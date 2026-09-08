@@ -160,6 +160,27 @@ function markerSnapshot(overrides = {}) {
   };
 }
 
+test('panel checklist is available separately and does not add selectable finding targets', () => {
+  const input = fixture();
+  input.summary.checklist = [{ ...input.summary.groups.humanReview[0], checkKey: 'general-question', occurrenceIds: ['general-1'] }];
+  const view = buildPanelView(input);
+  const root = renderPanelView({ view, document: new TestDocument(), onIntent() {} });
+  assert.ok(root.querySelector('[data-report-checklist]'));
+  assert.equal(root.querySelector('[data-report-checklist]').querySelectorAll('[data-intent="SELECT_OCCURRENCE"]').length, 0);
+  assert.equal(view.result.visibleOccurrenceIds.includes('general-1'), false);
+});
+
+test('each targeted finding offers direct highlight before any page signals are activated', () => {
+  const input = fixture();
+  const intents = [];
+  const root = renderPanelView({ view: buildPanelView(input), document: new TestDocument(), onIntent: intent => intents.push(intent) });
+  const button = root.querySelector('[data-intent="HIGHLIGHT_PAGE_OCCURRENCE"]');
+  assert.ok(button);
+  assert.equal(button.textContent, 'Destacar elemento na página');
+  button.click();
+  assert.deepEqual(intents, [{ type: 'HIGHLIGHT_PAGE_OCCURRENCE', occurrenceId: 'occ-1' }]);
+});
+
 test('marker projection copies only public fields and derives visible occurrence IDs from filtered cards', () => {
   const input = fixture();
   input.state.filters = { impact: ['serious'], wcag: [], abnt: [] };
@@ -575,7 +596,7 @@ test('all four screens emit only the exhaustive UI intent union', () => {
   assert.deepEqual(new Set(emitted.map(value => value.type)), new Set([
     'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
     'OPEN_REPORT', 'NEW_AUDIT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
-    'PERSONA_SELECT', 'CONFIRM_PIXEL_CAPTURE', 'SHOW_PAGE_MARKERS',
+    'PERSONA_SELECT', 'CONFIRM_PIXEL_CAPTURE', 'SHOW_PAGE_MARKERS', 'HIGHLIGHT_PAGE_OCCURRENCE',
   ]));
 });
 

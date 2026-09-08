@@ -154,6 +154,17 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
     if (value < 0 || typeof scroll !== 'boolean') return Promise.resolve(false);
     return mutate('PANEL_SELECT_PAGE_MARKER', { ordinal: value, scroll });
   }
+  async function highlight(occurrenceId) {
+    if (ordinal(occurrenceId) < 0 || ['showing', 'hiding'].includes(state.status)) return false;
+    const captured = context;
+    if (state.status !== 'active' && !await show()) return false;
+    if (context !== captured || state.status !== 'active') return false;
+    if (!state.groups.some(group => group.occurrenceIds.includes(occurrenceId))) {
+      publish({ ...state, message: 'O elemento não foi localizado com segurança nesta página. Consulte a captura registrada ou refaça a auditoria.' });
+      return false;
+    }
+    return select(occurrenceId, true);
+  }
   function filter(visibleOccurrenceIds) {
     if (!context || !Array.isArray(visibleOccurrenceIds)) return Promise.resolve(false);
     const visible = new Set(visibleOccurrenceIds);
@@ -161,5 +172,5 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
       visibleOrdinals: context.ids.flatMap((id, index) => visible.has(id) ? [index] : []).join(','),
     });
   }
-  return Object.freeze({ setResult, receive, show, hide, select, filter, reset, read: () => state });
+  return Object.freeze({ setResult, receive, show, hide, select, highlight, filter, reset, read: () => state });
 }

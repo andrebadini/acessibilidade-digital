@@ -2,6 +2,7 @@ import { sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import { runAuditaPageMarkersCommand } from '../browser/page-markers-overlay.js';
 import { bindAuditaPageMarkersPort } from '../browser/page-markers-port.js';
 import { projectPageMarkers } from './page-marker-projection.js';
+import { findingKind } from '../core/report/finding-kind.js';
 import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
 
 const INSTALLATION_ID = /^[A-Za-z0-9_-]{22}$/u;
@@ -329,8 +330,12 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
     const targets = [...grouped.values()]; const markerSelections = new Set(targets.flatMap(t => t.signals.map(s => s.selectionId)));
     for (const selectionId of ordinalToSelection.values())
       if (!generalSelections.has(selectionId) && !markerSelections.has(selectionId)) explicitlyUnlocated.add(selectionId);
+    const decisions = new Map(snapshot.model.reviewDecisions.map(row => [row.occurrenceId, row]));
+    const rules = new Map(snapshot.model.ruleResults.map(row => [JSON.stringify([row.source.engine, row.source.ruleId]), row]));
+    const findings = snapshot.model.occurrences.filter(row => findingKind(row,
+      rules.get(JSON.stringify([row.source.engine, row.source.ruleId])), decisions.get(row.occurrenceId)) !== 'checklist');
     return { page, targets, ordinalToSelection, selectionToOrdinal, generalSelections, explicitlyUnlocated, markerSelections,
-      offered: ordinalToSelection.size, omitted: Math.max(0, snapshot.model.occurrences.length - ordinalToSelection.size) };
+      offered: ordinalToSelection.size, omitted: findings.filter(row => !bundle.occurrenceIds.includes(row.occurrenceId)).length };
   }
   function activeResult(record) {
     return freezeGraph({ ok: true, markers: { state: 'active', modelRevision: record.modelRevision,

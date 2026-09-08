@@ -114,7 +114,10 @@ export function buildStableSelector(node, index = {}) {
       css = `#${escapeCssIdentifier(id)}`;
       confidence = 'high';
     } else {
-      css = semanticSelector(current, index);
+      // A structural path plus independently recorded classes can be proved again
+      // on the live page without exporting arbitrary text attributes as authority.
+      const classed = typeof current.attributes?.class === 'string' && current.attributes.class.trim();
+      css = classed ? '' : semanticSelector(current, index);
       confidence = css ? 'medium' : 'low';
       if (!css) css = nthPath(current, index);
     }

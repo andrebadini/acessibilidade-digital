@@ -1322,6 +1322,37 @@ const clock = (() => {
   return () => new Date(Date.UTC(2026, 7, 26, 14, 0, tick++)).toISOString();
 })();
 
+test('enhanced contrast reports only AAA while minimum remains independently inconclusive', async () => {
+  const page = rawPage();
+  const channel = (1.055 * (((6.386 - 1) / 20) ** (1 / 2.4)) - 0.055) * 255;
+  Object.assign(page.nodes[0], {
+    styles: { color: '#000', 'background-color': `rgb(${channel}, ${channel}, ${channel})`,
+      'font-size': '16px', 'font-weight': '400', opacity: '1', 'background-image': 'none' },
+    contrastReliable: true,
+  });
+  const model = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ page, noPixels: true }),
+    now: clock, idFactory: () => 'audit-enhanced-contrast',
+  });
+  const occurrence = model.occurrences.find(value => value.ruleId === 'text-contrast-enhanced');
+  assert.equal(occurrence?.outcome, 'failed');
+  assert.deepEqual(occurrence.itemWcagRefs, ['1.4.3', '1.4.6']);
+  assert.deepEqual(occurrence.sourceWcagRefs, ['1.4.3', '1.4.6']);
+  assert.deepEqual(occurrence.testedWcagRefs, ['1.4.6']);
+  assert.deepEqual(occurrence.wcagRefs, ['1.4.6']);
+  assert.deepEqual(occurrence.foreignBenchmarkRefs, []);
+  assert.equal(model.itemResults.find(item => item.id === '5.11.3').outcome, 'cantTell');
+  const report = await enrichAuditForReport(model, {
+    now: () => '2026-08-26T16:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '1.1.9', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
+  });
+  const exported = report.occurrences.find(value => value.ruleId === 'text-contrast-enhanced');
+  assert.equal(exported.classification, 'recommendation');
+  assert.deepEqual(exported.testedWcagRefs, ['1.4.6']);
+  assert.equal(exported.outcome, 'failed');
+  assert.equal(report.itemResults.find(item => item.id === '5.11.3').outcome, 'cantTell');
+});
+
 function legacyOccurrenceHash(value) {
   let hash = 0x811c9dc5;
   for (const character of value) {

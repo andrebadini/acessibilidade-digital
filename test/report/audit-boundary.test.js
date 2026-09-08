@@ -393,6 +393,75 @@ test('V1 migration downgrades an entire unproved failed rule and preserves a ful
   assert.equal(preserved.reviewDecisions.some(value => value.occurrenceId === 'occ-v1-failed'), false);
 });
 
+function enhancedContrastInput(testedWcagRefs) {
+  const input = reportInput();
+  input.versions.extension = '1.1.8';
+  const rule = input.ruleResults.find(value => value.ruleId === 'text-contrast-enhanced');
+  rule.outcome = 'failed';
+  rule.targets = ['n-1'];
+  rule.source = { engine: 'audita-core', ruleId: rule.ruleId, version: '1.0.0' };
+  input.itemResults.find(value => value.id === '5.11.2').outcome = 'failed';
+  input.occurrences.push({
+    occurrenceId: 'occ-enhanced', itemId: '5.11.2', ruleId: rule.ruleId, outcome: 'failed',
+    mode: 'automated', nodeId: 'n-1', evidenceIds: [], justification: 'Contraste aprimorado insuficiente.',
+    source: { ...rule.source }, itemWcagRefs: ['1.4.3', '1.4.6'], sourceWcagRefs: ['1.4.3', '1.4.6'],
+    testedWcagRefs: [...testedWcagRefs], wcagRefs: [...testedWcagRefs],
+  });
+  return input;
+}
+
+test('V1 migration preserves a proved enhanced failure scoped to AAA', () => {
+  const model = createAuditModel(enhancedContrastInput(['1.4.6']));
+  const occurrence = model.occurrences.find(value => value.occurrenceId === 'occ-enhanced');
+  assert.equal(occurrence.outcome, 'failed');
+  assert.equal(occurrence.classification, 'recommendation');
+  assert.deepEqual(occurrence.itemWcagRefs, ['1.4.3', '1.4.6']);
+  assert.deepEqual(occurrence.sourceWcagRefs, ['1.4.3', '1.4.6']);
+  assert.deepEqual(occurrence.testedWcagRefs, ['1.4.6']);
+  assert.deepEqual(occurrence.wcagRefs, ['1.4.6']);
+  assert.deepEqual(occurrence.foreignBenchmarkRefs, []);
+});
+
+test('V2 enhanced contrast accepts scoped AAA claims but rejects other partial or mismatched claims', () => {
+  const legacy = createAuditModel(enhancedContrastInput(['1.4.3', '1.4.6']));
+  const scoped = structuredClone(legacy);
+  const occurrence = scoped.occurrences.find(value => value.occurrenceId === 'occ-enhanced');
+  occurrence.testedWcagRefs = ['1.4.6'];
+  occurrence.wcagRefs = ['1.4.6'];
+  occurrence.foreignBenchmarkRefs = [];
+  assert.doesNotThrow(() => createAuditModel(scoped));
+  for (const tested of [[], ['1.4.3'], ['1.4.6', '1.4.3']]) {
+    const invalid = structuredClone(scoped);
+    const claim = invalid.occurrences.find(value => value.occurrenceId === 'occ-enhanced');
+    claim.testedWcagRefs = tested;
+    claim.wcagRefs = tested;
+    claim.foreignBenchmarkRefs = [...section508ReferencesForWcag(tested)];
+    assert.throws(() => createAuditModel(invalid), assertFixedError);
+  }
+  const mismatchedAlias = structuredClone(scoped);
+  mismatchedAlias.occurrences.find(value => value.occurrenceId === 'occ-enhanced').wcagRefs = ['1.4.3', '1.4.6'];
+  assert.throws(() => createAuditModel(mismatchedAlias), assertFixedError);
+});
+
+test('saved 1.1.8 enhanced contrast reports retain their legacy claims and integrity on re-export', async () => {
+  const saved = await enrichAuditForReport(enhancedContrastInput(['1.4.3', '1.4.6']), {
+    ...OPTIONS, manifestVersion: '1.1.8',
+  });
+  const original = canonicalStringify(saved);
+  const loaded = createAuditModel(structuredClone(saved));
+  assert.equal(canonicalStringify(loaded), original);
+  assert.deepEqual(JSON.parse(renderTechnicalJson(loaded)).audit.occurrences, saved.occurrences);
+  await verifyAuditIntegritySnapshot(loaded);
+  const reexported = await enrichAuditForReport(loaded, { ...OPTIONS, manifestVersion: '1.1.9' });
+  const occurrence = reexported.occurrences.find(value => value.occurrenceId === 'occ-enhanced');
+  assert.deepEqual(occurrence.testedWcagRefs, ['1.4.3', '1.4.6']);
+  assert.deepEqual(occurrence.foreignBenchmarkRefs, saved.occurrences.find(value => value.occurrenceId === 'occ-enhanced').foreignBenchmarkRefs);
+  assert.equal(occurrence.outcome, 'failed');
+  assert.equal(occurrence.classification, 'recommendation');
+  assert.equal(canonicalStringify(saved), original);
+  await verifyAuditIntegritySnapshot(reexported);
+});
+
 test('V1 migration makes a legacy manual finding inconclusive without normative or legal claims', () => {
   const input = reportInput();
   const item = NBR17225_ITEMS.find(value => value.id === '5.1.4');

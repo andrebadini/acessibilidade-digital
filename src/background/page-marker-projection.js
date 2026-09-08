@@ -40,10 +40,10 @@ function classificationFor(occurrence, decision) {
   const displayOutcome = ['failed', 'passed'].includes(originalOutcome) ? originalOutcome
     : decision?.answer === 'não conforme' ? 'failed'
       : decision?.answer === 'conforme' ? 'passed' : 'cantTell';
-  const normative = ['requirement', 'recommendation'].includes(occurrence.classification);
+  const normative = occurrence.classification === 'requirement';
   const group = displayOutcome === 'passed' ? 'passed'
     : displayOutcome === 'failed' ? (normative ? 'failed' : 'alerts')
-      : normative ? 'humanReview' : null;
+      : ['requirement', 'recommendation'].includes(occurrence.classification) ? 'humanReview' : null;
   return { originalOutcome, displayOutcome, classification: group ? classifyPanelResultV1(group) : null };
 }
 

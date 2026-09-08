@@ -50,6 +50,15 @@ test('includes a sanitized shadow path and never embeds password or token identi
   assert.doesNotMatch(JSON.stringify(selector), /password|token|access_token/i);
 });
 
+test('classed controls without an id use a structural locator that can be independently corroborated', () => {
+  const root = { nodeId: 'root', tagName: 'html', attributes: {}, parentId: null, children: ['body'] };
+  const body = { nodeId: 'body', tagName: 'body', attributes: {}, parentId: 'root', children: ['login'] };
+  const login = { nodeId: 'login', tagName: 'a', attributes: { class: 'signin primary', 'aria-label': 'Fazer login' }, parentId: 'body', children: [] };
+  assert.deepEqual(buildStableSelector(login, index([root, body, login])), {
+    css: 'html > body > a', framePath: [], confidence: 'low',
+  });
+});
+
 test('builds selectors by shadow scope instead of treating shadow ids as document-global', () => {
   const outside = { nodeId: 'outside', tagName: 'button', attributes: { id: 'inner' }, parentId: null, children: [] };
   const host = { nodeId: 'host', tagName: 'x-host', attributes: { id: 'account-panel' }, parentId: null, children: ['root'], shadowRootId: 'root' };

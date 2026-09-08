@@ -13,6 +13,7 @@ import {
 } from '../result.js';
 import { createReviewDecision, REVIEW_MODES } from '../review/decisions.js';
 import { canonicalStringify } from './canonical-json.js';
+import { isCompatibleCoreTestedWcagRefs } from './tested-criteria.js';
 import { projectClosedAuditShape } from './closed-schema.js';
 import { auditModelInputError, captureAuditInput } from './audit-input.js';
 import { REPORT_HASH_BASE } from './integrity-chain.js';
@@ -282,7 +283,7 @@ function migrateV1Record(model) {
       : [];
     if (source.engine === V1_MIGRATION_DEFAULTS.sourceEngine && outcome === 'failed' &&
       ruleId !== 'new-window-link-warning' &&
-      canonicalStringify(testedWcagRefs) !== canonicalStringify(sourceWcagRefs)) {
+      !isCompatibleCoreTestedWcagRefs(ruleId, outcome, sourceWcagRefs, testedWcagRefs)) {
       outcome = 'cantTell';
       testedWcagRefs = [];
     }
@@ -480,8 +481,8 @@ function unprovedFailedV1RuleIds(model, itemById, rulesVersion) {
         hasCorePassProvenance(occurrence.source, rule.ruleId, rulesVersion) &&
         sameStringList(occurrence.itemWcagRefs, itemWcag) &&
         sameStringList(occurrence.sourceWcagRefs, expectedSource) &&
-        sameStringList(tested, expectedSource) &&
-        sameStringList(occurrence.wcagRefs, expectedSource);
+        isCompatibleCoreTestedWcagRefs(rule.ruleId, occurrence.outcome, expectedSource, tested) &&
+        sameStringList(occurrence.wcagRefs, tested);
     });
     if (!fullyProved) downgraded.add(rule.ruleId);
   }
@@ -2291,9 +2292,9 @@ function validateWcagAndForeignReferences(occurrence, item, sourceRule, occurren
     authoritativeSourceWcag = occurrence.source.ruleId === 'new-window-link-warning'
       ? []
       : [...new Set((sourceRule?.wcag ?? []).filter(reference => expectedItemWcag.includes(reference)))];
-    authoritativeTestedWcag = occurrence.source.ruleId !== 'new-window-link-warning' && occurrence.outcome === 'failed'
-      ? [...authoritativeSourceWcag]
-      : [];
+    if (!isCompatibleCoreTestedWcagRefs(
+      occurrence.source.ruleId, occurrence.outcome, authoritativeSourceWcag, occurrence.testedWcagRefs,
+    )) throw new TypeError(`${occurrenceLabel} possui critérios WCAG testados incoerentes.`);
     const outcomeBound = sourceRule && (scopeMode === 'single'
       ? occurrence.outcome === sourceRule.outcome
       : (

@@ -470,6 +470,11 @@ async function handleIntent(intent) {
         await pageMarkers.select(intent.occurrenceId, true);
       }
       return;
+    case 'HIGHLIGHT_PAGE_OCCURRENCE':
+      if (state.screen !== 'result' || !exactDetail(intent.occurrenceId)) return;
+      selectOccurrence(intent.occurrenceId);
+      await pageMarkers.highlight(intent.occurrenceId);
+      return;
     case 'NEW_AUDIT': {
       if (state.screen !== 'result' || state.highlight.state === 'busy') return;
       pageMarkerInteractionRevision++;

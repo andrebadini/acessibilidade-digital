@@ -474,6 +474,13 @@ test('audits exactly two explicit URLs invisibly in one sanitized no-pixels batc
   const report = await extension.waitForReport({ auditId });
   const reportProof = await extension.waitForValue(report, `(() => {
     const text = document.documentElement?.outerHTML ?? '';
+    const checklistCounts = {};
+    for (const row of document.querySelectorAll('[data-checklist-question]')) {
+      const pageId = JSON.parse(row.dataset.checklistQuestion)[0];
+      const paragraph = [...row.querySelectorAll('p')].find(p=>p.textContent.startsWith('Registros originais: '));
+      const ids = paragraph.textContent.slice('Registros originais: '.length).split('. Dados e evidências integrais')[0].split(', ').filter(Boolean);
+      checklistCounts[pageId] = (checklistCounts[pageId] ?? 0) + ids.length;
+    }
     const forbidden = ${JSON.stringify([
       rawUrlA, rawUrlB, queryMarkerA, queryMarkerB, fragmentMarkerA, fragmentMarkerB, ...forbiddenPublicNames,
     ])};
@@ -487,6 +494,7 @@ test('audits exactly two explicit URLs invisibly in one sanitized no-pixels batc
       page2Occurrences: document.querySelectorAll(
         '[data-report-issue][data-page="page-2"] [data-report-occurrence-technical]').length,
       totalOccurrences: document.querySelectorAll('[data-report-occurrence-technical]').length,
+      checklistCounts,
       forbidden: forbidden.filter(value => text.includes(value)),
       rasterDataUrls: (text.match(/data:image\\/(?:png|jpeg|webp);base64,/giu) ?? []).length,
       evidenceImages: document.querySelectorAll('[data-evidence-preview-image], img.evidence-media').length,
@@ -498,12 +506,12 @@ test('audits exactly two explicit URLs invisibly in one sanitized no-pixels batc
   });
   assert.equal(reportProof.ready, true, `o relatório consolidado não carregou: ${reportProof.status}`);
   assert.equal(reportProof.page1Issues > 0 && reportProof.page2Issues > 0, true);
-  assert.equal(reportProof.page1Occurrences, occurrenceCounts['page-1'],
+  assert.equal(reportProof.page1Occurrences + (reportProof.checklistCounts['page-1'] ?? 0), occurrenceCounts['page-1'],
     'o relatório omitiu ocorrências da primeira página');
-  assert.equal(reportProof.page2Occurrences, occurrenceCounts['page-2'],
+  assert.equal(reportProof.page2Occurrences + (reportProof.checklistCounts['page-2'] ?? 0), occurrenceCounts['page-2'],
     'o relatório omitiu ocorrências da segunda página');
-  assert.equal(reportProof.totalOccurrences, occurrenceCount,
-    'o relatório não renderizou todas as ocorrências do modelo completo');
+  assert.equal(reportProof.totalOccurrences + Object.values(reportProof.checklistCounts).reduce((sum,n)=>sum+n,0), occurrenceCount,
+    'fichas de achados e checklist devem preservar todos os registros sem misturá-los');
   assert.deepEqual(reportProof.forbidden, []);
   assert.equal(reportProof.rasterDataUrls, 0);
   assert.equal(reportProof.evidenceImages, 0);

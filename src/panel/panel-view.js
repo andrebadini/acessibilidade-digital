@@ -1,4 +1,5 @@
 import { highlightActionForOccurrence } from './highlight-action.js';
+import { checklistElement } from '../core/report/checklist-presentation.js';
 import { decodePngDataUrl } from '../core/evidence/png.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 
@@ -135,6 +136,7 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
       case 'SHOW_PAGE_MARKERS':
       case 'HIDE_PAGE_MARKERS':
       case 'GO_TO_PAGE_MARKER':
+      case 'HIGHLIGHT_PAGE_OCCURRENCE':
       case 'PERSONA_SELECT':
       case 'PERSONA_READER_PREVIOUS':
       case 'PERSONA_READER_REPEAT':
@@ -615,6 +617,7 @@ function renderResult(document, view, emit, onEvent) {
     reportStatus,
   );
   root.append(ready, renderPageMarkerReview(document, view.markers, emit));
+  root.append(checklistElement(document, summary.checklist));
 
   const coverage = section(document, 'coverage-block');
   const coverageHeading = heading(document, 2, 'Cobertura automática');
@@ -684,8 +687,8 @@ function renderMetrics(document, counts, selected, onEvent) {
   wrapper.setAttribute('aria-label', 'Resumo dos resultados');
   const metrics = [
     ['Falhas confirmadas', counts.errors, 'failure', 'failed'],
-    ['Alertas', counts.alerts, 'alert', 'alerts'],
-    ['Revisão humana', counts.humanReview, 'review', 'humanReview'],
+    ['Recomendações e alertas', counts.alerts, 'alert', 'alerts'],
+    ['Suspeitas a confirmar', counts.humanReview, 'review', 'humanReview'],
     ['Resultados positivos', counts.positive, 'success', 'passed'],
   ];
   for (const [label, value, kind, group] of metrics) {
@@ -931,6 +934,7 @@ function renderCard(document, card, view, emit) {
     );
     button.setAttribute('aria-pressed', String(selected));
     root.append(button);
+    appendDirectHighlight(root, document, card, occurrenceId, view, emit);
   } else if (card.occurrenceIds.length > 1) {
     root.append(heading(document, 4, card.title));
     const occurrences = section(document, 'occurrence-options');
@@ -950,6 +954,7 @@ function renderCard(document, card, view, emit) {
       );
       button.setAttribute('aria-pressed', String(selected));
       occurrences.append(button);
+      appendDirectHighlight(occurrences, document, card, occurrenceId, view, emit, index + 1);
     }
     root.append(occurrences);
   } else {
@@ -963,6 +968,15 @@ function renderCard(document, card, view, emit) {
     paragraph(document, occurrenceText(card.occurrenceIds.length), 'card-occurrences'),
   );
   return root;
+}
+
+function appendDirectHighlight(root, document, card, occurrenceId, view, emit, ordinal = null) {
+  if (view.screen !== 'result' || !['top-document', 'mixed'].includes(card.context)) return;
+  const button = actionButton(document, 'Destacar elemento na página', 'HIGHLIGHT_PAGE_OCCURRENCE',
+    `direct-highlight-${occurrenceId}`, emit, 'secondary-action direct-highlight', { occurrenceId },
+    ['showing', 'hiding'].includes(view.markers.status));
+  button.setAttribute('aria-label', `Destacar elemento na página: ${card.title}${ordinal === null ? '' : `, ocorrência ${ordinal}`}`);
+  root.append(button);
 }
 
 function markerNumberForOccurrence(markers, occurrenceId) {
@@ -1542,6 +1556,7 @@ function copySummary(summary) {
     distributions: Object.fromEntries(FILTERS.map(name => [name, summary.distributions[name].map(row => ({ id: row.id, count: row.count }))])),
     limitations: Object.fromEntries(Object.entries(summary.limitations).map(([name, values]) => [name, [...values]])),
     groups: Object.fromEntries(GROUPS.map(name => [name, summary.groups[name].map(copyCard)])),
+    checklist: (summary.checklist ?? []).map(copyCard),
   };
 }
 
@@ -1617,7 +1632,7 @@ function impactLabel(value) {
   return ({ critical: 'Crítico', serious: 'Sério', moderate: 'Moderado', minor: 'Menor' })[value] ?? value;
 }
 function groupHeading(name) {
-  return ({ failed: 'Falhas confirmadas', alerts: 'Alertas', humanReview: 'Revisão humana', passed: 'Resultados positivos' })[name];
+  return ({ failed: 'Falhas confirmadas', alerts: 'Recomendações e alertas', humanReview: 'Suspeitas a confirmar', passed: 'Resultados positivos' })[name];
 }
 function classificationLabel(value) {
   return ({ failed: 'Falha confirmada', alert: 'Alerta', 'manual-review': 'Revisão humana', passed: 'Resultado positivo' })[value] ?? value;

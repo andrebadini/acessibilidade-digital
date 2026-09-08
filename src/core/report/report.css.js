@@ -3,6 +3,11 @@ import { RESULTS_OVERVIEW_CSS } from './results-overview.js';
 export const REPORT_CSS = `${RESULTS_OVERVIEW_CSS}
 :root{color-scheme:light;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;color:#14212b;background:#fff;--ink:#14212b;--surface:#fff;--navy:#003b71;--blue:#005a9c;--focus:#8b2f00;--muted:#738596;--pale:#eef4f8;--danger:#8b1e1e;--review:#6b4e00}
 *{box-sizing:border-box}
+.report-checklist{margin-block:1rem;padding:.9rem;border:1px solid #738596;border-radius:.65rem;background:#f7f9fb}
+.report-checklist>summary{font-weight:700;cursor:pointer;min-height:2.75rem}
+.report-checklist [data-checklist-question]{margin-top:.75rem;padding:.7rem;border-top:1px solid #b8c5cf;overflow-wrap:anywhere}
+.report-checklist [data-checklist-question]>summary{cursor:pointer;min-height:2.75rem;font-weight:600}
+@media print{[data-report-checklist]>[data-checklist-question]{display:none!important}}
 [data-report-summary-note]{display:none}
 [data-report-print-controls]{margin-block:1rem;padding:.75rem;border:1px solid #738596;border-radius:.5rem}
 html{scroll-behavior:smooth}
@@ -77,7 +82,7 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .evidence-definitions{position:absolute;width:0;height:0;overflow:hidden;pointer-events:none}
 .evidence-media{display:block;max-width:100%;height:auto;border:1px solid #738596;background:#eef4f8;margin-top:.75rem}
 .evidence-highlight{fill:none;vector-effect:non-scaling-stroke;pointer-events:none;stroke-width:7}
-.evidence-highlight--failed{stroke:#8b1e1e}.evidence-highlight--review{stroke:#6b4e00;stroke-dasharray:14 9}.evidence-highlight--passed{stroke:#003b71;stroke-dasharray:4 4}
+.evidence-highlight--failed{stroke:#8b1e1e}.evidence-highlight--advisory{stroke:#986000}.evidence-highlight--review{stroke:#6b4e00;stroke-dasharray:14 9}.evidence-highlight--passed{stroke:#003b71;stroke-dasharray:4 4}
 .occurrence-evidence{margin:1rem 0 0}
 .page-level-evidence{border:4px double #738596;border-radius:.3rem;padding:.5rem;background:#eef4f8}
 .page-level-evidence--failed{border-color:#8b1e1e}.page-level-evidence--review{border-style:dashed;border-color:#6b4e00}.page-level-evidence--passed{border-color:#003b71}
@@ -204,4 +209,4 @@ th{background:#eef4f8;color:#14212b}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-23LTYU1GQZKM0oQ881frq0NAdgsFyUvAdM1mGZHgoNY=';
+export const REPORT_CSS_CSP_HASH = 'sha256-xHwS8IcG/4W2Miux8lX2ORce7lRKkTzHZYEgO6bX1IQ=';

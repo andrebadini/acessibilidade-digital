@@ -8,6 +8,10 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Entrega atual e histórico funcional
 
+**Beta 1.1.9 entregue:** separa achados e suspeitas concretas do checklist geral; este não soma problemas nem fichas no PDF. Corrige a apresentação do contraste ampliado como recomendação/AAA, acrescenta destaque direto e espera de estabilização inicial para a URL dinâmica do Google. Percurso real e PDF de 21 páginas: `docs/qa/2026-09-08-beta119-google.md`. Gates e hash: `docs/qa/2026-09-08-beta119-release.md`.
+
+Refinos posteriores identificados no Google: compactar matriz/paginação do PDF; ajustar singular/plural e omitir “0 ocorrências” nos resultados positivos sem alvos; tornar o texto original de recomendações mais coerente com a classificação já mostrada; coletar dimensões mesmo quando a API não informa a versão do navegador. Manter aviso explícito da limitação até a correção, sem preencher metadados por estimativa. Nenhum desses refinamentos autoriza descartar registros ou relaxar prova de captura.
+
 **Beta 1.1.7 entregue:** inclui os sete guias práticos 5.1.7–5.1.9 e 5.12.1–5.12.4, conferidos em Chrome, HTML e PDF. Percurso principal, relatório, sinais ABNT, personas, URL e lote aceitos; integração C=0/I=0 e produto C=0/I=0, com M1 de paginação registrado abaixo. Os incidentes de configuração dos gates e as correções focadas permanecem transparentes em `docs/qa/2026-09-06-beta117-release.md`. Não há nova funcionalidade inteira pendente demonstrada na reconciliação atual; os refinamentos listados não bloqueiam esta beta.
 
 Reconciliação com fontes e testes atuais: `docs/qa/2026-09-06-goal-reconciliation.md`. Não usar checklists históricos vazios como prova de funcionalidade ausente. **Beta 1.1.6 entregue** após correção reproduzível da disponibilidade inicial de personas, testes focados, percurso nativo corrigido e duas revisões C=0/I=0. A execução ampla original com 37/38 nativos continua registrada, sem ser reclassificada como verde. Registro final: `docs/qa/2026-09-06-beta116-release.md`.

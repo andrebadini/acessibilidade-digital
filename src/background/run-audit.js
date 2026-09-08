@@ -37,6 +37,7 @@ import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-invent
 import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { createAuditModel } from '../core/report/audit-model.js';
+import { testedWcagRefsForCoreRule } from '../core/report/tested-criteria.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
@@ -514,7 +515,7 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
         ? []
         : [...new Set((Array.isArray(result.wcag) ? result.wcag : [])
           .filter(reference => itemWcagRefs.includes(reference)))];
-      const testedWcagRefs = result.outcome === 'failed' ? [...sourceWcagRefs] : [];
+      const testedWcagRefs = testedWcagRefsForCoreRule(result.ruleId, result.outcome, sourceWcagRefs);
       add({
         itemId,
         nbrItemRef: itemId,

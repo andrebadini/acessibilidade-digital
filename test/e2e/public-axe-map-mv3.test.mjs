@@ -113,9 +113,9 @@ test('proves axe/map only through action → Side Panel → public URL consent �
     `[...document.querySelectorAll('[data-report-issue]')].filter(issue => !issue.hidden).every(issue => issue.dataset.result === 'humanReview')`), true);
   await extension.click(report, 'button[data-report-metric="humanReview"]');
   await extension.evaluate(report, `(() => {
-    const group = [...document.querySelectorAll('[data-report-item-group]')].find(group => group.querySelector('[data-result="humanReview"]'));
+    const group = [...document.querySelectorAll('[data-report-item-group]')].find(group => group.querySelector('[data-result="failed"]'));
     group.open = true;
-    const card = group.querySelector('[data-result="humanReview"]');
+    const card = group.querySelector('[data-result="failed"]');
     card.querySelector('[data-report-issue-details]').open = true;
     card.scrollIntoView({ block: 'start', behavior: 'instant' });
     return true;
@@ -152,13 +152,13 @@ test('proves axe/map only through action → Side Panel → public URL consent �
     for(let parent=row.parentElement;parent;parent=parent.parentElement) {
       if(parent.tagName==='DETAILS') parent.open=true;
     }
-    row.closest('[data-report-issue]').scrollIntoView({behavior:'instant',block:'start'});
+    row.closest('[data-report-issue], [data-checklist-question]').scrollIntoView({behavior:'instant',block:'start'});
     return true;
   })()`);
   await extension.captureJourney('recorded-label-comparison', report, { captureBeyondViewport: false });
   t.diagnostic('recorded-label-comparison=retained-element=JSON=live=HTML; visible=B; accessible=Alvo pequeno vizinho');
 
-  // Confirm the new review procedures in their actual ABNT groups, not only in a helper.
+  // Generic questions retain their guides in the separate ABNT checklist.
   for (const [itemId, phrase] of [
     ['5.1.7', 'Procure outra forma de obter a mesma informação'],
     ['5.1.8', 'tempo observado'],
@@ -170,22 +170,22 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   ]) {
     assert.ok(audit.occurrences.some(occurrence => occurrence.itemId === itemId));
     const guide = await extension.evaluate(report,
-      `document.querySelector('[data-report-item-group="${itemId}"]')?.textContent ?? ''`);
+      `([...document.querySelectorAll('[data-checklist-question]')].find(row=>row.querySelector('summary')?.textContent.startsWith('ABNT ${itemId} —')) ?? document.querySelector('[data-report-item-group="${itemId}"]'))?.textContent ?? ''`);
     assert.ok(guide.includes(phrase), `live guide missing for ${itemId}`);
     assert.ok(html.includes(phrase), `exported guide missing for ${itemId}`);
   }
   for (const itemId of ['5.1.9', '5.12.2']) {
     await extension.evaluate(report, `(() => {
-      const group=document.querySelector('[data-report-item-group="${itemId}"]');
-      group.open=true;
-      const card=group.querySelector('[data-report-issue]');
+      const group=[...document.querySelectorAll('[data-checklist-question]')].find(row=>row.querySelector('summary')?.textContent.startsWith('ABNT ${itemId} —')) ?? document.querySelector('[data-report-item-group="${itemId}"]');
+      for(let parent=group;parent;parent=parent.parentElement) if(parent.tagName==='DETAILS') parent.open=true;
+      const card=group.querySelector('[data-report-issue]') ?? group;
       for(const detail of card.querySelectorAll('details')) detail.open=true;
       card.scrollIntoView({behavior:'instant',block:'start'});
       return true;
     })()`);
     await extension.captureJourney(`practical-guide-${itemId}`, report, { captureBeyondViewport: false });
   }
-  t.diagnostic('practical-guides=7; retained-ABNT-groups=live=HTML; pending-results-preserved');
+  t.diagnostic('practical-guides=7; separate-ABNT-checklist=live=HTML; pending-results-preserved');
 
   const rasters = audit.evidence.filter(artifact =>
     ['full-page', 'element'].includes(artifact.kind) && typeof artifact.dataUrl === 'string');

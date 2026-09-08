@@ -202,10 +202,11 @@ test('bounds the interactive panel projection while preserving complete occurren
   const exposedIds = Object.values(bundle.summary.groups).flatMap(cards =>
     cards.flatMap(card => card.occurrenceIds));
 
-  assert.equal(bundle.summary.counts.humanReview.occurrences, 256);
-  assert.equal(exposedIds.length <= 64, true);
+  assert.equal(bundle.summary.counts.humanReview.occurrences, 0);
+  assert.equal(bundle.summary.checklist.flatMap(card => card.occurrenceIds).length, 256);
+  assert.equal(exposedIds.length, 0);
   assert.equal(bundle.details.length, exposedIds.length);
-  assert.equal(bundle.summary.limitations.codes.some(value => /painel.+relat.rio completo/iu.test(value)), true);
+  assert.equal(bundle.summary.limitations.codes.some(value => /painel.+relat.rio completo/iu.test(value)), false);
   assert.equal(input.reportRevision.model.occurrences.length, 256);
 });
 

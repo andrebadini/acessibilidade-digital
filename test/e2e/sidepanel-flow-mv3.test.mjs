@@ -346,6 +346,7 @@ for (const scenario of [
                 metricsVisible:buttons.every(node=>{const r=node.getBoundingClientRect();return r.top>=0&&r.bottom<900&&r.height>=44&&r.width>=44}),
                 summaryBeforeActions:box('[data-result-filter]').top<box('[data-report-ready]').top,
                 firstAbntBottom:box('[data-abnt-group] > summary').bottom,
+                checklistBottom:box('[data-report-checklist] > summary').bottom,
                 reportVisible:!document.querySelector('[data-intent="OPEN_REPORT"]').closest('details:not([open])'),
                 statusVisible:!document.querySelector('[data-report-launch-status]').closest('details:not([open])'),
                 markerVisible:!document.querySelector('[data-page-marker-review] button').closest('details:not([open])'),
@@ -358,7 +359,8 @@ for (const scenario of [
               assert.equal(layout[key], true, `${key} at ${width}px`);
             }
             if (width === 360) {
-              assert.ok(layout.firstAbntBottom < 900, `ABNT first group below fold: ${layout.firstAbntBottom}`);
+              assert.ok(layout.checklistBottom < 900, `separate checklist below fold: ${layout.checklistBottom}`);
+              assert.ok(layout.firstAbntBottom > layout.checklistBottom, 'checklist disclosure precedes finding groups');
               await extension.captureJourney('compact-panel-360', panel, { captureBeyondViewport: false });
             }
           }
@@ -1104,7 +1106,7 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
   assert.ok(summary.occurrences > 0);
   assert.equal(summary.forbiddenCount, 0);
   const selectedIndex = await extension.evaluate(panel, `(() => {
-    const expected=${JSON.stringify(JSON.stringify(['page-1', 'audita-core', 'content-image-alternative']))};
+    const expected=${JSON.stringify(JSON.stringify(['page-1', 'audita-core', 'form-field-label']))};
     const card=[...document.querySelectorAll('[data-result-card]')]
       .find(value=>value.dataset.checkKey===expected);
     const button=card?.querySelector('button[data-intent="SELECT_OCCURRENCE"]');
@@ -1118,10 +1120,10 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
     await extension.captureJourney('panel-current-copy-missing-card', panel);
     const cardKeys = await extension.evaluate(panel,
       `Array.from(document.querySelectorAll('[data-result-card]'), card => card.dataset.checkKey)`);
-    assert.fail(`a ficha canônica de alternativa textual deve existir no sumário: ${JSON.stringify(cardKeys)}`);
+    assert.fail(`a falha detectada de rótulo deve existir no sumário: ${JSON.stringify(cardKeys)}`);
   }
   assert.equal(Number.isSafeInteger(selectedIndex) && selectedIndex >= 0, true,
-    'a ficha canônica de alternativa textual deve existir no sumário');
+    'a falha detectada de rótulo deve existir no sumário');
   const detail = await extension.waitForValue(panel, `(() => {
       const selected=[...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')]
         .findIndex(button=>button.getAttribute('aria-pressed')==='true');
@@ -1142,11 +1144,11 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
     })()`, value => value?.visible === true && value?.selected === selectedIndex && value?.consult === true, {
     timeoutMs: 10_000, intervalMs: 25,
   });
-  assert.equal(detail.selector, knownOccurrence.selector);
-  assert.equal(detail.normative.includes(`WCAG ${knownOccurrence.wcag}`), true);
-  assert.equal(detail.normative.includes(`ABNT NBR 17225: ${knownOccurrence.abnt}`), true);
+  assert.equal(detail.selector, '#missing-label');
+  assert.equal(detail.normative.includes('WCAG 3.3.2, 4.1.2'), true);
+  assert.equal(detail.normative.includes('ABNT NBR 17225: 5.9.1'), true);
   assert.match(detail.accessibility, /Anúncio esperado:\s*\S/u);
-  assert.match(detail.technical, /Regra:\s*content-image-alternative/u);
+  assert.match(detail.technical, /Regra:\s*form-field-label/u);
   assert.match(detail.technical, /Trecho sanitizado/u);
   assert.match(detail.previewText, /Evidências/u);
   assert.equal(detail.highlight, false);
@@ -1742,7 +1744,7 @@ test('current-page audits run in one inactive copy and leave the original page i
       // required audit evidence, source isolation and export proofs.
       try {
         await step('PANEL_CAPTURE', () => extension.captureJourney('panel-current-copy-summary', panel,
-          { captureBeyondViewport: false, fromSurface: false }));
+          { captureBeyondViewport: false }));
       } catch (error) {
         if (error?.cause?.code !== 'CDP_COMMAND_TIMEOUT') throw error;
         subtest.diagnostic('qa-limitation=PANEL_SCREENSHOT_CDP_TIMEOUT; panel-screenshot=not-produced; report-and-export-proofs=still-required');

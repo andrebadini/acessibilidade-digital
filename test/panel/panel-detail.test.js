@@ -194,7 +194,7 @@ test('uses the singular selected item in detail and the sorted unique official i
   const detail = buildPanelDetail({
     model: SAMPLE_AUDIT, summary, occurrenceId: 'occ-focus-review', highlightAvailability: new Map(),
   });
-  const card = Object.values(summary.groups).flat()
+  const card = [...Object.values(summary.groups).flat(), ...summary.checklist]
     .find(row => row.occurrenceIds.includes('occ-focus-review'));
 
   assert.deepEqual(card.abntItemIds, ['5.1.4']);

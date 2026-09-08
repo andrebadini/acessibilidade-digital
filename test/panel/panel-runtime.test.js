@@ -122,7 +122,15 @@ test('page markers wire controls, ABNT selection, filters and explicit navigatio
     if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
   } });
   const inventory = await createInstalledCoreRuleInventory();
-  const model = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), {
+  const draft = structuredClone(SAMPLE_AUDIT);
+  const evidence = structuredClone(draft.evidence.find(row => row.evidenceId === 'ev-control'));
+  evidence.evidenceId = 'ev-second'; evidence.nodeId = 'n-second'; evidence.backendNodeId = 142;
+  draft.evidence.push(evidence);
+  draft.ruleResults.find(row => row.ruleId === 'focus-visible').targets.push('n-second');
+  draft.occurrences.push({ ...structuredClone(draft.occurrences.find(row => row.occurrenceId === 'occ-focus-failed')),
+    occurrenceId: 'occ-second-failure', nodeId: 'n-second', target: { nodeId: 'n-second', selector: null, framePath: [] },
+    evidenceIds: ['ev-second'], evidenceRefs: ['ev-second'] });
+  const model = await enrichAuditForReport(draft, {
     now: () => '2026-09-06T12:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '1.1.0', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/152.0.0.0',
   });
@@ -204,8 +212,10 @@ test('page markers wire controls, ABNT selection, filters and explicit navigatio
   markerModelRevision = 2;
   port.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'result',
     auditId: result.auditId, sessionCapabilityId: 'S'.repeat(22), result: { ...result, modelRevision: 2 } });
-  await document.root.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]').dispatch('click');
+  await document.root.querySelector('button[data-intent="HIGHLIGHT_PAGE_OCCURRENCE"]').dispatch('click');
   await finishPending();
+  assert.equal(packets.filter(p => p.envelope?.type === 'PANEL_SELECT_PAGE_MARKER').at(-1).envelope.scroll, true,
+    'direct highlight prepares and selects the element without a separate show-all click');
   await document.root.querySelector(`button[data-focus-id="occurrence-${result.details[1].occurrenceId}"]`).dispatch('click');
   await finishPending();
   const beforeStale = packets.length;

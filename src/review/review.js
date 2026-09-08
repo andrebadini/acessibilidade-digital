@@ -546,7 +546,7 @@ async function start() {
   for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);
   const latest = await store.getLatest();
   status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true ? EXPORT_CLEANUP_MESSAGE
-    : list.childElementCount ? `${list.childElementCount} ocorrências aguardam revisão.` : 'Não há ocorrências para revisar.';
+    : `${summary.counts.errors.occurrences} falhas confirmadas; ${summary.counts.humanReview.occurrences} suspeitas a confirmar. Checklist separado: ${summary.checklist?.length ?? 0} verificações ainda sem conclusão.`;
 }
 
 void start().catch(() => { status.textContent = 'Não foi possível carregar a revisão.'; });

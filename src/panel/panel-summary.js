@@ -1,6 +1,8 @@
 import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
+import { findingKind } from '../core/report/finding-kind.js';
+import { displayedWcagRefs } from '../core/report/tested-criteria.js';
 import { verifyCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import {
   assertPanelClassificationV1,
@@ -85,9 +87,9 @@ function displayOutcomeForOccurrences(occurrences, decisionByOccurrence) {
 
 function groupForOccurrences(occurrences, displayOutcome) {
   if (displayOutcome === 'passed') return 'passed';
-  const normative = occurrences.some(occurrence => ['requirement', 'recommendation'].includes(occurrence.classification));
+  const normative = occurrences.some(occurrence => occurrence.classification === 'requirement');
   if (displayOutcome === 'failed') return normative ? 'failed' : 'alerts';
-  if (displayOutcome === 'cantTell' && normative) return 'humanReview';
+  if (displayOutcome === 'cantTell') return 'humanReview';
   return null;
 }
 
@@ -132,7 +134,7 @@ function impactFor(occurrences) {
 
 function cardMetadata(occurrences, rule, itemById) {
   const abntItemIds = uniqueSorted(occurrences.map(occurrence => occurrence.nbrItemRef).filter(id => itemById.has(id)));
-  const wcag = uniqueSorted(abntItemIds.flatMap(id => itemById.get(id).wcag.map(reference => reference.id))
+  const wcag = displayedWcagRefs(occurrences, rule, abntItemIds.flatMap(id => itemById.get(id).wcag.map(reference => reference.id))
     .concat(rule?.wcag ?? []));
   const item = abntItemIds.length === 1 ? itemById.get(abntItemIds[0]) : null;
   return { abntItemIds, wcag, title: item?.title ?? rule?.summary ?? occurrences[0].justification };
@@ -200,6 +202,7 @@ function passedCard(pageId, rule, itemById) {
 
 function buildGroups(model, checkpoint, verifiedInventory) {
   const groups = { failed: [], alerts: [], humanReview: [], passed: [] };
+  const checklist = [];
   const ruleByIdentity = authoritativeRuleIndex(model);
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
   const evidenceById = evidenceIndex(model);
@@ -213,7 +216,11 @@ function buildGroups(model, checkpoint, verifiedInventory) {
   }
   for (const [key, occurrences] of [...occurrencesByKey].sort(([left], [right]) => left.localeCompare(right))) {
     const rule = ruleByIdentity.get(JSON.stringify([occurrences[0].source.engine, occurrences[0].source.ruleId]));
-    const projected = occurrenceCard({ key, occurrences, rule, itemById, evidenceById, decisionByOccurrence });
+    const pending = occurrences.filter(occurrence => findingKind(occurrence, rule, decisionByOccurrence.get(occurrence.occurrenceId)) === 'checklist');
+    const pendingIds = new Set(pending.map(row=>row.occurrenceId));
+    if (pending.length) checklist.push(occurrenceCard({ key, occurrences: pending, rule, itemById, evidenceById, decisionByOccurrence }).card);
+    const findings = occurrences.filter(row=>!pendingIds.has(row.occurrenceId));
+    const projected = findings.length ? occurrenceCard({ key, occurrences: findings, rule, itemById, evidenceById, decisionByOccurrence }) : null;
     if (projected && (verifiedInventory || projected.groupName !== 'passed')) {
       groups[projected.groupName].push(projected.card);
     }
@@ -234,7 +241,7 @@ function buildGroups(model, checkpoint, verifiedInventory) {
     }
   }
   for (const groupName of GROUP_NAMES) groups[groupName].sort((left, right) => left.checkKey.localeCompare(right.checkKey));
-  return groups;
+  return { groups, checklist };
 }
 
 function projectInteractiveGroups(groups, model) {
@@ -337,7 +344,7 @@ async function buildSummary({ model: inputModel, executionCheckpoint, inventory:
     if (!(error instanceof TypeError) || error.message !== 'CORE_INVENTORY_UNVERIFIED') throw error;
   }
   if (inventory) validateCheckpointInventory(checkpoint, inventory, model);
-  const fullGroups = buildGroups(model, checkpoint, inventory);
+  const { groups: fullGroups, checklist } = buildGroups(model, checkpoint, inventory);
   const cards = GROUP_NAMES.flatMap(groupName => fullGroups[groupName]);
   const projected = interactive
     ? projectInteractiveGroups(fullGroups, model)
@@ -379,6 +386,7 @@ async function buildSummary({ model: inputModel, executionCheckpoint, inventory:
         .filter(row => row.outcome === 'untested').map(row => keyForOutcome(page.pageId, row.ruleId)))) : [],
     },
     groups,
+    checklist,
   };
   return freeze(summary);
 }

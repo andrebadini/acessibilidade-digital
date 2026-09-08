@@ -73,7 +73,7 @@ test('result copy preserves the coverage limitation and four separate checkKey m
   assert.match(view, /testes do motor próprio que tiveram conclusão automática/u);
   assert.match(view, /não se aplica/u);
   assert.match(view, /Não mede quanto do site é acessível/u);
-  for (const label of ['Falhas confirmadas', 'Alertas', 'Revisão humana', 'Resultados positivos']) {
+  for (const label of ['Falhas confirmadas', 'Recomendações e alertas', 'Suspeitas a confirmar', 'Resultados positivos']) {
     assert.match(view, new RegExp(label, 'u'));
   }
   assert.match(view, /ocorrência/u);

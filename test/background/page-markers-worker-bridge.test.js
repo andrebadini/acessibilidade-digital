@@ -22,13 +22,12 @@ function event() {
 
 test('an offered marker beyond global occurrence 64 opens its exact panel detail through the worker bridge', async () => {
   const changeDraft = draft => {
-    const source = draft.occurrences.find(row => row.occurrenceId === 'occ-focus-failed');
+    const source = draft.occurrences.find(row => row.occurrenceId === 'occ-cross-page');
+    const review = draft.manualReview.find(row => row.occurrenceId === source.occurrenceId);
     for (let index = 0; index < 64; index += 1) {
-      const nodeId = `node-extra-${index}`, evidenceId = `ev-extra-${index}`;
-      draft.ruleResults.find(row => row.ruleId === 'focus-visible').targets.push(nodeId);
-      draft.occurrences.push({ ...structuredClone(source), occurrenceId: `occ-aaa-${String(index).padStart(2, '0')}`,
-        nodeId, target: { nodeId, selector: null, framePath: [] }, evidenceIds: [evidenceId], evidenceRefs: [evidenceId] });
-      draft.evidence.push({ ...structuredClone(draft.evidence[1]), evidenceId, nodeId, backendNodeId: 100 + index });
+      const occurrenceId = `occ-aaa-${String(index).padStart(2, '0')}`;
+      draft.occurrences.push({ ...structuredClone(source), occurrenceId });
+      draft.manualReview.push({ ...structuredClone(review), occurrenceId });
     }
   };
   const first = await createControllerFixture({ changeDraft });
@@ -44,14 +43,14 @@ test('an offered marker beyond global occurrence 64 opens its exact panel detail
   const fixture = await createControllerFixture({ changeDraft, bundle });
   const shown = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
   assert.equal(first.model.occurrences.length, 67);
-  assert.equal(ids.length, 64);
-  assert.deepEqual(shown.markers.counts, { markers: 1, located: 63, unlocated: 0, general: 1, omitted: 3 });
-  const ordinal = ids.indexOf('occ-focus-review');
-  assert.equal(ordinal, 63);
+  assert.equal(ids.length, 1);
+  assert.deepEqual(shown.markers.counts, { markers: 1, located: 1, unlocated: 0, general: 0, omitted: 0 });
+  const ordinal = ids.indexOf('occ-focus-failed');
+  assert.equal(ordinal, 0);
   await fixture.dispatch('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals: String(ordinal) });
   fixture.page.environment.markerButtons()[0].click();
   const message = fixture.page.environment.messages.at(-1);
-  assert.equal(message.selectionId, 's67');
+  assert.equal(message.selectionId, 's66');
   const bridge = createPageMarkersWorkerBridge({ controller: fixture.controller });
   assert.equal(isPageMarkersRuntimeMessage(message), true);
   assert.equal(bridge.handleRuntimeMessage(message, fixture.latestPort().sender), true);

@@ -95,6 +95,15 @@ test('show authorizes the private panel window and returns only located physical
   }]);
 });
 
+test('unassessed checklist records do not appear as omitted page findings', async () => {
+  const fixture = await createControllerFixture();
+  fixture.bundle.details = fixture.bundle.details.filter(row => row.occurrenceId === 'occ-focus-failed');
+  const result = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal(result.ok, true);
+  assert.equal(result.markers.counts.located, 1);
+  assert.equal(result.markers.counts.omitted, 0);
+});
+
 test('authorization refusal and unavailable origin have no browser effects', async () => {
   for (const options of [{ authorized: false }, { noOrigin: true }]) {
     const fixture = await createControllerFixture(options);

@@ -893,3 +893,7 @@ code {
 
   button:active { transform: none; }
 }
+.report-checklist { margin-block: 1rem; padding: .8rem; border: 1px solid #738596; border-radius: .65rem; background: #f7f9fb; }
+.report-checklist summary { cursor: pointer; font-weight: 700; min-height: 2.75rem; }
+.report-checklist [data-checklist-question] { margin-top: .6rem; padding-top: .6rem; border-top: 1px solid #b8c5cf; overflow-wrap: anywhere; }
+.direct-highlight { margin-block: .4rem; }

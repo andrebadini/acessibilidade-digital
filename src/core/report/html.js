@@ -1,5 +1,6 @@
 import { accessibilityGuidance, recordedLabelComparisons } from './plain-language-guidance.js';
 import { resultsOverviewHtml } from './results-overview.js';
+import { checklistHtml } from './checklist-presentation.js';
 import { consumerBasisForOccurrence, CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { SECTION508_REVISED_CROSSWALK } from '../normative/section508.js';
 import { WCAG22_LEVELS } from '../normative/wcag22.js';
@@ -138,8 +139,8 @@ function reportItemCheckPresentation(issue, itemId) {
     : outcomes.includes('passed') ? 'passed' : outcomes.length ? 'inapplicable' : 'untested';
   const classifications = [...new Set(occurrences.map(occurrence => occurrence.classification))];
   if (issue.occurrences.length === 0) classifications.push(issue.classification);
-  const normative = classifications.some(value => ['requirement', 'recommendation'].includes(value));
-  const result = ['passed', 'inapplicable'].includes(outcome) ? 'passed' : normative ? outcome === 'failed' ? 'failed' : 'humanReview' : 'alerts';
+  const normative = classifications.includes('requirement');
+  const result = ['passed', 'inapplicable'].includes(outcome) ? 'passed' : outcome === 'failed' ? (normative ? 'failed' : 'alerts') : 'humanReview';
   const classification = result === 'humanReview' ? 'manual-review' : result;
   const originalOutcome = occurrences.some(row => row.outcome === 'failed') ? 'failed'
     : occurrences.some(row => ['cantTell', 'untested'].includes(row.outcome)) ? 'cantTell'
@@ -167,7 +168,7 @@ function renderReportViewDocument(model, view, options = {}) {
   ].join('; ');
   const evidenceById = new Map(view.technicalEvidence.map(evidence => [evidence.evidenceId, evidence]));
   const evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) => [evidence.evidenceId, `report-evidence-${index + 1}`]));
-  const groupLabels = Object.freeze({ failed: 'Não conformidades', alerts: 'Alertas', humanReview: 'Revisões humanas pendentes', passed: 'Resultados positivos' });
+  const groupLabels = Object.freeze({ failed: 'Não conformidades', alerts: 'Recomendações e alertas', humanReview: 'Suspeitas a confirmar', passed: 'Resultados positivos' });
   const outcomeLabels = Object.freeze({ failed: 'Não atendido neste teste', passed: 'Atendido no escopo observado', cantTell: 'Requer revisão humana', inapplicable: 'Não aplicável', untested: 'Não testado' });
   const impactLabels = Object.freeze({ critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Menor' });
   const statusLabels = Object.freeze({ pending: 'Pendente', complete: 'Concluída', partial: 'Concluída com limitações', cancelled: 'Cancelada', failed: 'Falhou' });
@@ -231,7 +232,7 @@ function renderReportViewDocument(model, view, options = {}) {
           : { title: 'Como corrigir e confirmar', confirmation: 'repita a verificação após a correção.' };
     const { guidance } = presentation;
     if (forPrint) {
-      if (group !== 'failed') {
+      if (group === 'passed') {
         const guidanceText = group === 'passed' ? 'Resultado positivo restrito ao teste realizado.'
           : guidance.reviewSteps.slice(1, -1).join(' ');
         return `<article class="occurrence-card print-checklist-row" data-report-issue data-result="${escapeHtml(group)}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p>${escapeHtml(label(presentation.outcome, outcomeLabels))} · ${escapeHtml(issue.pageId)} · WCAG ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}</p></header>${labelComparisons}<p>${escapeHtml(guidanceText)}</p></article>`;
@@ -240,7 +241,7 @@ function renderReportViewDocument(model, view, options = {}) {
       const announcement = issue.occurrences.length <= 1 && (issue.announcement?.length ?? 0) <= 300
         ? `<p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'não disponível')}.</p>`
         : '<p>Nomes e anúncios individuais: consulte o mapa e as fichas do HTML da mesma revisão.</p>';
-      return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p>${escapeHtml(label(presentation.outcome, outcomeLabels))} · ${escapeHtml(issue.pageId)} · WCAG ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}</p></header>${labelComparisons}${group === 'failed' ? `<p>${escapeHtml(guidance.observed)}</p><p>${escapeHtml(guidance.impact)}</p><p><strong>Como corrigir:</strong> ${escapeHtml(guidance.correction)}</p><p>${escapeHtml(guidance.example)}</p>${evidencePreview(evidence, issue)}` : ''}${steps}${announcement}${evidence.filter(item => item.snippet).map(item => `<p><strong>${escapeHtml(item.evidenceId)} — trecho de código:</strong></p><pre>${escapeHtml(Array.from(item.snippet).slice(0,400).join(''))}</pre>${item.snippet.length > 400 ? '<p>Trecho resumido; código integral no HTML/JSON.</p>' : ''}`).join('')}<p>${countLabel(issue.occurrences.length, 'registro associado', 'registros associados')} · ${countLabel(evidence.length, 'evidência', 'evidências')}. Correlação individual e orientações completas no HTML/JSON.</p></article>`;
+      return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p>${escapeHtml(label(presentation.outcome, outcomeLabels))} · ${escapeHtml(presentation.classifications.map(value => label(value, classificationLabels)).join(', '))} · ${escapeHtml(issue.pageId)} · WCAG ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}</p></header>${labelComparisons}<p>${escapeHtml(guidance.observed)}</p><p>${escapeHtml(guidance.impact)}</p><p><strong>Como tratar:</strong> ${escapeHtml(guidance.correction)}</p><p>${escapeHtml(guidance.example)}</p>${evidencePreview(evidence, issue)}${steps}${announcement}${evidence.filter(item => item.snippet).map(item => `<p><strong>${escapeHtml(item.evidenceId)} — trecho de código:</strong></p><pre>${escapeHtml(Array.from(item.snippet).slice(0,400).join(''))}</pre>${item.snippet.length > 400 ? '<p>Trecho resumido; código integral no HTML/JSON.</p>' : ''}`).join('')}<p>${countLabel(issue.occurrences.length, 'registro associado', 'registros associados')} · ${countLabel(evidence.length, 'evidência', 'evidências')}. Correlação individual e orientações completas no HTML/JSON.</p></article>`;
     }
     const firstAnchor = evidence.map(item => evidenceAnchorById.get(item.evidenceId)).find(Boolean);
     const evidenceLink = firstAnchor
@@ -286,12 +287,13 @@ ${section(0, `<p data-report-outcome><strong>Estado da auditoria:</strong> ${esc
 <p data-report-summary-note>Resumo executivo — não substitui o relatório completo. Fichas, capturas, anúncios, conclusões humanas detalhadas e evidências individuais estão no relatório completo da mesma auditoria e revisão.</p>
 ${forPrint ? '' : '<div data-report-print-controls><button type="button" data-report-print-summary>Imprimir resumo / salvar PDF</button><p data-report-print-status role="status">Resumo: totais, limitações, matriz ABNT e metodologia, sem fichas, capturas e conclusões humanas detalhadas. No diálogo de impressão, escolha Salvar como PDF.</p></div>'}
 ${resultsOverviewHtml(view)}
+${checklistHtml(view.checklist, forPrint, view.technicalEvidence)}
 ${forPrint ? `<section data-print-observation-scope><h2>Escopo e período observado</h2><p>Datas em UTC, registradas pelo relógio local; não certificado.</p><ul>${model.pages.map(page => `<li><strong>${escapeHtml(page.pageId)}</strong> — ${escapeHtml(page.finalUrl || page.requestedUrl || 'URL não registrada')}<br>Observação: ${escapeHtml(page.timestamps.startedAt || 'início não registrado')} – ${escapeHtml(page.timestamps.endedAt || 'fim não registrado')}.</li>`).join('')}</ul></section>` : ''}
 ${forPrint ? '<p data-print-reading-note><strong>PDF de leitura:</strong> verificações agrupadas, orientações essenciais e evidências apresentadas uma vez. Não repete o dossiê de cada ocorrência. O HTML contém as orientações completas e detalhes expansíveis; o JSON conserva todos os registros técnicos. Os arquivos se referem à mesma revisão e hash.</p>' : ''}
 ${navigation}<div class="filter-actions"><button type="button" data-report-clear-filters>Mostrar todos os resultados</button><p role="status" data-report-filter-status></p></div><noscript><p>Os filtros exigem JavaScript local. Todos os registros continuam disponíveis nos expansores abaixo.</p></noscript>
 ${section(1, itemGroups)}
 ${section(2, '<p>As não conformidades estão nas verificações agrupadas por item acima.</p>')}
-${section(3, reportHumanHistory(view.reviewHistory ?? [], evidenceAnchorById) + '<p>As revisões pendentes estão nas verificações agrupadas por item acima; um resultado pendente não confirma uma falha.</p>')}
+${section(3, reportHumanHistory(view.reviewHistory ?? [], evidenceAnchorById) + '<p>Suspeitas concretas estão agrupadas por item. Perguntas gerais e testes inconclusivos ficam no checklist separado do HTML; não são ocorrências de barreiras confirmadas.</p>')}
 ${section(4, reportViewReaderMaps(view))}
 ${section(5, `<details data-report-matrix><summary>Consultar a matriz completa dos 146 itens</summary><div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(label(row.classification, classificationLabels))}</td><td>${escapeHtml(label(row.outcome, outcomeLabels))}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div></details>`)}
 ${section(6, `${view.methodology.caveats.map(value => `<p>${escapeHtml(value)}</p>`).join('')}<p><strong>Revisão do modelo:</strong> ${view.modelRevision}. <strong>Integridade:</strong> ${escapeHtml(view.modelHash)}.</p>${delivery}<h3>Fontes oficiais</h3><ul>${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sources.map(source => `<li data-official-source>${escapeHtml(source.publisher)} — ${escapeHtml(source.title)} — ${escapeHtml(source.url)}</li>`).join('')}</ul><details data-report-annex><summary>Consultar evidências técnicas e anexos (${view.technicalEvidence.length})</summary>${annex}</details>`)}

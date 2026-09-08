@@ -1,5 +1,5 @@
 const NORMATIVE_CLASSIFICATIONS = new Set(['requirement', 'recommendation']);
-const TONE_ORDER = Object.freeze(['failed', 'review']);
+const TONE_ORDER = Object.freeze(['failed', 'advisory', 'review']);
 
 export const EVIDENCE_TREATMENTS_V1 = Object.freeze({
   failed: Object.freeze({
@@ -12,13 +12,20 @@ export const EVIDENCE_TREATMENTS_V1 = Object.freeze({
     aria: 'com revisão humana necessária destacada por moldura âmbar tracejada.',
     legend: '? Revisão humana necessária — moldura âmbar tracejada sobre o elemento.',
   }),
+  advisory: Object.freeze({
+    tone: 'advisory',
+    aria: 'com recomendação não atendida destacada por moldura âmbar sólida.',
+    legend: '! Recomendação não atendida — moldura âmbar sólida; não é falha de requisito obrigatório.',
+  }),
 });
 
 function treatmentTone(occurrence) {
   if (!occurrence || typeof occurrence !== 'object' ||
     !NORMATIVE_CLASSIFICATIONS.has(occurrence.classification)) return null;
   const answer = occurrence.decision?.answer;
-  if (occurrence.outcome === 'failed' || answer === 'não conforme') return 'failed';
+  if (occurrence.outcome === 'failed' || answer === 'não conforme') {
+    return occurrence.classification === 'recommendation' ? 'advisory' : 'failed';
+  }
   if (answer === 'conforme') return null;
   if (occurrence.outcome === 'cantTell' || answer === 'não foi possível determinar') return 'review';
   return null;

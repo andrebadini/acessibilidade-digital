@@ -25,6 +25,30 @@ async function shown(f) {
   await tick(); f.requests.at(-1).resolve(active()); await pending;
 }
 
+test('one explicit highlight prepares signals then scrolls to the correlated occurrence', async () => {
+  const f = fixture();
+  assert.equal(f.requests.length, 0, 'opening a result never touches the page');
+  const pending = f.session.highlight('two');
+  await tick(); f.requests[0].resolve(active()); await tick();
+  assert.deepEqual(f.requests[1].intent, { type: 'PANEL_SELECT_PAGE_MARKER', modelRevision: 1, ordinal: 1, scroll: true });
+  f.requests[1].resolve(active(1));
+  assert.equal(await pending, true);
+  assert.equal(f.session.read().selectedOccurrenceId, 'two');
+});
+
+test('direct highlight never selects after reset, failed show, or an unlocated/general target', async () => {
+  for (const mode of ['reset', 'failed', 'general']) {
+    const f = fixture();
+    const pending = f.session.highlight(mode === 'general' ? 'three' : 'one');
+    await tick();
+    if (mode === 'reset') f.session.reset();
+    f.requests[0].resolve(mode === 'failed' ? { ok: false } : active());
+    assert.equal(await pending, false);
+    assert.equal(f.requests.length, 1);
+    if (mode === 'general') assert.match(f.session.read().message, /não foi localizado/u);
+  }
+});
+
 test('show validates counts and projects numbered groups without transport authority', async () => {
   const f = fixture();
   await shown(f);

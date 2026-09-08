@@ -127,6 +127,20 @@ test('unknown pixel composition, gradients, canvas and invalid colors are cantTe
   }
 });
 
+test('6.386 contrast meets minimum but fails enhanced without approving unobserved text', async () => {
+  const measured = record('measured', 'p', { text: 'Texto', contrast: {
+    foreground: '#000', background: srgbGrayForBlackContrast(6.386), fontSizePx: 16, fontWeight: 400
+  } });
+  assert.equal((await evaluate('text-contrast-minimum', snapshot([measured]))).outcome, 'passed');
+  const enhanced = await evaluate('text-contrast-enhanced', snapshot([measured]));
+  assert.equal(enhanced.outcome, 'failed');
+  assert.equal(enhanced.targets[0].data.threshold, 7);
+  assert.ok(Math.abs(enhanced.targets[0].data.ratio - 6.386) < 1e-10);
+  const partial = snapshot([measured, record('unobserved', 'p', { text: 'Outro texto' })]);
+  assert.equal((await evaluate('text-contrast-minimum', partial)).outcome, 'cantTell');
+  assert.equal((await evaluate('text-contrast-enhanced', partial)).outcome, 'failed');
+});
+
 test('component, graphic and focus contrast require reliable observed pixels at ratio 3', async () => {
   const cases = [
     ['component-contrast', 'componentContrast'],

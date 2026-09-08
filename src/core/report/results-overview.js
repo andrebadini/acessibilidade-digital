@@ -1,7 +1,7 @@
 // Presentation of an already validated ReportView. Never changes recorded outcomes.
 const GROUPS = [
-  ['errors', 'Falhas', '#9d2b18'], ['alerts', 'Alertas', '#986000'],
-  ['humanReview', 'Revisões pendentes', '#bd8700'], ['positive', 'Resultados positivos', '#236b3b'],
+  ['errors', 'Falhas', '#9d2b18'], ['alerts', 'Recomendações e alertas', '#986000'],
+  ['humanReview', 'Suspeitas a confirmar', '#bd8700'], ['positive', 'Resultados positivos', '#236b3b'],
 ];
 export const RESULTS_OVERVIEW_CSS = `
 .results-overview{display:flex;align-items:center;flex-wrap:wrap;gap:1.25rem;padding:1.1rem;margin-block:1rem;background:#f4f8fb;border:1px solid #738596;border-radius:.75rem;break-inside:avoid}
@@ -52,11 +52,11 @@ function overviewTree(view) {
       node('p',score,{'class':'overview-score','data-automatic-score':''}),
       node('p',`${result.passed} verificações atendidas entre ${result.concluded} com conclusão automática aplicável.`),
       node('ul','',{},result.segments.map(segment=>node('li',`${segment.label}: ${segment.count} verificações`))),
-      node('p','Revisões pendentes não são falhas confirmadas. Incluem perguntas do roteiro ABNT e testes sem observação suficiente.'),
+      node('p','Suspeitas a confirmar têm um indício concreto, mas ainda não são falhas confirmadas. Perguntas gerais e testes sem observação suficiente ficam no checklist separado, fora deste gráfico.'),
       node('details','',{'data-score-methodology':''},[
         node('summary','Como o gráfico e o índice são calculados'),
         node('p','Índice = 10 × testes atendidos ÷ (atendidos + falhos), uma vez por regra e página do motor próprio, antes de decisões humanas. Exclui não aplicáveis, inconclusivos, não testados e motores suplementares. Sem denominador, não há nota.'),
-        node('p','O gráfico usa verificações agrupadas, não quantidade de elementos. Mostra resultados consolidados, incluindo os suplementares, e exclui não aplicáveis. Por isso seu denominador difere do índice. A cobertura automática continua separada.'),
+        node('p','O gráfico usa verificações agrupadas, não quantidade de elementos. Mostra resultados consolidados, incluindo os suplementares, e exclui não aplicáveis e checklist. Por isso seu denominador difere do índice. O índice inclui requisitos e recomendações dos níveis avaliados, inclusive AAA; não representa conformidade AA. A cobertura automática continua separada.'),
         node('p','Mesmo 10 não comprova acessibilidade integral. Pendências, limitações, nível WCAG e impacto devem ser considerados. O índice não é certificação, não é a nota do AMAWeb e não permite comparar motores ou versões diferentes diretamente.'),
       ]),
     ]),

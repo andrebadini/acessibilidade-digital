@@ -126,7 +126,11 @@ function validateCard(card, auditId) {
 }
 
 function validateSummary(summary, auditId) {
-  exact(summary, ['version', 'auditId', 'identity', 'coverage', 'counts', 'distributions', 'limitations', 'groups']);
+  exact(summary, ['version', 'auditId', 'identity', 'coverage', 'counts', 'distributions', 'limitations', 'groups', ...(Object.hasOwn(summary, 'checklist') ? ['checklist'] : [])]);
+  if (summary.checklist !== undefined) {
+    if (!Array.isArray(summary.checklist)) denied();
+    for (const card of summary.checklist) validateCard(card, auditId);
+  }
   if (summary.version !== 1 || summary.auditId !== auditId) denied();
   exact(summary.identity, ['finalUrl', 'completedAt', 'status']);
   string(summary.identity.finalUrl); string(summary.identity.completedAt); string(summary.identity.status);

@@ -1,5 +1,6 @@
 import { createAuditModel } from '../core/report/audit-model.js';
 import { resultsOverviewElement } from '../core/report/results-overview.js';
+import { checklistElement } from '../core/report/checklist-presentation.js';
 import { decodePngDataUrl } from '../core/evidence/png.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
@@ -136,7 +137,8 @@ function exact(value, keys) {
 
 function validateSummary(input, auditId) {
   const summary = copyData(input);
-  exact(summary, ['version', 'auditId', 'identity', 'coverage', 'counts', 'distributions', 'limitations', 'groups']);
+  exact(summary, ['version', 'auditId', 'identity', 'coverage', 'counts', 'distributions', 'limitations', 'groups', ...(Object.hasOwn(summary, 'checklist') ? ['checklist'] : [])]);
+  if (summary.checklist !== undefined && !Array.isArray(summary.checklist)) denied();
   if (summary.version !== 1 || summary.auditId !== auditId) denied();
   exact(summary.identity, ['finalUrl', 'completedAt', 'status']);
   exact(summary.counts, ['errors', 'alerts', 'humanReview', 'positive']);
@@ -306,13 +308,13 @@ function projectCard(card, group, model, decisionByOccurrence) {
   const occurrences = card.occurrenceIds.map(id => model.occurrences.find(row => row.occurrenceId === id)).filter(Boolean)
     .map(occurrence => {
       const decision = decisionByOccurrence.get(occurrence.occurrenceId) ?? null;
-      const legalReference = qualifiedConsumerReference({
+      const legalReference = occurrence.classification === 'requirement' ? qualifiedConsumerReference({
         occurrence,
         item: officialItemById.get(occurrence.itemId),
         displayOutcome: card.displayOutcome,
         decision,
         normativeItems: NBR17225_ITEMS,
-      });
+      }) : null;
       return {
         occurrenceId: occurrence.occurrenceId, itemId: occurrence.itemId, outcome: occurrence.outcome,
         classification: occurrence.classification, impact: occurrence.impact, justification: occurrence.justification,
@@ -401,6 +403,8 @@ export function buildReportView({ model: inputModel, summary: inputSummary, mode
       filters: collectFilterOptions(model, summary),
       executive: projectExecutive(model, summary),
       issues: projectIssues(model, summary),
+      checklist: (summary.checklist ?? []).map(card => projectCard(card, 'humanReview', model,
+        new Map(model.reviewDecisions.map(row => [row.occurrenceId, row])))),
       technicalEvidence: projectTechnicalEvidence(model),
       readerMaps: projectReaderMaps(model),
       methodology: projectMethodology(model),
@@ -676,8 +680,8 @@ function itemCheckPresentation(issue, itemId) {
     : outcomes.includes('passed') ? 'passed' : outcomes.length ? 'inapplicable' : 'untested';
   const classifications = [...new Set(occurrences.map(occurrence => occurrence.classification))];
   if (issue.occurrences.length === 0) classifications.push(issue.classification);
-  const normative = classifications.some(value => ['requirement', 'recommendation'].includes(value));
-  const result = ['passed', 'inapplicable'].includes(outcome) ? 'passed' : normative ? outcome === 'failed' ? 'failed' : 'humanReview' : 'alerts';
+  const normative = classifications.includes('requirement');
+  const result = ['passed', 'inapplicable'].includes(outcome) ? 'passed' : outcome === 'failed' ? (normative ? 'failed' : 'alerts') : 'humanReview';
   const classification = result === 'humanReview' ? 'manual-review' : result;
   const originalOutcome = occurrences.some(row => row.outcome === 'failed') ? 'failed'
     : occurrences.some(row => ['cantTell', 'untested'].includes(row.outcome)) ? 'cantTell'
@@ -940,8 +944,8 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const metricTotal = Math.max(1, Object.values(view.executive.counts).reduce((total, count) => total + count.checkKeys, 0));
   for (const [group, label, count] of [
     ['failed', 'Não conformidades', view.executive.counts.errors],
-    ['alerts', 'Alertas', view.executive.counts.alerts],
-    ['humanReview', 'Revisões humanas', view.executive.counts.humanReview],
+    ['alerts', 'Recomendações e alertas', view.executive.counts.alerts],
+    ['humanReview', 'Suspeitas a confirmar', view.executive.counts.humanReview],
     ['passed', 'Resultados positivos', view.executive.counts.positive],
   ]) {
     const card = document.createElement('button'); card.setAttribute('data-report-metric', group);
@@ -958,6 +962,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     metrics.append(card);
   }
   executive.append(metrics);
+  executive.append(checklistElement(document, view.checklist, view.technicalEvidence));
   const limitations = document.createElement('details');
   limitations.setAttribute('data-report-limitations', '');
   const noPixelEvidence = view.executive.limitations.includes(
@@ -1059,7 +1064,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
 
   const review = section(document, 3);
   appendHumanHistory(document, review, view.reviewHistory ?? [], evidenceAnchorById);
-  review.append(element(document, 'p', 'Use o cartão “Revisões humanas” no sumário para localizar as verificações pendentes. Abra os formulários abaixo quando estiver pronto para registrar suas conclusões.'));
+  review.append(element(document, 'p', 'O cartão “Suspeitas a confirmar” reúne indícios concretos. As demais perguntas ficam no checklist separado, sem conclusão ou aplicabilidade estabelecida. Os formulários abaixo permitem registrar conclusões para ambos.'));
   const reviewForms = document.createElement('details');
   reviewForms.setAttribute('data-review-controls-target', '');
   reviewForms.append(element(document, 'summary', 'Abrir os formulários de revisão humana'));

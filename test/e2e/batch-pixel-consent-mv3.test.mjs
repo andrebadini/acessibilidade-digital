@@ -600,6 +600,13 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
   const proof = await extension.waitForValue(report, `(()=>{
     const text=document.documentElement?.outerHTML??'';
     const body=document.body?.textContent??'';
+    const checklistCounts={};
+    for(const row of document.querySelectorAll('[data-checklist-question]')){
+      const pageId=JSON.parse(row.dataset.checklistQuestion)[0];
+      const paragraph=[...row.querySelectorAll('p')].find(p=>p.textContent.startsWith('Registros originais: '));
+      const ids=paragraph.textContent.slice('Registros originais: '.length).split('. Dados e evidências integrais')[0].split(', ').filter(Boolean);
+      checklistCounts[pageId]=(checklistCounts[pageId]??0)+ids.length;
+    }
     const forbidden=${JSON.stringify([queryMarkerA, queryMarkerB, fragmentMarkerA, fragmentMarkerB, ...privateFieldNames])};
     return{
       ready:Boolean(document.querySelector('[data-report-navigation]')&&document.querySelector('[data-report-export]')),
@@ -608,6 +615,7 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
       page2Issues:document.querySelectorAll('[data-report-issue][data-page="page-2"]').length,
       page1Occurrences:document.querySelectorAll('[data-report-issue][data-page="page-1"] [data-report-occurrence-technical]').length,
       page2Occurrences:document.querySelectorAll('[data-report-issue][data-page="page-2"] [data-report-occurrence-technical]').length,
+      checklistCounts,
       evidenceImages:document.querySelectorAll('[data-evidence-preview-image],img.evidence-media').length,
       wcag:/WCAG 2\.2:/u.test(body),
       abnt:/ABNT NBR 17225:/u.test(body),
@@ -619,8 +627,8 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
   });
   assert.equal(proof.ready, true, `P5B_REPORT_NOT_READY_${proof.status ?? 'missing'}`);
   assert.equal(proof.page1Issues > 0 && proof.page2Issues > 0, true, 'P5B_REPORT_PAGE_SECTIONS_MISSING');
-  assert.equal(proof.page1Occurrences, model.occurrenceCounts['page-1'], 'P5B_REPORT_PAGE_1_TRUNCATED');
-  assert.equal(proof.page2Occurrences, model.occurrenceCounts['page-2'], 'P5B_REPORT_PAGE_2_TRUNCATED');
+  assert.equal(proof.page1Occurrences+(proof.checklistCounts['page-1']??0), model.occurrenceCounts['page-1'], 'P5B_REPORT_PAGE_1_TRUNCATED');
+  assert.equal(proof.page2Occurrences+(proof.checklistCounts['page-2']??0), model.occurrenceCounts['page-2'], 'P5B_REPORT_PAGE_2_TRUNCATED');
   assert.equal(proof.evidenceImages >= 4, true, 'P5B_REPORT_RASTER_EVIDENCE_MISSING');
   assert.equal(proof.wcag, true, 'P5B_REPORT_WCAG_REFERENCE_MISSING');
   assert.equal(proof.abnt, true, 'P5B_REPORT_ABNT_REFERENCE_MISSING');

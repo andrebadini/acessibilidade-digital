@@ -127,6 +127,18 @@ function allCards(summary) {
   return Object.values(summary.groups).flat();
 }
 
+test('unassessed manual tasks stay in a separate checklist without inflating findings or losing the original records', async () => {
+  const before = JSON.stringify(SAMPLE_AUDIT);
+  const inventory = await createInstalledCoreRuleInventory();
+  const summary = await buildPanelSummary({ model: SAMPLE_AUDIT,
+    executionCheckpoint: checkpointFor(SAMPLE_AUDIT, inventory), inventory });
+  assert.equal(summary.counts.humanReview.occurrences, 0);
+  assert.equal(summary.checklist.length, 2);
+  assert.equal(summary.checklist.flatMap(card=>card.occurrenceIds).length, 2);
+  assert.equal(allCards(summary).some(card=>card.originalOutcome === 'cantTell'), false);
+  assert.equal(JSON.stringify(SAMPLE_AUDIT), before);
+});
+
 function modelWithEveryImpact() {
   const model = structuredClone(SAMPLE_AUDIT);
   model.occurrences.find(value => value.occurrenceId === 'occ-focus-failed').impact = 'critical';
@@ -170,11 +182,12 @@ test('separates attempted core coverage pairs from all-engine checkKeys and occu
   assert.deepEqual(summary.coverage, { status: 'available', numerator: 2, denominator: 130, percent: '1,5%' });
   assert.equal(new Set(cards.map(card => card.checkKey)).size, cards.length);
   assert.equal(cards.some(card => card.engine === 'audita-core'), true);
-  assert.equal(cards.some(card => card.engine === 'audita-manual-review'), true);
+  assert.equal(cards.some(card => card.engine === 'audita-manual-review'), false);
+  assert.equal(summary.checklist.some(card => card.engine === 'audita-manual-review'), true);
   assert.deepEqual(summary.counts, {
     errors: { checkKeys: 1, occurrences: 1 },
     alerts: { checkKeys: 0, occurrences: 0 },
-    humanReview: { checkKeys: 2, occurrences: 2 },
+    humanReview: { checkKeys: 0, occurrences: 0 },
     positive: { checkKeys: 1, occurrences: 0 },
   });
   assert.deepEqual(summary.limitations.untestedCheckKeys, [JSON.stringify(['page-1', 'audita-core', 'keyboard-focus-trap'])]);
@@ -187,12 +200,11 @@ test('distributes SAMPLE_AUDIT by canonical WCAG conformance level while cards p
   ]]));
 
   const summary = await buildPanelSummary({ model: SAMPLE_AUDIT, executionCheckpoint: checkpoint, inventory });
-  const criteria = new Map(allCards(summary).map(card => [card.ruleId, card.wcag]));
+  const criteria = new Map([...allCards(summary), ...summary.checklist].map(card => [card.ruleId, card.wcag]));
 
   assert.deepEqual(summary.distributions.wcag, [
-    { id: 'A', count: 1 },
-    { id: 'AA', count: 3 },
-    { id: 'AAA', count: 2 },
+    { id: 'AA', count: 2 },
+    { id: 'AAA', count: 1 },
   ]);
   assert.deepEqual(criteria.get('focus-visible'), ['2.4.7']);
   assert.deepEqual(criteria.get('focus-order'), ['2.4.3']);
@@ -213,7 +225,7 @@ test('preserves every canonical occurrence impact and counts checkKeys in the or
   const summary = await buildPanelSummary({
     model, executionCheckpoint: checkpointFor(model, inventory), inventory,
   });
-  const byOccurrence = new Map(allCards(summary).flatMap(card =>
+  const byOccurrence = new Map([...allCards(summary), ...summary.checklist].flatMap(card =>
     card.occurrenceIds.map(occurrenceId => [occurrenceId, card.impact])));
 
   assert.equal(byOccurrence.get('occ-focus-failed'), 'critical');
@@ -223,8 +235,6 @@ test('preserves every canonical occurrence impact and counts checkKeys in the or
   assert.deepEqual(summary.distributions.impact, [
     { id: 'critical', count: 1 },
     { id: 'minor', count: 1 },
-    { id: 'moderate', count: 1 },
-    { id: 'serious', count: 1 },
   ]);
 });
 
