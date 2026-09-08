@@ -117,7 +117,7 @@ export function canonicalizeAxeDiagnostics(value) {
 const MAX_GROUPS = 100;
 const MAX_NODES = 100;
 const DEFAULT_TIMEOUT_MS = 30_000;
-const SELECTOR_ALLOWED_CHARACTERS = /^[a-z0-9():>\- \t]+$/iu;
+const SELECTOR_ALLOWED_CHARACTERS = /^[a-z0-9*():>\- \t]+$/iu;
 export const AXE_STRUCTURAL_SELECTOR_TAGS = Object.freeze([
   'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'b', 'base', 'bdi', 'bdo', 'blockquote', 'body', 'br', 'button',
   'canvas', 'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist', 'dd', 'del', 'details', 'dfn', 'dialog', 'div', 'dl', 'dt',
@@ -158,6 +158,7 @@ function safeImpact(value) {
 }
 
 function safeSelectorCompound(compound) {
+  if (/^\*:nth-child\([1-9]\d{0,3}\)$/u.test(compound)) return true;
   const match = compound.match(/^([a-z][a-z0-9-]{0,31})(?::nth-of-type\(([1-9]\d{0,3})\))?$/iu);
   return Boolean(match && SAFE_TARGET_TAGS.has(match[1].toLowerCase()));
 }
@@ -307,22 +308,28 @@ export async function runAxeInFrame(config, policy) {
         let current = element;
         while (current && compounds.length < maxSelectorParts) {
           const tag = typeof current.localName === 'string' ? current.localName.toLowerCase() : '';
-          if (!allowedTags.has(tag)) return unavailable;
+          const anonymous = !allowedTags.has(tag);
           let compound = tag;
           const parent = current.parentElement;
+          if (anonymous && !parent) break;
           if (parent) {
             const siblings = parent.children;
             let sameTag = 0;
             let position = 0;
+            let childPosition = 0;
             const siblingLength = Math.min(Number.isSafeInteger(siblings?.length) ? siblings.length : 0, 2_048);
             for (let index = 0; index < siblingLength; index += 1) {
               const sibling = siblings[index];
+              if (sibling === current) childPosition = index + 1;
               if (typeof sibling?.localName === 'string' && sibling.localName.toLowerCase() === tag) {
                 sameTag += 1;
                 if (sibling === current) position = sameTag;
               }
             }
-            if (sameTag > 1) {
+            if (anonymous) {
+              if (childPosition === 0) return unavailable;
+              compound = `*:nth-child(${childPosition})`;
+            } else if (sameTag > 1) {
               if (position === 0) return unavailable;
               compound += `:nth-of-type(${position})`;
             }
@@ -331,11 +338,18 @@ export async function runAxeInFrame(config, policy) {
           if (tag === 'html') break;
           current = parent;
         }
-        if (compounds.length === 0 || compounds[0] !== 'html' || current?.localName?.toLowerCase() !== 'html') return unavailable;
-        const selector = compounds.join(' > ');
-        if (selector.length > maxSelectorLength) return unavailable;
-        const verified = globalThis.document.querySelectorAll(selector);
-        return verified?.length === 1 && verified[0] === element ? selector : unavailable;
+        // Prefer the complete path. Deep trees and custom ancestors may leave
+        // only a structural suffix; retain it solely if it resolves to this
+        // exact element, without exporting page-controlled names or attributes.
+        while (compounds.length > 0) {
+          const selector = compounds.join(' > ');
+          if (selector.length <= maxSelectorLength) {
+            const verified = globalThis.document.querySelectorAll(selector);
+            if (verified?.length === 1 && verified[0] === element) return selector;
+          }
+          compounds.shift();
+        }
+        return unavailable;
       } catch { return unavailable; }
     };
     const projectGroup = group => {

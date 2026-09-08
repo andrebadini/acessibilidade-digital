@@ -196,6 +196,19 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
   assert.ok(result.frames.length >= 2, JSON.stringify(result));
   assert.ok(result.frames.every(frame => frame.status === 'success'));
   assert.ok(result.frames.some(frame => frame.result.violations.some(rule => rule.id === 'image-alt')));
+  const top = result.frames.find(frame => frame.frameId === 0).result;
+  for (const ruleId of ['image-alt', 'button-name', 'input-button-name']) {
+    const nodes = top.violations.find(rule => rule.id === ruleId)?.nodes;
+    assert.ok(nodes?.length > 0, `${ruleId} must exercise its fixture`);
+    for (const node of nodes) {
+      assert.notEqual(node.target, '[target-unavailable]', `${ruleId}: target lost through depth/custom/center ancestor`);
+      const checked = await fixtureCdp.command('Runtime.evaluate', {
+        expression: `document.querySelectorAll(${JSON.stringify(node.target)}).length`, returnByValue: true,
+      });
+      assert.equal(checked.result.value, 1, 'the returned structural selector must locate exactly one real element');
+    }
+  }
+  assert.doesNotMatch(JSON.stringify(result), /private-customer-widget/);
   assert.doesNotMatch(JSON.stringify(result.diagnostics), /unsafe-eval|EvalError|https?:/iu);
   debug('result assertions passed');
 });

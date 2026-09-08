@@ -150,6 +150,68 @@ test('drops sparse or accessor-backed axe nodes in-frame without executing page-
   assert.deepEqual(projected.results.violations[0].truncation.nodes, { original: 1, retained: 0, truncated: true });
 });
 
+test('retains a unique structural suffix below a custom ancestor without exposing its name', async t => {
+  const originalAxe = globalThis.axe;
+  const originalDocument = globalThis.document;
+  t.after(() => {
+    if (originalAxe === undefined) delete globalThis.axe; else globalThis.axe = originalAxe;
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+  });
+  const custom = { localName: 'private-customer-widget', parentElement: null, children: [] };
+  const figure = { localName: 'figure', parentElement: custom, children: [] };
+  const image = { localName: 'img', parentElement: figure, children: [] };
+  custom.children = [figure]; figure.children = [image];
+  globalThis.document = {
+    querySelectorAll(selector) {
+      return ['#private-customer-image', 'figure > img'].includes(selector) ? [image] : [];
+    },
+  };
+  image.getRootNode = () => globalThis.document;
+  globalThis.axe = { version: '4.13.0', async run() { return {
+    violations: [{ id: 'image-alt', impact: 'critical', nodes: [{ target: ['#private-customer-image'] }] }],
+    incomplete: [], passes: [], inapplicable: [],
+  }; } };
+  const projected = await adapter.runAxeInFrame(adapter.AXE_RUN_CONFIG, adapter.AXE_FRAME_PROJECTION_POLICY);
+  assert.equal(projected.results.violations[0].nodes[0].target, 'figure > img');
+  assert.doesNotMatch(JSON.stringify(projected), /private-customer/);
+
+  globalThis.document.querySelectorAll = selector => selector === '#private-customer-image' ? [image] : [image, {}];
+  const ambiguous = await adapter.runAxeInFrame(adapter.AXE_RUN_CONFIG, adapter.AXE_FRAME_PROJECTION_POLICY);
+  assert.equal(ambiguous.results.violations[0].nodes[0].target, adapter.AXE_TARGET_UNAVAILABLE,
+    'an ambiguous suffix must never choose an element by approximation');
+});
+
+test('distinguishes identical descendants through anonymous custom-ancestor positions', async t => {
+  const originalAxe = globalThis.axe;
+  const originalDocument = globalThis.document;
+  t.after(() => {
+    if (originalAxe === undefined) delete globalThis.axe; else globalThis.axe = originalAxe;
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+  });
+  const html = { localName: 'html', parentElement: null, children: [] };
+  const body = { localName: 'body', parentElement: html, children: [] };
+  const custom = { localName: 'private-customer-widget', parentElement: body, children: [] };
+  const figure = { localName: 'figure', parentElement: custom, children: [] };
+  const image = { localName: 'img', parentElement: figure, children: [] };
+  html.children = [body]; body.children = [custom]; custom.children = [figure]; figure.children = [image];
+  const expected = 'html > body > *:nth-child(1) > figure > img';
+  globalThis.document = { querySelectorAll(selector) {
+    return ['#private-image', expected].includes(selector) ? [image] : [image, {}];
+  } };
+  image.getRootNode = () => globalThis.document;
+  globalThis.axe = { version: '4.13.0', async run() { return {
+    violations: [{ id: 'image-alt', nodes: [{ target: ['#private-image'] }] }],
+    incomplete: [], passes: [], inapplicable: [],
+  }; } };
+  const projected = await adapter.runAxeInFrame(adapter.AXE_RUN_CONFIG, adapter.AXE_FRAME_PROJECTION_POLICY);
+  assert.equal(projected.results.violations[0].nodes[0].target, expected);
+  assert.equal(adapter.sanitizeAxeStructuralSelector(expected), expected, 'the transport must preserve the anonymous structural path');
+  assert.doesNotMatch(JSON.stringify(projected), /private-customer|private-image/);
+  for (const hostile of ['*', '*:nth-child(0)', '*:nth-child(-1)', '*:nth-child(2n)', '*[data-user]', '*:nth-of-type(2)']) {
+    assert.equal(adapter.sanitizeAxeStructuralSelector(hostile), adapter.AXE_TARGET_UNAVAILABLE);
+  }
+});
+
 test('diagnostic canonicalization distinguishes a readable empty array from invalid and unreadable collections', () => {
   const revokedPair = Proxy.revocable([], {});
   revokedPair.revoke();
