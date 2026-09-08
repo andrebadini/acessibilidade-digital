@@ -8,6 +8,11 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Entrega atual e histórico funcional
 
+**Beta 1.1.12 entregue:** preserva viewport observado quando a versão do navegador não pode ser lida e distingue recomendações na redação de novos registros, sem reescrever relatórios antigos. Candidato, correções das expectativas/ambiente de teste, gates, QA visual/PDF, limites e SHA em `docs/qa/2026-09-08-beta1112-release.md`. As indicações abaixo “fora do ZIP 1.1.11” continuam corretas para aquele pacote; os dois incrementos agora integram a 1.1.12.
+
+- Precisão de aceite A → B: o teste atual usa navegação real pela API, pode receber tela inicial e não exige mesma identidade do contexto do painel; A e B têm HTML igual. Comprova auditoria B nova e A preservada, não digitação literal na barra nem achado exclusivo de B. Fortalecer essa prova sem reabrir o mecanismo já aprovado.
+- QA da matriz PDF 1.1.12: evitar quebra interna do número ABNT na primeira coluna, mantendo o item inteiro legível numa linha. Agrupamentos e texto estão preservados; refinamento visual junto da compactação.
+
 **Beta 1.1.11 entregue:** nova auditoria após navegação A → B, correlação de sinais axe com elementos/evidências, destaque preservado depois de exportar conteúdo inalterado e documentação alinhada com mapa/retencão existentes. Gate 4032/4032 lógicos, 39/39 na etapa serial Chrome, regressão documental 68/68; revisões finais C=0/I=0. Pacote, SHA e limites em `docs/qa/2026-09-08-beta1111-release.md`. Google atual: 27 páginas, checklist fora dos achados e seis sinais com captura correlacionada; comparação não simultânea em `docs/qa/2026-09-08-beta1111-google-comparison.md`.
 
 - Menores da revisão documental 1.1.11: alinhar a descrição de `alarms` na política HTML à menção de retenção já existente no Markdown; explicitar nos guias que a migração de auditorias antigas deriva o prazo de `endedAt` e dados sem data válida podem estar imediatamente vencidos. O guia já manda exportar antes de atualizar; não há promessa de recuperação de dados antigos.

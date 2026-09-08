@@ -2,7 +2,7 @@
 
 ## Estado da versão
 
-Candidata em validação. Este guia não confirma que o pacote já foi entregue; a liberação depende dos testes em Chrome e da conferência dos arquivos.
+Beta validada no Chrome for Testing 152, com pacote conferido contra o código testado. A auditoria continua sujeita aos limites descritos abaixo; não é certificação de conformidade integral.
 
 ## Instalar ou atualizar
 
