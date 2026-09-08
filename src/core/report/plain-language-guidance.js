@@ -96,6 +96,12 @@ const SPACING_REVIEW = [
 ];
 
 const SPECIFIC = {
+  '5.11.2': {
+    steps: [...PROFILES['5.11'].steps,
+      'Compare separadamente os dois limites: 5.11.3 (mínimo, requisito) pede 4,5:1 para texto comum ou 3:1 para texto grande; 5.11.2 (aprimorado, recomendação) pede 7:1 ou 4,5:1, respectivamente. Texto grande tem pelo menos 18 pt, ou 14 pt em negrito. Considere as exceções da norma para logotipos e texto em plano secundário.',
+      'Não atingir o contraste aprimorado não prova falha no mínimo. Confira a medição de cada elemento no estado registrado; uma medição isolada não aprova o contraste da página inteira. Sem medição confiável, mantenha a conclusão pendente.'],
+    example: `${PROFILES['5.11'].example} Em outro exemplo hipotético, um texto comum com contraste de 6,39:1 supera o mínimo de 4,5:1, mas não alcança os 7:1 recomendados. Isso não descreve necessariamente a página auditada nem comprova sua conformidade integral.`
+  },
   '5.1.1': {
     correction: 'Torne perceptível qual controle está selecionado pelo teclado, por exemplo com um contorno visível.',
     steps: ['Use Tab e Shift+Tab para percorrer os controles sem o mouse.', 'Confira se é possível enxergar qual elemento está selecionado em cada parada.']
@@ -302,6 +308,10 @@ export function accessibilityGuidance({ itemId, title, outcome, observed, correc
     passed: 'O resultado registrado indica atendimento no escopo verificado.',
     inapplicable: 'O item foi registrado como não aplicável ao escopo verificado.'
   };
+  const normativeExplanation = item?.classification === 'recommendation'
+    ? ' Como interpretar: este item é uma recomendação, não um requisito para conformidade regular. Pela seção 4 da ABNT NBR 17225:2025, a conformidade plena abrange também as recomendações; o não atendimento exige justificativa razoável. A recomendação beneficia mais pessoas, mas seu não atendimento, isoladamente, não demonstra descumprimento do mínimo nem determina infração ou multa.'
+    : item?.classification === 'requirement'
+      ? ' Como interpretar: este item é um requisito para conformidade regular, quando aplicável. Resultado pendente não é falha confirmada; aprovação neste teste não certifica a página inteira.' : '';
   let nextAction;
   if (outcome === 'passed') nextAction = 'Nenhuma correção é indicada por este resultado. Mantenha o comportamento e reavalie quando houver mudanças.';
   else if (outcome === 'inapplicable') nextAction = 'Nenhuma correção é indicada para este resultado. Reavalie a aplicabilidade se o conteúdo mudar.';
@@ -312,7 +322,7 @@ export function accessibilityGuidance({ itemId, title, outcome, observed, correc
     impact: profile.impact,
     observed: `${introductions[outcome] || introductions.cantTell}${evidence ? ` Registro original: ${evidence}` : ' Não foi fornecida uma descrição do que foi observado.'}`,
     correction: nextAction,
-    reviewSteps: [`Confira “${topic}” no trecho e no estado da página indicados pelo relatório.`, ...profile.steps, 'Registre a conclusão, a evidência e as limitações da revisão; o exemplo abaixo não é evidência da página.'],
+    reviewSteps: [`Confira “${topic}” no trecho e no estado da página indicados pelo relatório.`, ...profile.steps, ...(normativeExplanation ? [normativeExplanation.trim()] : []), 'Registre a conclusão, a evidência e as limitações da revisão; o exemplo abaixo não é evidência da página.'],
     example: `Exemplo hipotético: ${profile.example}`
   };
 }

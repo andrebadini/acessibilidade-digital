@@ -3,6 +3,21 @@ import test from 'node:test';
 import { NBR17225_ITEMS } from '../../src/core/normative/nbr17225.js';
 import { accessibilityGuidance as guidance } from '../../src/core/report/plain-language-guidance.js';
 
+test('explains recommendation versus requirement without changing the original observation', () => {
+  const observed = 'Amostra registrada: contraste 6,39:1.';
+  const recommended = guidance({ itemId: '5.11.2', outcome: 'failed', observed });
+  const required = guidance({ itemId: '5.11.3', outcome: 'cantTell', observed });
+  assert.ok(recommended.observed.includes(observed));
+  assert.match(recommended.reviewSteps.join(' '), /recomendação.*conformidade regular/is);
+  assert.match(required.reviewSteps.join(' '), /requisito.*conformidade regular/is);
+  assert.match(required.observed, /não confirma atendimento nem falha/);
+  assert.match(recommended.reviewSteps.join(' '), /5\.11\.3.*4,5:1.*3:1/);
+  assert.match(recommended.reviewSteps.join(' '), /5\.11\.2.*7:1.*4,5:1/);
+  assert.match(recommended.example, /hipotético.*6,39:1/);
+  assert.doesNotMatch(recommended.observed, /mínimo atendido|site acessível/i);
+  assert.match(recommended.reviewSteps.join(' '), /justificativa razoável/);
+});
+
 // Catches evidence being replaced by a topic's hypothetical failure.
 test('preserves supplied evidence verbatim when explaining a failure', () => {
   const observed = 'Botão #buscar: razão medida 2.1:1; amostra parcial.\nEstado: aberto.';
