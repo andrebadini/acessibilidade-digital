@@ -30,3 +30,13 @@ test('missing evidence and supplemental incomplete outcomes are not silently app
   assert.equal(findingKind({ ...occurrence, source: { engine: 'axe-core' } }, { targets: [{selector:'[target-unavailable]'}] }), 'checklist');
   assert.equal(findingKind({ ...occurrence, outcome: 'untested' }), 'checklist');
 });
+
+test('actual supplemental engine signals remain visible for review even without a correlated element', () => {
+  for (const engineResultType of ['violations', 'incomplete']) {
+    const signal = { ...occurrence, nodeId: null, source: { engine: 'axe-core' }, engineResultType,
+      selector: '[target-unavailable]' };
+    assert.equal(findingKind(signal, null), 'suspected');
+    assert.equal(signal.outcome, 'cantTell');
+    assert.equal(findingKind({ ...signal, engineResultType: undefined }, null), 'checklist');
+  }
+});

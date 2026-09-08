@@ -52,7 +52,7 @@ function overviewTree(view) {
       node('p',score,{'class':'overview-score','data-automatic-score':''}),
       node('p',`${result.passed} verificações atendidas entre ${result.concluded} com conclusão automática aplicável.`),
       node('ul','',{},result.segments.map(segment=>node('li',`${segment.label}: ${segment.count} verificações`))),
-      node('p','Suspeitas a confirmar têm um indício concreto, mas ainda não são falhas confirmadas. Perguntas gerais e testes sem observação suficiente ficam no checklist separado, fora deste gráfico.'),
+      node('p','Revisão humana reúne indícios e sinais inconclusivos dos motores, não falhas confirmadas. Um sinal pode estar sem elemento correlacionado: nesse caso, é preciso localizar e reproduzir a situação antes de concluir. Perguntas gerais sem sinal específico ficam no checklist separado, fora deste gráfico.'),
       node('details','',{'data-score-methodology':''},[
         node('summary','Como o gráfico e o índice são calculados'),
         node('p','Índice = 10 × testes atendidos ÷ (atendidos + falhos), uma vez por regra e página do motor próprio, antes de decisões humanas. Exclui não aplicáveis, inconclusivos, não testados e motores suplementares. Sem denominador, não há nota.'),

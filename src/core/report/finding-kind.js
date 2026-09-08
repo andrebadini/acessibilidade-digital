@@ -6,6 +6,8 @@ export function findingKind(occurrence, rule, decision) {
       : decision?.answer === 'conforme' ? 'passed' : occurrence.outcome;
   if (outcome === 'failed') return occurrence.classification === 'requirement' ? 'detected' : 'advisory';
   if (outcome === 'passed') return 'positive';
+  if (outcome === 'cantTell' && occurrence.source.engine === 'axe-core' &&
+    ['violations', 'incomplete'].includes(occurrence.engineResultType)) return 'suspected';
   if (outcome === 'cantTell' && occurrence.source.engine === 'audita-core' &&
     occurrence.nodeId !== null && rule?.targets?.some(target =>
       String(target.nodeId) === String(occurrence.nodeId) && CONCRETE_REASONS.has(target.data?.reason))) return 'suspected';
