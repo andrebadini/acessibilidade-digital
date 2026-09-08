@@ -8,6 +8,13 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Entrega atual e histórico funcional
 
+**Beta 1.1.11 entregue:** nova auditoria após navegação A → B, correlação de sinais axe com elementos/evidências, destaque preservado depois de exportar conteúdo inalterado e documentação alinhada com mapa/retencão existentes. Gate 4032/4032 lógicos, 39/39 na etapa serial Chrome, regressão documental 68/68; revisões finais C=0/I=0. Pacote, SHA e limites em `docs/qa/2026-09-08-beta1111-release.md`. Google atual: 27 páginas, checklist fora dos achados e seis sinais com captura correlacionada; comparação não simultânea em `docs/qa/2026-09-08-beta1111-google-comparison.md`.
+
+- Menores da revisão documental 1.1.11: alinhar a descrição de `alarms` na política HTML à menção de retenção já existente no Markdown; explicitar nos guias que a migração de auditorias antigas deriva o prazo de `endedAt` e dados sem data válida podem estar imediatamente vencidos. O guia já manda exportar antes de atualizar; não há promessa de recuperação de dados antigos.
+- Menor da revisão de destaque: transformar o diagnóstico nativo de revisão posterior/hash igual em asserção explícita. Casos unitários e destaque real após quatro downloads já aprovados; não reabrir o mecanismo sem RED novo.
+
+**Beta 1.1.10 entregue anteriormente:** correção A → B, sinais inconclusivos separados do checklist e orientação de requisito/recomendação; ver `docs/qa/2026-09-08-beta1110-release.md`. Seus bytes permanecem inalterados.
+
 **Beta 1.1.9 entregue:** separa achados e suspeitas concretas do checklist geral; este não soma problemas nem fichas no PDF. Corrige a apresentação do contraste ampliado como recomendação/AAA, acrescenta destaque direto e espera de estabilização inicial para a URL dinâmica do Google. Percurso real e PDF de 21 páginas: `docs/qa/2026-09-08-beta119-google.md`. Gates e hash: `docs/qa/2026-09-08-beta119-release.md`.
 
 Refinos posteriores identificados no Google: compactar matriz/paginação do PDF; ajustar singular/plural e omitir “0 ocorrências” nos resultados positivos sem alvos; tornar o texto original de recomendações mais coerente com a classificação já mostrada; coletar dimensões mesmo quando a API não informa a versão do navegador. Manter aviso explícito da limitação até a correção, sem preencher metadados por estimativa. Nenhum desses refinamentos autoriza descartar registros ou relaxar prova de captura.
