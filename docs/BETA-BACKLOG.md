@@ -4,6 +4,8 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Incidente de compatibilidade — não confundir com refinamento menor
 
+- **Produção pendente, 08/09:** a coleta real da 1.1.12 registra `versions.extension: 0.1.0` em vez de 1.1.12. RED confirmado contra o manifesto; corrigir a proveniência em novas auditorias sem modificar documentos históricos. A primeira tentativa do novo teste também teve `CDP_COMMAND_FAILED`, ainda sem causa isolada. Registro completo em `docs/qa/2026-09-08-google-1112-production-correction.md`. Não tratar o encerramento anterior como aceite do usuário à beta.
+
 - A beta 1.1.2 pode persistir uma decisão humana com hash do modelo pendente e tornar esse relatório ilegível. A correção preventiva foi implementada após essa beta, com verificação do novo hash antes do commit atômico e exportação real da revisão. Registros já afetados **não são recuperados automaticamente**; preservar dados e arquivos previamente exportados. Recuperação exige uma base verificável, não a assinatura silenciosa de conteúdo antigo. Registro: `docs/qa/2026-09-06-live-review-refresh.md`.
 
 ## Entrega atual e histórico funcional

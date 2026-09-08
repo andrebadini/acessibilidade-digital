@@ -4,6 +4,8 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação da beta
 
+**Meta de produção ainda aberta:** o encerramento como beta foi corrigido. A [nova coleta da 1.1.12 no Google](docs/qa/2026-09-08-google-1112-production-correction.md) gerou os quatro formatos e identificou uma falha importante na versão registrada pelo relatório. O pacote abaixo não está aprovado como entrega de produção.
+
 A versão atual é **1.1.12**: confira o [guia de instalação e teste](docs/COMO-TESTAR-BETA-1.1.12.md) e o [registro de validação](docs/qa/2026-09-08-beta1112-release.md). Preserva dimensões observadas quando a versão do navegador não está disponível e corrige a redação de recomendações sem reescrever relatórios antigos. Mantém a correção de nova auditoria após navegar para outra página, a correlação de sinais axe com evidências e o destaque depois de exportar conteúdo inalterado. Os guias didáticos, sinais clicáveis e grupos ABNT continuam disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. O [teste do Google da beta 1.1.11](docs/qa/2026-09-08-beta1111-google-comparison.md) é histórico, não uma coleta da versão 1.1.12.
 
 1. Descompacte o arquivo da beta em uma pasta própria. Se estiver usando o código-fonte, use esta pasta do projeto.
