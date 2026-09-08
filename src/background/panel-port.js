@@ -1180,8 +1180,16 @@ export function createPanelPortCoordinator(raw) {
           !safeEpoch(currentTime) || currentTime >= args.expiresAt) return false;
         const existing = await readBootstrap(args.windowId, assertOwned);
         assertOwned();
-        if (existing && (existing.auditId !== args.auditId || existing.sessionCapabilityId !== args.sessionCapabilityId ||
-          existing.windowId !== args.windowId)) return false;
+        const supersedesTerminal = existing && (existing.auditId !== args.auditId ||
+          existing.sessionCapabilityId !== args.sessionCapabilityId);
+        if (supersedesTerminal) {
+          const previousSession = await readSession(existing.sessionCapabilityId, existing.auditId, assertOwned);
+          assertOwned();
+          if (existing.windowId !== args.windowId || previousSession.windowId !== args.windowId ||
+            !['result', 'view-only', 'revoked'].includes(previousSession.state)) return false;
+          await requireActiveAbsent(assertOwned);
+          assertOwned();
+        }
         assertOwned();
         const replacement = await replaceBootstrap(existing, {
           version: 1, kind: 'audit-session', auditId: args.auditId, sessionCapabilityId: args.sessionCapabilityId,
@@ -1189,6 +1197,14 @@ export function createPanelPortCoordinator(raw) {
           captureMode: args.captureMode,
         }, assertOwned);
         assertOwned();
+        if (replacement.state === 'committed' && supersedesTerminal) {
+          const binding = liveByWindow.get(args.windowId);
+          if (connected(binding) && binding.state === 'bound-session' &&
+            binding.auditId === existing.auditId && binding.sessionCapabilityId === existing.sessionCapabilityId) {
+            // Only the panel's current-result pointer changes; stored reports and sessions remain intact.
+            bind(binding, args.windowId, 'bound-idle', null, null, assertOwned);
+          }
+        }
         return replacement.state === 'committed';
       } catch (error) {
         if (error === scopeDeniedSentinel) throw error;

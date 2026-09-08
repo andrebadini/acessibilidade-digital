@@ -1785,6 +1785,52 @@ test('reload projects the exact durable capture mode for every running audit pol
   }
 });
 
+test('a completed result can yield the panel to a new audit without revoking the previous report session', async () => {
+  const env = fixture();
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  await env.coordinator.withWindowLock(9, async scope => {
+    assert.equal((await scope.registerAndPublishViewOnly({
+      auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION, windowId: 9,
+      createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, resultBundle: await bundle(),
+    })).delivered, true);
+  });
+  env.sessions.set(SESSION, session('running', SESSION, 'audit-next'));
+  await env.coordinator.withWindowLock(9, async scope => {
+    assert.equal(await scope.registerPendingBootstrap({
+      auditId: 'audit-next', sessionCapabilityId: SESSION, windowId: 9,
+      createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, captureMode: 'no-pixels',
+    }), true);
+    env.setActive({ ...runningActive(), auditId: 'audit-next' });
+    assert.equal(await scope.publishRegisteredBootstrap({
+      auditId: 'audit-next', sessionCapabilityId: SESSION, windowId: 9,
+    }), true);
+  });
+  assert.equal(connected.messages.at(-1).state, 'running');
+  assert.equal(connected.messages.at(-1).auditId, 'audit-next');
+  assert.equal(env.sessions.get(VIEW_SESSION).state, 'view-only');
+  assert.deepEqual(env.revoked, []);
+});
+
+test('new audit does not replace a running, paused or active prior audit bootstrap', async () => {
+  for (const priorState of ['running', 'privacy-paused', 'view-only']) {
+    const env = fixture();
+    env.sessions.set(VIEW_SESSION, session(priorState, VIEW_SESSION));
+    env.sessions.set(SESSION, session('running', SESSION, 'audit-next'));
+    const prior = { version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: VIEW_SESSION,
+      windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed' };
+    env.sessionArea.values[panelBootstrapStorageKey(9)] = prior;
+    if (priorState === 'view-only') env.setActive(runningActive());
+    assert.equal(await env.coordinator.withWindowLock(9, scope => scope.registerPendingBootstrap({
+      auditId: 'audit-next', sessionCapabilityId: SESSION, windowId: 9,
+      createdAt: EPOCH + 1, expiresAt: EPOCH + 10_000, captureMode: 'no-pixels',
+    })), false);
+    assert.deepEqual(env.sessionArea.values[panelBootstrapStorageKey(9)], prior);
+  }
+});
+
 test('single-URL bootstrap stays connected and publishes running without exposing disposable authority', async () => {
   const env = fixture();
   env.sessions.set(SESSION, Object.freeze({

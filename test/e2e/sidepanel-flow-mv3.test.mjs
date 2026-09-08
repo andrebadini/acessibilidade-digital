@@ -1593,6 +1593,51 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
   }
 }
 
+test('new audit after address-bar navigation preserves A and audits B in the same panel', { timeout: 180_000 }, async t => {
+  assert.ok(chromeBinary, 'Chrome for Testing is required');
+  const fixture = await startFixtureServer(t, new Map(['/current', '/other'].map(path => [path, {
+    status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
+    body: currentPageDocument(0),
+  }])));
+  let extension;
+  try {
+    extension = await launchUnpackedExtension(t, {
+      extensionPath: await realpath(workspaceRoot), startUrl: `${fixture.origin}/current`,
+      viewport: { width: 1280, height: 900 }, chromeBinary, expectedMajor: 152,
+    });
+    await armSourceInvariantProof(extension);
+    let panel = await extension.openSidePanelFromAction();
+    const first = await beginAttachedAttempt(extension, panel, 'no-pixels');
+    const firstId = await first.auditIdPromise;
+    await waitForResult(extension, panel, firstId);
+    const original = await markerRecordFingerprint(extension, firstId);
+    await navigateRealPage(extension, extension.startPage, { url: `${fixture.origin}/other`, operationId: 'reaudit-document-b' });
+    await armSourceInvariantProof(extension);
+    panel = await extension.waitForSidePanel();
+    const screen = await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`,
+      value => ['result', 'initial'].includes(value), { timeoutMs: 15_000 });
+    if (screen === 'result') await extension.click(panel, '[data-intent="NEW_AUDIT"]');
+    const second = await beginAttachedAttempt(extension, panel, 'no-pixels');
+    const secondId = await second.auditIdPromise.catch(async error => {
+      t.diagnostic(JSON.stringify(await extension.evaluate(panel, `({screen:document.querySelector('[data-screen]')?.dataset.screen,status:document.querySelector('[role="status"]')?.textContent})`)));
+      t.diagnostic(JSON.stringify(await extension.evaluate(extension.harnessPage, `(async()=>{
+        const entries=Object.entries(await chrome.storage.session.get(null));
+        return entries.filter(([key])=>/active-audit-job|start-journal|panel-bootstrap/.test(key)).map(([key,value])=>({kind:key.split(':').slice(0,3).join(':'),state:value?.state}));
+      })()`, {awaitPromise:true})));
+      throw error;
+    });
+    assert.notEqual(secondId, firstId);
+    assert.equal(await waitForResult(extension, panel, secondId), secondId);
+    const urls = await extension.evaluate(extension.harnessPage, `(async()=>{
+      const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+      const value=await store.getReportRevision(${JSON.stringify(secondId)});
+      return [value?.model?.requestedUrl,value?.model?.finalUrl];
+    })()`, { awaitPromise: true });
+    assert.deepEqual(urls, [`${fixture.origin}/other`, `${fixture.origin}/other`]);
+    assert.deepEqual(await markerRecordFingerprint(extension, firstId), original);
+  } finally { await extension?.close().catch(() => {}); }
+});
+
 test('current-page audits run in one inactive copy and leave the original page intact', { timeout: 600_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do painel lateral.');
   const fixture = await startFixtureServer(t, new Map([
