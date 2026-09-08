@@ -133,6 +133,18 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   const technical = JSON.parse(jsonBytes.replace(/^\uFEFF/u, ''));
   const audit = technical.audit;
 
+  for (const page of audit.pages) {
+    assert.ok(Object.values(page.viewport).every(value => Number.isFinite(value) && value > 0),
+      'the actual exported page must retain its observed dimensions despite unavailable browser version');
+  }
+  assert.doesNotMatch(html, /Não foi possível registrar o viewport/);
+  const itemById = new Map(audit.itemResults.map(item => [item.id, item]));
+  const recommendedRules = audit.ruleResults.filter(rule => rule.source.engine === 'audita-core' &&
+    itemById.get(rule.nbrItems[0])?.classification === 'recommendation');
+  assert.ok(recommendedRules.length > 0);
+  assert.ok(recommendedRules.every(rule => rule.summary.startsWith('Recomendação ')),
+    'new exported recommendation summaries must not call them requirements');
+
   const supplementalImage = audit.occurrences.find(occurrence => occurrence.engineRuleId === 'image-alt' &&
     occurrence.framePath.length === 0);
   assert.ok(supplementalImage?.nodeId, 'supplemental image must correlate with the collected element');

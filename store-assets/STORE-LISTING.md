@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.11 beta 1
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.12 beta 1
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
