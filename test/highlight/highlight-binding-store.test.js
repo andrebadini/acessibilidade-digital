@@ -138,13 +138,13 @@ test('persists one closed registry transition and reloads frozen null-prototype 
   assert.equal(JSON.stringify(snapshot).includes('token='), false);
 });
 
-test('fails closed on every expected revision or model hash divergence', async () => {
+test('fails closed on revision rollback or model hash divergence', async () => {
   const { store, sessionArea } = clockFixture();
   await store.put(bindingFixture());
   const writesBefore = sessionArea.writes.length;
 
   for (const input of [
-    { auditId: 'audit-1', occurrenceId: 'occ-1', expectedModelRevision: 5, expectedModelHash: HASH },
+    { auditId: 'audit-1', occurrenceId: 'occ-1', expectedModelRevision: 3, expectedModelHash: HASH },
     { auditId: 'audit-1', occurrenceId: 'occ-1', expectedModelRevision: 4, expectedModelHash: 'c'.repeat(64) },
   ]) {
     await assert.rejects(
@@ -157,6 +157,21 @@ test('fails closed on every expected revision or model hash divergence', async (
     error => error instanceof TypeError && error.message === 'HIGHLIGHT_INPUT_INVALID',
   );
   assert.equal(sessionArea.writes.length, writesBefore);
+});
+
+test('finds unchanged content after export bookkeeping advances without refreshing expiry or rewriting proof', async () => {
+  const { store, sessionArea } = clockFixture();
+  const binding = bindingFixture();
+  await store.put(binding);
+  const writes = sessionArea.writes.length;
+  const found = await store.findTarget({ auditId: binding.auditId, occurrenceId: 'occ-1',
+    expectedModelRevision: binding.modelRevision + 1, expectedModelHash: HASH });
+  assert.deepEqual(found.binding, binding);
+  assert.equal(sessionArea.writes.length, writes);
+  await assert.rejects(store.findTarget({ auditId: binding.auditId, occurrenceId: 'occ-1',
+    expectedModelRevision: binding.modelRevision + 1, expectedModelHash: 'c'.repeat(64) }), /Modelo divergente/u);
+  await assert.rejects(store.findTarget({ auditId: binding.auditId, occurrenceId: 'occ-1',
+    expectedModelRevision: binding.modelRevision - 1, expectedModelHash: HASH }), /Modelo divergente/u);
 });
 
 test('serializes same-page collision so only one concurrent binding wins', async () => {

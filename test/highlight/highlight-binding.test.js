@@ -263,6 +263,18 @@ test('requires the exact audit, page, occurrence and unique node evidence relati
   );
 });
 
+test('keeps evidence binding across later record revisions only for identical verified content', async () => {
+  const snapshot = await snapshotFixture();
+  const binding = createHighlightBindingV1(bindingInput(snapshot));
+  const later = { ...snapshot, modelRevision: snapshot.modelRevision + 1 };
+  assert.deepEqual(assertBindingMatchesModel({ binding, snapshot: later }), binding);
+  assert.equal(binding.modelRevision, snapshot.modelRevision, 'do not rewrite the provenance of the recorded proof');
+  assert.throws(() => assertBindingMatchesModel({ binding,
+    snapshot: { ...later, modelHash: 'd'.repeat(64) } }), /Relação modelo-evidência inválida/u);
+  assert.throws(() => assertBindingMatchesModel({ binding,
+    snapshot: { ...snapshot, modelRevision: snapshot.modelRevision - 1 } }), /Relação modelo-evidência inválida/u);
+});
+
 test('records only adapter proofs correlated to the verified model and discards raw URL', async () => {
   const snapshot = await snapshotFixture({ auditId: 'audit-highlight-recorder' });
   const rawCurrentUrl = 'https://servico.exemplo.test/consulta/inicio?token=PRIVATE&view=public';

@@ -101,7 +101,7 @@ function randomBytesFixture() {
   };
 }
 
-async function harness({ inject, decorateStore, liveVerify, tabState, authorize } = {}) {
+async function harness({ inject, decorateStore, liveVerify, tabState, authorize, snapshotForLoad } = {}) {
   const snapshot = await snapshotFixture();
   const binding = bindingFixture(snapshot);
   const clock = { value: EPOCH };
@@ -140,7 +140,7 @@ async function harness({ inject, decorateStore, liveVerify, tabState, authorize 
   const modelAuthority = {
     async loadValidated(input) {
       trace.push(['model', input.auditId]);
-      return snapshot;
+      return snapshotForLoad ? snapshotForLoad(snapshot) : snapshot;
     },
   };
   const liveVerifier = {
@@ -177,6 +177,23 @@ async function harness({ inject, decorateStore, liveVerify, tabState, authorize 
   });
   return { controller, binding, bindingStore, realStore, snapshot, clock, trace };
 }
+
+test('highlights unchanged exported content but still requires the live document proof', async () => {
+  const fixture = await harness({ snapshotForLoad: snapshot => ({ ...snapshot, modelRevision: snapshot.modelRevision + 1 }) });
+  const input = request(fixture.snapshot.model.auditId, 'occ-focus-failed');
+  assert.deepEqual(await fixture.controller.availability(input), { ok: true, bindingStatus: { state: 'available' } });
+  const result = await fixture.controller.highlight(input);
+  assert.equal(result.ok, true);
+  assert.ok(fixture.trace.some(row => row[0] === 'verify'));
+  assert.ok(fixture.trace.some(row => row[0] === 'inject' && row[1].command.op === 'install'));
+
+  const navigated = await harness({
+    snapshotForLoad: snapshot => ({ ...snapshot, modelRevision: snapshot.modelRevision + 1 }),
+    liveVerify: async () => ({ ok: false, reason: 'document-changed' }),
+  });
+  assert.equal((await navigated.controller.highlight(request(navigated.snapshot.model.auditId, 'occ-focus-failed'))).ok, false);
+  assert.equal(navigated.trace.some(row => row[0] === 'inject'), false);
+});
 
 test('returns only the authorized durable overlay state needed to resynchronize a consumer', async () => {
   const fixture = await harness();

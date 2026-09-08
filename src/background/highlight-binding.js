@@ -325,8 +325,11 @@ function sameSelector(left, right) {
 }
 
 function bindingMatchesIndexedModel(binding, snapshot, index) {
+  // Export bookkeeping advances the storage revision without changing the model.
+  // Keep the original proof revision/expiry; require identical verified content
+  // and refuse rollback before checking every occurrence/evidence relationship.
   if (!index || binding.auditId !== snapshot.model.auditId ||
-    binding.modelRevision !== snapshot.modelRevision || binding.modelHash !== snapshot.modelHash) throw new Error();
+    binding.modelRevision > snapshot.modelRevision || binding.modelHash !== snapshot.modelHash) throw new Error();
   const page = index.pageById.get(binding.pageId);
   if (!page || page.finalUrl !== binding.topUrlEvidence) throw new Error();
   for (const [occurrenceId, target] of Object.entries(binding.targets)) {

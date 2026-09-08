@@ -392,7 +392,7 @@ export function createHighlightBindingStore(raw = undefined) {
     if (matches.length > 1) throw new Error('HIGHLIGHT_REGISTRY_INVALID');
     const matched = matches[0] ?? null;
     if (matched && Object.hasOwn(input, 'expectedModelRevision') &&
-      (matched.modelRevision !== input.expectedModelRevision || matched.modelHash !== input.expectedModelHash)) {
+      (matched.modelRevision > input.expectedModelRevision || matched.modelHash !== input.expectedModelHash)) {
       divergentModel();
     }
     for (const binding of Object.values(registry.bindingsByAuditPage)) {

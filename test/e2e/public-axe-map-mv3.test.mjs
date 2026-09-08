@@ -133,6 +133,64 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   const technical = JSON.parse(jsonBytes.replace(/^\uFEFF/u, ''));
   const audit = technical.audit;
 
+  const supplementalImage = audit.occurrences.find(occurrence => occurrence.engineRuleId === 'image-alt' &&
+    occurrence.framePath.length === 0);
+  assert.ok(supplementalImage?.nodeId, 'supplemental image must correlate with the collected element');
+  assert.equal(supplementalImage.outcome, 'cantTell');
+  assert.equal(supplementalImage.legalAnalysis, null);
+  const supplementalEvidence = audit.evidence.find(artifact => artifact.kind === 'element' &&
+    artifact.nodeId === supplementalImage.nodeId && supplementalImage.evidenceRefs.includes(artifact.evidenceId));
+  assert.match(supplementalEvidence?.dataUrl ?? '', /^data:image\/png;base64,/);
+  assert.ok(supplementalEvidence.accessibility.announcementPreview.length > 0);
+  // Public-URL reports are view-only; the live owned-page action belongs to the panel.
+  await extension.startPage.page.command('Page.bringToFront');
+  const imageControl = `button[data-focus-id="occurrence-${supplementalImage.occurrenceId}"]`;
+  await extension.evaluate(panel, `(() => {
+    const button = document.querySelector(${JSON.stringify(imageControl)});
+    const group=button?.closest('details[data-abnt-group]');
+    if(group&&!group.open)group.querySelector('summary').click();
+    return Boolean(button);
+  })()`);
+  await extension.click(panel, imageControl);
+  await extension.waitForValue(panel,
+    `document.querySelector('[data-result-detail] .detail-actions [data-action]')?.dataset.action`,
+    value => ['highlight-occurrence', 'consult-evidence'].includes(value));
+  t.diagnostic(`supplemental-binding=${JSON.stringify(await extension.evaluate(extension.harnessPage, `(async()=>{
+    const stored=await chrome.storage.session.get(null);
+    const bindings=Object.values(stored['audita:highlight-bindings:v1']?.bindingsByAuditPage??{});
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    const authority=(await import(chrome.runtime.getURL('/src/background/highlight-model-authority.js'))).createHighlightModelAuthority({auditStore:store});
+    let modelProof='loading', revisions=[];
+    try {
+      const snapshot=await authority.loadValidated({auditId:${JSON.stringify(auditId)}});
+      modelProof='binding';
+      revisions=bindings.map(row=>({revision:row.modelRevision===snapshot.modelRevision,hash:row.modelHash===snapshot.modelHash}));
+      const {assertBindingMatchesModel}=await import(chrome.runtime.getURL('/src/background/highlight-binding.js'));
+      for(const binding of bindings)assertBindingMatchesModel({binding,snapshot});
+      modelProof='valid';
+    } catch {modelProof+='-invalid';}
+    return {modelProof,revisions,bound:bindings.some(row=>Object.hasOwn(row.targets??{},${JSON.stringify(supplementalImage.occurrenceId)})),
+      bindings:bindings.length,targets:bindings.map(row=>Object.keys(row.targets??{}).length),
+      pages:(await chrome.tabs.query({})).filter(tab=>tab.url===${JSON.stringify(fixtureUrl)}).length};
+  })()`, {awaitPromise:true}))}`);
+  await extension.waitForValue(panel,
+    `Boolean(document.querySelector('[data-action="highlight-occurrence"]'))`, Boolean);
+  await extension.click(panel, '[data-action="highlight-occurrence"]');
+  await extension.waitForValue(panel,
+    `Boolean(document.querySelector('[data-action="clear-highlight"]'))`, Boolean);
+  const overlayCount = () => extension.evaluate(extension.harnessPage, `(async()=>{
+    const tabs=(await chrome.tabs.query({})).filter(tab=>tab.url===${JSON.stringify(fixtureUrl)});
+    const counts=await Promise.all(tabs.map(tab=>chrome.scripting.executeScript({target:{tabId:tab.id},world:'ISOLATED',
+      func:()=>document.querySelectorAll('[data-audita-highlight-root="v1"]').length})));
+    return counts.flat().reduce((sum,entry)=>sum+entry.result,0);
+  })()`, { awaitPromise: true });
+  assert.equal(await overlayCount(), 1, 'the panel action must draw one overlay on the actual audited page');
+  await extension.click(panel, '[data-action="clear-highlight"]');
+  await extension.waitForValue(panel,
+    `Boolean(document.querySelector('[data-action="highlight-occurrence"]'))`, Boolean);
+  assert.equal(await overlayCount(), 0, 'clearing the supplemental finding must remove the overlay');
+  await report.command('Page.bringToFront');
+
   // Read the actual retained occurrence, not an independently reconstructed label.
   const labelOccurrence = audit.occurrences.find(occurrence => occurrence.itemId === '5.13.7');
   assert.ok(labelOccurrence, 'the fixture must exercise the label-in-name finding');
