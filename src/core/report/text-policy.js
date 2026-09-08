@@ -89,7 +89,21 @@ export function canonicalCoreRuleSummary(ruleId, outcome) {
   const item = ITEM_BY_RULE_ID.get(ruleId);
   const result = CORE_OUTCOME_TEXT[outcome];
   if (!item || !result) return null;
+  if (item.classification === 'recommendation') {
+    const recommendationResult = outcome === 'inapplicable'
+      ? 'recomendação não aplicável ao estado observado' : result;
+    return `Recomendação “${item.title}”: ${recommendationResult}.`;
+  }
   return `Requisito “${item.title}”: ${result}.`;
+}
+
+// Exact historical text remains valid without rewriting a saved model or its hash.
+export function isCanonicalCoreRuleSummary(value, ruleId, outcome) {
+  const item = ITEM_BY_RULE_ID.get(ruleId);
+  const result = CORE_OUTCOME_TEXT[outcome];
+  if (!item || !result) return false;
+  return value === canonicalCoreRuleSummary(ruleId, outcome) ||
+    value === `Requisito “${item.title}”: ${result}.`;
 }
 
 export function canonicalBatchRuleSummary(outcome) {
@@ -109,7 +123,16 @@ export function canonicalCoreRuleLimitations(outcome) {
 
 export function canonicalReviewQuestion(item) {
   if (!item || typeof item.title !== 'string') return null;
+  if (item.classification === 'recommendation') {
+    return `A recomendação “${item.title}” está atendida no contexto apresentado?`;
+  }
   return `O requisito “${item.title}” está conforme no contexto apresentado?`;
+}
+
+export function isCanonicalReviewQuestion(value, item) {
+  if (!item || typeof item.title !== 'string') return false;
+  return value === canonicalReviewQuestion(item) ||
+    value === `O requisito “${item.title}” está conforme no contexto apresentado?`;
 }
 
 export function canonicalScope(mode, pageCount = 1) {

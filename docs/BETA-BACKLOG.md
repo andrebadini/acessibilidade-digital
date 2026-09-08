@@ -17,7 +17,9 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 **Beta 1.1.9 entregue:** separa achados e suspeitas concretas do checklist geral; este não soma problemas nem fichas no PDF. Corrige a apresentação do contraste ampliado como recomendação/AAA, acrescenta destaque direto e espera de estabilização inicial para a URL dinâmica do Google. Percurso real e PDF de 21 páginas: `docs/qa/2026-09-08-beta119-google.md`. Gates e hash: `docs/qa/2026-09-08-beta119-release.md`.
 
-Refinos posteriores identificados no Google: compactar matriz/paginação do PDF; ajustar singular/plural e omitir “0 ocorrências” nos resultados positivos sem alvos; tornar o texto original de recomendações mais coerente com a classificação já mostrada. Nenhum desses refinamentos autoriza descartar registros ou relaxar prova de captura.
+Refinos posteriores identificados no Google: compactar matriz/paginação do PDF; ajustar singular/plural e omitir “0 ocorrências” nos resultados positivos sem alvos. Nenhum desses refinamentos autoriza descartar registros ou relaxar prova de captura.
+
+- Redação normativa corrigida no código após a beta 1.1.11: novos resumos/perguntas distinguem requisitos e recomendações. Relatórios antigos permanecem legíveis e não são reescritos. GREEN 201/201 e duas revisões C=0/I=0/M=0; JSON real 1.1.11 revalidado e reexportado com modelo idêntico. Ainda fora do ZIP 1.1.11. Registro: `docs/qa/2026-09-08-normative-wording.md`.
 
 - Dimensões independentes da consulta de versão: corrigidas no código após a beta 1.1.11, com RED reproduzido, 324/324 testes focados e duas revisões C=0/I=0/M=0. Dimensões válidas permanecem observadas mesmo quando a versão é indisponível; valores não são estimados. Ainda fora do ZIP 1.1.11, aguardando o gate nativo do próximo candidato. Registro: `docs/qa/2026-09-08-independent-viewport.md`.
 

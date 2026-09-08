@@ -41,6 +41,8 @@ import {
   deriveSystemLimitations,
   filterCanonicalSystemLimitations,
   isCanonicalBatchRuleSummary,
+  isCanonicalCoreRuleSummary,
+  isCanonicalReviewQuestion,
   isCanonicalScope,
   isCanonicalSystemLimitation,
 } from './text-policy.js';
@@ -1428,7 +1430,7 @@ function validateRules(rules, itemById, rulesVersion, { scopeMode, pageCount }) 
       boundedRetainedText(rule.summary, 'ruleSummary', `Regra ${id}.summary`);
       const summaryIsCanonical = scopeMode === 'batch'
         ? isCanonicalBatchRuleSummary(rule.summary, rule.outcome)
-        : rule.summary === canonicalCoreRuleSummary(id, rule.outcome);
+        : isCanonicalCoreRuleSummary(rule.summary, id, rule.outcome);
       if (!summaryIsCanonical) throw new TypeError(`Regra ${id} possui resumo não canônico.`);
       if (canonicalStringify(rule.limitations) !== canonicalStringify(canonicalCoreRuleLimitations(rule.outcome))) {
         throw new TypeError(`Regra ${id} possui limitações core não canônicas.`);
@@ -2020,7 +2022,7 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
     validateEquivalenceIdentity(occurrence, artifactById);
     boundedRetainedText(occurrence.justification, 'occurrenceJustification', `${label}.justification`);
     if (occurrence.source.engine === V1_MIGRATION_DEFAULTS.sourceEngine &&
-      occurrence.justification !== canonicalCoreRuleSummary(occurrence.source.ruleId, occurrence.outcome)) {
+      !isCanonicalCoreRuleSummary(occurrence.justification, occurrence.source.ruleId, occurrence.outcome)) {
       throw new TypeError(`${label}.justification diverge do texto core autoritativo.`);
     }
     if (occurrence.source.engine === V1_MIGRATION_DEFAULTS.manualSourceEngine &&
@@ -2384,7 +2386,7 @@ function validateReview(model, { itemIds, itemById, occurrenceById }) {
     if (!REVIEW_STATUSES.has(entry.status)) throw new TypeError(`${label} possui status inválido.`);
     boundedRetainedText(entry.question, 'reviewQuestion', `${label}.question`);
     boundedRetainedText(entry.reason, 'reviewReason', `${label}.reason`);
-    if (entry.question !== canonicalReviewQuestion(item) || entry.reason !== occurrence.justification) {
+    if (!isCanonicalReviewQuestion(entry.question, item) || entry.reason !== occurrence.justification) {
       throw new TypeError(`${label} possui pergunta ou justificativa não derivada da ocorrência e do item.`);
     }
     if (entry.auditId !== undefined && entry.auditId !== model.auditId) throw new TypeError(`${label} pertence a outra auditoria.`);
