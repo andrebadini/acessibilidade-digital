@@ -1,6 +1,6 @@
 # Política de Privacidade — Audita Acessibilidade
 
-Versão 1.4, atualizada em 31 de agosto de 2026.
+Versão 1.5, atualizada em 8 de setembro de 2026.
 
 ## 1. Finalidade
 
@@ -34,7 +34,9 @@ Ao abrir a URL indicada, o navegador se comunica normalmente com o site auditado
 
 O andamento, o modelo da auditoria, as evidências — inclusive pixels de capturas — e as decisões de revisão ficam no armazenamento local do perfil do navegador. A URL armazenada é sanitizada, mas ainda pode identificar a página ou conter dados pessoais que não tenham sido reconhecidos automaticamente. Os relatórios HTML, JSON-LD/EARL, CSV e PDF são salvos na pasta de downloads escolhida pelo navegador.
 
-Nesta beta, cada auditoria permanece no armazenamento local do perfil até que o usuário a exclua pela respectiva página de relatório, remova a extensão ou limpe os dados da extensão no Chrome. A exclusão pela página de relatório exige confirmação e apaga o modelo, as evidências, os pixels e as revisões locais daquela auditoria. A beta não executa exclusão automática por prazo nem depois da exportação.
+O prazo de retenção é de 30 dias desde o primeiro registro persistido da auditoria. Revisar ou exportar não renova esse prazo. A limpeza das auditorias vencidas ocorre quando o Chrome puder executar a extensão; navegador fechado ou limpeza interrompida podem adiar sua conclusão. Não há promessa de remoção instantânea no momento do vencimento. Exporte os relatórios que deseja conservar antes desse prazo.
+
+A exclusão manual pela página de relatório exige confirmação e remove o modelo, as evidências, os pixels e as revisões locais daquela auditoria. Há também uma opção de exclusão após exportação, opcional e inicialmente desmarcada. Ela só permite excluir a auditoria exportada depois da confirmação dos quatro downloads (HTML, PDF, CSV e JSON) da mesma revisão. Exportação parcial ou revisão alterada não autoriza essa exclusão; a retenção por prazo continua aplicável. A limpeza interrompida é retomada quando possível, sem declarar concluída uma exclusão ainda pendente.
 
 Os arquivos já baixados ficam fora do armazenamento interno da extensão. A exclusão da auditoria local não apaga esses arquivos da pasta de downloads; eles permanecem no sistema de arquivos até serem excluídos pelo usuário.
 
@@ -59,7 +61,7 @@ O usuário controla o compartilhamento posterior dos relatórios que baixar.
 - `downloads`: salva os relatórios solicitados pelo usuário.
 - `storage`: mantém localmente o andamento, os resultados e as decisões de revisão.
 - `sidePanel`: mantém a interface persistente ao lado da página.
-- `alarms`: agenda a expiração e a limpeza de estados temporários, como consentimentos de captura, personas e destaques.
+- `alarms`: agenda a retenção das auditorias e a limpeza de estados temporários, como consentimentos de captura, personas e destaques.
 - `contextMenus`: oferece um atalho opcional para iniciar a auditoria.
 - acesso a endereços HTTP e HTTPS: permite auditar localmente a página web escolhida pelo usuário.
 
@@ -79,6 +81,7 @@ O usuário pode:
 - ocultar dados antes da captura;
 - revisar cada ocorrência que dependa de julgamento humano;
 - excluir uma auditoria e todas as evidências, pixels e revisões locais pela respectiva página de revisão;
+- optar pela exclusão local após a confirmação da exportação completa;
 - excluir relatórios baixados;
 - apagar os dados locais removendo a extensão ou limpando seus dados no Chrome.
 

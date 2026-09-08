@@ -1,4 +1,6 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.0.7 beta 6
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.11 beta 1
+
+Material local de referência; não representa publicação ou atualização de uma página de loja.
 
 ## Nome
 
@@ -38,7 +40,7 @@ Antes de auditar, oculte dados pessoais ou sigilosos visíveis. As capturas são
 
 Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional.
 
-Limites desta beta: o mapa numerado consolidado de anúncios ainda não está disponível. A retenção automática por prazo também permanece em desenvolvimento.
+O mapa numerado e a legenda de anúncios estimados são incluídos no modo de evidência completa quando a coleta permite, com omissões explícitas. A retenção local tem prazo de 30 dias desde o primeiro registro persistido; a limpeza depende de o Chrome executar a extensão. A exclusão opcional após exportação exige a confirmação dos quatro downloads da mesma revisão e não apaga arquivos baixados. Consulte a política de privacidade para os limites da limpeza recuperável.
 
 ## Finalidade única
 

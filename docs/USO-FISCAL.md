@@ -29,7 +29,7 @@ A pessoa operadora escolhe o modo antes de iniciar:
 
 Nos dois modos com imagens, a extensão verifica sinais sensíveis antes de cada captura. A primeira detecção pausa a auditoria e a captura só prossegue após confirmação explícita; uma categoria nova identificada nas verificações posteriores bloqueia aquela captura. Como páginas dinâmicas podem mudar no intervalo técnico inevitável entre a última verificação e a captura, esse controle reduz, mas não elimina o risco. Oculte dados pessoais ou sigilosos antes de confirmar.
 
-As molduras vermelha e âmbar exibidas no relatório são derivações visuais correlacionadas às ocorrências. Os PNGs originais e os respectivos hashes permanecem separados e não são modificados. O mapa numerado consolidado dos anúncios ainda não faz parte desta beta.
+As molduras vermelha e âmbar exibidas no relatório são derivações visuais correlacionadas às ocorrências. Os PNGs originais e os respectivos hashes permanecem separados e não são modificados. No modo de evidência completa, o mapa numerado relaciona elementos e legenda dos anúncios estimados quando a coleta consegue produzi-lo. Omissões e limites ficam registrados; o anúncio não é a transcrição garantida de um leitor de tela real.
 
 ## Privacidade e permissões
 
@@ -41,6 +41,8 @@ Depois de instalar, fixe o ícone do Audita Acessibilidade na barra do Chrome, s
 
 ## Limitações operacionais
 
-Esta beta audita a página aberta, outra URL ou um lote explícito de 2 a 20 URLs nos três modos. Em lotes, o consentimento para capturas é individual por página; o progresso e os resultados concluídos podem ser recuperados após reinício do processo da extensão. Cancelar ou interromper definitivamente a auditoria descarta os dados temporários daquela execução após confirmar a limpeza dos recursos. O mapa numerado consolidado permanece em desenvolvimento. Páginas adicionais, fluxos autenticados, estados não visitados, conteúdo que muda com o tempo e equivalência de mídia podem exigir amostragem e revisão externas. Frames de terceiros, canvas, vídeo e restrições do navegador podem limitar evidências. Auditorias `partial`, `failed` ou `cancelled` não devem ser apresentadas como completas.
+Esta beta audita a página aberta, outra URL ou um lote explícito de 2 a 20 URLs nos três modos. Em lotes, o consentimento para capturas é individual por página; o progresso e os resultados concluídos podem ser recuperados após reinício do processo da extensão. Cancelar ou interromper definitivamente a auditoria descarta os dados temporários daquela execução após confirmar a limpeza dos recursos. Páginas adicionais, fluxos autenticados, estados não visitados, conteúdo que muda com o tempo e equivalência de mídia podem exigir amostragem e revisão externas. Frames de terceiros, canvas, vídeo e restrições do navegador podem limitar evidências. Auditorias `partial`, `failed` ou `cancelled` não devem ser apresentadas como completas.
+
+O prazo de retenção local é de 30 dias desde o primeiro registro persistido, sem renovação ao revisar ou exportar. A limpeza depende de o Chrome executar a extensão e pode ser retomada após interrupção. Exporte antes do prazo o material que deseja conservar. A opção de exclusão após exportação começa desmarcada e depende da confirmação dos quatro downloads da mesma revisão. Arquivos já baixados não são apagados pela exclusão local. Consulte a [Política de Privacidade](POLITICA-DE-PRIVACIDADE.md).
 
 O candidato beta só deve ser distribuído depois de um gate único com suíte lógica, verificação estática, E2E real na versão fixada do Chrome, instalação sem compactação, percurso completo até HTML, PDF, CSV e JSON-LD/EARL e QA visual do painel e do relatório. O resultado desse gate deve ser registrado junto ao pacote.

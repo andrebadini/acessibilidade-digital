@@ -28,7 +28,7 @@ test('plain-language usage docs report the current verification boundary accurat
   assert.match(combined, /Outra URL[^.]*três modos/iu);
   assert.match(combined, /lote explícito de 2 a 20 URLs nos três modos/iu);
   assert.match(combined, /consentimento para capturas é individual por página/iu);
-  assert.match(combined, /mapa numerado[^.]*permanece em desenvolvimento/iu);
+  assert.doesNotMatch(combined, /mapa numerado[^.]*permanece em desenvolvimento|mapa numerado[^.]*não faz parte/iu);
   assert.match(combined, /cópia temporária e inativa[^.]*página original/iu);
   assert.doesNotMatch(combined, /auditoria anexada atual[^.]*não captura pixels|fluxo anexado atual[^.]*modo sem pixels/iu);
 });

@@ -57,7 +57,7 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.match(listing, /processamento local/iu);
   assert.match(listing, /não constitui certificação/iu);
   assert.match(listing, /debugger[\s\S]*DOMSnapshot[\s\S]*árvore de acessibilidade/iu);
-  assert.match(listing, /1\.0\.7 beta 6/iu);
+  assert.match(listing, /1\.1\.11 beta 1/iu);
   assert.match(listing, /Evidência completa[\s\S]*Somente elementos[\s\S]*Sem imagens/iu);
   assert.match(listing, /HTML, PDF, CSV e JSON-LD\/EARL/iu);
   assert.match(listing, /outra URL[\s\S]*três modos/iu);
@@ -65,7 +65,7 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.match(listing, /2 a 20 URLs[\s\S]*relatório consolidado/iu);
   assert.match(listing, /URLs em lote nos três modos/iu);
   assert.match(listing, /confirmação individual por página/iu);
-  assert.match(listing, /mapa numerado[^.]*ainda não está disponível/iu);
+  assert.match(listing, /mapa numerado[^.]*legenda/iu);
   assert.doesNotMatch(listing, /1\.0\.1|aba descartável/iu);
 });
 
@@ -80,12 +80,12 @@ test('publishes a complete privacy policy in Markdown and standalone HTML', asyn
       /controle do usuário/iu,
       /contato/iu,
     ]) assert.match(policy, expectation, `${path}: ${expectation}`);
-    assert.match(policy, /versão (?:da política )?1\.4/iu, path);
+    assert.match(policy, /versão (?:da política )?1\.5/iu, path);
     assert.match(policy, /sidePanel[\s\S]*alarms[\s\S]*contextMenus/iu, path);
-    assert.match(policy, /permanece no armazenamento local[\s\S]*exclua[\s\S]*não executa exclusão automática por prazo/iu, path);
+    assert.match(policy, /30 dias[\s\S]*primeiro registro[\s\S]*Chrome[\s\S]*executar/iu, path);
     assert.match(policy, /antes (?:de|das) cada captura[\s\S]*intervalo técnico[\s\S]*não elimina/iu, path);
-    assert.doesNotMatch(policy, /no máximo,? 30 dias|auditorias vencidas/iu, path);
-    assert.doesNotMatch(policy, /escolher[^.]*exclusão local[^.]*exportação|excluir todas pelo painel/iu, path);
+    assert.match(policy, /opcional[\s\S]*quatro downloads[\s\S]*parcial/iu, path);
+    assert.doesNotMatch(policy, /não executa exclusão automática|no máximo,? 30 dias/iu, path);
     assert.doesNotMatch(policy, /Chrome Web Store/iu,
       `${path}: a política não pode prometer publicação ou contato por uma loja específica`);
   }

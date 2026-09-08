@@ -4,7 +4,7 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação da beta
 
-A versão atual é **1.1.8**: confira o [guia de instalação e teste](docs/COMO-TESTAR-BETA-1.1.8.md) e o [diagnóstico e verificação](docs/qa/2026-09-06-google-counts.md). Corrige a multiplicação de revisões genéricas e falsos positivos reproduzidos no Google, acrescenta gráfico e índice técnico transparente e reduz a repetição no PDF. Os guias didáticos, sinais clicáveis e grupos ABNT continuam disponíveis. A revisão automática continua sem certificar conformidade integral.
+A versão atual é **1.1.11**: confira o [guia de instalação e teste](docs/COMO-TESTAR-BETA-1.1.11.md) e o [teste atual do Google](docs/qa/2026-09-08-beta1111-google-comparison.md). Inclui a correção de nova auditoria após navegar para outra página, liga sinais suplementares do axe-core às evidências quando o elemento pode ser confirmado e preserva o destaque depois de exportar conteúdo inalterado. Os guias didáticos, sinais clicáveis e grupos ABNT continuam disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral.
 
 1. Descompacte o arquivo da beta em uma pasta própria. Se estiver usando o código-fonte, use esta pasta do projeto.
 2. Abra `chrome://extensions` no Chrome.
