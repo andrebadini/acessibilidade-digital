@@ -302,6 +302,7 @@ test('batch page consent resumes the same owner without creating navigating or c
     canonicalInternals: true, sessionValues: {}, trackCaptureCalls: true,
     sensitiveSignals: PASSWORD_SIGNALS,
   });
+  adapter.manifestVersion = '1.1.12';
   const paused = await runUrlAudit({
     auditId, ownershipId, windowId: 9,
     navigationToken: 'Q'.repeat(22), navigationPurpose: 'batch-page',
@@ -346,6 +347,7 @@ test('batch page consent resumes the same owner without creating navigating or c
   });
 
   assert.equal(resumed.status, 'complete');
+  assert.equal(resumed.model.versions.extension, '1.1.12');
   assert.equal(resumed.ownershipState, 'removed');
   assert.equal(resumed.observedTarget.ownershipId, ownershipId);
   assert.deepEqual(forbidden, []);
@@ -1200,6 +1202,7 @@ function fakeAdapter(options = {}) {
 test('single URL production façade composes the observed pipeline and retains its audited tab for review', async () => {
   const sessionValues = {};
   const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true, sessionValues });
+  adapter.manifestVersion = '1.1.12';
   const checkpoints = [];
   let tokenTakes = 0;
   const result = await runUrlAudit({
@@ -1229,6 +1232,7 @@ test('single URL production façade composes the observed pipeline and retains i
 
   assert.equal(result.status, 'complete');
   assert.equal(result.model.auditId, 'audit-url-production');
+  assert.equal(result.model.versions.extension, '1.1.12');
   assert.equal(result.observationState, 'observed');
   assert.equal(result.ownershipState, 'retained-for-review');
   assert.equal(result.observedTarget.ownershipId, `owner_${'O'.repeat(22)}`);
@@ -2816,6 +2820,7 @@ test('owned simultaneous cancellation remains cancelled when its final proof is 
   const sessionValues = {};
   let proofCount = 0;
   const adapter = fakeAdapter({ noPixels: true, canonicalInternals: true, sessionValues });
+  adapter.manifestVersion = '1.1.12';
   adapter.probeDocumentIdentity = async tabId => {
     proofCount += 1;
     if (proofCount === 2) controller.abort(new DOMException('PRIVATE_VALID_FINAL_PROOF_ABORT', 'AbortError'));
@@ -2836,6 +2841,7 @@ test('owned simultaneous cancellation remains cancelled when its final proof is 
   assert.equal(execution.status, 'cancelled');
   assert.equal(execution.ownershipState, 'removed');
   assert.equal(execution.model.session.status, 'cancelled');
+  assert.equal(execution.model.versions.extension, '1.1.12');
   assert.doesNotMatch(JSON.stringify(execution), /PRIVATE_VALID_FINAL_PROOF_ABORT/u);
 });
 
@@ -3073,6 +3079,7 @@ test('attached execution preserves a canonical cancelled model for a genuinely a
     noPixels: true,
     afterCollect() { controller.abort(new DOMException('PRIVATE_USER_CANCEL_DETAIL', 'AbortError')); },
   });
+  adapter.manifestVersion = '1.1.12';
   const result = await runAttachedAuditExecution({
     auditId: 'audit-attached-real-abort', sessionCapabilityId: 'S'.repeat(22),
     target: {
@@ -3086,6 +3093,7 @@ test('attached execution preserves a canonical cancelled model for a genuinely a
   assert.equal(result.state, 'model');
   assert.equal(result.failureCode, null);
   assert.equal(result.model.session.status, 'cancelled');
+  assert.equal(result.model.versions.extension, '1.1.12');
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_USER_CANCEL_DETAIL/u);
 });
 

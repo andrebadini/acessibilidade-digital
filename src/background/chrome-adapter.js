@@ -854,6 +854,14 @@ function captureChromeRuntime(value) {
     !sameChromeDescriptor(lastError, confirmedLastError) ||
     typeof getURL !== 'function' || typeof sendMessage !== 'function') throw chromeApiDenied();
   const captured = ObjectCreate(null);
+  let manifestVersion = 'não disponível';
+  const getManifest = ObjectGetOwnPropertyDescriptor(value, 'getManifest')?.value;
+  if (typeof getManifest === 'function') {
+    const manifest = ReflectApply(getManifest, value, []);
+    const version = manifest && ObjectGetOwnPropertyDescriptor(manifest, 'version')?.value;
+    if (typeof version === 'string' && /^\d{1,5}(?:\.\d{1,5}){0,3}$/u.test(version)) manifestVersion = version;
+  }
+  defineDataProperty(captured, 'manifestVersion', manifestVersion, true, false, false);
   defineDataProperty(captured, 'getURL', ReflectApply(FunctionPrototypeBind, getURL, [captured]), true, false, false);
   defineDataProperty(
     captured,
@@ -1477,6 +1485,7 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
   };
 
   const adapter = {
+    manifestVersion: chromeApi.runtime.manifestVersion,
     createTab(options) { return invoke(chromeApi, chromeApi.tabs, 'create', options); },
     navigateTab(tabId, url) { return invoke(chromeApi, chromeApi.tabs, 'update', tabId, { url }); },
     async probeDocumentIdentity(tabId) {

@@ -97,7 +97,9 @@ async function enrichCapturedAudit(captured, options) {
     timestamps: { startedAt: raw.timestamps?.startedAt, endedAt, generatedAt },
     timezone,
     versions: {
-      extension: cleanVersion(options.manifestVersion ?? '0.1.0', 'manifestVersion'),
+      extension: cleanVersion(raw.schemaVersion === 2
+        ? raw.versions.extension
+        : options.manifestVersion ?? raw.versions?.extension ?? 'não disponível', 'manifestVersion'),
       rules: rulesVersion,
       browser: browserVersion,
     },

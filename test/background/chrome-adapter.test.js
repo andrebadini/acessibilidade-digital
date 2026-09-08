@@ -79,6 +79,20 @@ function createChromeAdapter(chromeApi, rawOptions) {
     : createChromeAdapterFromAuthority(authority, rawOptions);
 }
 
+test('captures installed extension version without keeping a mutable manifest reference', () => {
+  const fake = chromeFake();
+  const manifest = { version: '1.1.12', version_name: '1.1.12 beta 1' };
+  fake.chromeApi.runtime.getManifest = () => manifest;
+  const adapter = createChromeAdapter(fake.chromeApi);
+  manifest.version = '9.9.9';
+  assert.equal(adapter.manifestVersion, '1.1.12');
+});
+
+test('does not invent an installed extension version when Chrome provides none', () => {
+  const fake = chromeFake();
+  assert.equal(createChromeAdapter(fake.chromeApi).manifestVersion, 'não disponível');
+});
+
 test('waits for a quiet URL after load before freezing the observed document', async () => {
   const fake = chromeFake();
   let current = { id: 17, status: 'complete', url: 'https://example.test/' };

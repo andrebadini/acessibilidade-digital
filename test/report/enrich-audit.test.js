@@ -34,6 +34,20 @@ function rawAudit(overrides = {}) {
   return raw;
 }
 
+test('does not invent an extension version when a new draft has no installed version', async () => {
+  const model = await enrichAuditForReport(rawAudit(), { now: () => '2026-08-26T15:00:00.000Z' });
+  assert.equal(model.versions.extension, 'não disponível');
+});
+
+test('preserves the producer version of a stored report when enriched by a newer installation', async () => {
+  const options = { now: () => '2026-08-26T15:00:00.000Z', manifestVersion: '1.1.11' };
+  const stored = await enrichAuditForReport(rawAudit(), options);
+  const previous = structuredClone(stored);
+  const revised = await enrichAuditForReport(stored, { ...options, manifestVersion: '1.1.12' });
+  assert.equal(revised.versions.extension, '1.1.11');
+  assert.deepEqual(stored, previous);
+});
+
 test('derives one factual environment diagnostic when an observed V1 viewport is wholly unavailable', async () => {
   const expectedDerived = {
     code: 'ENVIRONMENT_UNAVAILABLE',

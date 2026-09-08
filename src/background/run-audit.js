@@ -334,6 +334,7 @@ export async function runUrlAudit(rawArgs = {}) {
       }
       terminalModel = await enrichAuditForReport(draft, {
         now: args.now,
+        manifestVersion: legacyEffects.manifestVersion,
         expectedExtensionId: args.expectedExtensionId,
         browserVersion: draft.environment?.chromeVersion || 'não disponível',
         rulesVersion: draft.methodology?.version || inventory.rulesVersion,
@@ -1440,11 +1441,12 @@ async function createInterruptedObservedDraft({ auditId, requestedUrl, observedT
   });
 }
 
-async function cancelledAuditProjection({ draft, now, expectedExtensionId, rulesVersion }) {
+async function cancelledAuditProjection({ draft, now, expectedExtensionId, rulesVersion, manifestVersion }) {
   const cancellationAt = canonicalTime(now());
   const cancelled = projectCancelledAuditDraft(draft, cancellationAt);
   const model = await enrichAuditForReport(cancelled, {
     now,
+    manifestVersion,
     expectedExtensionId,
     browserVersion: cancelled.environment?.chromeVersion || 'não disponível',
     rulesVersion: cancelled.methodology?.version || rulesVersion,
@@ -1572,6 +1574,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
       );
       terminalModel = await enrichAuditForReport(legacyDraft, {
         now: modelNow,
+        manifestVersion: legacyEffects.manifestVersion,
         expectedExtensionId,
         browserVersion: legacyDraft.environment?.chromeVersion || 'não disponível',
         rulesVersion: legacyDraft.methodology?.version || inventory.rulesVersion,
@@ -1694,6 +1697,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     });
     const model = await cancelledAuditModel({
       draft, now: modelNow, expectedExtensionId, rulesVersion: inventory.rulesVersion,
+      manifestVersion: legacyEffects.manifestVersion,
     });
     return deepFreeze({ version: 1, auditId, state: 'model', failureCode: null, model, checkpoint: lastCheckpoint });
   }
@@ -1721,6 +1725,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   if (closedFailureCode === 'AUDIT_ABORTED' && legacyDraft && lastCheckpoint) {
     const model = await cancelledAuditModel({
       draft: legacyDraft, now: modelNow, expectedExtensionId, rulesVersion: inventory.rulesVersion,
+      manifestVersion: legacyEffects.manifestVersion,
     });
     if (terminalPersistenceStarted) await persistAuditModel(model);
     return deepFreeze({ version: 1, auditId, state: 'model', failureCode: null, model, checkpoint: lastCheckpoint });
@@ -1763,7 +1768,9 @@ function optionalAdapterMethod(adapter, name) {
 }
 
 function captureLegacyEffects(adapter) {
-  const captured = {};
+  const version = ownValue(adapter, 'manifestVersion');
+  const captured = { manifestVersion: typeof version === 'string' && /^\d{1,5}(?:\.\d{1,5}){0,3}$/u.test(version)
+    ? version : 'não disponível' };
   for (const name of [
     'connectCdp', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
     'emitProgress', 'handoffReport', 'executeScript', 'createProbeAdapter',
@@ -1865,6 +1872,7 @@ async function runAuditExecutionInternal({
       compatibilityDraft = draft;
       terminalModel = await enrichAuditForReport(draft, {
         now,
+        manifestVersion: legacyEffects.manifestVersion,
         expectedExtensionId,
         browserVersion: draft.environment?.chromeVersion || 'não disponível',
         rulesVersion: draft.methodology?.version || inventory.rulesVersion,
@@ -1970,6 +1978,7 @@ async function runAuditExecutionInternal({
       });
       const cancelled = await cancelledAuditProjection({
         draft, now, expectedExtensionId, rulesVersion: inventory.rulesVersion,
+        manifestVersion: legacyEffects.manifestVersion,
       });
       const checkpoint = checkpointProjection(checkpointRecorder.snapshot(), {
         sourceAuditId: auditId,
