@@ -57,7 +57,8 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.match(listing, /processamento local/iu);
   assert.match(listing, /não constitui certificação/iu);
   assert.match(listing, /debugger[\s\S]*DOMSnapshot[\s\S]*árvore de acessibilidade/iu);
-  assert.match(listing, /1\.1\.11 beta 1/iu);
+  const manifest = JSON.parse((await read('manifest.json')).toString('utf8'));
+  assert.ok(listing.includes(manifest.version_name), 'listing must identify the version declared by the package');
   assert.match(listing, /Evidência completa[\s\S]*Somente elementos[\s\S]*Sem imagens/iu);
   assert.match(listing, /HTML, PDF, CSV e JSON-LD\/EARL/iu);
   assert.match(listing, /outra URL[\s\S]*três modos/iu);
