@@ -207,6 +207,100 @@ test('derives applicability internally and scopes it to the exact top-frame norm
   assert.equal(image.legalAnalysis, null);
 });
 
+test('correlates a supplemental image through anonymous ancestors without confirming an ABNT failure', () => {
+  const snapshot = targetSizeSnapshot();
+  snapshot.nodes[2].tagName = 'customer-widget';
+  snapshot.nodes[2].children = ['n-text', 'n-image'];
+  snapshot.nodes.push(
+    { nodeId: 'n-text', parentId: 'n-button', children: [], tagName: '#text', framePath: [] },
+    { nodeId: 'n-image', parentId: 'n-button', children: [], tagName: 'img', framePath: [] },
+  );
+  const input = emptySuccessfulRun();
+  input.frames[0].result.violations = [{ id: 'image-alt', impact: 'critical', nodes: [
+    { target: 'html > body > *:nth-child(1) > img' },
+  ] }];
+  const options = { snapshot, pageId: 'page-1', rulesVersion: '1.0.0', coreRuleResults: [] };
+  const normalized = normalizeAxeResults(input, options);
+  const occurrence = normalized.occurrences[0];
+  assert.equal(occurrence.nodeId, 'n-image');
+  assert.equal(occurrence.target.nodeId, 'n-image');
+  assert.equal(occurrence.presentationTargetKey, 'node:n-image');
+  assert.equal(occurrence.outcome, 'cantTell');
+  assert.equal(occurrence.legalAnalysis, null);
+  assert.equal(occurrence.applicabilityEvidence, null);
+  assert.deepEqual(occurrence.testedWcagRefs, []);
+  assert.deepEqual(validateNormalizedAxeSupplemental(normalized, options).errors, []);
+  const forged = structuredClone(normalized);
+  forged.occurrences[0].outcome = 'failed';
+  assert.ok(validateNormalizedAxeSupplemental(forged, options).errors.length > 0);
+
+  input.frames[0].result.violations[0].nodes[0].target = 'img';
+  assert.equal(normalizeAxeResults(input, options).occurrences[0].nodeId, 'n-image');
+  snapshot.nodes.push(
+    { nodeId: 'frame-image', parentId: 'frame-root', children: [], tagName: 'img', framePath: ['frame-1'] },
+    { nodeId: 'shadow-image', parentId: 'shadow-root', children: [], tagName: 'img', framePath: [],
+      shadowHostId: 'shadow-host', shadowRootId: 'shadow-root' },
+  );
+  assert.equal(normalizeAxeResults(input, options).occurrences[0].nodeId, 'n-image',
+    'known child-frame and shadow scopes do not participate in a top-document CSS selector');
+  snapshot.nodes.splice(-2);
+  snapshot.nodes[2].children.push('n-image-2');
+  snapshot.nodes.push({ ...snapshot.nodes.at(-1), nodeId: 'n-image-2' });
+  assert.equal(normalizeAxeResults(input, options).occurrences[0].nodeId, null, 'ambiguous suffix must remain uncorrelated');
+  input.frames[0].frameId = 7;
+  input.frames[0].result.violations[0].nodes[0].target = 'html > body > *:nth-child(1) > img:nth-of-type(1)';
+  assert.equal(normalizeAxeResults(input, options).occurrences[0].nodeId, null, 'child-frame identity cannot reuse top-frame nodes');
+});
+
+test('correlates deep supplemental suffixes only through intact top-document ancestry', () => {
+  const snapshot = targetSizeSnapshot();
+  let parent = snapshot.nodes.at(-1);
+  parent.tagName = 'div';
+  for (let index = 0; index < 15; index += 1) {
+    const node = { nodeId: `deep-${index}`, parentId: parent.nodeId, children: [],
+      tagName: index === 14 ? 'img' : 'div', framePath: [] };
+    parent.children = [node.nodeId]; snapshot.nodes.push(node); parent = node;
+  }
+  const input = emptySuccessfulRun();
+  input.frames[0].result.incomplete = [{ id: 'image-alt', nodes: [{ target: 'div > img' }] }];
+  const correlate = candidate => normalizeAxeResults(input, { snapshot: candidate }).occurrences[0];
+  assert.equal(correlate(snapshot).nodeId, 'deep-14');
+  for (const mutate of [
+    value => value.nodes.push({ ...value.nodes.at(-1) }),
+    value => { value.nodes[1].children = []; },
+    value => { value.nodes[2].parentId = 'deep-14'; },
+    value => { value.nodes.at(-1).framePath = ['child-frame']; },
+  ]) {
+    const invalid = structuredClone(snapshot); mutate(invalid);
+    assert.equal(correlate(invalid).nodeId, null);
+    assert.equal(correlate(invalid).outcome, 'cantTell');
+  }
+});
+
+test('counts every semantic match for a generic selector and rejects omitted siblings', () => {
+  const snapshot = targetSizeSnapshot();
+  snapshot.nodes[1].children = ['n-button', 'd2'];
+  snapshot.nodes[2].tagName = 'div'; snapshot.nodes[2].children = ['i1', 'i2'];
+  snapshot.nodes.push(
+    { nodeId: 'd2', parentId: 'n-body', children: ['i3'], tagName: 'div', framePath: [] },
+    { nodeId: 'i1', parentId: 'n-button', children: [], tagName: 'img', framePath: [] },
+    { nodeId: 'i2', parentId: 'n-button', children: [], tagName: 'img', framePath: [] },
+    { nodeId: 'i3', parentId: 'd2', children: [], tagName: 'img', framePath: [] },
+  );
+  const input = emptySuccessfulRun();
+  input.frames[0].result.incomplete = [{ id: 'image-alt', nodes: [{ target: 'img' }] }];
+  assert.equal(normalizeAxeResults(input, { snapshot }).occurrences[0].nodeId, null,
+    'images with nth-of-type positions still match the unqualified img selector');
+  snapshot.nodes[2].children = ['i1'];
+  assert.equal(normalizeAxeResults(input, { snapshot }).occurrences[0].nodeId, null,
+    'an incomplete candidate branch cannot make another image appear uniquely matched');
+  const missing = targetSizeSnapshot();
+  missing.nodes[2].tagName = 'img';
+  missing.nodes.push({ nodeId: 'omitted-image', parentId: 'n-body', children: [], tagName: 'img', framePath: [] });
+  assert.equal(normalizeAxeResults(input, { snapshot: missing }).occurrences[0].nodeId, null,
+    'a parent children list must include all nodes declaring that parent');
+});
+
 test('does not manufacture an ABNT failure from a curated ID mapping without applicability evidence', () => {
   const normalized = normalizeAxeResults(runResult(), { pageId: 'page-1' });
   const ambiguous = normalized.occurrences.find(item => item.engineRuleId === 'image-alt');

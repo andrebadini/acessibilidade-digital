@@ -3288,6 +3288,45 @@ test('forces legacy element-only and full-evidence hints through the canonical n
   assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'element' && artifact.dataUrl), false);
 });
 
+test('collects element evidence and announcement for an inconclusive supplemental image', async () => {
+  const page = rawPage();
+  page.nodes = [
+    { backendNodeId: 10, tagName: 'html', attributes: {}, parentBackendNodeId: null },
+    { backendNodeId: 11, tagName: 'body', attributes: {}, parentBackendNodeId: 10 },
+    { backendNodeId: 12, tagName: 'customer-widget', attributes: {}, parentBackendNodeId: 11 },
+    { backendNodeId: 13, tagName: 'img', attributes: { id: 'product-image', src: '/product.png' }, parentBackendNodeId: 12,
+      rect: { x: 20, y: 30, width: 100, height: 80 } },
+  ];
+  page.axTree.nodes = [{ backendDOMNodeId: 13, role: { value: 'image' }, name: { value: '' } }];
+  const selector = 'html > body > *:nth-child(1) > img';
+  const adapter = fakeAdapter({ page, outerHtml: () => '<img id="product-image" src="/product.png">', axeRun: {
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [{ id: 'image-alt', impact: 'critical', nodes: [{ target: selector }] }],
+      incomplete: [], passes: [], inapplicable: [],
+    } }],
+  } });
+  const model = await runAudit({ url: 'https://example.test/', chromeAdapter: adapter,
+    now: clock, idFactory: () => 'audit-supplemental-image' });
+  const occurrence = model.occurrences.find(value => value.ruleId === 'axe.image-alt');
+  assert.equal(occurrence.nodeId, 'n-13');
+  assert.equal(occurrence.outcome, 'cantTell');
+  assert.equal(occurrence.legalAnalysis, null);
+  const evidence = model.evidence.artifacts.find(value => value.kind === 'element' && value.nodeId === 'n-13');
+  assert.ok(occurrence.evidenceIds.includes(evidence.evidenceId));
+  assert.equal(Object.hasOwn(evidence, 'dataUrl'), false, 'the no-pixels façade must not produce a thumbnail');
+  assert.match(evidence.snippet, /<img/);
+  assert.ok(evidence.accessibility.announcementPreview.length > 0);
+  const report = await enrichAuditForReport(model, { now: () => '2026-08-26T16:00:00.000Z',
+    timezone: 'America/Cuiaba', manifestVersion: '1.1.10', rulesVersion: '1.0.0', browserVersion: 'Chrome/152.0.7977.64' });
+  assert.doesNotThrow(() => createAuditModel(report));
+  assert.doesNotThrow(() => renderHtmlReport(report));
+  const exported = report.occurrences.find(value => value.ruleId === 'axe.image-alt');
+  assert.equal(exported.target.nodeId, 'n-13');
+  assert.equal(exported.target.selector, selector);
+  assert.ok(exported.evidenceRefs.includes(evidence.evidenceId));
+});
+
 test('orders capture→axe→collect→probes→core→normalize, correlates target-size by node and drops raw axe', async () => {
   const page = rawPage();
   page.nodes = [

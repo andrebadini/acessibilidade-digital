@@ -258,8 +258,101 @@ function publishedFindingCounts(occurrences, resultType) {
 }
 
 function correlatedTargetNodeId(options, { axeRuleId, mapping, frameId, selector }) {
-  if (mapping?.targetScope !== 'node' || axeRuleId !== 'target-size' || frameId !== 0 || selector === AXE_TARGET_UNAVAILABLE) return null;
-  return targetNodeIdForStructuralSelector(options.snapshot, selector);
+  if (frameId !== 0 || selector === AXE_TARGET_UNAVAILABLE || mapping?.targetScope === 'document') return null;
+  if (axeRuleId === 'target-size') return targetNodeIdForStructuralSelector(options.snapshot, selector);
+  return supplementalNodeForSelector(options.snapshot, selector);
+}
+
+// Localization is independent of normative applicability. Only structural paths
+// from a complete, reciprocal top-document ancestry may link a signal to a node.
+function supplementalNodeForSelector(snapshot, selector) {
+  if (sanitizeAxeStructuralSelector(selector) !== selector) return null;
+  const tokens = selector.split(' > ').map(compound => {
+    const match = compound.match(/^(\*|[a-z][a-z0-9-]*)(?::(nth-child|nth-of-type)\(([1-9]\d{0,3})\))?$/u);
+    return match ? { tag: match[1], positionKind: match[2], position: Number(match[3]) } : null;
+  });
+  if (tokens.length > 12 || tokens.some(token => token === null)) return null;
+  const inspected = inspectArray(snapshot, 'nodes', 50_000);
+  if (!inspected.valid || !inspected.readable || inspected.declaredLength > 50_000) return null;
+  const byId = new Map();
+  const childrenByParent = new Map();
+  for (const node of inspected.values) {
+    const id = safeRead(node, 'nodeId');
+    if ((typeof id !== 'string' && !Number.isSafeInteger(id)) || byId.has(String(id))) return null;
+    byId.set(String(id), node);
+    const parentId = safeRead(node, 'parentId');
+    if (parentId !== null && parentId !== undefined) {
+      const siblings = childrenByParent.get(String(parentId)) ?? new Set();
+      siblings.add(String(id)); childrenByParent.set(String(parentId), siblings);
+    }
+  }
+  const tagOf = node => {
+    const tag = safeRead(node, 'tagName');
+    return typeof tag === 'string' && /^[a-z][a-z0-9-]*$/iu.test(tag) ? tag.toLowerCase() : null;
+  };
+  const leafTag = tokens.at(-1).tag;
+  const matches = [];
+  for (const node of inspected.values) {
+    if (!tagOf(node) || (leafTag !== '*' && tagOf(node) !== leafTag)) continue;
+    const frame = inspectArray(node, 'framePath', 32);
+    if (!frame.valid || !frame.readable || frame.declaredLength > 32 ||
+      frame.values.some(part => typeof part !== 'string')) return null;
+    if (frame.values.length > 0 || (typeof safeRead(node, 'shadowHostId') === 'string' &&
+      typeof safeRead(node, 'shadowRootId') === 'string')) continue;
+    const compounds = [];
+    const visited = new Set();
+    let current = node;
+    let rooted = false;
+    while (current && visited.size < 512) {
+      const id = safeRead(current, 'nodeId');
+      if (visited.has(String(id)) || !exactStringArray(safeRead(current, 'framePath'), []) ||
+        safeRead(current, 'inShadowTree') === true || safeRead(current, 'shadowRootType')) break;
+      visited.add(String(id));
+      const tag = tagOf(current);
+      if (!tag) break;
+      const parentId = safeRead(current, 'parentId');
+      const parent = byId.get(String(parentId));
+      if (tag === 'html' && (parentId == null || String(parentId) === String(safeRead(safeRead(snapshot, 'document'), 'nodeId')))) {
+        compounds.unshift({ tag: 'html', childPosition: 1, position: 1 }); rooted = true; break;
+      }
+      if (!parent) break;
+      const children = inspectArray(parent, 'children', 2_048);
+      if (!children.valid || !children.readable || children.declaredLength > 2_048) break;
+      const declaredChildren = childrenByParent.get(String(parentId)) ?? new Set();
+      if (children.values.length !== declaredChildren.size ||
+        new Set(children.values.map(String)).size !== declaredChildren.size ||
+        children.values.some(childId => !declaredChildren.has(String(childId)))) break;
+      let childPosition = 0;
+      let position = 0;
+      let elements = 0;
+      let sameTag = 0;
+      let occurrences = 0;
+      let valid = true;
+      for (const childId of children.values) {
+        const child = byId.get(String(childId));
+        if (!child || String(safeRead(child, 'parentId')) !== String(parentId)) { valid = false; break; }
+        const childTag = tagOf(child);
+        if (childTag) elements += 1;
+        if (childTag === tag) sameTag += 1;
+        if (String(childId) === String(id)) {
+          occurrences += 1; childPosition = elements; position = sameTag;
+        }
+      }
+      if (!valid || occurrences !== 1 || childPosition === 0 || position === 0) break;
+      compounds.unshift({ tag, childPosition, position });
+      current = parent;
+    }
+    // An unproven candidate is not proof that the remaining match is unique.
+    if (!rooted) return null;
+    const suffix = compounds.slice(-tokens.length);
+    if (suffix.length === tokens.length && tokens.every((token, index) => {
+      const segment = suffix[index];
+      return (token.tag === '*' || token.tag === segment.tag) &&
+        (!token.positionKind || token.position === (token.positionKind === 'nth-child' ? segment.childPosition : segment.position));
+    })) matches.push(safeRead(node, 'nodeId'));
+    if (matches.length > 1) return null;
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function derivedApplicability(options, { axeRuleId, mapping, pageId, frameId, selector, correlatedNodeId }) {
