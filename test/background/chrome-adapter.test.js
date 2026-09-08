@@ -79,6 +79,25 @@ function createChromeAdapter(chromeApi, rawOptions) {
     : createChromeAdapterFromAuthority(authority, rawOptions);
 }
 
+test('waits for a quiet URL after load before freezing the observed document', async () => {
+  const fake = chromeFake();
+  let current = { id: 17, status: 'complete', url: 'https://example.test/' };
+  fake.chromeApi.tabs.get = async () => ({ ...current });
+  const adapter = createChromeAdapter(fake.chromeApi);
+  let resolved = false;
+  const pending = adapter.waitForStable(17, { timeoutMs: 2000 }).then(tab => { resolved = true; return tab; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(resolved, false, 'load complete is not yet a stable URL');
+  current = { ...current, url: 'https://example.test/?state=ready' };
+  fake.updated.listener(17, { status: 'loading', url: current.url }, { ...current, status: 'loading' });
+  fake.updated.listener(17, { status: 'complete' }, current);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(resolved, false, 'a same-document URL update must restart the quiet window');
+  assert.equal((await pending).url, current.url);
+  assert.equal(fake.updated.removed, true);
+  assert.equal(fake.removed.removed, true);
+});
+
 test('keeps a closed session facade and CSPRNG behind a non-enumerable execution contract', () => {
   const fake = chromeFake();
   const adapter = createChromeAdapter(fake.chromeApi);
@@ -155,7 +174,7 @@ test('invokes receiver-branded Chrome Event methods on their captured native eve
   fake.chromeApi.tabs.get = async id => ({ id, status: 'complete', url: 'https://example.test/' });
 
   const adapter = createChromeAdapter(fake.chromeApi);
-  await adapter.waitForStable(17, { timeoutMs: 50 });
+  await adapter.waitForStable(17, { timeoutMs: 1000 });
 
   assert.deepEqual(calls, [
     ['updated-add', 'function'], ['removed-add', 'function'],
@@ -1719,7 +1738,7 @@ test('creates, navigates, waits, scripts all frames, connects CDP and removes on
   const adapter = createChromeAdapter(fake.chromeApi);
   const tab = await adapter.createTab({ url: 'about:blank', active: false });
   await adapter.navigateTab(tab.id, 'https://example.test/');
-  const stable = await adapter.waitForStable(tab.id, { timeoutMs: 50 });
+  const stable = await adapter.waitForStable(tab.id, { timeoutMs: 1000 });
   await adapter.executeScript({ target: { tabId: tab.id, allFrames: true }, func() {} });
   const cdp = await adapter.connectCdp(tab.id);
   assert.equal(typeof adapter.captureFullPage, 'function');

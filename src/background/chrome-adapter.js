@@ -1613,15 +1613,38 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       if (options.signal?.aborted) throw abortError(options.signal);
       return new Promise((resolve, reject) => {
         let timer;
+        let quietTimer;
+        let revision = 0;
+        let settled = false;
         const cleanup = () => {
           clearTimeout(timer);
+          clearTimeout(quietTimer);
           chromeApi.tabs.onUpdated.removeListener(onUpdated);
           chromeApi.tabs.onRemoved.removeListener(onRemoved);
           options.signal?.removeEventListener('abort', onAbort);
         };
-        const finish = (handler, value) => { cleanup(); handler(value); };
+        const finish = (handler, value) => {
+          if (settled) return;
+          settled = true; cleanup(); handler(value);
+        };
+        // A load event can precede a site's replaceState/redirect (for example
+        // Google's startup URL). Freeze identity only after this quiet window;
+        // the runner and each raster still prove the exact document separately.
+        const observe = tab => {
+          if (settled) return;
+          const observedRevision = ++revision;
+          clearTimeout(quietTimer);
+          if (tab?.status !== 'complete') return;
+          quietTimer = setTimeout(() => {
+            void invoke(chromeApi, chromeApi.tabs, 'get', tabId).then(current => {
+              if (settled || observedRevision !== revision) return;
+              if (current?.status === 'complete' && current.url === tab.url) finish(resolve, current);
+              else observe(current);
+            }, error => finish(reject, error));
+          }, 500);
+        };
         const onUpdated = (id, changeInfo, tab) => {
-          if (id === tabId && (changeInfo.status === 'complete' || tab?.status === 'complete')) finish(resolve, tab);
+          if (id === tabId && (changeInfo.status || changeInfo.url)) observe(tab);
         };
         const onRemoved = id => { if (id === tabId) finish(reject, new Error('A aba de auditoria foi fechada.')); };
         const onAbort = () => finish(reject, abortError(options.signal));
@@ -1630,7 +1653,7 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
         options.signal?.addEventListener('abort', onAbort, { once: true });
         timer = setTimeout(() => finish(reject, timeoutError()), timeoutMs);
         void invoke(chromeApi, chromeApi.tabs, 'get', tabId).then(tab => {
-          if (tab?.status === 'complete') finish(resolve, tab);
+          if (revision === 0) observe(tab);
         }, error => finish(reject, error));
       });
     },
