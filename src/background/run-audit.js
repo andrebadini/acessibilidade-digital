@@ -882,18 +882,21 @@ async function runLegacyAudit({
       const environment = await awaitStep(() => chromeAdapter.getEnvironment?.(tab.id, cdp, pristineMetrics));
       const viewport = environment?.viewport;
       if (!environment || typeof environment !== 'object' || typeof environment.chromeVersion !== 'string' ||
-        !environment.chromeVersion.trim() || !viewport ||
+        !viewport ||
         ![viewport.width, viewport.height, viewport.deviceScaleFactor].every(value => Number.isFinite(value) && value > 0)) {
         throw new TypeError('Ambiente incompleto.');
       }
       state.environment = {
-        chromeVersion: environment.chromeVersion,
+        chromeVersion: environment.chromeVersion.trim(),
         viewport: {
           width: viewport.width,
           height: viewport.height,
           deviceScaleFactor: viewport.deviceScaleFactor,
         },
       };
+      if (!state.environment.chromeVersion) {
+        recoverable('BROWSER_VERSION_UNAVAILABLE', 'A versão do navegador não pôde ser lida; as dimensões observadas foram preservadas.');
+      }
     } catch (error) {
       rethrowAbort(error, signal);
       recoverable('ENVIRONMENT_UNAVAILABLE', 'Os metadados públicos do ambiente não puderam ser lidos.');

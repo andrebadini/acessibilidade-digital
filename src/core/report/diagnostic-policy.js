@@ -76,6 +76,7 @@ const technicalPageDiagnostics = [
     statuses: ALL_TERMINAL_STATUSES, fact: 'full-page-omitted-policy', causePartial: false,
   }),
   page({ code: 'ENVIRONMENT_UNAVAILABLE', message: 'Os metadados públicos do ambiente não puderam ser lidos.', fact: 'environment-unavailable' }),
+  page({ code: 'BROWSER_VERSION_UNAVAILABLE', message: 'A versão do navegador não pôde ser lida; as dimensões observadas foram preservadas.', fact: 'browser-version-unavailable' }),
   page({ code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.', fact: 'dynamic-probes-incomplete', group: 'dynamic-probes' }),
   page({ code: 'DYNAMIC_PROBES_FAILED', message: 'As verificações dinâmicas não puderam ser concluídas.', fact: 'dynamic-probes-failed', group: 'dynamic-probes' }),
   page({ code: 'AXE_EXECUTION_FAILED', message: 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.', fact: 'axe-partial', group: 'axe' }),

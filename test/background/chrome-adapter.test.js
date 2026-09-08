@@ -1754,6 +1754,35 @@ test('creates, navigates, waits, scripts all frames, connects CDP and removes on
   assert.deepEqual(fake.calls.filter(call => call[0] === 'detach'), [['detach', { tabId: 17 }]]);
 });
 
+test('retains observed viewport when the debugger denies Browser.getVersion', async () => {
+  const fake = chromeFake();
+  const adapter = createChromeAdapter(fake.chromeApi);
+  const environment = await adapter.getEnvironment(17, {
+    async command(method) {
+      if (method === 'Browser.getVersion') throw new Error('PRIVATE_BROWSER_FAILURE');
+      assert.equal(method, 'Runtime.evaluate');
+      return { result: { value: { width: 1024, height: 768, deviceScaleFactor: 2 } } };
+    },
+  });
+  assert.deepEqual(environment, {
+    chromeVersion: '', viewport: { width: 1024, height: 768, deviceScaleFactor: 2 },
+  });
+  assert.doesNotMatch(JSON.stringify(environment), /PRIVATE_BROWSER_FAILURE/);
+});
+
+test('does not manufacture viewport when its independent read fails', async () => {
+  const adapter = createChromeAdapter(chromeFake().chromeApi);
+  const environment = await adapter.getEnvironment(17, {
+    async command(method) {
+      if (method === 'Browser.getVersion') return { product: 'Chrome/152.0.0.0' };
+      throw new Error('PRIVATE_VIEWPORT_FAILURE');
+    },
+  });
+  assert.equal(environment.chromeVersion, 'Chrome/152.0.0.0');
+  assert.deepEqual(environment.viewport, { width: null, height: null, deviceScaleFactor: null });
+  assert.doesNotMatch(JSON.stringify(environment), /PRIVATE_VIEWPORT_FAILURE/);
+});
+
 test('times out a tab that never reaches complete and removes its listeners', async () => {
   const fake = chromeFake();
   fake.chromeApi.tabs.get = async id => ({ id, status: 'loading', url: 'https://example.test/' });

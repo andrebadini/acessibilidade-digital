@@ -1668,12 +1668,17 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
     composeAnnouncementMap,
     runDynamicProbes(tabId, cdp, options = {}) { return runDynamicProbes({ adapter: createProbeAdapter(tabId, cdp), signal: options.signal }); },
     async getEnvironment(_tabId, cdp) {
-      const [version, viewport] = await Promise.all([
+      const [version, viewport] = await Promise.allSettled([
         cdp.command('Browser.getVersion', {}),
         cdp.command('Runtime.evaluate', { expression: '({width:innerWidth,height:innerHeight,deviceScaleFactor:devicePixelRatio})', returnByValue: true }),
       ]);
-      const value = viewport?.result?.value || {};
-      return { chromeVersion: String(version?.product || ''), viewport: { width: value.width, height: value.height, deviceScaleFactor: value.deviceScaleFactor } };
+      // Browser is not exposed by chrome.debugger. Its failure must not erase
+      // a successful, independent measurement from the page's Runtime domain.
+      const value = viewport.status === 'fulfilled' ? viewport.value?.result?.value : null;
+      return {
+        chromeVersion: version.status === 'fulfilled' ? String(version.value?.product || '') : '',
+        viewport: { width: value?.width ?? null, height: value?.height ?? null, deviceScaleFactor: value?.deviceScaleFactor ?? null },
+      };
     },
     async getFinalUrl(tabId) { return (await invoke(chromeApi, chromeApi.tabs, 'get', tabId))?.url || ''; },
     async proveHighlightTargets(rawInput) {

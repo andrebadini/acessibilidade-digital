@@ -1729,6 +1729,9 @@ function validatePageDiagnosticFacts(model, page, policies) {
   if (codes.has('ENVIRONMENT_UNAVAILABLE') && Object.values(page.viewport).some(value => value !== null)) {
     throw new TypeError('Diagnóstico de ambiente indisponível contradiz o viewport observado.');
   }
+  if (codes.has('BROWSER_VERSION_UNAVAILABLE') && Object.values(page.viewport).some(value => value === null)) {
+    throw new TypeError('Diagnóstico de dimensões preservadas exige viewport observado.');
+  }
   if (page.finalUrlObserved && Object.values(page.viewport).every(value => value === null) &&
     !codes.has('ENVIRONMENT_UNAVAILABLE')) {
     throw new TypeError('Viewport não observado exige diagnóstico factual de ambiente indisponível.');

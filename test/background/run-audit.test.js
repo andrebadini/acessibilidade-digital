@@ -4274,6 +4274,49 @@ test('does not claim or clean ownership when createTab returns an invalid resour
   assert.doesNotMatch(JSON.stringify(execution), /PRIVATE_INVALID_TAB_ID/u);
 });
 
+test('preserves viewport through the report when only browser version is unavailable', async () => {
+  const draft = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({
+      environmentResult: { chromeVersion: '', viewport: { width: 1024, height: 768, deviceScaleFactor: 2 } },
+    }), now: clock, idFactory: () => 'audit-viewport-without-version',
+  });
+  assert.deepEqual(draft.environment.viewport, { width: 1024, height: 768, deviceScaleFactor: 2 });
+  assert.equal(draft.environment.chromeVersion, '');
+  assert.equal(draft.session.status, 'partial');
+  assert.equal(draft.session.diagnostics.some(row => row.code === 'BROWSER_VERSION_UNAVAILABLE'), true);
+  assert.equal(draft.session.diagnostics.some(row => row.code === 'ENVIRONMENT_UNAVAILABLE'), false);
+  const report = await enrichAuditForReport(draft, { now: clock, expectedExtensionId: TEST_EXTENSION_ID });
+  assert.deepEqual(report.pages[0].viewport, { width: 1024, height: 768, deviceScaleFactor: 2 });
+  assert.equal(report.versions.browser, 'não disponível');
+  const html = renderHtmlReport(report);
+  assert.match(html, /A versão do navegador não pôde ser lida; as dimensões observadas foram preservadas/);
+  assert.doesNotMatch(html, /Não foi possível registrar o viewport/);
+});
+
+test('does not preserve invalid dimensions just because browser version is unavailable', async () => {
+  const draft = await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({
+      environmentResult: { chromeVersion: '', viewport: { width: 0, height: 768, deviceScaleFactor: 2 } },
+    }), now: clock, idFactory: () => 'audit-invalid-viewport',
+  });
+  assert.deepEqual(draft.environment.viewport, { width: null, height: null, deviceScaleFactor: null });
+  assert.equal(draft.session.diagnostics.some(row => row.code === 'ENVIRONMENT_UNAVAILABLE'), true);
+  assert.equal(draft.session.diagnostics.some(row => row.code === 'BROWSER_VERSION_UNAVAILABLE'), false);
+});
+
+test('rejects a report claiming preserved dimensions when no viewport was observed', async () => {
+  const draft = structuredClone(await runAudit({
+    url: 'https://example.test/', chromeAdapter: fakeAdapter({ environmentResult: undefined }), now: clock,
+    idFactory: () => 'audit-contradictory-viewport',
+  }));
+  draft.session.diagnostics.push({
+    ...draft.session.diagnostics.find(row => row.code === 'ENVIRONMENT_UNAVAILABLE'),
+    code: 'BROWSER_VERSION_UNAVAILABLE',
+    message: 'A versão do navegador não pôde ser lida; as dimensões observadas foram preservadas.',
+  });
+  await assert.rejects(enrichAuditForReport(draft, { now: clock, expectedExtensionId: TEST_EXTENSION_ID }));
+});
+
 test('records a missing environment as a factual partial cause', async () => {
   const draft = await runAudit({
     url: 'https://example.test/', chromeAdapter: fakeAdapter({ environmentResult: undefined }), now: clock,
