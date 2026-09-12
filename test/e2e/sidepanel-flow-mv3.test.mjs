@@ -1638,6 +1638,103 @@ test('new audit after address-bar navigation preserves A and audits B in the sam
   } finally { await extension?.close().catch(() => {}); }
 });
 
+test('passive current-page observes memory-only elements without navigation or interaction', { timeout: 180_000 }, async t => {
+  assert.ok(chromeBinary, 'Chrome for Testing configurado é obrigatório.');
+  const fixture = await startFixtureServer(t, new Map([
+    ['/current', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: currentPageDocument(0) }],
+  ]));
+  const extension = await launchUnpackedExtension(t, {
+    extensionPath: await realpath(workspaceRoot), startUrl: `${fixture.origin}/current`,
+    downloadMode: 'profile', viewport: { width: 1280, height: 900 }, chromeBinary, expectedMajor: 152,
+  });
+  const panel = await extension.openSidePanelFromAction();
+  await extension.waitForValue(panel, 'document.querySelector("[data-screen]")?.dataset.screen',
+    value => value === 'initial', { timeoutMs: 30_000 });
+  await extension.click(panel, 'input[data-capture-mode="no-pixels"]');
+  await panel.command('Page.bringToFront');
+  await extension.waitForValue(panel, 'document.visibilityState', value => value === 'visible', { timeoutMs: 10_000 });
+  assert.equal(await extension.evaluate(extension.startPage.page, `new Promise(resolve=>{
+    let previous='';let stable=0;let samples=0;
+    const sample=()=>{const current=innerWidth+':'+innerHeight;
+      stable=current===previous?stable+1:0;previous=current;
+      if(stable>=6)return resolve(true);if(++samples>=60)return resolve(false);setTimeout(sample,50)};sample();
+  })`, { awaitPromise: true }), true, 'native side panel must settle before measuring source invariants');
+  await extension.evaluate(extension.startPage.page, `(() => {
+    const region=document.createElement('section');region.id='memory-only-menu';
+    region.innerHTML='<h2>Menu aberto somente em memória</h2><button id="memory-only-unnamed" style="width:80px;height:40px"></button>';
+    document.querySelector('main').append(region);
+    const notes=document.querySelector('#source-notes');notes.focus();notes.setSelectionRange(2,5);scrollTo(0,200);
+    const state=()=>({html:document.body.innerHTML,focus:document.activeElement?.id,hasFocus:document.hasFocus(),scroll:[scrollX,scrollY],
+      viewport:[innerWidth,innerHeight,visualViewport.width,visualViewport.height,visualViewport.scale],
+      selection:[notes.selectionStart,notes.selectionEnd],
+      style:[getComputedStyle(document.querySelector('#runtime-style-target')).color,getComputedStyle(notes).fontSize]});
+    globalThis.__passiveProof={state,events:[],mutations:0};
+    const observer=new MutationObserver(records=>{globalThis.__passiveProof.mutations+=records.length});
+    observer.observe(document.body,{subtree:true,childList:true,attributes:true,characterData:true});
+    globalThis.__passiveProof.observer=observer;
+    for(const type of ['keydown','keyup','beforeinput','input','change','click','pointerdown','pointerup','selectionchange','scroll','resize','focus','blur','focusin','focusout','visibilitychange','popstate','hashchange','pagehide'])addEventListener(type,()=>globalThis.__passiveProof.events.push(type),true);
+    return true;
+  })()`);
+  // Drain the scroll event caused by test setup before recording the baseline.
+  await extension.evaluate(extension.startPage.page, 'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{globalThis.__passiveProof.observer.takeRecords();globalThis.__passiveProof.mutations=0;globalThis.__passiveProof.events=[];resolve(true)})))', { awaitPromise: true });
+  const before = await extension.evaluate(extension.startPage.page, 'globalThis.__passiveProof.state()');
+  const identityBefore = await extension.identityOf(extension.startPage);
+  await armTabIsolationProof(extension);
+  await armProgressObserver(extension, panel);
+  // The extension, not this test's CDP session, must own observation during the audit.
+  await extension.browser.command('Target.detachFromTarget', { sessionId: extension.startPage.page.sessionId });
+  const auditIdPromise = waitForActiveAuditId(extension);
+  await extension.click(panel, 'button[data-intent="START_ATTACHED"]');
+  const auditId = await auditIdPromise;
+  assert.equal(await waitForResult(extension, panel, auditId), auditId);
+  await assertObservedProgress(extension, panel);
+  const source = await extension.attachPage(extension.startPage.targetId);
+  assert.deepEqual(await extension.identityOf({ targetId: extension.startPage.targetId, page: source }), identityBefore);
+  const after = await extension.evaluate(source, '({state:globalThis.__passiveProof.state(),events:globalThis.__passiveProof.events,mutations:globalThis.__passiveProof.mutations})');
+  assert.deepEqual(after.state, before);
+  assert.deepEqual(after.events, []);
+  assert.equal(after.mutations, 0);
+  const observed = await extension.evaluate(extension.harnessPage, `(async()=>{
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    const revision=await store.getReportRevision(${JSON.stringify(auditId)});
+    const model=revision?.model;
+    return {present:Boolean(model),
+      codes:model?.session?.diagnostics?.map(value=>value.code)??[],evidence:model?.evidence?.length??-1,
+      targets:model?.occurrences?.filter(value=>['axe.button-name','accessible-component-name'].includes(value.ruleId)).map(value=>({ruleId:value.ruleId,outcome:value.outcome,target:value.target})),
+      created:globalThis.__auditaCurrentCopyProofV1.state.created.length,
+      updates:globalThis.__auditaCurrentCopyProofV1.state.sourceUpdates};
+  })()`, { awaitPromise: true });
+  assert.equal(observed.present, true);
+  assert.ok(observed.evidence > 0, 'non-raster evidence remains available in no-pixels mode');
+  const memoryTargets = await extension.evaluate(source, `(${JSON.stringify(observed.targets)}).filter(value=>{
+    const selector=value.target?.selector;return selector&&document.querySelector(selector)?.id==='memory-only-unnamed';
+  })`);
+  assert.equal(memoryTargets.length, 1, 'the recorded selector must resolve to the memory-only element');
+  assert.equal(memoryTargets[0].ruleId, 'axe.button-name');
+  assert.equal(memoryTargets[0].outcome, 'cantTell', 'the supplemental ABNT mapping requires confirmation');
+  assert.ok(observed.targets.some(value=>value.ruleId==='accessible-component-name' && value.outcome==='failed' &&
+    value.target.nodeId===memoryTargets[0].target.nodeId), 'core must detect the missing accessible name on the same live node');
+  const privateState = await readPrivateAttempt(extension, auditId);
+  assert.deepEqual(privateState.owners, []);
+  assert.equal(privateState.rawNavigationCount, 0);
+  assert.equal(privateState.rasterDataUrls, 0);
+  assert.equal(privateState.sessionRasterDataUrls, 0);
+  assert.equal(privateState.pixelStateCount, 0);
+  assert.ok(observed.codes.includes('DYNAMIC_PROBES_OMITTED_PASSIVE'));
+  assert.equal(observed.codes.includes('ATTACHED_COPY_RELOADED'), false);
+  assert.equal(observed.created, 0);
+  assert.deepEqual(observed.updates, []);
+  await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
+  const report = await extension.waitForReport({ auditId });
+  await extension.waitForValue(report, 'document.querySelectorAll("[data-report-issue]").length',
+    value => value > 0, { timeoutMs: 30_000 });
+  const reportText = await extension.evaluate(report, 'document.body.textContent');
+  assert.match(reportText, /ABNT/);
+  assert.match(reportText, /WCAG/);
+  assert.match(reportText, /sem alterar foco/);
+  t.diagnostic('Chrome152; actual-document; memory-only finding retained; no created tabs; focus/scroll/layout preserved; report opened');
+});
+
 test('current-page audits run in one inactive copy and leave the original page intact', { timeout: 600_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do painel lateral.');
   const fixture = await startFixtureServer(t, new Map([
