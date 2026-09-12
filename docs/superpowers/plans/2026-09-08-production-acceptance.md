@@ -14,6 +14,8 @@
 
 On 08/09 the user explicitly requested **beta 1.1.13, then pause**. Finish only the in-flight producer-version fix, validation and that beta delivery before pausing. This is an intermediate package requested by the user, not production approval or completion of this plan. Resume production work only when requested.
 
+**Resumed 12/09:** user explicitly requested continuation. Existing HEAD `396b0ec` and delivered packages are preserved. Production acceptance remains open. Focused follow-up: expose the recorded producer in live/HTML/print reports (the data was already preserved in 1.1.13), then reconcile acceptance and test the frozen production candidate itself.
+
 ## Global Constraints
 
 - Production, not beta, is the goal. Do not merely remove the word beta.

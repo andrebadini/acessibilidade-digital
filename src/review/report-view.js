@@ -1146,6 +1146,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   matrixScroll.append(table); matrixDetails.append(matrixScroll); matrix.append(matrixDetails); root.append(matrix);
 
   const methodology = section(document, 6);
+  methodology.append(element(document, 'p', `Versão da extensão que realizou a auditoria: ${view.methodology.versions.extension}.`));
   appendTextList(document, methodology, view.methodology.caveats, 'Sem ressalvas adicionais.');
   methodology.append(element(document, 'p', `Auditoria: ${view.auditId}. Revisão do modelo: ${view.modelRevision}. Integridade: ${view.modelHash}.`));
   const officialSources = document.createElement('div'); officialSources.setAttribute('data-official-sources', '');

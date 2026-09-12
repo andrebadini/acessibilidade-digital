@@ -23,6 +23,23 @@ const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia 
 const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
 
+for (const producer of ['1.1.13', 'não disponível']) {
+  test(`visible reports preserve recorded producer ${producer} without rewriting evidence`, async () => {
+    const { model, summary } = await fixture({ mutateDraft(draft) { draft.versions.extension = producer; } });
+    const before = JSON.stringify(model);
+    assert.equal(model.versions.extension, producer);
+    const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+    const root = renderReportView({ view, document: new Document(), onExport() {} });
+    assert.ok(root.textContent.includes(`Versão da extensão que realizou a auditoria: ${producer}`));
+    for (const forPrint of [false, true]) {
+      const html = renderHtmlReport(model, { reportView: view, forPrint });
+      const visibleText = html.replace(/<style[^>]*>[\s\S]*?<\/style>|<script[^>]*>[\s\S]*?<\/script>/gu, '').replace(/<[^>]*>/gu, '');
+      assert.ok(visibleText.includes(`Versão da extensão que realizou a auditoria: ${producer}`));
+    }
+    assert.equal(JSON.stringify(model), before);
+  });
+}
+
 test('checklist has didactic guidance separately from findings and only a compact reference in the PDF', async () => {
   const { model, summary } = await fixture();
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
