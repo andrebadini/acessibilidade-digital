@@ -8,6 +8,21 @@ import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js
 import { validateNormalizedAxeSupplemental } from '../../src/core/axe/validate-supplemental.js';
 
 const PROVENANCE = AXE_PROVENANCE;
+
+for (const [id, itemId, classification] of [
+  ['aria-required-children', '5.13.12', 'requirement'],
+  ['aria-required-parent', '5.13.12', 'requirement'],
+  ['bypass', '5.7.11', 'recommendation'],
+]) test(`retains ${id} for ABNT review instead of silently discarding the signal`, () => {
+  const input = emptySuccessfulRun();
+  input.frames[0].result.incomplete = [{ id, impact: 'serious', nodes: [{ target: ['div'], impact: 'serious' }] }];
+  const result = normalizeAxeResults(input, { pageId: 'page-1' });
+  assert.equal(result.occurrences.length, 1);
+  assert.equal(result.occurrences[0].itemId, itemId);
+  assert.equal(result.occurrences[0].classification, classification);
+  assert.equal(result.occurrences[0].outcome, 'cantTell');
+  assert.deepEqual(validateNormalizedAxeSupplemental(result).errors, []);
+});
 const PARTIAL_LIMITATION = 'O motor suplementar axe-core teve cobertura parcial; somente resultados vinculados a frames concluídos foram considerados.';
 const PROVENANCE_LIMITATION = 'A proveniência do resultado axe não corresponde ao pacote verificado; nenhum achado foi publicado.';
 
@@ -54,6 +69,24 @@ function runResult() {
     }],
   };
 }
+
+test('incomplete contrast and ARIA signals explain uncertainty without claiming a measured failure', () => {
+  const input = emptySuccessfulRun();
+  input.frames[0].result.incomplete = ['color-contrast', 'aria-valid-attr-value'].map(id => ({
+    id, impact: 'serious', nodes: [{ target: ['button'], impact: 'serious' }]
+  }));
+  const result = normalizeAxeResults(input, { pageId: 'page-1' });
+  assert.equal(result.occurrences.length, 2);
+  for (const occurrence of result.occurrences) {
+    assert.equal(occurrence.outcome, 'cantTell');
+    assert.match(occurrence.justification, /inconclusiv|não conseguiu concluir/iu);
+    assert.doesNotMatch(occurrence.justification, /Texto observado abaixo|Valor inválido.*compromete/iu);
+  }
+  for (const rule of result.ruleResults) {
+    assert.match(rule.summary, /inconclusiv|não conseguiu concluir/iu);
+    assert.match(rule.targets[0].message, /inconclusiv|não conseguiu concluir/iu);
+  }
+});
 
 function targetSizeRun({ frameId = 0, selector = 'html > body > button' } = {}) {
   return {

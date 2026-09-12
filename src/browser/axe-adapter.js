@@ -130,8 +130,8 @@ export const AXE_STRUCTURAL_SELECTOR_TAGS = Object.freeze([
 const SAFE_TARGET_TAGS = new Set(AXE_STRUCTURAL_SELECTOR_TAGS);
 export const AXE_ALLOWED_RULE_IDS = Object.freeze([
   'area-alt', 'aria-allowed-attr', 'aria-command-name', 'aria-input-field-name', 'aria-meter-name',
-  'aria-progressbar-name', 'aria-required-attr', 'aria-roles', 'aria-toggle-field-name', 'aria-tooltip-name',
-  'aria-valid-attr-value', 'aria-valid-attr', 'button-name', 'color-contrast', 'definition-list', 'dlitem',
+  'aria-progressbar-name', 'aria-required-attr', 'aria-required-children', 'aria-required-parent', 'aria-roles', 'aria-toggle-field-name', 'aria-tooltip-name',
+  'aria-valid-attr-value', 'aria-valid-attr', 'button-name', 'bypass', 'color-contrast', 'definition-list', 'dlitem',
   'document-title', 'frame-title', 'html-has-lang', 'html-lang-valid', 'image-alt', 'input-button-name',
   'input-image-alt', 'label', 'label-content-name-mismatch', 'link-name', 'list', 'listitem', 'meta-viewport',
   'object-alt', 'role-img-alt', 'select-name', 'svg-img-alt', 'target-size', 'td-headers-attr', 'th-has-data-cells',

@@ -9,6 +9,7 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { axeNbrMappingForRule } from '../normative/axe-nbr-crosswalk.js';
 import { section508ReferencesForWcag } from '../normative/section508.js';
+import { inconclusiveAxeText } from './result-text.js';
 
 const MAX_FRAMES = 64;
 const MAX_GROUPS_PER_TYPE = 100;
@@ -555,7 +556,9 @@ export function normalizeAxeResults(input, options = {}) {
           const classification = item?.classification ?? 'best-practice';
           const impact = safeImpact(safeRead(node, 'impact') ?? safeRead(group, 'impact'));
           const source = makeSource(axeRuleId);
-          const conditionText = mapping?.rationale || 'Achado suplementar do axe-core sem vínculo curado com item ABNT.';
+          const conditionText = resultType === 'incomplete'
+            ? inconclusiveAxeText(item)
+            : mapping?.rationale || 'Achado suplementar do axe-core sem vínculo curado com item ABNT.';
           const justification = mapping && resultType === 'violations' && !applicabilityEvidence
             ? `${conditionText} A aplicabilidade ao item ABNT ainda exige confirmação pelo motor próprio ou revisão.`
             : conditionText;
@@ -606,6 +609,12 @@ export function normalizeAxeResults(input, options = {}) {
         }
       }
     }
+  }
+  for (const rule of ruleById.values()) {
+    const mapping = axeNbrMappingForRule(rule.engineRuleId);
+    const hasIncomplete = occurrences.some(occurrence => occurrence.ruleId === rule.ruleId && occurrence.engineResultType === 'incomplete');
+    if (mapping) rule.summary = rule.outcome !== 'failed' && hasIncomplete
+      ? inconclusiveAxeText(ITEM_BY_ID.get(mapping.nbrItemRef)) : mapping.rationale;
   }
   technicalSummary.violations = publishedFindingCounts(occurrences, 'violations');
   technicalSummary.incomplete = publishedFindingCounts(occurrences, 'incomplete');

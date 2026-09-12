@@ -18,6 +18,46 @@ function validSupplemental() {
   }));
 }
 
+test('historical inconclusive records remain readable without changing their recorded outcome', () => {
+  const payload = structuredClone(normalizeAxeResults({
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: {
+      violations: [], incomplete: [{ id: 'color-contrast', impact: 'serious', nodes: [{ target: ['button'], impact: 'serious' }] }],
+      passes: [], inapplicable: []
+    } }]
+  }, { pageId: 'page-1' }));
+  const historicalText = 'Texto observado abaixo do contraste mínimo automatizável.';
+  payload.occurrences[0].justification = historicalText;
+  payload.ruleResults[0].summary = historicalText;
+  payload.ruleResults[0].targets[0].message = historicalText;
+  assert.deepEqual(validateNormalizedAxeSupplemental(payload).errors, []);
+  assert.equal(payload.occurrences[0].outcome, 'cantTell');
+});
+
+test('an isolated historical summary cannot contradict modern inconclusive occurrences', () => {
+  const payload = structuredClone(normalizeAxeResults({
+    status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [],
+    frames: [{ frameId: 0, status: 'success', result: { violations: [], passes: [], inapplicable: [],
+      incomplete: [{ id: 'color-contrast', impact: 'serious', nodes: [{ target: ['button'], impact: 'serious' }] }]
+    } }]
+  }, { pageId: 'page-1' }));
+  payload.ruleResults[0].summary = 'Texto observado abaixo do contraste mínimo automatizável.';
+  assert.ok(validateNormalizedAxeSupplemental(payload).errors.length > 0);
+});
+
+test('mixed incomplete and violation summaries do not depend on frame ordering', () => {
+  const frame = (frameId, kind) => ({ frameId, status: 'success', result: {
+    violations: [], incomplete: [], passes: [], inapplicable: [],
+    [kind]: [{ id: 'color-contrast', impact: 'serious', nodes: [{ target: ['button'], impact: 'serious' }] }]
+  } });
+  const frames = [frame(0, 'violations'), frame(1, 'incomplete')];
+  const normalize = frames => normalizeAxeResults({ status: 'complete', provenance: AXE_PROVENANCE, diagnostics: [], frames }, { pageId: 'page-1' });
+  const a = normalize(frames), b = normalize([...frames].reverse());
+  assert.equal(a.ruleResults[0].summary, b.ruleResults[0].summary);
+  assert.match(a.ruleResults[0].summary, /inconclusiva/);
+  assert.deepEqual(validateNormalizedAxeSupplemental(a).errors, []);
+});
+
 const PARTIAL_LIMITATION = 'O motor suplementar axe-core teve cobertura parcial; somente resultados vinculados a frames concluídos foram considerados.';
 const TRUNCATED_LIMITATION = 'Os resultados axe excederam limites locais de segurança; contagens e achados publicados são truncados.';
 

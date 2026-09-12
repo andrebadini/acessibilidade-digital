@@ -10,6 +10,7 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { axeNbrMappingForRule } from '../normative/axe-nbr-crosswalk.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { section508ReferencesForWcag } from '../normative/section508.js';
+import { inconclusiveAxeText } from './result-text.js';
 
 const ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
 const ALLOWED_RULE_IDS = new Set(AXE_ALLOWED_RULE_IDS);
@@ -223,8 +224,9 @@ function validateRule(rule, errors) {
   const rationale = mapping.rationale;
   const targets = boundedArray(rule, 'targets', 256);
   const limitations = boundedArray(rule, 'limitations', 4);
-  const allowedJustifications = new Set([rationale, `${rationale}${CONFIRMATION_SUFFIX}`]);
-  if (!targets || !limitations || own(rule, 'summary') !== rationale ||
+  const inconclusive = inconclusiveAxeText(ITEM_BY_ID.get(mapping.nbrItemRef));
+  const allowedJustifications = new Set([rationale, `${rationale}${CONFIRMATION_SUFFIX}`, inconclusive]);
+  if (!targets || !limitations || ![rationale, inconclusive].includes(own(rule, 'summary')) ||
     targets.some(target => !allowedJustifications.has(own(target, 'message')) || !validTarget(target, own(target, 'message'))) ||
     limitations.some(value => value !== 'A aplicabilidade ABNT não foi confirmada; o resultado permanece cantTell.') ||
     !['minor', 'moderate', 'serious', 'critical'].includes(own(rule, 'impact')) ||
@@ -261,7 +263,9 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
     errors.push(`Ocorrência de ${ruleId} diverge do crosswalk curado.`);
     return false;
   }
-  const rationale = mapping?.rationale ?? UNMAPPED_RATIONALE;
+  const rationale = engineResultType === 'incomplete'
+    ? inconclusiveAxeText(mapping ? ITEM_BY_ID.get(mapping.nbrItemRef) : null)
+    : mapping?.rationale ?? UNMAPPED_RATIONALE;
   const justification = own(occurrence, 'justification');
   const target = own(occurrence, 'target');
   const selector = own(target, 'selector');
@@ -275,7 +279,11 @@ function validateOccurrence(occurrence, validatedRule, options, errors) {
   const expectedJustification = engineResultType === 'violations' && mapping && outcome === 'cantTell'
     ? `${rationale}${CONFIRMATION_SUFFIX}`
     : rationale;
-  if (justification !== expectedJustification ||
+  // Historical exports used the exact curated rationale for incomplete too.
+  // Accept that finite legacy wording without granting a confirmed outcome.
+  const historicalIncompleteText = engineResultType === 'incomplete' && outcome === 'cantTell' &&
+    mapping && justification === mapping.rationale;
+  if ((justification !== expectedJustification && !historicalIncompleteText) ||
     !exactKeys(target, ['framePath', 'nodeId', 'selector']) || targetNodeId !== occurrenceNodeId ||
     (nodeScopedBinding
       ? (!(typeof occurrenceNodeId === 'string' || Number.isSafeInteger(occurrenceNodeId)) ||
@@ -378,6 +386,12 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
   for (const checked of validatedRules.values()) {
     if (strongest.get(checked.ruleId) !== checked.outcome) errors.push(`Agregação declarada de ${checked.ruleId} não corresponde às ocorrências.`);
     const accepted = acceptedByRule.get(checked.ruleId) ?? [];
+    const mapping = axeNbrMappingForRule(own(checked.rule, 'engineRuleId'));
+    const incompleteOccurrences = accepted.filter(occurrence => own(occurrence, 'engineResultType') === 'incomplete');
+    const historical = incompleteOccurrences.length > 0 && incompleteOccurrences.every(occurrence =>
+      own(occurrence, 'justification') === mapping?.rationale);
+    const expectedSummary = checked.outcome !== 'failed' && incompleteOccurrences.length > 0 && !historical
+      ? inconclusiveAxeText(ITEM_BY_ID.get(mapping?.nbrItemRef)) : mapping?.rationale;
     const impactOrder = ['minor', 'moderate', 'serious', 'critical'];
     const strongestImpact = accepted.reduce((current, occurrence) =>
       impactOrder.indexOf(own(occurrence, 'impact')) > impactOrder.indexOf(current) ? own(occurrence, 'impact') : current, 'minor');
@@ -387,7 +401,7 @@ export function validateNormalizedAxeSupplemental(input, options = {}) {
       framePath: own(own(occurrence, 'target'), 'framePath'),
       message: own(occurrence, 'justification'),
     }));
-    if (own(checked.rule, 'impact') !== strongestImpact ||
+    if (own(checked.rule, 'summary') !== expectedSummary || own(checked.rule, 'impact') !== strongestImpact ||
       own(checked.rule, 'confidence') !== (checked.outcome === 'failed' ? 'high' : 'low') ||
       !exactData(own(checked.rule, 'targets'), expectedTargets)) {
       errors.push(`Resumo da regra ${checked.ruleId} não foi derivado das ocorrências aceitas.`);
