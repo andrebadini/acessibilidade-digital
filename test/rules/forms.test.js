@@ -12,6 +12,44 @@ test('a programmatic aria-label is not reported as a missing label association',
   assert.equal((await evaluate('form-label-association', page)).outcome, 'passed');
 });
 
+test('aria-labelledby associates a field with collected label text', async () => {
+  const value = snapshot([
+    record('label', 'span', { attributes: { id: 'field-name' }, text: 'Nome' }),
+    record('field', 'input', { attributes: { 'aria-labelledby': 'field-name' }, accessibleName: 'Nome' })
+  ]);
+  assert.equal((await evaluate('form-label-association', value)).outcome, 'passed');
+});
+
+test('native labelable elements are valid targets even when they are not text fields', async () => {
+  for (const tag of ['button', 'meter', 'output', 'progress']) {
+    const value = snapshot([
+      record('label', 'label', { attributes: { for: 'control' }, text: 'Resultado' }),
+      record('control', tag, { attributes: { id: 'control' } })
+    ]);
+    assert.equal((await evaluate('form-label-association', value)).outcome, 'passed', tag);
+  }
+});
+
+test('aria-labelledby does not approve absent, ambiguous or foreign document targets', async () => {
+  const field = record('field', 'input', { attributes: { 'aria-labelledby': 'name' }, frameId: 'main' });
+  const label = record('label', 'span', { attributes: { id: 'name' }, text: 'Nome', frameId: 'main' });
+  for (const labels of [[], [label, { ...label, nodeId: 'duplicate' }], [{ ...label, frameId: 'child', framePath: ['frame'] }]]) {
+    assert.equal((await evaluate('form-label-association', snapshot([field, ...labels]))).outcome, 'failed');
+  }
+});
+
+test('native label associations cannot cross documents or be confused by foreign IDs', async () => {
+  const label = record('label', 'label', { attributes: { for: 'control' }, frameId: 'main' });
+  const foreign = record('foreign', 'button', { attributes: { id: 'control' }, frameId: 'child', framePath: ['frame'] });
+  assert.equal((await evaluate('form-label-association', snapshot([label, foreign]))).outcome, 'failed');
+  const local = record('local', 'input', { attributes: { id: 'control' }, frameId: 'main' });
+  assert.equal((await evaluate('form-label-association', snapshot([label, local, { ...foreign, tagName: 'div' }]))).outcome, 'passed');
+  const orphan = { ...foreign, tagName: 'input' };
+  const result = await evaluate('form-label-association', snapshot([label, local, orphan]));
+  assert.equal(result.outcome, 'failed');
+  assert.deepEqual(result.targets.map(target => target.nodeId), ['foreign']);
+});
+
 function record(nodeId, tagName, overrides = {}) {
   return {
     nodeId,

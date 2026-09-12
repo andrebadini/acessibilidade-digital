@@ -29,6 +29,12 @@ function fieldsOf(nodes) {
   return nodes.filter(isFormField);
 }
 
+function isNativeLabelable(node) {
+  const tag = tagOf(node);
+  return ['button', 'meter', 'output', 'progress', 'select', 'textarea'].includes(tag) ||
+    (tag === 'input' && normalizeText(attribute(node, 'type')).toLowerCase() !== 'hidden');
+}
+
 function formFieldLabel(snapshot) {
   return formResult(snapshot, ({ nodes }) => {
     const fields = fieldsOf(nodes);
@@ -56,8 +62,10 @@ function nestedLabel(field, index) {
   return chain.complete && chain.ancestors.some(node => tagOf(node) === 'label');
 }
 
+const documentKey = node => JSON.stringify([node.frameId ?? 'main', node.framePath ?? []]);
+
 function labelAssociatedWithField(label, field, ids, index) {
-  if (tagOf(label) !== 'label') return false;
+  if (tagOf(label) !== 'label' || documentKey(label) !== documentKey(field)) return false;
   if (hasAttribute(label, 'for')) {
     const matches = ids.get(normalizeText(attribute(label, 'for'))) ?? [];
     return matches.length === 1 && matches[0] === field;
@@ -73,33 +81,45 @@ function formLabelAssociation(snapshot) {
     if (fields.length === 0 && labels.length === 0) {
       return result('inapplicable', 'Não há campos ou rótulos de formulário aplicáveis.');
     }
-    const ids = domIdIndex(nodes);
+    const nodesByDocument = new Map();
+    for (const node of nodes) {
+      const key = documentKey(node);
+      if (!nodesByDocument.has(key)) nodesByDocument.set(key, []);
+      nodesByDocument.get(key).push(node);
+    }
+    const idsByDocument = new Map([...nodesByDocument].map(([key, values]) => [key, domIdIndex(values)]));
     const index = nodeIndex(nodes);
     const labelsByTarget = new Map();
     const failures = [];
 
     for (const label of labels) {
       if (!hasAttribute(label, 'for')) continue;
+      const ids = idsByDocument.get(documentKey(label));
       const forId = normalizeText(attribute(label, 'for'));
       const matches = ids.get(forId) ?? [];
       if (matches.length === 0) {
         failures.push(target(label, 'Corrija a referência for deste rótulo.', {
           reason: 'missing-idref', attribute: 'for'
         }));
-      } else if (!matches.every(isFormField)) {
+      } else if (!matches.every(isNativeLabelable)) {
         failures.push(target(label, 'Associe este rótulo a um campo rotulável.', {
           reason: 'invalid-label-target', attribute: 'for'
         }));
       } else {
-        const bucket = labelsByTarget.get(forId) ?? [];
+        const key = `${documentKey(label)}:${forId}`;
+        const bucket = labelsByTarget.get(key) ?? [];
         bucket.push(label);
-        labelsByTarget.set(forId, bucket);
+        labelsByTarget.set(key, bucket);
       }
     }
 
     for (const field of fields) {
+      const ids = idsByDocument.get(documentKey(field));
+      const ariaLabels = normalizeText(attribute(field, 'aria-labelledby')).split(/\s+/u).filter(Boolean);
+      const ariaAssociated = ariaLabels.length > 0 && ariaLabels.every(id =>
+        (ids.get(id) ?? []).length === 1);
       const id = normalizeText(attribute(field, 'id'));
-      const referencedLabels = id ? labelsByTarget.get(id) ?? [] : [];
+      const referencedLabels = id ? labelsByTarget.get(`${documentKey(field)}:${id}`) ?? [] : [];
       let explicitLabelsValid = false;
       let explicitFailure = null;
       if (hasOwn(field, 'labels')) {
@@ -138,7 +158,7 @@ function formLabelAssociation(snapshot) {
         failures.push(target(field, 'Use um ID único para associar o rótulo a este campo.', {
           reason: 'ambiguous-idref', attribute: 'for'
         }));
-      } else if (referencedLabels.length > 0 || explicitLabelsValid || nestedLabel(field, index) ||
+      } else if (referencedLabels.length > 0 || explicitLabelsValid || ariaAssociated || nestedLabel(field, index) ||
           normalizeText(attribute(field, 'aria-label'))) {
         continue;
       } else {
