@@ -30,6 +30,45 @@ test('unknown media timing preserves a review task instead of declaring inapplic
   }
 });
 
+test('semantic images are reviewed even without an img tag', async () => {
+  for (const node of [
+    record('image', 'svg', { attributes: { role: 'img' }, axRole: 'image', accessibleName: 'Gráfico' }),
+    record('image', 'div', { attributes: { role: 'img' }, accessibleName: 'Mapa' })
+  ]) {
+    const value = await evaluate('content-image-alternative', snapshot([node]));
+    assert.equal(value.outcome, 'cantTell');
+    assert.equal(value.targets[0].nodeId, 'image');
+  }
+});
+
+test('image alternative evaluation honors the observed accessible name before alt', async () => {
+  assert.equal((await evaluate('content-image-alternative', snapshot([
+    record('image', 'img', { attributes: { alt: '', 'aria-label': 'Gráfico' }, accessibleName: 'Gráfico', mediaPurpose: 'content' })
+  ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('content-image-alternative', snapshot([
+    record('image', 'img', { attributes: { alt: 'Gráfico' }, accessibleName: '', mediaPurpose: 'content' })
+  ]))).outcome, 'failed');
+});
+
+test('non-native images use ARIA naming, not an unsupported alt attribute', async () => {
+  assert.equal((await evaluate('content-image-alternative', snapshot([
+    record('image', 'div', { attributes: { role: 'img', 'aria-label': 'Mapa' }, mediaPurpose: 'content' })
+  ]))).outcome, 'cantTell');
+});
+
+test('alt is not a native text alternative for an ARIA div image', async () => {
+  assert.equal((await evaluate('content-image-alternative', snapshot([
+    record('image', 'div', { attributes: { role: 'img', alt: 'Mapa' }, mediaPurpose: 'content' })
+  ]))).outcome, 'failed');
+});
+
+test('uncollected referenced or SVG names require review instead of a missing-name claim', async () => {
+  for (const node of [
+    record('image', 'div', { attributes: { role: 'img', 'aria-labelledby': 'caption' }, mediaPurpose: 'content' }),
+    record('image', 'svg', { attributes: { role: 'img' }, mediaPurpose: 'content' })
+  ]) assert.equal((await evaluate('content-image-alternative', snapshot([node]))).outcome, 'cantTell');
+});
+
 test('image alternatives fail objective absence but quality and unknown purpose remain review', async () => {
   const missing = await evaluate('content-image-alternative', snapshot([
     record('image', 'img', { mediaPurpose: 'content' })

@@ -11,6 +11,7 @@ import {
   orderTargets,
   probeCoverageCantTell,
   result,
+  roleOf,
   snapshotParts,
   tagOf,
   target
@@ -38,6 +39,7 @@ function mediaResult(snapshot, evaluate) {
 function images(nodes) {
   return nodes.filter(node => !isHidden(node) && (
     ['img', 'area'].includes(tagOf(node)) ||
+    ['img', 'image'].includes(normalizeText(node.axRole).toLowerCase() || roleOf(node)) ||
     (tagOf(node) === 'input' && normalizeText(attribute(node, 'type')).toLowerCase() === 'image') ||
     node?.imageCandidate === true
   ));
@@ -57,8 +59,17 @@ const IMAGE_RULE_PURPOSE = Object.freeze({
 });
 
 function alternativeValue(node) {
-  if (hasAttribute(node, 'alt')) return { known: true, value: attribute(node, 'alt') ?? '' };
   if (hasOwn(node, 'accessibleName')) return { known: true, value: node.accessibleName };
+  if (normalizeText(attribute(node, 'aria-labelledby'))) return { known: false, unresolved: true, value: '' };
+  const ariaLabel = normalizeText(attribute(node, 'aria-label'));
+  if (ariaLabel) return { known: true, value: ariaLabel };
+  const tag = tagOf(node);
+  const nativeAlt = ['img', 'area'].includes(tag) ||
+    (tag === 'input' && normalizeText(attribute(node, 'type')).toLowerCase() === 'image');
+  if (nativeAlt && hasAttribute(node, 'alt')) return { known: true, value: attribute(node, 'alt') ?? '' };
+  if (tag === 'svg') return { known: false, unresolved: true, value: '' };
+  const title = normalizeText(attribute(node, 'title'));
+  if (title) return { known: true, value: title };
   return { known: false, value: '' };
 }
 
@@ -73,6 +84,7 @@ function imageAlternative(snapshot, ruleId) {
     const failures = [];
     for (const node of applicable) {
       const alternative = alternativeValue(node);
+      if (alternative.unresolved) continue;
       if (expectedPurpose === 'decorative') {
         if (!alternative.known || normalizeText(alternative.value)) {
           failures.push(target(node, 'Remova a alternativa textual de uma imagem confirmada como decorativa.', {
@@ -90,7 +102,7 @@ function imageAlternative(snapshot, ruleId) {
       reason: unknown.includes(node) ? 'unknown-image-purpose' : 'verify-alternative-quality',
       declaredPurpose: mediaPurpose(node) || 'unknown'
     }));
-    return result('cantTell', 'A presença objetiva foi verificada; finalidade e equivalência exigem revisão humana.', review, [
+    return result('cantTell', 'Confirme a finalidade, a alternativa disponível e sua equivalência; dados não coletados não provam ausência.', review, [
       'Compare a informação, função ou decoração visível com a alternativa disponível.'
     ]);
   });
