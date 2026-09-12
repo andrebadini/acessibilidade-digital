@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { MEDIA_RULES } from '../../src/core/rules/media.js';
 import { runRules } from '../../src/core/rules/run-rules.js';
+import { validateCoreRuleTargetInventory } from '../../src/core/report/remediation-policy.js';
 
 function record(nodeId, tagName, overrides = {}) {
   return { nodeId, tagName, attributes: {}, text: '', children: [], parentId: null, hidden: false, selectorHint: `#${nodeId}`, role: '', ...overrides };
@@ -18,6 +19,16 @@ async function evaluate(ruleId, value) {
   assert.ok(rule, `Regra ausente: ${ruleId}`);
   return (await runRules(value, {}, [rule]))[0];
 }
+
+test('unknown media timing preserves a review task instead of declaring inapplicability', async () => {
+  for (const id of ['video-captions', 'video-transcript', 'video-audio-description', 'live-captions', 'live-audio-transcript']) {
+    const value = await evaluate(id, snapshot([record('video', 'video')]));
+    assert.equal(value.outcome, 'cantTell', id);
+    assert.equal(value.targets[0].nodeId, 'video');
+    assert.equal(value.targets[0].data.reason, 'unknown-media-timing');
+    assert.equal(validateCoreRuleTargetInventory(id, value.outcome, value.targets.map(({selectorHint, ...target}) => target)), true);
+  }
+});
 
 test('image alternatives fail objective absence but quality and unknown purpose remain review', async () => {
   const missing = await evaluate('content-image-alternative', snapshot([
@@ -80,9 +91,9 @@ test('audio control preserves video hasAudio tri-state while native audio is inh
   assert.equal((await evaluate('audio-control', snapshot([autoplay('audio')]))).outcome, 'failed');
 });
 
-test('prerecorded video with audio fails without captions and reviews track equivalence when present', async () => {
+test('prerecorded video reviews absent tracks and equivalence instead of assuming absent captions', async () => {
   const video = overrides => record('video', 'video', { mediaTiming: 'prerecorded', hasAudio: true, essentiality: 'non-essential', ...overrides });
-  assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [] })]))).outcome, 'failed');
+  assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [] })]))).outcome, 'cantTell');
   const present = await evaluate('video-captions', snapshot([video({ captionTracks: [{ kind: 'captions', srclang: 'pt-BR' }] })]));
   assert.equal(present.outcome, 'cantTell');
   assert.equal(present.targets[0].data.reason, 'verify-caption-equivalence');
@@ -99,6 +110,17 @@ test('prerecorded video with audio fails without captions and reviews track equi
   assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [{}] })]))).outcome, 'cantTell');
   assert.equal((await evaluate('video-captions', snapshot([video({ captionTracks: [{ kind: 'captions' }] })]))).outcome, 'cantTell');
   assert.equal((await evaluate('video-captions', snapshot([video({ hasAudio: false, captionTracks: [] })]))).outcome, 'inapplicable');
+});
+
+test('no caption track cannot disprove burned-in captions or an equivalent-text exception', async () => {
+  for (const tracks of [[], [{ kind: 'subtitles', srclang: 'pt-BR' }]]) {
+    const value = await evaluate('video-captions', snapshot([record('video', 'video', {
+      mediaTiming: 'prerecorded', hasAudio: true, essentiality: 'non-essential', captionTracks: tracks
+    })]));
+    assert.equal(value.outcome, 'cantTell');
+    assert.equal(value.targets[0].data.reason, 'captions-not-determined');
+    assert.equal(validateCoreRuleTargetInventory(value.ruleId, value.outcome, value.targets.map(({selectorHint, ...target}) => target)), true);
+  }
 });
 
 test('transcript, audio description, sign language and live equivalents expose review candidates', async () => {

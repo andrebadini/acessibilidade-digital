@@ -138,6 +138,8 @@ const MESSAGE = Object.freeze({
   'verify-alternative-quality': 'Compare a alternativa textual com a finalidade e o conteúdo da imagem.',
   'missing-autoplay-audio-control': 'Forneça pausa, parada ou volume independente para este áudio automático.',
   'unknown-video-audio': 'Determine se este vídeo possui áudio antes de concluir a exigência de legendas.',
+  'unknown-media-timing': 'Confirme se esta mídia é gravada ou transmitida ao vivo antes de escolher a verificação aplicável.',
+  'captions-not-determined': 'Sem faixa de legendas identificada: procure legendas na imagem ou no player. Confira se o vídeo é uma alternativa identificada para texto equivalente.',
   'unknown-media-essentiality': 'Determine a finalidade da mídia antes de concluir a exigência de legendas.',
   'missing-captions-observation': 'Colete as faixas de texto deste vídeo antes de concluir a presença de legendas.',
   'missing-captions-track': 'Forneça uma faixa de legendas para este vídeo pré-gravado com áudio.',
@@ -259,8 +261,8 @@ register(IMAGE_RULES, 'unknown-image-purpose', ['declaredPurpose']);
 register(IMAGE_RULES, 'verify-alternative-quality', ['declaredPurpose']);
 register(['audio-control'], 'missing-autoplay-audio-control', ['durationSeconds']);
 for (const reason of [
-  'unknown-video-audio', 'unknown-media-essentiality', 'missing-captions-observation',
-  'missing-captions-track', 'verify-caption-equivalence', 'malformed-captions-track',
+  'unknown-video-audio', 'unknown-media-timing', 'unknown-media-essentiality', 'missing-captions-observation',
+  'missing-captions-track', 'captions-not-determined', 'verify-caption-equivalence', 'malformed-captions-track',
 ]) register(['video-captions'], reason);
 const MEDIA_REVIEW_MESSAGES = Object.freeze({
   'audio-text-alternative': 'Compare a alternativa textual com todo o áudio pré-gravado.',
@@ -274,6 +276,7 @@ const MEDIA_REVIEW_MESSAGES = Object.freeze({
 });
 for (const [ruleId, message] of Object.entries(MEDIA_REVIEW_MESSAGES)) {
   register([ruleId], 'verify-media-equivalence', [], message);
+  register([ruleId], 'unknown-media-timing');
 }
 register(['animation-control'], 'missing-animation-control',
   ['durationSeconds', 'iterationCount', 'totalDurationSeconds']);

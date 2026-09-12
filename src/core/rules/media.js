@@ -149,9 +149,13 @@ function audioControl(snapshot) {
   });
 }
 
+const unknownTiming = node => !['prerecorded', 'live'].includes(node.mediaTiming);
+const TIMING_REVIEW = 'Confirme se esta mídia é gravada ou transmitida ao vivo antes de escolher a verificação aplicável.';
+const CAPTIONS_REVIEW = 'Sem faixa de legendas identificada: procure legendas na imagem ou no player. Confira se o vídeo é uma alternativa identificada para texto equivalente.';
+
 function videoCaptions(snapshot) {
   return mediaResult(snapshot, ({ nodes }) => {
-    const videos = nodes.filter(node => !isHidden(node) && tagOf(node) === 'video' && node?.mediaTiming === 'prerecorded');
+    const videos = nodes.filter(node => !isHidden(node) && tagOf(node) === 'video' && (node.mediaTiming === 'prerecorded' || unknownTiming(node)));
     if (videos.length === 0) return result('inapplicable', 'Não há vídeo pré-gravado com áudio aplicável.');
     const failures = [];
     const review = [];
@@ -159,6 +163,10 @@ function videoCaptions(snapshot) {
     let applicable = false;
     for (const node of videos) {
       if (node.hasAudio === false) continue;
+      if (unknownTiming(node)) {
+        review.push(target(node, TIMING_REVIEW, { reason: 'unknown-media-timing' }));
+        continue;
+      }
       if (node.hasAudio !== true) {
         incomplete = true;
         review.push(target(node, 'Determine se este vídeo possui áudio antes de concluir a exigência de legendas.', { reason: 'unknown-video-audio' }));
@@ -176,7 +184,7 @@ function videoCaptions(snapshot) {
           reason: 'missing-captions-observation'
         }));
       } else if (node.captionTracks.length === 0) {
-        failures.push(target(node, 'Forneça uma faixa de legendas para este vídeo pré-gravado com áudio.', { reason: 'missing-captions-track' }));
+        review.push(target(node, CAPTIONS_REVIEW, { reason: 'captions-not-determined' }));
       } else {
         const validTracks = node.captionTracks.filter(track =>
           track && typeof track === 'object' && !Array.isArray(track) &&
@@ -192,7 +200,7 @@ function videoCaptions(snapshot) {
           incomplete = true;
           review.push(target(node, 'Complete os metadados da faixa antes de verificar as legendas.', { reason: 'malformed-captions-track' }));
         } else {
-          failures.push(target(node, 'Forneça uma faixa de legendas para este vídeo pré-gravado com áudio.', { reason: 'missing-captions-track' }));
+          review.push(target(node, CAPTIONS_REVIEW, { reason: 'captions-not-determined' }));
         }
       }
     }
@@ -220,10 +228,12 @@ const REVIEW_MEDIA_CONFIG = Object.freeze({
 function mediaReview(snapshot, ruleId) {
   const config = REVIEW_MEDIA_CONFIG[ruleId];
   return mediaResult(snapshot, ({ nodes }) => {
-    const candidates = nodes.filter(node => !isHidden(node) && config.tags.includes(tagOf(node)) && node?.mediaTiming === config.timing);
+    const candidates = nodes.filter(node => !isHidden(node) && config.tags.includes(tagOf(node)) &&
+      (node.mediaTiming === config.timing || unknownTiming(node)));
     if (candidates.length === 0) return result('inapplicable', 'Não há mídia desta categoria no estado observado.');
     return result('cantTell', 'A alternativa de mídia exige comparação humana.', candidates.map(node =>
-      target(node, config.request, { reason: 'verify-media-equivalence' })
+      unknownTiming(node) ? target(node, TIMING_REVIEW, { reason: 'unknown-media-timing' }) :
+        target(node, config.request, { reason: 'verify-media-equivalence' })
     ), [config.request]);
   });
 }
