@@ -5,6 +5,9 @@ const BOTH_MODES = Object.freeze(['single', 'batch']);
 export const ATTACHED_COPY_RELOADED_MESSAGE =
   'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
 
+export const DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE =
+  'A página foi observada sem alterar foco, rolagem ou layout. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.';
+
 export const EXPORT_ISSUE_MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
   REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
@@ -79,6 +82,8 @@ const technicalPageDiagnostics = [
   page({ code: 'BROWSER_VERSION_UNAVAILABLE', message: 'A versão do navegador não pôde ser lida; as dimensões observadas foram preservadas.', fact: 'browser-version-unavailable' }),
   page({ code: 'DYNAMIC_PROBES_INCOMPLETE', message: 'As verificações dinâmicas atingiram o tempo limite.', fact: 'dynamic-probes-incomplete', group: 'dynamic-probes' }),
   page({ code: 'DYNAMIC_PROBES_FAILED', message: 'As verificações dinâmicas não puderam ser concluídas.', fact: 'dynamic-probes-failed', group: 'dynamic-probes' }),
+  page({ code: 'DYNAMIC_PROBES_OMITTED_PASSIVE', message: DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES, fact: 'dynamic-probes-omitted-passive', group: 'dynamic-probes', causePartial: false }),
   page({ code: 'AXE_EXECUTION_FAILED', message: 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.', fact: 'axe-partial', group: 'axe' }),
   page({ code: 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', message: 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.', fact: 'element-capture-skipped' }),
   page({ code: 'ANNOTATION_MAP_PARTIAL', message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.', fact: 'annotation-partial', group: 'annotation' }),

@@ -38,7 +38,7 @@ import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/captur
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { testedWcagRefsForCoreRule } from '../core/report/tested-criteria.js';
-import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
+import { ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import {
@@ -71,6 +71,7 @@ const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
 ]);
 const PIXEL_BOUNDARY_INTERRUPTION = new WeakSet();
 const OBSERVED_LEGACY_RASTER_BOUNDARIES = new WeakMap();
+const PASSIVE_ATTACHED_ADAPTERS = new WeakSet();
 
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
@@ -920,10 +921,12 @@ async function runLegacyAudit({
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
     try {
-      const rawProbes = chromeAdapter.runDynamicProbes
+      const passive = PASSIVE_ATTACHED_ADAPTERS.has(chromeAdapter);
+      const rawProbes = passive ? {} : chromeAdapter.runDynamicProbes
         ? await awaitStep(() => chromeAdapter.runDynamicProbes(tab.id, cdp, { signal }))
         : await awaitStep(() => runDynamicProbes({ adapter: chromeAdapter.createProbeAdapter?.(tab.id, cdp), signal }));
       const normalizedProbes = normalizeProbes(rawProbes);
+      if (passive) appendDiagnosticOnce('DYNAMIC_PROBES_OMITTED_PASSIVE', DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE, true);
       if (probesTimedOut(rawProbes, normalizedProbes)) recoverable('DYNAMIC_PROBES_INCOMPLETE', 'As verificações dinâmicas atingiram o tempo limite.');
       state.snapshot = mergeProbesIntoSnapshot(state.snapshot, normalizedProbes);
       throwIfAborted(signal);
@@ -1362,6 +1365,7 @@ function createObservedLegacyAdapter(chromeAdapter, observedTarget, capturePolic
     },
   };
   OBSERVED_LEGACY_RASTER_BOUNDARIES.set(adapter, rasterBoundary);
+  if (observedTarget.kind === 'attached') PASSIVE_ATTACHED_ADAPTERS.add(adapter);
   return adapter;
 }
 

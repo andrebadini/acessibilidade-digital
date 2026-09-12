@@ -1569,8 +1569,46 @@ test('attached execution uses no owned-tab or URL-vault effects and returns the 
   assert.equal(adapter.events.includes('create-tab'), false);
   assert.equal(adapter.events.some(value => value.startsWith('navigate:')), false);
   assert.equal(adapter.events.some(value => value.startsWith('remove-tab:')), false);
+  assert.equal(adapter.events.includes('probes'), false, 'attached observation must not change focus or layout');
+  assert.ok(adapter.events.includes('axe'));
+  assert.ok(adapter.events.includes('collect'));
+  assert.ok(result.model.pages[0].diagnostics.some(entry => entry.code === 'DYNAMIC_PROBES_OMITTED_PASSIVE'));
+  assert.equal(result.model.pages[0].diagnostics.some(entry => ['DYNAMIC_PROBES_FAILED', 'DYNAMIC_PROBES_INCOMPLETE'].includes(entry.code)), false);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.checkpoint), true);
+});
+
+test('passive attached execution cannot fall back to interactive probes or publish their results', async t => {
+  for (const variant of ['fallback', 'throw', 'timeout']) await t.test(variant, async () => {
+    const adapter = fakeAdapter({ noPixels: true });
+    let calls = 0;
+    if (variant === 'fallback') delete adapter.runDynamicProbes;
+    else adapter.runDynamicProbes = async () => {
+      calls += 1;
+      if (variant === 'throw') throw new Error('private probe failure');
+      return { timedOut: true, focus: { completed: true, focusableCount: 1, events: [
+        { backendNodeId: 1, indicatorVisible: true, areaSufficient: true, intersectionRatio: 1 },
+      ] }, reflow: { testedWidthCssPx: 320, horizontalOverflow: false } };
+    };
+    adapter.createProbeAdapter = () => { calls += 1; throw new Error('interactive fallback forbidden'); };
+    const result = await runAttachedAuditExecution({
+      auditId: `audit-passive-${variant}`, sessionCapabilityId: 'S'.repeat(22),
+      target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+        initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+      chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => {}, persistAuditModel: async () => {},
+    });
+    assert.equal(calls, 0);
+    assert.equal(result.state, 'model');
+    assert.equal(result.model.session.status, 'complete');
+    const diagnostics = result.model.pages[0].diagnostics;
+    assert.equal(diagnostics.filter(entry => entry.code === 'DYNAMIC_PROBES_OMITTED_PASSIVE').length, 1);
+    assert.equal(diagnostics.some(entry => ['DYNAMIC_PROBES_FAILED', 'DYNAMIC_PROBES_INCOMPLETE'].includes(entry.code)), false);
+    for (const id of ['focus-visible', 'responsive-reflow', 'target-size-minimum']) {
+      assert.equal(result.model.ruleResults.find(rule => rule.ruleId === id)?.outcome, 'cantTell', id);
+    }
+  });
 });
 
 test('attached full-evidence derives one map from the authorized pristine source after element capture', async () => {
@@ -1596,6 +1634,7 @@ test('attached full-evidence derives one map from the authorized pristine source
   assert.equal(result.state, 'model');
   assert.equal(result.model.session.status, 'complete');
   assert.equal(adapter.counts.fullPageCalls, 1);
+  assert.equal(adapter.events.includes('probes'), false, 'authorized pixels do not authorize interactive probes');
   assert.equal(adapter.events.filter(event => event === 'map').length, 1);
   const map = result.model.evidence.find(artifact => artifact.kind === 'announcement-map');
   const original = result.model.evidence.find(artifact => artifact.kind === 'full-page');
@@ -4128,14 +4167,15 @@ test('stores readable sanitized snippets and the report encodes them exactly onc
     manifestVersion: '0.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/147.0.0.0',
   });
   const html = renderHtmlReport(report);
-  const encodedSnippet = html.match(/<pre><code>([^]*?)<\/code><\/pre>/u)?.[1];
+  const decodedSnippets = [...html.matchAll(/<pre><code>([^]*?)<\/code><\/pre>/gu)]
+    .map(match => decodeHtmlText(match[1]));
 
   assert.match(html, /&lt;iframe title=&quot;Mapa&quot;&gt;&lt;\/iframe&gt;/u);
   assert.match(html, /&lt;button aria-label=&quot;Abrir&quot;&gt;Abrir&lt;\/button&gt;/u);
   assert.doesNotMatch(html, /&amp;lt;(?:iframe|button)/u);
   assert.doesNotMatch(html, /TOPSECRET|javascript:|onload=/iu);
   assert.equal((html.match(/<script>/gu) || []).length, 1, 'somente o script estático do relatório é permitido');
-  assert.equal(decodeHtmlText(encodedSnippet), evidence.snippet);
+  assert.ok(decodedSnippets.includes(evidence.snippet), 'the matching evidence is encoded once, independently of report ordering');
 });
 
 function decodeHtmlText(value) {
