@@ -181,6 +181,62 @@ export function collectRuntimePageData() {
     }
   };
   visit(document);
+  // Reuse a single read-only geometry sample. No focus, scroll, emulation or
+  // synthetic input is needed to measure ordinary visible native controls.
+  const geometry = new Map(elements.map(element => [element, {
+    rect: element.getBoundingClientRect(), computed: getComputedStyle(element)
+  }]));
+  const composedParent = element => element.assignedSlot || element.parentElement || element.getRootNode()?.host || null;
+  const containsComposed = (parent, child) => {
+    for (let current = child; current; current = composedParent(current)) if (current === parent) return true;
+    return false;
+  };
+  const nativeTarget = element => ['button', 'input', 'select', 'textarea'].includes(element.localName) ||
+    (element.localName === 'a' && element.hasAttribute('href'));
+  const pseudoContent = new Map();
+  const hasPseudoContent = element => {
+    if (!pseudoContent.has(element)) pseudoContent.set(element,
+      ['::before', '::after'].some(pseudo => !['none', 'normal'].includes(getComputedStyle(element, pseudo).content)));
+    return pseudoContent.get(element);
+  };
+  const targetSizeRect = element => {
+    try {
+      // Local frame coordinates cannot prove scaling/clipping by its embedder.
+      if (window !== window.top) return null;
+      const { rect } = geometry.get(element);
+      if (!nativeTarget(element) || element.matches(':disabled') || element.getClientRects().length !== 1 ||
+        ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0 ||
+        rect.x < 0 || rect.y < 0 || rect.right > innerWidth || rect.bottom > innerHeight) return null;
+      for (let current = element; current; current = composedParent(current)) {
+        const css = geometry.get(current)?.computed || getComputedStyle(current);
+        if (css.display === 'none' || css.visibility !== 'visible' || Number(css.opacity) !== 1 ||
+          css.pointerEvents === 'none' || css.transform !== 'none' || css.perspective !== 'none' ||
+          css.clipPath !== 'none' || !['auto', 'none'].includes(css.clip) || css.maskImage !== 'none' ||
+          (current !== element && (css.overflowX !== 'visible' || css.overflowY !== 'visible' || hasPseudoContent(current)))) return null;
+      }
+      for (const [other, sample] of geometry) {
+        if (other === element || containsComposed(other, element)) continue;
+        const descendant = containsComposed(element, other);
+        if (descendant && !nativeTarget(other) && !other.hasAttribute('role') && !other.hasAttribute('tabindex')) continue;
+        const css = sample.computed;
+        if (css.display === 'none' || css.visibility !== 'visible') continue;
+        const box = sample.rect;
+        if (box.width > 0 && box.height > 0 && box.left < rect.right && box.right > rect.left &&
+          box.top < rect.bottom && box.bottom > rect.top) return null;
+        // A pseudo-element can paint beyond its originating element's box.
+        // Without its own geometry, do not certify this target from bounds alone.
+        if (hasPseudoContent(other)) return null;
+      }
+      const root = element.getRootNode();
+      for (const x of [rect.left + 0.5, rect.left + rect.width / 2, rect.right - 0.5]) {
+        for (const y of [rect.top + 0.5, rect.top + rect.height / 2, rect.bottom - 0.5]) {
+          const hit = root.elementFromPoint(x, y);
+          if (!hit || !containsComposed(element, hit)) return null;
+        }
+      }
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    } catch { return null; }
+  };
 
   const signature = (element, token) => {
     try {
@@ -215,20 +271,21 @@ export function collectRuntimePageData() {
   };
 
   const nodes = elements.map((element, order) => {
-    const computed = getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
+    const { computed, rect } = geometry.get(element);
     const styles = {};
     for (const name of styleNames) styles[name] = computed.getPropertyValue(name);
     const sensitiveControl = isSensitiveControl(element);
     const visible = computed.display !== 'none' && computed.visibility !== 'hidden' && Number(computed.opacity) !== 0 && rect.width > 0 && rect.height > 0;
     const nativeControl = ['button', 'input', 'select', 'textarea'].includes(element.localName);
     const disabled = nativeControl && element.matches(':disabled');
+    const measuredTarget = targetSizeRect(element);
     const record = {
       order,
       tagName: element.localName,
       selectorHint: selector(element),
       viewportRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       documentRect: { x: rect.x + scrollX, y: rect.y + scrollY, width: rect.width, height: rect.height },
+      ...(measuredTarget ? { targetSizeRect: measuredTarget } : {}),
       styles,
       contrastReliable: contrastReliable(element),
       backgroundImageKind: backgroundKind(computed.getPropertyValue('background-image')),

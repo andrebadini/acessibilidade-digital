@@ -302,6 +302,8 @@ function copyRuntime(record, base) {
   const documentRect = copyRect(record?.documentRect);
   if (viewportRect) result.viewportRect = viewportRect;
   if (documentRect) result.documentRect = documentRect;
+  const targetSizeRect = copyRect(record?.targetSizeRect);
+  if (targetSizeRect) result.targetSizeRect = targetSizeRect;
   if (record?.styles && typeof record.styles === 'object' && !Array.isArray(record.styles)) {
     result.styles = {};
     for (const [name, value] of Object.entries(record.styles)) {

@@ -86,6 +86,18 @@ function addViewport(raw, content, documentIndex = 0) {
   return raw;
 }
 
+test('columnar runtime target area survives the existing identity join without trusting layout bounds', () => {
+  const raw = collectorFixture();
+  const runtimeButton = raw.pageData[0].result.nodes.find(node => node.backendNodeId === 6);
+  runtimeButton.targetSizeRect = { x: 10, y: 20, width: 30, height: 30 };
+  raw.domSnapshot.documents[0].layout = { nodeIndex: [5], bounds: [[0, 0, 200, 200]], styles: [[]] };
+  const snapshot = normalizeSnapshot(raw);
+  const button = snapshot.nodes.find(node => node.backendNodeId === 6);
+  assert.deepEqual(button.targetSizeRect, { x: 10, y: 20, width: 30, height: 30 });
+  delete runtimeButton.targetSizeRect;
+  assert.equal(normalizeSnapshot(raw).nodes.find(node => node.backendNodeId === 6).targetSizeRect, undefined);
+});
+
 test('normalization preserves a top-document zoom restriction for the ABNT zoom rule', async () => {
   const raw = addViewport(collectorFixture(), 'width=device-width, user-scalable=no');
   const snapshot = normalizeSnapshot(raw);

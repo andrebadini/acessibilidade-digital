@@ -922,7 +922,10 @@ async function runLegacyAudit({
 
     try {
       const passive = PASSIVE_ATTACHED_ADAPTERS.has(chromeAdapter);
-      const rawProbes = passive ? {} : chromeAdapter.runDynamicProbes
+      const rawProbes = passive ? { targetSizes: state.snapshot.nodes.flatMap(node => {
+        const rect = node.targetSizeRect;
+        return rect ? [{ nodeId: node.nodeId, width: rect.width, height: rect.height, exception: 'unknown' }] : [];
+      }) } : chromeAdapter.runDynamicProbes
         ? await awaitStep(() => chromeAdapter.runDynamicProbes(tab.id, cdp, { signal }))
         : await awaitStep(() => runDynamicProbes({ adapter: chromeAdapter.createProbeAdapter?.(tab.id, cdp), signal }));
       const normalizedProbes = normalizeProbes(rawProbes);

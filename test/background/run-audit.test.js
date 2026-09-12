@@ -1578,6 +1578,36 @@ test('attached execution uses no owned-tab or URL-vault effects and returns the 
   assert.equal(Object.isFrozen(result.checkpoint), true);
 });
 
+test('passive attached execution uses same-collection target areas without interactive probes', async t => {
+  for (const [size, missing, partial, minimum, enhanced] of [
+    [30, false, false, 'passed', 'cantTell'],
+    [44, false, false, 'passed', 'passed'],
+    [20, false, false, 'cantTell', 'cantTell'],
+    [44, true, false, 'cantTell', 'cantTell'],
+    [44, false, true, 'cantTell', 'cantTell'],
+  ]) await t.test(`${size}/missing=${missing}/partial=${partial}`, async () => {
+    const page = rawPage();
+    for (const node of page.nodes.filter(node => node.tagName === 'button')) {
+      node.targetSizeRect = { x: 10, y: 20, width: size, height: size };
+    }
+    if (missing) delete page.nodes[1].targetSizeRect;
+    if (partial) page.coverage.runtime.outcome = 'partial';
+    const adapter = fakeAdapter({ noPixels: true, page });
+    const result = await runAttachedAuditExecution({
+      auditId: 'audit-passive-area', sessionCapabilityId: 'S'.repeat(22),
+      target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a',
+        initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+      capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+      chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => {}, persistAuditModel: async () => {},
+    });
+    assert.equal(result.state, 'model');
+    assert.equal(result.model.ruleResults.find(rule => rule.ruleId === 'target-size-minimum')?.outcome, minimum);
+    assert.equal(result.model.ruleResults.find(rule => rule.ruleId === 'target-size-enhanced')?.outcome, enhanced);
+    assert.equal(adapter.events.includes('probes'), false);
+  });
+});
+
 test('passive attached execution cannot fall back to interactive probes or publish their results', async t => {
   for (const variant of ['fallback', 'throw', 'timeout']) await t.test(variant, async () => {
     const adapter = fakeAdapter({ noPixels: true });
