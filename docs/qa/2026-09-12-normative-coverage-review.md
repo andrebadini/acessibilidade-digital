@@ -6,6 +6,14 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Espaçamento inicial e alternativa de ajuste — 5.12.1 a 5.12.4
+
+Texto normativo conferido nas páginas impressas 27–28: cada item admite o espaçamento inicial suficiente OU mecanismo de configuração sem perda de conteúdo/funcionalidade. A função compartilhada anterior ignorava o primeiro caminho e consumia `textSpacingObservation`, que não possui produtor em `src`. Também atribuía a mesma perda conjunta aos quatro itens sem demonstrar a dimensão responsável.
+
+RED: baseline suficiente resultava em cantTell, texto de controle inativo suficiente também, e observação sintética conjunta resultava em failed nos quatro itens. Nova verificação usa estilos calculados dos proprietários de texto direto, preservando fonte própria de spans: linha ≥1,5×fonte; letra ≥0,12×fonte; palavra ≥0,16×fonte. Comprimentos devem ser pixels válidos e fonte positiva. Valores insuficientes, normal, ausentes ou ambíguos exigem revisão da alternativa; não causam falha automática. A exceção de inatividade do contraste não é transferida para espaçamento. A aprovação se limita ao valor inicial observado, não afirma teste de ajustes nem ausência de perdas em outros estados. Distância entre parágrafos ainda exige geometria/revisão e não recebe aprovação a partir das outras dimensões.
+
+GREEN 43/43 nos testes focados de regras visuais e contratos de integração, com limiares exatos, fontes internas maiores, privacidade/ocultação, separação entre dimensões e rejeição de flags sintéticas como prova. Diff-check verde; revisão independente dos três arquivos aprovada sem C/I concreto, com os 43 testes repetidos pelo revisor. O reaproveitamento da fixture columnar de contraste evita outra representação simulada do mesmo protocolo; não altera o normalizador neste incremento.
+
 ### Contraste textual: origem da amostra e inatividade — 5.11.2/5.11.3
 
 A definição 3.56 (página impressa 9) inclui texto de componente inativo em plano secundário, exceção de 5.11.2/5.11.3 (páginas 26–27). Não se trata apenas da exceção de contraste não textual em 5.11.4.

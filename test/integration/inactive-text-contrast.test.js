@@ -104,3 +104,86 @@ test('active nested links and external labels are not exempted by an inactive bu
     assert.deepEqual(result.targets.map(t => snapshot.nodes.find(n => n.nodeId === t.nodeId).tagName), ['a', 'label']);
   }
 });
+
+async function spacing(records, ruleId) {
+  const snapshot = normalizeSnapshot(capture(records));
+  return (await runRules(snapshot, {}, VISUAL_RULES.filter(rule => rule.id === ruleId)))[0];
+}
+
+test('ABNT baseline spacing is evaluated independently for each spacing dimension', async () => {
+  const records = [
+    { tag: 'P', parent: 2, styles: { 'line-height': '24px', 'letter-spacing': '1.92px', 'word-spacing': '2.56px' } },
+    { tag: '#text', parent: 3, text: 'Texto com espaçamento suficiente' }
+  ];
+  for (const id of ['line-spacing', 'letter-spacing', 'word-spacing']) {
+    assert.equal((await spacing(records, id)).outcome, 'passed');
+  }
+  assert.equal((await spacing(records, 'paragraph-spacing')).outcome, 'cantTell');
+});
+
+test('spacing below baseline requires checking the alternative mechanism, not an automatic failure', async () => {
+  for (const [id, property, value] of [
+    ['line-spacing', 'line-height', '23.99px'],
+    ['letter-spacing', 'letter-spacing', '1.919px'],
+    ['word-spacing', 'word-spacing', '2.559px']
+  ]) {
+    const result = await spacing([
+      { tag: 'P', parent: 2, styles: { [property]: value } },
+      { tag: '#text', parent: 3, text: 'Texto' }
+    ], id);
+    assert.equal(result.outcome, 'cantTell');
+    assert.deepEqual(result.targets, []);
+  }
+});
+
+test('inline text with a larger font prevents an unsupported baseline approval', async () => {
+  const result = await spacing([
+    { tag: 'P', parent: 2, styles: { 'line-height': '24px' } },
+    { tag: '#text', parent: 3, text: 'Texto inicial' },
+    { tag: 'SPAN', parent: 3, styles: { 'font-size': '32px', 'line-height': '24px' } },
+    { tag: '#text', parent: 5, text: 'Trecho maior' }
+  ], 'line-spacing');
+  assert.equal(result.outcome, 'cantTell');
+});
+
+test('a disabled control does not create a text-spacing exception', async () => {
+  assert.equal((await spacing([
+    { tag: 'BUTTON', parent: 2, attrs: { disabled: '' }, styles: { 'line-height': '24px' } },
+    { tag: '#text', parent: 3, text: 'Enviar' }
+  ], 'line-spacing')).outcome, 'passed');
+});
+
+test('spacing does not interpret non-pixel or missing computed values as successful measurements', async () => {
+  for (const value of ['normal', '1.5em', '150%', '24px extra', '', 'Infinitypx']) {
+    assert.equal((await spacing([
+      { tag: 'P', parent: 2, styles: { 'line-height': value } },
+      { tag: '#text', parent: 3, text: 'Texto' }
+    ], 'line-spacing')).outcome, 'cantTell');
+  }
+  assert.equal((await spacing([
+    { tag: 'P', parent: 2, styles: { 'font-size': '0px', 'line-height': '24px' } },
+    { tag: '#text', parent: 3, text: 'Texto' }
+  ], 'line-spacing')).outcome, 'cantTell');
+});
+
+test('a shortcoming in line spacing does not invalidate sufficient letter and word spacing', async () => {
+  const records = [
+    { tag: 'P', parent: 2, styles: { 'line-height': '16px', 'letter-spacing': '1.92px', 'word-spacing': '2.56px' } },
+    { tag: '#text', parent: 3, text: 'Texto' }
+  ];
+  assert.equal((await spacing(records, 'line-spacing')).outcome, 'cantTell');
+  for (const id of ['letter-spacing', 'word-spacing']) assert.equal((await spacing(records, id)).outcome, 'passed');
+});
+
+test('private and hidden text cannot contaminate the observed spacing baseline', async () => {
+  const records = [
+    { tag: 'P', parent: 2, styles: { 'line-height': '24px' } },
+    { tag: '#text', parent: 3, text: 'Texto público' },
+    { tag: 'DIV', parent: 2, attrs: { contenteditable: 'true' } },
+    { tag: '#text', parent: 5, text: 'PRIVATE-SPACING-SENTINEL' },
+    { tag: 'DIV', parent: 2, attrs: { hidden: '' } },
+    { tag: 'SPAN', parent: 7 }, { tag: '#text', parent: 8, text: 'Oculto' }
+  ];
+  assert.equal((await spacing(records, 'line-spacing')).outcome, 'passed');
+  assert.equal(JSON.stringify(normalizeSnapshot(capture(records))).includes('PRIVATE-SPACING-SENTINEL'), false);
+});

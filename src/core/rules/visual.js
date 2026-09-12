@@ -258,22 +258,31 @@ function exceptionObservation(snapshot, field, failureProperty, label) {
   });
 }
 
-function textSpacing(snapshot) {
-  return visualResult(snapshot, ({ document, nodes }) => {
-    const observation = document.textSpacingObservation;
-    if (!hasOwn(document, 'textSpacingObservation') || !observation || typeof observation !== 'object' || observation.applied !== true || typeof observation.lossOfContent !== 'boolean') {
-      return result('cantTell', 'A página não foi observada com as substituições de espaçamento aplicadas.', [], [
-        'Aplique os valores de teste de linha, parágrafo, letras e palavras e observe perda ou sobreposição.'
-      ]);
-    }
-    if (!observation.lossOfContent) return result('passed', 'Não houve perda de conteúdo com os espaçamentos de teste.');
+function cssPixelLength(value) {
+  const match = typeof value === 'string' && value.trim().match(/^(-?(?:\d+|\d*\.\d+))px$/u);
+  return match && finite(Number(match[1])) ? Number(match[1]) : null;
+}
+
+function textSpacing(snapshot, dimension) {
+  return visualResult(snapshot, ({ nodes }) => {
+    if (!dimension) return result('cantTell', 'A distância entre os parágrafos e a alternativa de ajuste precisam de verificação.', [], [
+      'Verifique se os parágrafos têm distância de pelo menos duas vezes o tamanho da fonte, ou se há mecanismo de ajuste que alcance esse valor sem perder conteúdo ou funções.'
+    ]);
     const index = nodeIndex(nodes);
-    const ids = Array.isArray(observation.affectedNodeIds) ? observation.affectedNodeIds : [];
-    const targets = ids.map(id => index.get(String(id))).filter(Boolean).map(node =>
-      target(node, 'Corrija a perda ou sobreposição causada pelos espaçamentos de teste.', { reason: 'text-spacing-content-loss' })
-    );
-    if (targets.length === 0) targets.push(documentTarget(document, 'Corrija a perda de conteúdo causada pelos espaçamentos de teste.', { reason: 'text-spacing-content-loss' }));
-    return result('failed', 'A substituição de espaçamento causou perda ou sobreposição de conteúdo.', targets);
+    const candidates = nodes.filter(node => normalizeText(node.text) && !isHidden(node) &&
+      node.textContrastScope !== 'aggregate' && !ancestorNodes(node, index).ancestors.some(isHidden));
+    const sufficient = candidates.length > 0 && candidates.every(node => {
+      const fontSize = cssPixelLength(node.styles?.['font-size'] ?? node.styles?.fontSize);
+      const spacing = cssPixelLength(node.styles?.[dimension.property]);
+      return fontSize !== null && fontSize > 0 && spacing !== null && spacing >= dimension.ratio * fontSize;
+    });
+    if (sufficient) return result('passed', `O espaçamento ${dimension.label} nos textos observados já atende ao valor mínimo da ABNT, conforme os estilos calculados.`, [], [
+      'Esta verificação examina o valor inicial observado; não simula ajustes nem comprova ausência de recorte ou sobreposição em outros estados.'
+    ]);
+    return result('cantTell', `O valor inicial de espaçamento ${dimension.label} não foi comprovado para todo o texto; a alternativa de ajuste precisa de revisão.`, [], [
+      `Verifique se existe mecanismo para ajustar o espaçamento ${dimension.label} a pelo menos ${dimension.displayRatio} vez o tamanho da fonte, sem perder conteúdo ou funções.`,
+      'Um valor inicial menor, sozinho, não comprova descumprimento: a norma também admite a alternativa de ajuste. Compare antes e depois e procure texto cortado, sobreposto ou controles inacessíveis.'
+    ]);
   });
 }
 
@@ -352,10 +361,10 @@ export const VISUAL_RULES = createRuleRegistry([
   definition('component-contrast', snapshot => nonTextContrast(snapshot, 'componentContrast', 'componente')),
   definition('graphic-object-contrast', snapshot => nonTextContrast(snapshot, 'graphicContrast', 'objeto gráfico')),
   definition('focus-indicator-contrast', snapshot => nonTextContrast(snapshot, 'focusContrast', 'indicador de foco')),
-  definition('line-spacing', textSpacing),
-  definition('paragraph-spacing', textSpacing),
-  definition('letter-spacing', textSpacing),
-  definition('word-spacing', textSpacing),
+  definition('line-spacing', snapshot => textSpacing(snapshot, { property: 'line-height', ratio: 1.5, displayRatio: '1,5', label: 'entre linhas' })),
+  definition('paragraph-spacing', snapshot => textSpacing(snapshot, null)),
+  definition('letter-spacing', snapshot => textSpacing(snapshot, { property: 'letter-spacing', ratio: 0.12, displayRatio: '0,12', label: 'entre letras' })),
+  definition('word-spacing', snapshot => textSpacing(snapshot, { property: 'word-spacing', ratio: 0.16, displayRatio: '0,16', label: 'entre palavras' })),
   definition('text-block-alignment', snapshot => textBlock(snapshot, 'textAlign', value => normalizeText(value).toLowerCase() === 'justify', {
     subject: 'alinhamento', message: 'Evite justificar este bloco de texto.', reason: 'justified-text-block', failed: 'Há bloco de texto justificado.', passed: 'Os blocos observados não estão justificados.', request: 'Colete o alinhamento calculado de cada bloco.'
   })),

@@ -277,8 +277,11 @@ test('orientation, reflow, resizing and text spacing require completed observati
   for (const ruleId of ['line-spacing', 'paragraph-spacing', 'letter-spacing', 'word-spacing']) {
     assert.equal((await evaluate(ruleId, snapshot([], {
       textSpacingObservation: { applied: true, lossOfContent: true, affectedNodeIds: [] }
-    }))).outcome, 'failed');
+    }))).outcome, 'cantTell');
     assert.equal((await evaluate(ruleId, snapshot())).outcome, 'cantTell');
+    assert.equal((await evaluate(ruleId, snapshot([], {
+      textSpacingObservation: { applied: true, lossOfContent: false }
+    }))).outcome, 'cantTell');
   }
 });
 
