@@ -232,6 +232,42 @@ const SPECIFIC = {
     steps: ['Localize um bloco de texto e confira o tamanho da fonte e o ajuste de espaçamento entre palavras. A equipe técnica pode verificar word-spacing; não confunda esse ajuste com o espaçamento entre letras.', ...SPACING_REVIEW],
     example: 'para uma fonte de 16 pixels, o ajuste de referência entre palavras é 2,56 pixels (16 × 0,16). Depois do ajuste, uma instrução pode quebrar em mais linhas, mas nenhuma palavra fica inacessível.'
   },
+  '5.9.9': {
+    impact: 'Quando um formulário apenas pinta um campo de vermelho ou diz “erro”, a pessoa pode não perceber o problema ou não saber qual informação precisa corrigir.',
+    correction: 'Descreva o erro em texto e identifique o campo correspondente. Não dependa apenas de cor, ícone ou posição na tela.',
+    steps: ['Se já houver um erro exibido, leia sua mensagem e localize o campo indicado. Ela explica o que está errado e permite reconhecer onde corrigir?', 'Se não houver erro no estado observado, isso não prova atendimento nem falha. Para testar, use um ambiente autorizado e dados fictícios; não envie pedidos, pagamentos, inscrições ou dados pessoais reais apenas para provocar uma mensagem.', 'Registre a mensagem e a identificação do campo, ocultando os dados preenchidos. “E-mail: falta o sinal @” descreve o problema; “algo deu errado” sozinho não identifica o campo nem o erro.'],
+    example: 'um campo de data mostra “Data de nascimento: informe uma data válida”. A pessoa identifica o campo e entende a natureza do erro sem precisar distinguir sua cor.'
+  },
+  '5.9.10': {
+    impact: 'Identificar um erro no formulário nem sempre ensina como resolvê-lo. Sem uma sugestão compreensível, a pessoa pode repetir tentativas sem conseguir concluir.',
+    correction: 'Quando uma forma de correção for conhecida, explique o que fazer. A norma admite não fornecer uma sugestão que coloque em risco a segurança ou o propósito do conteúdo.',
+    steps: ['Examine uma mensagem de erro já exibida ou um teste autorizado com dados fictícios. Além de dizer o que houve, a mensagem orienta como corrigir quando essa orientação é conhecida?', 'Confira a exceção de segurança no caso concreto. Por exemplo, uma resposta de autenticação não deve revelar informações sensíveis apenas para ser mais detalhada; isso não justifica omitir todas as orientações de um formulário comum.', 'Registre a sugestão existente ou ausente e a eventual justificativa da exceção. Não conclua falha só porque a mensagem é curta, nem presuma uma justificativa de segurança sem evidência.'],
+    example: '“Use o formato dia/mês/ano, como 15/08/2000” ajuda a corrigir uma data. Trata-se de orientação de formato, não de dado real do usuário.'
+  },
+  '5.9.12': {
+    impact: 'Um erro em formulário crítico pode gerar consequências importantes, como assumir uma obrigação, realizar um pagamento ou perder dados. A pessoa precisa ter uma oportunidade de evitar ou reverter o engano.',
+    correction: 'Ofereça uma forma de reverter, verificar ou confirmar os dados em formulários críticos. São alternativas: não é necessário exigir as três simultaneamente.',
+    steps: ['Identifique a finalidade e as consequências do formulário antes de classificá-lo como crítico. Uma tela isolada não demonstra todo o processo.', 'Em ambiente de teste autorizado, procure uma etapa de conferência ou confirmação, uma possibilidade de correção ou um procedimento de reversão. Verifique se a alternativa realmente está disponível e funciona.', 'Não conclua uma operação real com consequências financeiras, jurídicas ou perda de dados para fazer a auditoria. Registre as etapas verificadas, a alternativa encontrada e o que não pôde ser testado.'],
+    example: 'antes de confirmar uma transferência em ambiente de teste, uma tela permite conferir destinatário e valor e voltar para corrigir. A mera existência de um botão “Continuar” não comprova essa proteção.'
+  },
+  '5.9.15': {
+    impact: 'Pedir novamente informações já fornecidas no mesmo processo aumenta o esforço e a chance de erro, especialmente para quem tem dificuldade de memória ou de digitação.',
+    correction: 'Preencha automaticamente os dados já informados ou disponibilize-os para seleção. Considere as exceções da norma: reentrada essencial, necessária por segurança ou informação anterior que deixou de ser válida.',
+    steps: ['Acompanhe as etapas do mesmo processo em um teste autorizado e identifique quais informações são pedidas novamente. Comparar apenas nomes parecidos de campos não demonstra repetição do mesmo dado.', 'Confira se o dado anterior já vem preenchido ou pode ser selecionado sem redigitação. Se for exigido novamente, investigue a necessidade concreta de segurança, essencialidade ou atualização.', 'Registre a sequência e a alternativa ou justificativa encontrada, sem incluir os valores pessoais usados. Não presuma falha nem atendimento apenas pela presença de autocomplete no código.'],
+    example: 'em um formulário de compra, uma opção “Usar o mesmo endereço para cobrança” permite reaproveitar o endereço informado anteriormente, sem digitá-lo outra vez.'
+  },
+  '5.9.16': {
+    impact: 'Uma validação que exige enxergar imagens, ouvir sons ou executar um movimento específico pode impedir uma pessoa de concluir o formulário.',
+    correction: 'Ofereça uma alternativa de validação que não exija a mesma percepção ou capacidade motora do método original.',
+    steps: ['Localize a validação e identifique a exigência: reconhecer imagens, ouvir um áudio, arrastar uma peça ou outro movimento, por exemplo.', 'Procure e teste, em contexto autorizado, uma alternativa que dispense essa mesma exigência. Trocar uma imagem por outra imagem não elimina a exigência de enxergar.', 'Registre a exigência, o caminho alternativo e se ele permite concluir a validação. A simples presença de um ícone de acessibilidade não comprova uma alternativa utilizável.'],
+    example: 'uma validação por arrastar oferece também um método que pode ser concluído sem esse movimento. Ainda é necessário verificar se a alternativa não introduz outra barreira para a pessoa que a utiliza.'
+  },
+  '5.9.18': {
+    impact: 'No formulário de autenticação, memorizar informações, resolver um desafio ou transcrever dados sem ajuda pode impedir o acesso de pessoas com limitações cognitivas.',
+    correction: 'Evite testes de função cognitiva na autenticação ou ofereça alternativa ou assistência. No requisito mínimo, a norma também admite reconhecimento de objetos ou identificação de conteúdo não textual fornecido pelo usuário.',
+    steps: ['Examine o processo de autenticação completo, não apenas o campo de senha. Identifique se exige memorizar, calcular, resolver um desafio ou transcrever informação.', 'Verifique se existe método alternativo ou assistência que permita concluir, como uso de gerenciador de senhas ou colagem quando aplicáveis. Teste somente com conta de teste autorizada; não registre senhas, códigos ou tokens no relatório.', 'Se a conclusão depender das exceções de reconhecimento de objetos ou de conteúdo não textual fornecido pelo usuário, registre qual se aplica. Essas duas alternativas pertencem ao requisito mínimo 5.9.18 e não demonstram, sozinhas, atendimento à recomendação aprimorada 5.9.17.'],
+    example: 'um acesso permite que o gerenciador de senhas preencha as credenciais, sem exigir que a pessoa as memorize e digite manualmente. É preciso avaliar também as demais etapas e desafios desse acesso.'
+  },
   '5.12.5': {
     impact: 'Pessoas com dificuldade de leitura podem perder a sequência quando o início das linhas muda de posição. No texto justificado, espaços desiguais entre palavras para alinhar as duas bordas também podem dificultar acompanhar o parágrafo.',
     correction: 'Como melhoria recomendada, alinhe os blocos à esquerda para idiomas lidos da esquerda para a direita e à direita para os de leitura inversa. Se outro alinhamento for essencial à compreensão, registre essa justificativa.',

@@ -20,6 +20,48 @@ test('aria-labelledby associates a field with collected label text', async () =>
   assert.equal((await evaluate('form-label-association', value)).outcome, 'passed');
 });
 
+test('a wrapping label with an explicit for cannot label a different nested field', async () => {
+  const value = snapshot([
+    record('label', 'label', { attributes: { for: 'other' }, children: ['nested'], text: 'Outro campo' }),
+    record('nested', 'input', { parentId: 'label', attributes: { id: 'nested' } }),
+    record('other', 'input', { attributes: { id: 'other' } }),
+  ]);
+  const result = await evaluate('form-label-association', value);
+  assert.equal(result.outcome, 'failed');
+  assert.deepEqual(result.targets.map(target => target.nodeId), ['nested']);
+});
+
+test('an implicit wrapping label labels only its first labelable descendant', async () => {
+  const value = snapshot([
+    record('label', 'label', { children: ['first', 'second'], text: 'Nome' }),
+    record('first', 'input', { parentId: 'label' }),
+    record('second', 'input', { parentId: 'label' }),
+  ]);
+  assert.deepEqual((await evaluate('form-label-association', value)).targets.map(target => target.nodeId), ['second']);
+});
+
+test('same field names do not establish a group across different form owners or documents', async () => {
+  const f1 = record('f1', 'form', { attributes: { id: 'f1' }, children: ['a'] });
+  const f2 = record('f2', 'form', { attributes: { id: 'f2' }, children: ['b'] });
+  const a = record('a', 'input', { parentId: 'f1', attributes: { type: 'radio', name: 'choice' } });
+  const b = record('b', 'input', { parentId: 'f2', attributes: { type: 'radio', name: 'choice' } });
+  assert.equal((await evaluate('related-fields-grouping', snapshot([f1, a, f2, b]))).outcome, 'inapplicable');
+  b.attributes.form = 'f1';
+  assert.equal((await evaluate('related-fields-grouping', snapshot([f1, a, f2, b]))).outcome, 'failed');
+  delete b.attributes.form;
+  a.parentId = null; b.parentId = null; b.frameId = 'child';
+  assert.equal((await evaluate('related-fields-grouping', snapshot([a, b]))).outcome, 'inapplicable');
+});
+
+test('an empty form reference has no owner even when a form has an empty id', async () => {
+  const value = snapshot([
+    record('form', 'form', { attributes: { id: '' }, children: ['a'] }),
+    record('a', 'input', { parentId: 'form', attributes: { type: 'radio', name: 'choice' } }),
+    record('b', 'input', { attributes: { type: 'radio', name: 'choice', form: '' } }),
+  ]);
+  assert.equal((await evaluate('related-fields-grouping', value)).outcome, 'inapplicable');
+});
+
 test('native labelable elements are valid targets even when they are not text fields', async () => {
   for (const tag of ['button', 'meter', 'output', 'progress']) {
     const value = snapshot([

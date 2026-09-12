@@ -57,9 +57,9 @@ function formFieldLabel(snapshot) {
   });
 }
 
-function nestedLabel(field, index) {
+function nestedLabel(field, index, ids) {
   const chain = ancestorNodes(field, index);
-  return chain.complete && chain.ancestors.some(node => tagOf(node) === 'label');
+  return chain.complete && chain.ancestors.some(node => labelAssociatedWithField(node, field, ids, index));
 }
 
 const documentKey = node => JSON.stringify([node.frameId ?? 'main', node.framePath ?? []]);
@@ -71,7 +71,10 @@ function labelAssociatedWithField(label, field, ids, index) {
     return matches.length === 1 && matches[0] === field;
   }
   const chain = ancestorNodes(field, index);
-  return chain.complete && chain.ancestors.includes(label);
+  if (!chain.complete || !chain.ancestors.includes(label)) return false;
+  const first = [...index.values()].find(node => isNativeLabelable(node) &&
+    documentKey(node) === documentKey(label) && ancestorNodes(node, index).ancestors.includes(label));
+  return first === field;
 }
 
 function formLabelAssociation(snapshot) {
@@ -158,7 +161,7 @@ function formLabelAssociation(snapshot) {
         failures.push(target(field, 'Use um ID único para associar o rótulo a este campo.', {
           reason: 'ambiguous-idref', attribute: 'for'
         }));
-      } else if (referencedLabels.length > 0 || explicitLabelsValid || ariaAssociated || nestedLabel(field, index) ||
+      } else if (referencedLabels.length > 0 || explicitLabelsValid || ariaAssociated || nestedLabel(field, index, ids) ||
           normalizeText(attribute(field, 'aria-label'))) {
         continue;
       } else {
@@ -175,22 +178,38 @@ function formLabelAssociation(snapshot) {
 
 function relatedFieldsGrouping(snapshot) {
   return formResult(snapshot, ({ nodes }) => {
+    const index = nodeIndex(nodes);
+    let incomplete = false;
     const groupedTypes = fieldsOf(nodes).filter(node => {
       const type = normalizeText(attribute(node, 'type')).toLowerCase();
       return ['checkbox', 'radio'].includes(type) && normalizeText(attribute(node, 'name'));
     });
     const groups = new Map();
     for (const field of groupedTypes) {
-      const key = `${normalizeText(attribute(field, 'type')).toLowerCase()}:${normalizeText(attribute(field, 'name'))}`;
+      const chain = ancestorNodes(field, index);
+      if (!chain.complete || chain.ancestors.some(node => node.shadowHost === true)) {
+        incomplete = true;
+        continue;
+      }
+      let owner = chain.ancestors.find(node => tagOf(node) === 'form')?.nodeId ?? null;
+      if (hasAttribute(field, 'form')) {
+        const reference = attribute(field, 'form');
+        const matches = reference === '' ? [] : nodes.filter(node => documentKey(node) === documentKey(field) &&
+          attribute(node, 'id') === reference);
+        if (matches.length > 1) { incomplete = true; continue; }
+        owner = matches.length === 1 && tagOf(matches[0]) === 'form' ? matches[0].nodeId : null;
+      }
+      const key = JSON.stringify([documentKey(field), owner,
+        normalizeText(attribute(field, 'type')).toLowerCase(), normalizeText(attribute(field, 'name'))]);
       const group = groups.get(key) ?? [];
       group.push(field);
       groups.set(key, group);
     }
     const applicable = [...groups.values()].filter(group => group.length > 1);
-    if (applicable.length === 0) return result('inapplicable', 'Não há conjuntos de campos relacionados aplicáveis.');
-    const index = nodeIndex(nodes);
+    if (applicable.length === 0) return incomplete
+      ? result('cantTell', 'A observação não permite determinar o formulário proprietário de todos os campos.')
+      : result('inapplicable', 'Não há conjuntos de campos relacionados aplicáveis.');
     const failures = [];
-    let incomplete = false;
     for (const group of applicable) {
       for (const field of group) {
         const chain = ancestorNodes(field, index);
