@@ -378,12 +378,29 @@ function textBlockAlignment(snapshot) {
 
 function textBlockWidth(snapshot) {
   return visualResult(snapshot, ({ nodes, document }) => {
-    const candidates = nodes.filter(node => !isHidden(node) && node?.textBlock === true);
+    const index = nodeIndex(nodes);
+    const candidates = nodes.filter(node => node?.textBlock === true &&
+      (node.hasRenderedBox === true || (node.hasRenderedBox !== false && !isHidden(node) &&
+      !ancestorNodes(node, index).ancestors.some(isHidden))));
     if (candidates.length === 0) return result('inapplicable', 'Não há blocos de texto identificados.');
+    const blockSet = new Set(candidates);
+    const nestedByBlock = new Map();
+    for (const child of candidates) {
+      const parent = ancestorNodes(child, index).ancestors.find(ancestor => blockSet.has(ancestor));
+      if (parent) {
+        if (!nestedByBlock.has(parent)) nestedByBlock.set(parent, []);
+        nestedByBlock.get(parent).push(child);
+      }
+    }
     const targets = [];
     let incomplete = false;
-    const index = nodeIndex(nodes);
     for (const node of candidates) {
+      if (!normalizeText(node.text || node.visibleText)) { incomplete = true; continue; }
+      if (node.textContrastScope === 'aggregate') {
+        const nestedBlocks = nestedByBlock.get(node) || [];
+        if (normalizeText(nestedBlocks.map(child => child.text || child.visibleText || '').join(' ')) ===
+          normalizeText(node.text || node.visibleText)) continue;
+      }
       const count = node.charactersPerLine;
       if (!Number.isSafeInteger(count) || count <= 0 || count > 1_000_000) {
         incomplete = true;

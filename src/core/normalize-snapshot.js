@@ -294,6 +294,10 @@ function copyRect(value) {
 
 function copyRuntime(record, base) {
   const result = {};
+  const charactersPerLine = ownData(record, 'charactersPerLine');
+  if (Number.isSafeInteger(charactersPerLine) && charactersPerLine > 0 && charactersPerLine <= 2048) {
+    result.charactersPerLine = charactersPerLine;
+  }
   if (typeof record?.hasRenderedBox === 'boolean') result.hasRenderedBox = record.hasRenderedBox;
   for (const key of ['visibleText', 'focusable', 'interaction', 'interactive', 'required', 'checked', 'disabled', 'active', 'hidden', 'shadowHost', 'shadowRootMode', 'contrastReliable']) {
     if (typeof record?.[key] === 'string' || typeof record?.[key] === 'boolean' || record?.[key] === null) result[key] = record[key];

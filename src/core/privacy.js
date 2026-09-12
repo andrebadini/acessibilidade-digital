@@ -242,6 +242,7 @@ export function redactNormalizedNode(input, {
     if (name === 'style' || name === 'srcdoc' || /^on/iu.test(name)) delete node.attributes[name];
   }
   const editable = editableControl(node);
+  if (editable || privateText || privateTextAncestor || executable) delete node.charactersPerLine;
   if (editable) {
     delete node.attributes.value;
     delete node.attributes['aria-valuenow'];

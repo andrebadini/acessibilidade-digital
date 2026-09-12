@@ -6,6 +6,18 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### 5.12.6 — largura dos blocos, decisão normativa e medição passiva
+
+Checkpoint `c098b3a`: corrigido limite por idioma (80; 40 em chinês/japonês/coreano, inclusive herança local) e alternativa normativa de mecanismo de configuração. Excesso é suspeita concreta `cantTell`, não falha antes de verificar a alternativa. Idioma desconhecido não presume 80: até 40 satisfaz ambos os limites; 41–80 fica inconclusivo; acima de 80 exige revisão. Dois REDs confirmados; 61/61 testes de regras/orientações e revisão independente C=0/I=0 nesse escopo. Guia didático específico mantido junto da observação original. Não houve ampliação de medição nesse commit.
+
+Etapa de medição validada no escopo: `Range.getClientRects()` por grafema (`Intl.Segmenter`), sem seleção, foco, scroll, mutação DOM, estilo ou captura. Medição de linhas efetivamente exibidas, não estimativa por pixels/fonte ou capacidade futura do contêiner. Suporte inicial restrito a blocos horizontais com um único nó de texto, no máximo 2048 grafemas por bloco e 20000 medições por documento; nenhuma aprovação de prefixo parcial. Blocos complexos permanecem no inventário sem medida/ocorrência fabricada. Privacidade verificada antes da leitura e contagens derivadas removidas na fronteira final privada. A definição operacional por grafemas é uma metodologia da ferramenta, não definição textual da ABNT.
+
+RED Chrome confirmou ausência do produtor; RED de integração confirmou contêiner agregado impedindo conclusão. Revisão independente encontrou uma subcontagem reproduzível: LF/CRLF em `white-space:normal` pode apresentar espaço, portanto não pode ser descartado como quebra preservada. RED 80≠81 registrado e corrigido. GREEN final: 70/70 focados e Chrome 1/1, incluindo acentos combinados, linhas preservadas, wrapping, espaços oriundos de LF/CRLF, alvo visual aria-hidden, privacidade, ausência de medida parcial/complexa e preservação de estado. A fixture CRLF restaura CRLF literal antes do baseline, pois o parser HTML normaliza terminadores. Revisão final C=0/I=0 limitada ao incremento; não valida capturas, release completa ou toda a norma. Nenhum ZIP gerado.
+
+### Percurso principal depois do checkpoint 560e31e
+
+Reexecutado no Chrome 152 somente `passive current-page…no-pixels` do sidepanel-flow existente: 1/1 passou em aproximadamente 5,4 segundos. Página efetivamente aberta, elemento criado em memória preservado, nenhuma aba criada, foco/scroll/leiaute preservados; relatório abriu, destaque e remoção funcionaram, hash do modelo não mudou e quatro formatos foram exportados e verificados. O PDF da fixture intencionalmente defeituosa continua com 24 páginas; não é nova medição do Google. Modos com pixels e produção global continuam pendentes. Não se executou a suíte E2E ampla nem se gerou ZIP.
+
 ### Fechamento do incremento visual e didático após revisão independente
 
 Revisor reutilizado com autorização expressa do usuário, somente leitura e sem agentes adicionais. Primeiro parecer: C=0/I=1, alinhamento ainda excluía conteúdo visível com aria-hidden apesar de hasRenderedBox. RED reproduzido no teste Chrome. Rodada agrupada corrigiu derivação/seleção visual, deduplicação de contêiner com múltiplos blocos (RED próprio) e alvo indevido quando texto do bloco já foi redigido (RED próprio). A deduplicação compara somente o texto remanescente com a concatenação dos blocos descendentes mais próximos; não elimina texto próprio não coberto. Agrupamento usa Set/Map, sem buscas cruzadas cúbicas.

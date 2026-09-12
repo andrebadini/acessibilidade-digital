@@ -90,6 +90,18 @@ test('text width honors inherited local language and missing measurements withou
   assert.deepEqual(value.targets, []);
 });
 
+test('text width includes rendered aria-hidden text and skips only proven aggregate duplicates', async () => {
+  const parent = record('container', 'div', { text: 'One Two', textBlock: true, textContrastScope: 'aggregate', children: ['one', 'two'] });
+  const one = record('one', 'p', { text: 'One', parentId: 'container', textBlock: true, charactersPerLine: 3 });
+  const two = record('two', 'p', { text: 'Two', parentId: 'container', textBlock: true, charactersPerLine: 3, hidden: true, hasRenderedBox: true });
+  assert.equal((await evaluate('text-block-width', snapshot([parent, one, two]))).outcome, 'passed');
+  two.charactersPerLine = 81;
+  assert.deepEqual((await evaluate('text-block-width', snapshot([parent, one, two]))).targets.map(target => target.nodeId), ['two']);
+  two.charactersPerLine = 3;
+  parent.text = 'Own text One Two';
+  assert.equal((await evaluate('text-block-width', snapshot([parent, one, two]))).outcome, 'cantTell');
+});
+
 test('ABNT alignment distinguishes language direction and does not confirm an essentiality exception automatically', async () => {
   for (const [language, textAlign, direction, outcome, count] of [
     ['pt-BR', 'left', 'ltr', 'passed', 0],

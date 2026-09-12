@@ -203,6 +203,54 @@ export function collectRuntimePageData() {
       ['::before', '::after'].some(pseudo => !['none', 'normal'].includes(getComputedStyle(element, pseudo).content)));
     return pseudoContent.get(element);
   };
+  let textWidthBudget = 20_000;
+  const charactersPerLine = element => {
+    try {
+      // Measure only complete, simple horizontal text. No DOM or Selection writes.
+      if (element.childNodes.length !== 1 || element.firstChild.nodeType !== Node.TEXT_NODE) return undefined;
+      const ownStyle = geometry.get(element).computed;
+      if (!['block', 'list-item'].includes(ownStyle.display)) return undefined;
+      for (let current = element; current; current = composedParent(current)) {
+        if (isEditable(current) || isSensitiveControl(current)) return undefined;
+        const css = geometry.get(current)?.computed || getComputedStyle(current);
+        if (css.writingMode !== 'horizontal-tb' || css.transform !== 'none' || css.perspective !== 'none' ||
+          css.columnCount !== 'auto' || css.columnWidth !== 'auto' || css.textTransform !== 'none' ||
+          css.hyphens === 'auto' || css.textOverflow !== 'clip' ||
+          !['none', '0'].includes(css.webkitLineClamp) ||
+          css.overflowX !== 'visible' || css.overflowY !== 'visible' || hasPseudoContent(current)) return undefined;
+      }
+      const textNode = element.firstChild;
+      const text = textNode.data;
+      if (!text.trim() || text.length > 16_384 || /[\u00ad\u200b\u202a-\u202e\u2066-\u2069]/u.test(text)) return undefined;
+      const segments = [];
+      for (const segment of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
+        if (segments.length === 2048) return undefined;
+        segments.push(segment);
+      }
+      if (segments.length > textWidthBudget) return undefined;
+      textWidthBudget -= segments.length;
+      const range = document.createRange();
+      const lines = [];
+      for (const { segment, index } of segments) {
+        if (/^[\r\n]+$/u.test(segment) && ['pre', 'pre-wrap', 'pre-line', 'break-spaces'].includes(ownStyle.whiteSpace)) continue;
+        range.setStart(textNode, index);
+        range.setEnd(textNode, index + segment.length);
+        const rects = [...range.getClientRects()].filter(box => box.width > 0 && box.height > 0);
+        if (!rects.length && /^\s+$/u.test(segment)) continue;
+        if (rects.length !== 1) return undefined;
+        const rect = rects[0];
+        if (![rect.top, rect.bottom, rect.left, rect.right].every(Number.isFinite)) return undefined;
+        let line = lines.find(item => Math.abs(item.top - rect.top) < 0.5 && Math.abs(item.bottom - rect.bottom) < 0.5);
+        if (!line) {
+          if (lines.some(item => rect.top < item.bottom && rect.bottom > item.top)) return undefined;
+          line = { top: rect.top, bottom: rect.bottom, count: 0 };
+          lines.push(line);
+        }
+        line.count++;
+      }
+      return lines.length ? Math.max(...lines.map(line => line.count)) : undefined;
+    } catch { return undefined; }
+  };
   const targetSizeRect = element => {
     try {
       // Local frame coordinates cannot prove scaling/clipping by its embedder.
@@ -288,6 +336,7 @@ export function collectRuntimePageData() {
     const nativeControl = ['button', 'input', 'select', 'textarea'].includes(element.localName);
     const disabled = nativeControl && element.matches(':disabled');
     const measuredTarget = targetSizeRect(element);
+    const measuredLine = hasRenderedBox ? charactersPerLine(element) : undefined;
     const record = {
       order,
       tagName: element.localName,
@@ -295,6 +344,7 @@ export function collectRuntimePageData() {
       viewportRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       documentRect: { x: rect.x + scrollX, y: rect.y + scrollY, width: rect.width, height: rect.height },
       ...(measuredTarget ? { targetSizeRect: measuredTarget } : {}),
+      ...(measuredLine ? { charactersPerLine: measuredLine } : {}),
       styles,
       contrastReliable: contrastReliable(element),
       backgroundImageKind: backgroundKind(computed.getPropertyValue('background-image')),
