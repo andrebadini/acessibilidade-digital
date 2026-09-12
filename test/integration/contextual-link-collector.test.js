@@ -167,7 +167,8 @@ async function collectNormalizeAndEvaluate(kind, options = {}) {
     format: 'simplified-v1',
     document: { url: 'https://example.test/', title: 'Adjacência', language: 'pt-BR' },
     nodes,
-    axTree: { nodes: [{ backendDOMNodeId: backendId.get(graph.link), role: { value: 'link' }, name: { value: 'Ajuda' } }] },
+    // A plain anchor without href has no link role in Chrome's AX tree.
+    axTree: { nodes: options.anchorWithoutHref ? [] : [{ backendDOMNodeId: backendId.get(graph.link), role: { value: 'link' }, name: { value: 'Ajuda' } }] },
   };
   const normalized = normalizeSnapshot(raw);
   const audit = await runCoreAudit(normalized);
@@ -233,7 +234,7 @@ test('all 130 rules ignore anchors without href but still evaluate genuine nativ
   }
 });
 
-test('all 130 rules create no link failure from private roots, descendants or hostile redacted paths', async () => {
+test('private text does not create link failures or erase an independently observed structural role', async () => {
   for (const options of [
     { privateSource: true },
     { privateAncestor: true },
@@ -246,8 +247,16 @@ test('all 130 rules create no link failure from private roots, descendants or ho
     const normalizedLink = value.normalized.nodes.find(node => node.tagName === 'a');
     assert.equal(Object.hasOwn(collectedLink, 'interaction'), false);
     assert.equal(Object.hasOwn(normalizedLink, 'interaction'), false);
+    assert.equal(normalizedLink.axRole, 'link');
+    const expected = {
+      'link-semantics': 'passed',
+      'link-purpose-as-link': 'cantTell',
+      'link-purpose-without-context': 'cantTell',
+      'link-purpose-in-context': 'cantTell',
+      'new-window-link-warning': 'inapplicable',
+    };
     for (const ruleId of LINK_RULES) {
-      assert.equal(value.audit.ruleResults.find(rule => rule.ruleId === ruleId).outcome, 'inapplicable', `${ruleId}: ${JSON.stringify(options)}`);
+      assert.equal(value.audit.ruleResults.find(rule => rule.ruleId === ruleId).outcome, expected[ruleId], `${ruleId}: ${JSON.stringify(options)}`);
     }
     assert.equal(value.audit.ruleResults.some(rule =>
       rule.outcome === 'failed' && rule.targets.some(target => target.nodeId === value.linkNodeId)), false);
