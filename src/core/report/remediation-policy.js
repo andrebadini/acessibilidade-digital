@@ -242,6 +242,8 @@ for (const ruleId of ['component-contrast', 'graphic-object-contrast', 'focus-in
   register([ruleId], 'insufficient-non-text-contrast', ['ratio', 'threshold'],
     'Aumente o contraste não textual para pelo menos 3:1.', data => data.threshold === 3);
 }
+register(['component-contrast'], 'inactive-component-unconfirmed', [],
+  'O componente declara estar inativo. Confirme se realmente não pode ser acionado; apenas a declaração não comprova a exceção de contraste.');
 for (const ruleId of ['line-spacing', 'paragraph-spacing', 'letter-spacing', 'word-spacing']) {
   register([ruleId], 'text-spacing-content-loss');
 }
@@ -364,6 +366,7 @@ export function validateCoreRuleTargetInventory(ruleId, outcome, targets) {
     if (!((typeof nodeId === 'string' && ID.test(nodeId)) || Number.isSafeInteger(nodeId))) return false;
     if (exactKeys(target, ['nodeId'])) continue;
     if (!exactKeys(target, ['nodeId', 'data', 'message'])) return false;
+    if (target.data?.reason === 'inactive-component-unconfirmed' && outcome !== 'cantTell') return false;
     const message = canonicalCoreRemediation(ruleId, target.data);
     if (!message || target.message !== message || !codepointLength(target.message, MAX_TARGET_TEXT)) return false;
   }

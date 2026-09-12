@@ -6,6 +6,14 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Relatório de componente com inatividade declarada — 5.11.4
+
+Reabertura por RED reproduzível, não por hipótese: a regra `component-contrast` já produzia uma revisão `inactive-component-unconfirmed` quando havia `aria-disabled=true`, mas o catálogo fechado de remediação não reconhecia esse motivo. A criação do modelo de relatório falhava. O teste de integração ARIA falhou também em cópia isolada de `f482c56`, confirmando problema anterior à medição passiva.
+
+Correção limitada à política: registrar o motivo somente para contraste de componente, sem parâmetros adicionais e com a mensagem fixa do produtor. Aceitar somente outcome `cantTell`; não permitir converter declaração de inatividade em falha confirmada. Novo teste usa o resultado real da regra e rejeita alteração de mensagem, dados adicionais, outro tipo de contraste ou promoção para failed. Não mudou a exceção nativa de controles efetivamente desabilitados nem os critérios de contraste.
+
+Revisão independente sem C/I no diff, com 21 testes visuais e o teste de relatório anteriormente vermelho repetidos pelo revisor. Regressões de autoridade/identidade dos alvos: 14/14. Arquivo de orquestração `run-audit.test.js`: 168/168. Diff-check verde. Estes números não equivalem à aprovação da release.
+
 ### Medição de área de acionamento separada dos limiares — 5.8.6/5.8.7
 
 A recomendação ampliada (44×44 CSS px, 5.8.6) e o requisito mínimo (24×24, 5.8.7) precisam de conclusões independentes. RED de integração demonstrou alvo observado 30×30 com exceção desconhecida: mínimo normalizado passed e aprimorado cantTell, mas a cobertura conjunta descartava a medida no merge e tornava o mínimo inconclusivo.

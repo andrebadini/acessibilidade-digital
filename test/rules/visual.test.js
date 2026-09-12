@@ -12,6 +12,7 @@ import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 import { runRules } from '../../src/core/rules/run-rules.js';
 import { STRUCTURE_RULES } from '../../src/core/rules/structure.js';
 import { VISUAL_RULES } from '../../src/core/rules/visual.js';
+import { validateCoreRuleTargetInventory } from '../../src/core/report/remediation-policy.js';
 
 function record(nodeId, tagName, overrides = {}) {
   return {
@@ -177,6 +178,26 @@ test('component contrast exempts native inactive controls without exempting acti
   assert.deepEqual(mixed.targets.map(target=>target.nodeId), ['active']);
   const graphic = record('graphic', 'button', { attributes: { disabled: '' }, graphicContrast: low });
   assert.equal((await evaluate('graphic-object-contrast', snapshot([graphic]))).outcome, 'failed');
+});
+
+test('the report accepts an observed ARIA inactivity review without accepting it as a failure', async () => {
+  const review = await evaluate('component-contrast', snapshot([
+    record('n-1', 'button', { attributes: { 'aria-disabled': 'true' } }),
+  ]));
+  assert.equal(review.outcome, 'cantTell');
+  const targets = review.targets.map(({ selectorHint, ...target }) => target);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].data.reason, 'inactive-component-unconfirmed');
+  assert.equal(validateCoreRuleTargetInventory('component-contrast', 'cantTell', targets), true,
+    'the report must accept the actual review emitted by the rule');
+  assert.equal(validateCoreRuleTargetInventory('component-contrast', 'failed', targets), false);
+  assert.equal(validateCoreRuleTargetInventory('graphic-object-contrast', 'cantTell', targets), false);
+  assert.equal(validateCoreRuleTargetInventory('component-contrast', 'cantTell', [{
+    ...targets[0], message: 'Infração comprovada sem revisão.'
+  }]), false);
+  assert.equal(validateCoreRuleTargetInventory('component-contrast', 'cantTell', [{
+    ...targets[0], data: { ...targets[0].data, ratio: 1 }
+  }]), false);
 });
 
 test('declared ARIA inactivity is not assumed to prevent operation', async () => {
