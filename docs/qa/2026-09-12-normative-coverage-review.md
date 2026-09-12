@@ -6,6 +6,14 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Semântica de texto especial — 5.12.8
+
+Corpo da norma, página impressa 29: identificar programaticamente a semântica de ênfases, citações, abreviaturas e outros textos especiais; a adequação do uso à finalidade é o requisito separado 5.12.9. Referência técnica complementar: [W3C H49](https://www.w3.org/WAI/WCAG22/Techniques/html/H49.html), consultada em 12/09/2026. H49 exige examinar também a informação transmitida pela apresentação; encontrar algumas tags não demonstra cobertura integral.
+
+Causa reproduzida: a regra consumia `specialTextKind`/`specialTextSemantic`, sem produtor no normalizador. Cinco REDs de integração mostraram `inapplicable` até para `<em>` observado. A correção elimina essas flags como prova e inventaria marcações no snapshot já redigido. Retorna `cantTell` sem alvos de problema: uma pendência geral de checklist, não falha nem suspeita concreta por trecho. CSS negrito/itálico não gera infração. Marcações existentes não comprovam exposição efetiva, identificação de todos os trechos ou finalidade correta. Não há novo campo que atravesse a fronteira de privacidade.
+
+Verificação focada: 25/25 testes (7 integração + 18 regras visuais), incluindo DOM columnar com texto filho, agregação ABNT indeterminada, ausência de dados, flags fabricadas, 400 trechos sem multiplicação de alvos e exclusão de texto privado/executável/oculto. Revisão independente do diff congelado aprovada C=0/I=0/M=0, com os 25 testes repetidos pelo revisor. Este incremento corrige conclusão indevida, não implementa um detector exaustivo de intenção textual nem encerra a revisão de produção.
+
 ### Exceção de componente inativo — 5.11.4
 
 Corpo do PDF, página impressa 27: componente em estado inativo é exceção explícita do contraste de componentes. REDs reproduziram button disabled sendo failed a 1:1 e ARIA-disabled não confirmado sendo tratado como falha certa. Correção local restringe a exceção a controles nativos com estado/atributo próprio confirmado; atributo HTML disabled="false" continua presença, enquanto representação booleana false não comprova desabilitação. Um disabled arbitrário em div não cria exceção. ARIA-disabled isolado gera alvo cantTell com instrução de confirmar operação. Gráficos e foco não recebem a exceção de componentes.

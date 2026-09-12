@@ -2,6 +2,7 @@ import { contrastRatio } from '../color.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { createRuleRegistry } from './registry.js';
 import {
+  ancestorNodes,
   attribute,
   documentTarget,
   hasOwn,
@@ -14,6 +15,7 @@ import {
   probeCoverageCantTell,
   result,
   snapshotParts,
+  tagOf,
   target
 } from './snapshot.js';
 
@@ -301,17 +303,18 @@ function textBlock(snapshot, property, invalid, label) {
 
 function specialTextSemantics(snapshot) {
   return visualResult(snapshot, ({ nodes }) => {
-    const candidates = nodes.filter(node => !isHidden(node) && normalizeText(node?.specialTextKind));
-    if (candidates.length === 0) return result('inapplicable', 'Não há texto especial identificado.');
-    const failures = [];
-    let incomplete = false;
-    for (const node of candidates) {
-      if (typeof node.specialTextSemantic !== 'boolean') incomplete = true;
-      else if (!node.specialTextSemantic) failures.push(target(node, 'Exponha programaticamente o significado deste texto especial.', { reason: 'missing-special-text-semantics' }));
-    }
-    if (failures.length > 0) return result('failed', 'Há texto especial sem semântica correspondente.', failures);
-    if (incomplete) return result('cantTell', 'A semântica calculada do texto especial não foi coletada.', [], ['Colete a semântica do texto especial identificado.']);
-    return result('passed', 'Todo texto especial identificado possui semântica observável.');
+    // Inventory of markup in the redacted snapshot, not proof of complete semantic coverage.
+    const tags = new Set(['em', 'strong', 'q', 'blockquote', 'abbr', 'cite', 'dfn', 'code', 'kbd', 'samp', 'var', 'sub', 'sup']);
+    const index = nodeIndex(nodes);
+    const count = nodes.filter(node => tags.has(tagOf(node)) &&
+      normalizeText(node.visibleText || node.text) && !isHidden(node) &&
+      !ancestorNodes(node, index).ancestors.some(isHidden)).length;
+    return result('cantTell', count > 0
+      ? `Foram observadas ${count} ${count === 1 ? 'marcação de texto especial' : 'marcações de texto especial'}. Isso não comprova que todos os trechos estejam identificados corretamente.`
+      : 'Não foi possível determinar se há informação transmitida por destaques ou outros textos especiais sem marcação correspondente.', [], [
+      'Compare os destaques com seu significado. Por exemplo, se uma palavra enfatizada muda o sentido da frase, verifique se essa ênfase também está identificada no código, e não apenas na aparência.',
+      'Negrito ou itálico podem ser apenas decoração. A presença de marcações não comprova a cobertura de todos os trechos, nem sua exposição efetiva. O uso adequado à finalidade é revisado separadamente no item 5.12.9.'
+    ]);
   });
 }
 
