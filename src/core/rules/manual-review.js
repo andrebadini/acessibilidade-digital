@@ -42,18 +42,26 @@ function reviewResult(snapshot, evaluate) {
 
 function tableTitleAssociation(snapshot) {
   return reviewResult(snapshot, ({ nodes }) => {
-    const tables = nodes.filter(node => !isHidden(node) && tagOf(node) === 'table');
+    const tables = nodes.filter(node => !isHidden(node) && (tagOf(node) === 'table' ||
+      ['table', 'grid', 'treegrid'].includes(normalizeText(node.axRole).toLowerCase() || roleOf(node))));
     if (tables.length === 0) return result('inapplicable', 'Não há tabelas observáveis.');
-    const applicable = tables.filter(node => node?.hasTableTitle === true);
-    if (applicable.length === 0) return result('inapplicable', 'Não há título de tabela identificado.');
     const failures = [];
     let incomplete = false;
-    for (const table of applicable) {
-      if (typeof table.tableTitleAssociated !== 'boolean') incomplete = true;
+    let associated = 0;
+    for (const table of tables) {
+      if (table.hasTableTitle === false) continue;
+      const tableRole = normalizeText(table.axRole).toLowerCase() || roleOf(table);
+      const caption = tagOf(table) === 'table' && (!tableRole || tableRole === 'table') &&
+        nodes.some(node => node.parentId === table.nodeId && tagOf(node) === 'caption' &&
+          !isHidden(node) && !['none', 'presentation'].includes(roleOf(node)) && normalizeText(node.text));
+      if (caption) { associated += 1; continue; }
+      if (table.hasTableTitle !== true || typeof table.tableTitleAssociated !== 'boolean') incomplete = true;
       else if (!table.tableTitleAssociated) failures.push(target(table, 'Associe programaticamente o título a esta tabela.', { reason: 'table-title-not-associated' }));
+      else associated += 1;
     }
     if (failures.length > 0) return result('failed', 'Há título de tabela sem associação programática.', failures);
-    if (incomplete) return result('cantTell', 'A associação do título da tabela não foi coletada.', [], ['Colete a relação programática entre tabela e título.']);
+    if (incomplete) return result('cantTell', 'Não foi possível determinar todos os títulos de tabela e suas associações.', [], ['Verifique se há um título acima ou abaixo da tabela. Confirme se ele está associado à tabela; um texto próximo, sozinho, não comprova essa associação.']);
+    if (associated === 0) return result('inapplicable', 'A observação informa que não há títulos de tabela.');
     return result('passed', 'Todos os títulos de tabela identificados estão associados.');
   });
 }
@@ -118,25 +126,26 @@ const PAGE_LEVEL_WHEN_EMPTY = new Set([
 ]);
 
 function scopedCandidates(ruleId, nodes) {
+  const observedRole = node => normalizeText(node.axRole).toLowerCase() || roleOf(node);
   if (ruleId === 'focusable-elements-interactive') return nodes.filter(isComponent);
   if (ruleId === 'content-in-landmarks') {
     const index = nodeIndex(nodes);
     return nodes.filter(node => {
       if (isHidden(node) || (!normalizeText(node?.text) && !isComponent(node))) return false;
-      if (LANDMARK_ROLES.has(roleOf(node)) || ['main', 'nav', 'aside'].includes(tagOf(node))) return false;
+      if (LANDMARK_ROLES.has(observedRole(node)) || ['main', 'nav', 'aside'].includes(tagOf(node))) return false;
       const chain = ancestorNodes(node, index);
       return !chain.complete || !chain.ancestors.some(ancestor =>
-        LANDMARK_ROLES.has(roleOf(ancestor)) || ['main', 'nav', 'aside'].includes(tagOf(ancestor))
+        LANDMARK_ROLES.has(observedRole(ancestor)) || ['main', 'nav', 'aside'].includes(tagOf(ancestor))
       );
     });
   }
   if (TARGET_GROUPS.focus.has(ruleId)) return nodes.filter(node => !isHidden(node) && node?.focusable === true);
   if (TARGET_GROUPS.hover.has(ruleId)) return nodes.filter(node => !isHidden(node) && (node?.hoverContent === true || node?.focusContent === true));
   if (TARGET_GROUPS.component.has(ruleId)) return nodes.filter(isComponent);
-  if (TARGET_GROUPS.heading.has(ruleId)) return nodes.filter(node => !isHidden(node) && (/^h[1-6]$/u.test(tagOf(node)) || roleOf(node) === 'heading'));
-  if (TARGET_GROUPS.landmark.has(ruleId)) return nodes.filter(node => !isHidden(node) && (LANDMARK_ROLES.has(roleOf(node)) || ['main', 'nav', 'aside'].includes(tagOf(node))));
-  if (TARGET_GROUPS.list.has(ruleId)) return nodes.filter(node => !isHidden(node) && ['ol', 'ul'].includes(tagOf(node)));
-  if (TARGET_GROUPS.table.has(ruleId)) return nodes.filter(node => !isHidden(node) && tagOf(node) === 'table');
+  if (TARGET_GROUPS.heading.has(ruleId)) return nodes.filter(node => !isHidden(node) && (/^h[1-6]$/u.test(tagOf(node)) || observedRole(node) === 'heading'));
+  if (TARGET_GROUPS.landmark.has(ruleId)) return nodes.filter(node => !isHidden(node) && (LANDMARK_ROLES.has(observedRole(node)) || ['main', 'nav', 'aside'].includes(tagOf(node))));
+  if (TARGET_GROUPS.list.has(ruleId)) return nodes.filter(node => !isHidden(node) && (['ol', 'ul', 'dl'].includes(tagOf(node)) || ['list', 'descriptionlist'].includes(observedRole(node))));
+  if (TARGET_GROUPS.table.has(ruleId)) return nodes.filter(node => !isHidden(node) && (tagOf(node) === 'table' || ['table', 'grid', 'treegrid'].includes(observedRole(node))));
   if (TARGET_GROUPS.link.has(ruleId)) return nodes.filter(node => !isHidden(node) && ((tagOf(node) === 'a' && normalizeText(attribute(node, 'href'))) || roleOf(node) === 'link'));
   if (TARGET_GROUPS.field.has(ruleId)) return nodes.filter(isFormField);
   return null;

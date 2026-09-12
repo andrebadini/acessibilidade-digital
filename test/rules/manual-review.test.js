@@ -112,3 +112,56 @@ test('supporting automatic rules are conservative when observations are missing'
     record('custom', 'x-slider', { role: 'slider', requiredStates: ['value'], exposedStates: {} })
   ]))).outcome, 'failed');
 });
+
+test('unknown table title observation cannot establish inapplicability', async () => {
+  assert.equal((await evaluate('table-title-association', snapshot([record('table', 'table')]))).outcome, 'cantTell');
+});
+
+test('native caption association is established from collected nodes', async () => {
+  const value = snapshot([
+    record('table', 'table', { children: ['caption'] }),
+    record('caption', 'caption', { parentId: 'table', text: 'Preços dos serviços' })
+  ]);
+  assert.equal((await evaluate('table-title-association', value)).outcome, 'passed');
+});
+
+test('ARIA tables are included even without native table markup', async () => {
+  assert.equal((await evaluate('table-title-association', snapshot([
+    record('table', 'div', { axRole: 'table' })
+  ]))).outcome, 'cantTell');
+});
+
+test('caption evidence does not approve empty, hidden or overridden captions', async () => {
+  for (const overrides of [{ text: '' }, { hidden: true }, { role: 'presentation' }]) {
+    assert.equal((await evaluate('table-title-association', snapshot([
+      record('table', 'table'),
+      record('caption', 'caption', { parentId: 'table', text: 'Preços', ...overrides })
+    ]))).outcome, 'cantTell');
+  }
+  assert.equal((await evaluate('table-title-association', snapshot([
+    record('table', 'table', { hasTableTitle: false })
+  ]))).outcome, 'inapplicable');
+});
+
+test('review applicability includes observed semantic roles and definition lists', async () => {
+  for (const [rule, tag, axRole] of [
+    ['heading-purpose', 'div', 'heading'],
+    ['list-purpose', 'div', 'list'],
+    ['list-purpose', 'dl', 'DescriptionList'],
+    ['table-purpose', 'div', 'table'],
+    ['landmark-purpose', 'div', 'navigation']
+  ]) {
+    const value = await evaluate(rule, snapshot([record('element', tag, { axRole })]));
+    assert.equal(value.outcome, 'cantTell', rule);
+    assert.equal(value.targets[0].nodeId, 'element');
+  }
+});
+
+test('content within an observed AX landmark is not reported as outside regions', async () => {
+  const value = await evaluate('content-in-landmarks', snapshot([
+    record('region', 'div', { axRole: 'navigation', text: 'Ajuda', children: ['text'] }),
+    record('text', 'p', { parentId: 'region', text: 'Ajuda' })
+  ]));
+  assert.equal(value.outcome, 'inapplicable');
+  assert.deepEqual(value.targets, []);
+});
