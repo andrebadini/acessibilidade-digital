@@ -248,6 +248,12 @@ test('the isolated browser-world collector emits media and only observable DOM/s
     getBoundingClientRect: () => ({ x: 0, y: 0, width: 1, height: 1 }),
   });
   const privateSibling = new FakeElement();
+  const inheritedButton = Object.assign(new FakeElement(), {
+    localName: 'button', id: 'inherited-disabled', children: [], parentElement: null, shadowRoot: null,
+    disabled: false, innerText: 'Salvar', getAttribute: () => '', hasAttribute: () => false,
+    getRootNode: () => globalThis.document, matches: () => true, getAnimations: () => [],
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 80, height: 30 }),
+  });
   const contextualLink = new FakeElement();
   const linkParent = new FakeElement();
   Object.assign(linkParent, {
@@ -280,7 +286,7 @@ test('the isolated browser-world collector emits media and only observable DOM/s
       Node: { ELEMENT_NODE: 1 }, Element: FakeElement, ShadowRoot: class {},
       HTMLInputElement: class {}, HTMLSelectElement: class {}, HTMLTextAreaElement: class {},
       HTMLMediaElement: FakeMedia, HTMLAudioElement: FakeAudio, HTMLImageElement: class {}, HTMLCanvasElement: class {},
-      CSS: { escape: value => value }, document: { baseURI: 'https://example.test/', children: [audio, handTalkScript, vlibrasWidget, linkParent], activeElement: null },
+      CSS: { escape: value => value }, document: { baseURI: 'https://example.test/', children: [audio, handTalkScript, vlibrasWidget, linkParent, inheritedButton], activeElement: null },
       getComputedStyle: () => ({ getPropertyValue: name => ({ display: 'block', visibility: 'visible', opacity: '1', 'background-image': 'none' }[name] || '') }),
       location: { href: 'https://example.test/' }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
       matchMedia: () => ({ matches: false }),
@@ -288,6 +294,9 @@ test('the isolated browser-world collector emits media and only observable DOM/s
     });
     const collected = collectRuntimePageData();
     const media = collected.nodes[0].media;
+    const inactive = collected.nodes.find(item => item.tagName === 'button');
+    assert.equal(inactive.disabled, true);
+    assert.equal(inactive.focusable, false);
     assert.deepEqual(media, {
       kind: 'audio', currentSrc: 'https://example.test/podcast.mp3', durationSeconds: 8,
       muted: false, autoplay: true, controls: false, captionTracks: [], hasAudio: true,

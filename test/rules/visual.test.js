@@ -160,6 +160,36 @@ test('component, graphic and focus contrast require reliable observed pixels at 
   }
 });
 
+test('component contrast exempts native inactive controls without exempting active controls or graphics', async () => {
+  const low = { foreground: '#fff', background: '#fff', reliable: true };
+  for (const disabled of ['', 'false']) {
+    const inactive = record('inactive', 'button', { attributes: { disabled }, componentContrast: low });
+    assert.equal((await evaluate('component-contrast', snapshot([inactive]))).outcome, 'inapplicable');
+  }
+  const inherited = record('inherited', 'input', { disabled: true, form: { disabled: false }, componentContrast: low });
+  assert.equal((await evaluate('component-contrast', snapshot([inherited]))).outcome, 'inapplicable');
+  const active = record('active', 'button', { componentContrast: low });
+  assert.equal((await evaluate('component-contrast', snapshot([
+    record('false-flag', 'button', { attributes: { disabled: false }, componentContrast: low })
+  ]))).outcome, 'failed');
+  const mixed = await evaluate('component-contrast', snapshot([inherited, active]));
+  assert.equal(mixed.outcome, 'failed');
+  assert.deepEqual(mixed.targets.map(target=>target.nodeId), ['active']);
+  const graphic = record('graphic', 'button', { attributes: { disabled: '' }, graphicContrast: low });
+  assert.equal((await evaluate('graphic-object-contrast', snapshot([graphic]))).outcome, 'failed');
+});
+
+test('declared ARIA inactivity is not assumed to prevent operation', async () => {
+  const low = { foreground: '#fff', background: '#fff', reliable: true };
+  const declared = record('custom', 'div', { role: 'button', attributes: { 'aria-disabled': 'true' }, componentContrast: low });
+  const review = await evaluate('component-contrast', snapshot([declared]));
+  assert.equal(review.outcome, 'cantTell');
+  assert.equal(review.targets.length, 1);
+  assert.equal((await evaluate('component-contrast', snapshot([
+    record('fake', 'div', { role: 'button', attributes: { disabled: '' }, componentContrast: low })
+  ]))).outcome, 'failed');
+});
+
 test('target sizes preserve 23.99/24 and 43.99/44 boundaries with explicit exceptions', async () => {
   const minimum = await evaluate('target-size-minimum', snapshot([
     record('small', 'button', { role: 'button', targetSize: { width: 23.99, height: 24, exception: 'none' } }),

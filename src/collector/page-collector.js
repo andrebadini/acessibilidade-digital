@@ -221,6 +221,8 @@ export function collectRuntimePageData() {
     for (const name of styleNames) styles[name] = computed.getPropertyValue(name);
     const sensitiveControl = isSensitiveControl(element);
     const visible = computed.display !== 'none' && computed.visibility !== 'hidden' && Number(computed.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+    const nativeControl = ['button', 'input', 'select', 'textarea'].includes(element.localName);
+    const disabled = nativeControl && element.matches(':disabled');
     const record = {
       order,
       tagName: element.localName,
@@ -232,7 +234,8 @@ export function collectRuntimePageData() {
       backgroundImageKind: backgroundKind(computed.getPropertyValue('background-image')),
       hidden: !visible,
       visibleText: sensitiveControl ? '' : (element.innerText || '').replace(/\s+/gu, ' ').trim(),
-      focusable: element.matches('a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]') && !element.disabled,
+      focusable: element.matches('a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]') && !disabled,
+      ...(nativeControl ? { disabled } : {}),
       active: document.activeElement === element,
       shadowHost: Boolean(element.shadowRoot),
       shadowRootMode: element.shadowRoot?.mode || null

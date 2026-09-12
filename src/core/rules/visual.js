@@ -2,6 +2,7 @@ import { contrastRatio } from '../color.js';
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { createRuleRegistry } from './registry.js';
 import {
+  attribute,
   documentTarget,
   hasOwn,
   isComponent,
@@ -101,11 +102,17 @@ function nonTextContrast(snapshot, field, kind) {
       ? nodes.filter(node => !isHidden(node) && (node?.graphicObject === true || hasOwn(node, field)))
       : field === 'focusContrast'
         ? nodes.filter(node => !isHidden(node) && (node?.focusable === true || hasOwn(node, field)))
-        : nodes.filter(isComponent);
+        : nodes.filter(node => isComponent(node) && !nativeInactive(node));
     if (candidates.length === 0) return result('inapplicable', `Não há ${kind} aplicáveis.`);
     const failures = [];
+    const inactiveReview = [];
     let incomplete = false;
     for (const node of candidates) {
+      if (field === 'componentContrast' && normalizeText(attribute(node, 'aria-disabled')).toLowerCase() === 'true') {
+        incomplete = true;
+        inactiveReview.push(target(node, 'O componente declara estar inativo. Confirme se realmente não pode ser acionado; apenas a declaração não comprova a exceção de contraste.', { reason: 'inactive-component-unconfirmed' }));
+        continue;
+      }
       const observation = node?.[field];
       if (uncertainComposition(observation)) {
         incomplete = true;
@@ -118,11 +125,16 @@ function nonTextContrast(snapshot, field, kind) {
       }));
     }
     if (failures.length > 0) return result('failed', `Há ${kind} com contraste abaixo de 3:1.`, failures);
-    if (incomplete) return result('cantTell', `Os pixels de ${kind} não foram observados com confiabilidade.`, [], [
-      'Colete as cores finais dos pixels relevantes e sua composição de fundo.'
+    if (incomplete) return result('cantTell', `A medição ou a aplicabilidade do contraste de ${kind} precisa de confirmação.`, inactiveReview, [
+      'Colete as cores finais dos pixels relevantes e sua composição de fundo. Se o componente declarar estar inativo, confirme esse estado antes de aplicar a exceção.'
     ]);
     return result('passed', `Todos os ${kind} aplicáveis atendem ao contraste observado.`);
   });
+}
+
+function nativeInactive(node) {
+  if (!['button', 'input', 'select', 'textarea'].includes(normalizeText(node?.tagName).toLowerCase())) return false;
+  return typeof attribute(node, 'disabled') === 'string' || node.disabled === true || node.form?.disabled === true;
 }
 
 const MINIMUM_TARGET_EXCEPTIONS = new Set(['equivalent', 'inline', 'user-agent', 'essential', 'spacing']);
