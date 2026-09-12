@@ -6,6 +6,12 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Contraste CSS e filtros visuais — novo RED reproduzível
+
+Após `c64b531`, Chrome152 reproduziu `contrast.reliable=true` para parágrafo preto/branco sob `filter:brightness(0)` no ancestral. As cores CSS anteriores ao filtro não provam a composição exibida. Fonte técnica primária: [Filter Effects, W3C Working Draft](https://www.w3.org/TR/filter-effects-1/#funcdef-filter-brightness); não é fonte de classificação jurídica/ABNT.
+
+Correção mínima: `contrastReliable` também exige `filter:none` ao longo da cadeia composta inteira, sem interromper no primeiro fundo opaco. Não serializa strings ou URLs de filtros. Não infere razão final, não fabrica alvo e não declara toda composição CSS coberta. GREEN: 68 testes focados; Chrome 1/1 cobrindo filtro próprio/ancestral, mínimo/aprimorado, restauração de `none`, opacidade e preservação de HTML/foco/scroll/viewport. Revisão independente repetiu Chrome, C=0/I=0 limitado aos dois arquivos de implementação/teste; não repetiu os 68 testes. Casos com composição não medida permanecem inconclusivos, não falha automática.
+
 ### 5.12.6 — largura dos blocos, decisão normativa e medição passiva
 
 Checkpoint `c098b3a`: corrigido limite por idioma (80; 40 em chinês/japonês/coreano, inclusive herança local) e alternativa normativa de mecanismo de configuração. Excesso é suspeita concreta `cantTell`, não falha antes de verificar a alternativa. Idioma desconhecido não presume 80: até 40 satisfaz ambos os limites; 41–80 fica inconclusivo; acima de 80 exige revisão. Dois REDs confirmados; 61/61 testes de regras/orientações e revisão independente C=0/I=0 nesse escopo. Guia didático específico mantido junto da observação original. Não houve ampliação de medição nesse commit.

@@ -48,7 +48,7 @@ export function collectRuntimePageData() {
     while (current instanceof Element && !visited.has(current)) {
       visited.add(current);
       const computed = getComputedStyle(current);
-      if (Number(computed.opacity) !== 1) return false;
+      if (Number(computed.opacity) !== 1 || computed.filter !== 'none') return false;
       if (!opaqueBackground) {
         if (backgroundKind(computed.getPropertyValue('background-image')) !== 'none') return false;
         opaqueBackground = opaqueColor(computed.getPropertyValue('background-color'));
