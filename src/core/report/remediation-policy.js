@@ -251,6 +251,9 @@ register(['text-block-alignment'], 'justified-text-block');
 register(['text-block-alignment'], 'alignment-essentiality-unconfirmed', [],
   'O alinhamento difere do recomendado para o idioma declarado. Confirme se ele é essencial para compreender o conteúdo; caso contrário, alinhe ao início da leitura.');
 register(['text-block-width'], 'text-block-too-wide');
+register(['text-block-width'], 'text-width-configuration-unconfirmed', ['width', 'threshold'],
+  'A linha observada excede o limite de referência. Verifique se existe um mecanismo para ajustar a largura até 80 caracteres por linha, ou 40 para chinês, japonês e coreano.',
+  data => Number.isSafeInteger(data.width) && [40, 80].includes(data.threshold) && data.width > data.threshold);
 register(['special-text-semantics'], 'missing-special-text-semantics');
 register(['zoom-not-blocked'], 'zoom-restricted');
 
@@ -370,6 +373,7 @@ export function validateCoreRuleTargetInventory(ruleId, outcome, targets) {
     if (!exactKeys(target, ['nodeId', 'data', 'message'])) return false;
     if (target.data?.reason === 'inactive-component-unconfirmed' && outcome !== 'cantTell') return false;
     if (target.data?.reason === 'alignment-essentiality-unconfirmed' && outcome !== 'cantTell') return false;
+    if (target.data?.reason === 'text-width-configuration-unconfirmed' && outcome !== 'cantTell') return false;
     const message = canonicalCoreRemediation(ruleId, target.data);
     if (!message || target.message !== message || !codepointLength(target.message, MAX_TARGET_TEXT)) return false;
   }

@@ -52,6 +52,44 @@ function srgbGrayForBlackContrast(ratio) {
   return { r: channel * 255, g: channel * 255, b: channel * 255, a: 1 };
 }
 
+test('text width uses the ABNT language limit and leaves the configuration alternative open', async () => {
+  for (const [language, count, outcome, targetCount] of [
+    ['pt-BR', 80, 'passed', 0], ['pt-BR', 81, 'cantTell', 1],
+    ['ja', 40, 'passed', 0], ['ja', 41, 'cantTell', 1],
+    ['zh-Hant', 60, 'cantTell', 1], ['ko', 60, 'cantTell', 1],
+    ['', 40, 'passed', 0], ['', 60, 'cantTell', 0],
+    ['qaa', 60, 'cantTell', 0], ['', 81, 'cantTell', 1],
+    ['pt-BR', NaN, 'cantTell', 0], ['pt-BR', Infinity, 'cantTell', 0],
+    ['pt-BR', -1, 'cantTell', 0], ['pt-BR', 0, 'cantTell', 0],
+    ['pt-BR', 12.5, 'cantTell', 0],
+  ]) {
+    const value = await evaluate('text-block-width', snapshot([
+      record('copy', 'p', { text: 'Texto observado', textBlock: true, charactersPerLine: count }),
+    ], { language }));
+    assert.equal(value.outcome, outcome, `${language}/${count}`);
+    assert.equal(value.targets.length, targetCount, `${language}/${count}`);
+    if (targetCount) {
+      const targets = value.targets.map(({ nodeId, message, data }) => ({ nodeId, message, data }));
+      assert.equal(validateCoreRuleTargetInventory('text-block-width', 'cantTell', targets), true);
+      assert.equal(validateCoreRuleTargetInventory('text-block-width', 'failed', targets), false);
+    }
+  }
+});
+
+test('text width honors inherited local language and missing measurements without inventing targets', async () => {
+  const parent = record('section', 'section', { attributes: { lang: 'ja' }, children: ['copy'] });
+  const child = record('copy', 'p', { parentId: 'section', text: '本文', textBlock: true, charactersPerLine: 60 });
+  assert.equal((await evaluate('text-block-width', snapshot([parent, child]))).targets.length, 1);
+  child.attributes.lang = '';
+  assert.equal((await evaluate('text-block-width', snapshot([parent, child]))).targets.length, 0);
+  assert.equal((await evaluate('text-block-width', snapshot([parent, child]))).outcome, 'cantTell');
+  child.attributes.lang = 'pt-BR';
+  const unsupported = record('complex', 'p', { text: 'Sem medição', textBlock: true });
+  const value = await evaluate('text-block-width', snapshot([parent, child, unsupported]));
+  assert.equal(value.outcome, 'cantTell');
+  assert.deepEqual(value.targets, []);
+});
+
 test('ABNT alignment distinguishes language direction and does not confirm an essentiality exception automatically', async () => {
   for (const [language, textAlign, direction, outcome, count] of [
     ['pt-BR', 'left', 'ltr', 'passed', 0],

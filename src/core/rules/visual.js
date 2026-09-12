@@ -376,19 +376,40 @@ function textBlockAlignment(snapshot) {
   });
 }
 
-function textBlock(snapshot, property, invalid, label) {
-  return visualResult(snapshot, ({ nodes }) => {
+function textBlockWidth(snapshot) {
+  return visualResult(snapshot, ({ nodes, document }) => {
     const candidates = nodes.filter(node => !isHidden(node) && node?.textBlock === true);
     if (candidates.length === 0) return result('inapplicable', 'Não há blocos de texto identificados.');
-    const failures = [];
+    const targets = [];
     let incomplete = false;
+    const index = nodeIndex(nodes);
     for (const node of candidates) {
-      if (!hasOwn(node, property) || (label.valid && !label.valid(node[property]))) incomplete = true;
-      else if (invalid(node[property])) failures.push(target(node, label.message, { reason: label.reason }));
+      const count = node.charactersPerLine;
+      if (!Number.isSafeInteger(count) || count <= 0 || count > 1_000_000) {
+        incomplete = true;
+        continue;
+      }
+      const ancestry = ancestorNodes(node, index);
+      const languageNode = [node, ...ancestry.ancestors].find(item => attribute(item, 'lang') !== undefined);
+      const language = languageNode ? attribute(languageNode, 'lang') : ancestry.complete ? document.language : '';
+      let threshold;
+      try {
+        const locale = new Intl.Locale(language);
+        if (locale.language !== 'und' && locale.maximize().script) {
+          threshold = ['zh', 'ja', 'ko'].includes(locale.language) ? 40 : 80;
+        }
+      } catch { /* An unknown language does not establish the 80-character limit. */ }
+      if (count <= (threshold ?? 40)) continue;
+      if (threshold === undefined && count <= 80) { incomplete = true; continue; }
+      targets.push(target(node,
+        'A linha observada excede o limite de referência. Verifique se existe um mecanismo para ajustar a largura até 80 caracteres por linha, ou 40 para chinês, japonês e coreano.',
+        { reason: 'text-width-configuration-unconfirmed', width: count, threshold: threshold ?? 80 }));
     }
-    if (failures.length > 0) return result('failed', label.failed, failures);
-    if (incomplete) return result('cantTell', `A observação de ${label.subject} não foi coletada para todos os blocos.`, [], [label.request]);
-    return result('passed', label.passed);
+    if (targets.length || incomplete) return result('cantTell',
+      'A largura dos blocos precisa de revisão: há medidas ausentes, idioma indefinido ou linhas acima do limite cuja alternativa de configuração não foi verificada.', targets, [
+        'O item 5.12.6 admite até 80 caracteres por linha (40 para chinês, japonês e coreano) OU um mecanismo que permita configurar a largura e alcançar esse resultado. Uma linha mais longa, sozinha, não demonstra descumprimento. Ausência de medição não identifica um problema concreto.'
+      ]);
+    return result('passed', 'As linhas medidas nos blocos observados respeitam o limite aplicável. O resultado se restringe ao conteúdo e ao estado medidos, não a outros tamanhos de janela ou estados da página.');
   });
 }
 
@@ -442,9 +463,7 @@ export const VISUAL_RULES = createRuleRegistry([
   definition('letter-spacing', snapshot => textSpacing(snapshot, { property: 'letter-spacing', ratio: 0.12, displayRatio: '0,12', label: 'entre letras' })),
   definition('word-spacing', snapshot => textSpacing(snapshot, { property: 'word-spacing', ratio: 0.16, displayRatio: '0,16', label: 'entre palavras' })),
   definition('text-block-alignment', textBlockAlignment),
-  definition('text-block-width', snapshot => textBlock(snapshot, 'charactersPerLine', value => value > 80, {
-    subject: 'largura', message: 'Limite a largura deste bloco a 80 caracteres por linha.', reason: 'text-block-too-wide', failed: 'Há bloco com mais de 80 caracteres por linha.', passed: 'Os blocos observados respeitam a largura máxima.', request: 'Meça os caracteres por linha de cada bloco.', valid: value => finite(value) && value >= 0
-  })),
+  definition('text-block-width', textBlockWidth),
   definition('text-resizing', textResize),
   definition('special-text-semantics', specialTextSemantics),
   definition('zoom-not-blocked', zoomNotBlocked)
