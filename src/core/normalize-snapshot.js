@@ -240,7 +240,7 @@ function deriveRuleObservations(node) {
   const styles = node.styles && typeof node.styles === 'object' ? node.styles : {};
   const display = cleanText(styles.display).toLowerCase();
   const text = cleanText(node.visibleText || node.text);
-  if (text && !node.hidden && (TEXT_BLOCK_TAGS.has(node.tagName) || BLOCK_TEXT_DISPLAYS.has(display))) {
+  if (text && (node.hasRenderedBox === true || (node.hasRenderedBox !== false && !node.hidden)) && !node.tagName.startsWith('#') && (TEXT_BLOCK_TAGS.has(node.tagName) || BLOCK_TEXT_DISPLAYS.has(display))) {
     node.textBlock = true;
     const textAlign = cleanText(styles['text-align'] || styles.textAlign);
     if (textAlign) node.textAlign = textAlign;
@@ -294,6 +294,7 @@ function copyRect(value) {
 
 function copyRuntime(record, base) {
   const result = {};
+  if (typeof record?.hasRenderedBox === 'boolean') result.hasRenderedBox = record.hasRenderedBox;
   for (const key of ['visibleText', 'focusable', 'interaction', 'interactive', 'required', 'checked', 'disabled', 'active', 'hidden', 'shadowHost', 'shadowRootMode', 'contrastReliable']) {
     if (typeof record?.[key] === 'string' || typeof record?.[key] === 'boolean' || record?.[key] === null) result[key] = record[key];
   }
@@ -833,7 +834,7 @@ function normalizeColumnar(raw) {
   for (const node of redactedNodes) {
     node.textContrastScope = node.tagName !== '#text' && node.children.some(id => {
       const child = redactedById.get(id);
-      return child?.tagName === '#text' && !child.hidden && cleanText(child.text);
+      return child?.tagName === '#text' && (!child.hidden || node.hasRenderedBox === true) && cleanText(child.text);
     }) ? 'direct' : 'aggregate';
   }
 

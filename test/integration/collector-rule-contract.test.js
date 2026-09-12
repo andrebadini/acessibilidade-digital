@@ -175,7 +175,7 @@ test('collector runtime records normalize into the observations consumed by the 
   const audit = await runCoreAudit(merged);
   const outcome = ruleId => audit.ruleResults.find(item => item.ruleId === ruleId).outcome;
   assert.equal(outcome('accessible-component-name'), 'failed');
-  assert.equal(outcome('text-block-alignment'), 'failed');
+  assert.equal(outcome('text-block-alignment'), 'cantTell');
   assert.equal(outcome('text-contrast-minimum'), 'failed');
   assert.equal(outcome('target-size-minimum'), 'cantTell');
   assert.equal(outcome('target-size-enhanced'), 'cantTell');
@@ -184,6 +184,44 @@ test('collector runtime records normalize into the observations consumed by the 
 
 test('the actual structural collector requests text-align for the existing justified-text evaluator', () => {
   assert.ok(COMPUTED_STYLE_PROPERTIES.includes('text-align'));
+});
+
+test('observed logical alignment uses CSS direction and inherited language through normalization', async () => {
+  const raw = collectorFixture();
+  const strings = raw.domSnapshot.strings;
+  const lang = strings.push('lang') - 1;
+  const ar = strings.push('ar') - 1;
+  raw.domSnapshot.documents[0].nodes.attributes[1] = [lang, ar];
+  Object.assign(raw.pageData[0].result.nodes[0].styles, { 'text-align': 'start', direction: 'rtl' });
+  const audit = await runCoreAudit(normalizeSnapshot(raw));
+  assert.equal(audit.ruleResults.find(item => item.ruleId === 'text-block-alignment').outcome, 'passed');
+});
+
+test('a CDP text node with its parent block style is not another text block', () => {
+  const raw = collectorFixture();
+  const strings = raw.domSnapshot.strings;
+  const block = strings.push('block') - 1;
+  const center = strings.push('center') - 1;
+  raw.domSnapshot.computedStyles = ['display', 'text-align'];
+  raw.domSnapshot.documents[0].layout = {
+    nodeIndex: [3, 4], bounds: [[0, 0, 100, 20], [0, 0, 100, 20]],
+    styles: [[block, center], [block, center]],
+  };
+  const nodes = normalizeSnapshot(raw).nodes;
+  assert.equal(nodes.find(node => node.backendNodeId === 4).textBlock, true);
+  assert.notEqual(nodes.find(node => node.backendNodeId === 5).textBlock, true);
+});
+
+test('a collected SVG keeps graphic contrast pending without creating a fabricated low-contrast occurrence', async () => {
+  const raw = collectorFixture();
+  raw.domSnapshot.documents[0].nodes.nodeName[5] = raw.domSnapshot.strings.push('SVG') - 1;
+  raw.pageData[0].result.nodes[1].tagName = 'svg';
+  raw.axTree.nodes[0].role.value = 'graphics-document';
+  const audit = await runCoreAudit(normalizeSnapshot(raw));
+  const result = audit.ruleResults.find(item => item.ruleId === 'graphic-object-contrast');
+  assert.equal(result.outcome, 'cantTell');
+  assert.deepEqual(result.targets, []);
+  assert.ok(result.limitations.length > 0);
 });
 
 test('normalizer retains only bounded contextual and widget observations', () => {

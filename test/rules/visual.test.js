@@ -52,6 +52,96 @@ function srgbGrayForBlackContrast(ratio) {
   return { r: channel * 255, g: channel * 255, b: channel * 255, a: 1 };
 }
 
+test('ABNT alignment distinguishes language direction and does not confirm an essentiality exception automatically', async () => {
+  for (const [language, textAlign, direction, outcome, count] of [
+    ['pt-BR', 'left', 'ltr', 'passed', 0],
+    ['pt-BR', 'center', 'ltr', 'cantTell', 1],
+    ['pt-BR', 'right', 'ltr', 'cantTell', 1],
+    ['pt-BR', 'justify', 'ltr', 'cantTell', 1],
+    ['ar', 'right', 'rtl', 'passed', 0],
+    ['ar', 'left', 'rtl', 'cantTell', 1],
+    ['ar', 'start', 'rtl', 'passed', 0],
+    ['pt-BR', 'start', 'rtl', 'cantTell', 1],
+    ['pt-BR', 'unexpected', 'ltr', 'cantTell', 0],
+    ['', 'left', 'ltr', 'cantTell', 0],
+    ['qaa', 'left', 'ltr', 'cantTell', 0],
+  ]) {
+    const value = await evaluate('text-block-alignment', snapshot([
+      record('copy', 'p', { text: 'Conteúdo', textBlock: true, textAlign, styles: { direction } })
+    ], { language }));
+    assert.equal(value.outcome, outcome, `${language}/${textAlign}/${direction}`);
+    assert.equal(value.targets.length, count);
+    if (count) {
+      const targets = value.targets.map(({ nodeId, message, data }) => ({ nodeId, message, data }));
+      assert.equal(validateCoreRuleTargetInventory('text-block-alignment', 'cantTell', targets), true);
+      assert.equal(validateCoreRuleTargetInventory('text-block-alignment', 'failed', targets), false);
+    }
+  }
+});
+
+test('alignment respects local language and unknown observations without hiding concrete suspicions', async () => {
+  const parent = record('parent', 'section', { attributes: { lang: 'ar' } });
+  const child = record('child', 'p', { parentId: 'parent', text: 'نص', textBlock: true, textAlign: 'right' });
+  assert.equal((await evaluate('text-block-alignment', snapshot([parent, child]))).outcome, 'passed');
+  child.attributes.lang = '';
+  assert.equal((await evaluate('text-block-alignment', snapshot([parent, child]))).outcome, 'cantTell');
+  const value = await evaluate('text-block-alignment', snapshot([
+    record('unknown', 'p', { textBlock: true, text: 'Texto' }),
+    record('center', 'p', { textBlock: true, text: 'Texto', textAlign: 'center' }),
+    record('hidden', 'p', { textBlock: true, textAlign: 'center', hidden: true })
+  ]));
+  assert.equal(value.outcome, 'cantTell');
+  assert.deepEqual(value.targets.map(t => t.nodeId), ['center']);
+});
+
+test('alignment does not duplicate a paragraph through a text-aggregating container', async () => {
+  const value = await evaluate('text-block-alignment', snapshot([
+    record('container', 'div', { text: 'Mesmo texto', textBlock: true, textAlign: 'center', textContrastScope: 'aggregate', children: ['paragraph'] }),
+    record('paragraph', 'p', { parentId: 'container', text: 'Mesmo texto', textBlock: true, textAlign: 'center', textContrastScope: 'direct' })
+  ]));
+  assert.deepEqual(value.targets.map(t => t.nodeId), ['paragraph']);
+});
+
+test('alignment does not count a container whose text is entirely inside multiple child blocks', async () => {
+  const value = await evaluate('text-block-alignment', snapshot([
+    record('container', 'div', { text: 'Primeiro Segundo', textBlock: true, textAlign: 'center', textContrastScope: 'aggregate', children: ['first', 'second'] }),
+    record('first', 'p', { parentId: 'container', text: 'Primeiro', textBlock: true, textAlign: 'center', textContrastScope: 'direct' }),
+    record('second', 'p', { parentId: 'container', text: 'Segundo', textBlock: true, textAlign: 'center', textContrastScope: 'direct' })
+  ]));
+  assert.deepEqual(value.targets.map(t => t.nodeId), ['first', 'second']);
+});
+
+test('alignment does not invent a concrete occurrence for a block whose text was redacted', async () => {
+  const result = await evaluate('text-block-alignment', snapshot([
+    record('private', 'p', { text: '', visibleText: '', textBlock: true, textAlign: 'center', hasRenderedBox: true })
+  ]));
+  assert.equal(result.outcome, 'cantTell');
+  assert.deepEqual(result.targets, []);
+});
+
+test('graphic contrast recognizes ordinary rendered media without declaring every image a violation', async () => {
+  for (const node of [
+    record('image', 'img', { attributes: { alt: 'Evolução das vendas' } }),
+    record('chart', 'svg'),
+    record('canvas', 'canvas'),
+    record('semantic', 'div', { axRole: 'graphics-document' }),
+    record('background', 'div', { backgroundImageKind: 'url' }),
+  ]) {
+    const value = await evaluate('graphic-object-contrast', snapshot([node]));
+    assert.equal(value.outcome, 'cantTell', node.nodeId);
+    assert.deepEqual(value.targets, [], 'unmeasured media is not a concrete low-contrast occurrence');
+  }
+});
+
+test('one measured graphic cannot approve another image whose relevant parts were not measured', async () => {
+  const value = await evaluate('graphic-object-contrast', snapshot([
+    record('known', 'svg', { graphicContrast: { foreground: '#000', background: '#fff', reliable: true } }),
+    record('unknown', 'img', { attributes: { alt: 'Mapa' } })
+  ]));
+  assert.equal(value.outcome, 'cantTell');
+  assert.deepEqual(value.targets, []);
+});
+
 test('WCAG sRGB contrast preserves effective 4.49/4.50 and 2.99/3.00 boundaries', () => {
   assert.ok(Math.abs(contrastRatio('#000', srgbGrayForBlackContrast(4.49)) - 4.49) < 1e-10);
   assert.ok(Math.abs(contrastRatio('#000', srgbGrayForBlackContrast(4.5)) - 4.5) < 1e-10);

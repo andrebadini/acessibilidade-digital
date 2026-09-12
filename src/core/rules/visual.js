@@ -68,7 +68,7 @@ function isLargeText(observation) {
 function textContrast(snapshot, enhanced) {
   return visualResult(snapshot, ({ nodes }) => {
     const index = nodeIndex(nodes);
-    const candidates = nodes.filter(node => !isHidden(node) && normalizeText(node?.text) &&
+    const candidates = nodes.filter(node => (node.hasRenderedBox === true || (node.hasRenderedBox !== false && !isHidden(node))) && normalizeText(node?.text) &&
       node.textContrastScope !== 'aggregate' && !inactiveText(node, index));
     if (candidates.length === 0) return result('inapplicable', 'Não há texto visível aplicável.');
     const failures = [];
@@ -109,8 +109,16 @@ function inactiveText(node, index) {
 
 function nonTextContrast(snapshot, field, kind) {
   return visualResult(snapshot, ({ nodes }) => {
+    const index = nodeIndex(nodes);
     const candidates = field === 'graphicContrast'
-      ? nodes.filter(node => !isHidden(node) && (node?.graphicObject === true || hasOwn(node, field)))
+      ? nodes.filter(node => (node.hasRenderedBox === true ||
+        (node.hasRenderedBox !== false && !isHidden(node) && !ancestorNodes(node, index).ancestors.some(isHidden))) && (
+        node?.graphicObject === true || hasOwn(node, field) ||
+        ['img', 'svg', 'canvas'].includes(tagOf(node)) ||
+        ['img', 'image', 'graphics-document', 'graphics-object', 'graphics-symbol'].includes(normalizeText(node.axRole || node.role || attribute(node, 'role')).toLowerCase()) ||
+        (tagOf(node) === 'input' && normalizeText(attribute(node, 'type')).toLowerCase() === 'image') ||
+        ['url', 'gradient', 'mixed'].includes(node.backgroundImageKind)
+      ))
       : field === 'focusContrast'
         ? nodes.filter(node => !isHidden(node) && (node?.focusable === true || hasOwn(node, field)))
         : nodes.filter(node => isComponent(node) && !nativeInactive(node));
@@ -136,6 +144,11 @@ function nonTextContrast(snapshot, field, kind) {
       }));
     }
     if (failures.length > 0) return result('failed', `Há ${kind} com contraste abaixo de 3:1.`, failures);
+    if (incomplete && field === 'graphicContrast') return result('cantTell',
+      'Há conteúdo gráfico cuja função ou contraste não foi determinado. Isso não comprova contraste insuficiente.', [], [
+        'Identifique as partes necessárias para entender a informação: por exemplo, barras de um gráfico, linhas de um mapa ou um ícone informativo. Meça contraste de pelo menos 3:1 com o fundo e entre partes adjacentes necessárias. Não é preciso aplicar essa medida indiscriminadamente a todos os pixels de uma fotografia.',
+        'Verifique se uma apresentação específica é essencial à informação, como as cores originais de uma obra analisada. Registre essa justificativa; estar em uma imagem ou ter texto alternativo não comprova, por si só, a exceção.'
+      ]);
     if (incomplete) return result('cantTell', `A medição ou a aplicabilidade do contraste de ${kind} precisa de confirmação.`, inactiveReview, [
       'Colete as cores finais dos pixels relevantes e sua composição de fundo. Se o componente declarar estar inativo, confirme esse estado antes de aplicar a exceção.'
     ]);
@@ -305,6 +318,64 @@ function textResize(snapshot) {
   });
 }
 
+function textBlockAlignment(snapshot) {
+  return visualResult(snapshot, ({ nodes, document }) => {
+    const index = nodeIndex(nodes);
+    const candidates = nodes.filter(node => node?.textBlock === true &&
+      (node.hasRenderedBox === true || (node.hasRenderedBox !== false && !isHidden(node) &&
+      !ancestorNodes(node, index).ancestors.some(isHidden))));
+    if (!candidates.length) return result('inapplicable', 'Não há blocos de texto identificados.');
+    const blockSet = new Set(candidates);
+    const nestedByBlock = new Map();
+    for (const child of candidates) {
+      const parent = ancestorNodes(child, index).ancestors.find(ancestor => blockSet.has(ancestor));
+      if (parent) {
+        if (!nestedByBlock.has(parent)) nestedByBlock.set(parent, []);
+        nestedByBlock.get(parent).push(child);
+      }
+    }
+    const targets = [];
+    let incomplete = false;
+    for (const node of candidates) {
+      if (!normalizeText(node.text || node.visibleText)) { incomplete = true; continue; }
+      if (node.textContrastScope === 'aggregate') {
+        const nestedBlocks = nestedByBlock.get(node) || [];
+        const nestedText = normalizeText(nestedBlocks.map(child => child.text || child.visibleText || '').join(' '));
+        if (nestedText === normalizeText(node.text || node.visibleText)) continue;
+      }
+      const ancestry = ancestorNodes(node, index);
+      const languageNode = [node, ...ancestry.ancestors].find(item => attribute(item, 'lang') !== undefined);
+      const language = languageNode ? attribute(languageNode, 'lang') : ancestry.complete ? document.language : '';
+      let readingDirection;
+      try {
+        const locale = new Intl.Locale(language);
+        if (locale.language !== 'und' && locale.maximize().script) readingDirection = locale.getTextInfo().direction;
+      } catch { /* Missing or unsupported language data is not proof of alignment. */ }
+      let align = normalizeText(node.textAlign).toLowerCase();
+      if (align === 'start' || align === 'end') {
+        const direction = node.styles?.direction;
+        if (direction === 'ltr' || direction === 'rtl') {
+          align = (align === 'start') === (direction === 'ltr') ? 'left' : 'right';
+        }
+      }
+      if (!['ltr', 'rtl'].includes(readingDirection) || !['left', 'right', 'center', 'justify'].includes(align)) {
+        incomplete = true;
+        continue;
+      }
+      if (align !== (readingDirection === 'ltr' ? 'left' : 'right')) {
+        targets.push(target(node,
+          'O alinhamento difere do recomendado para o idioma declarado. Confirme se ele é essencial para compreender o conteúdo; caso contrário, alinhe ao início da leitura.',
+          { reason: 'alignment-essentiality-unconfirmed' }));
+      }
+    }
+    if (targets.length || incomplete) return result('cantTell',
+      'A recomendação de alinhamento precisa de revisão nos blocos indicados ou sem observação suficiente.', targets, [
+        'Confira o idioma e o alinhamento: português à esquerda; árabe ou hebraico à direita. Se o alinhamento for diferente, verifique se a posição transmite significado essencial, como em um poema visual. Preferência estética, sozinha, não demonstra essa exceção.'
+      ]);
+    return result('passed', 'Os blocos observados estão alinhados conforme a direção de leitura dos idiomas declarados. A adequação das declarações de idioma é verificada separadamente.');
+  });
+}
+
 function textBlock(snapshot, property, invalid, label) {
   return visualResult(snapshot, ({ nodes }) => {
     const candidates = nodes.filter(node => !isHidden(node) && node?.textBlock === true);
@@ -370,9 +441,7 @@ export const VISUAL_RULES = createRuleRegistry([
   definition('paragraph-spacing', snapshot => textSpacing(snapshot, null)),
   definition('letter-spacing', snapshot => textSpacing(snapshot, { property: 'letter-spacing', ratio: 0.12, displayRatio: '0,12', label: 'entre letras' })),
   definition('word-spacing', snapshot => textSpacing(snapshot, { property: 'word-spacing', ratio: 0.16, displayRatio: '0,16', label: 'entre palavras' })),
-  definition('text-block-alignment', snapshot => textBlock(snapshot, 'textAlign', value => normalizeText(value).toLowerCase() === 'justify', {
-    subject: 'alinhamento', message: 'Evite justificar este bloco de texto.', reason: 'justified-text-block', failed: 'Há bloco de texto justificado.', passed: 'Os blocos observados não estão justificados.', request: 'Colete o alinhamento calculado de cada bloco.'
-  })),
+  definition('text-block-alignment', textBlockAlignment),
   definition('text-block-width', snapshot => textBlock(snapshot, 'charactersPerLine', value => value > 80, {
     subject: 'largura', message: 'Limite a largura deste bloco a 80 caracteres por linha.', reason: 'text-block-too-wide', failed: 'Há bloco com mais de 80 caracteres por linha.', passed: 'Os blocos observados respeitam a largura máxima.', request: 'Meça os caracteres por linha de cada bloco.', valid: value => finite(value) && value >= 0
   })),

@@ -4,7 +4,7 @@ import { sanitizeEvidenceUrl, sanitizeWarning } from '../core/privacy.js';
 export const COMPUTED_STYLE_PROPERTIES = Object.freeze([
   'display', 'visibility', 'opacity', 'color', 'background-color',
   'background-image', 'font-size', 'font-weight', 'line-height',
-  'letter-spacing', 'word-spacing', 'text-align', 'outline-color', 'outline-style',
+  'letter-spacing', 'word-spacing', 'text-align', 'direction', 'outline-color', 'outline-style',
   'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
   'overflow-y', 'animation-duration', 'animation-iteration-count',
   'transition-duration'

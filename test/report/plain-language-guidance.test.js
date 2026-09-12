@@ -18,6 +18,27 @@ test('explains recommendation versus requirement without changing the original o
   assert.match(recommended.reviewSteps.join(' '), /justificativa razoável/);
 });
 
+test('alignment review covers reading direction and essential presentation instead of only justification', () => {
+  const result = guidance({ itemId: '5.12.5', outcome: 'cantTell', observed: 'Parágrafo centralizado.' });
+  const instructions = result.reviewSteps.join(' ');
+  assert.match(instructions, /português.*esquerda/is);
+  assert.match(instructions, /(?:árabe|hebraico).*direita/is);
+  assert.match(instructions, /essencial.*compreen/is);
+  assert.match(instructions, /recomendação/);
+  assert.ok(result.observed.includes('Parágrafo centralizado.'));
+});
+
+test('graphic contrast guidance explains relevant parts, adjacent colors and essential presentation', () => {
+  const result = guidance({ itemId: '5.11.5', outcome: 'cantTell' });
+  const instructions = result.reviewSteps.join(' ');
+  assert.match(instructions, /partes.*necessárias/is);
+  assert.match(instructions, /3:1/);
+  assert.match(instructions, /adjacentes|entre si/);
+  assert.match(instructions, /essencial/);
+  assert.match(result.example, /gráfico|mapa/);
+  assert.match(result.observed, /não confirma/);
+});
+
 // Catches evidence being replaced by a topic's hypothetical failure.
 test('preserves supplied evidence verbatim when explaining a failure', () => {
   const observed = 'Botão #buscar: razão medida 2.1:1; amostra parcial.\nEstado: aberto.';

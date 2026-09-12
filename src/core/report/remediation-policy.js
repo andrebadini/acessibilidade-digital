@@ -248,6 +248,8 @@ for (const ruleId of ['line-spacing', 'paragraph-spacing', 'letter-spacing', 'wo
   register([ruleId], 'text-spacing-content-loss');
 }
 register(['text-block-alignment'], 'justified-text-block');
+register(['text-block-alignment'], 'alignment-essentiality-unconfirmed', [],
+  'O alinhamento difere do recomendado para o idioma declarado. Confirme se ele é essencial para compreender o conteúdo; caso contrário, alinhe ao início da leitura.');
 register(['text-block-width'], 'text-block-too-wide');
 register(['special-text-semantics'], 'missing-special-text-semantics');
 register(['zoom-not-blocked'], 'zoom-restricted');
@@ -367,6 +369,7 @@ export function validateCoreRuleTargetInventory(ruleId, outcome, targets) {
     if (exactKeys(target, ['nodeId'])) continue;
     if (!exactKeys(target, ['nodeId', 'data', 'message'])) return false;
     if (target.data?.reason === 'inactive-component-unconfirmed' && outcome !== 'cantTell') return false;
+    if (target.data?.reason === 'alignment-essentiality-unconfirmed' && outcome !== 'cantTell') return false;
     const message = canonicalCoreRemediation(ruleId, target.data);
     if (!message || target.message !== message || !codepointLength(target.message, MAX_TARGET_TEXT)) return false;
   }

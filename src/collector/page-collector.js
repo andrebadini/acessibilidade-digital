@@ -6,7 +6,7 @@ export function collectRuntimePageData() {
   const sensitive = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
   const styleNames = [
     'display', 'visibility', 'opacity', 'color', 'background-color', 'background-image',
-    'font-family', 'font-size', 'font-weight', 'line-height', 'text-align',
+    'font-family', 'font-size', 'font-weight', 'line-height', 'text-align', 'direction',
     'letter-spacing', 'word-spacing', 'outline-color', 'outline-style',
     'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
     'overflow-y', 'animation-duration', 'animation-iteration-count',
@@ -43,15 +43,19 @@ export function collectRuntimePageData() {
   };
   const contrastReliable = element => {
     let current = element;
+    let opaqueBackground = false;
     const visited = new Set();
     while (current instanceof Element && !visited.has(current)) {
       visited.add(current);
       const computed = getComputedStyle(current);
-      if (Number(computed.opacity) !== 1 || backgroundKind(computed.getPropertyValue('background-image')) !== 'none') return false;
-      if (opaqueColor(computed.getPropertyValue('background-color'))) return true;
-      current = current.parentElement;
+      if (Number(computed.opacity) !== 1) return false;
+      if (!opaqueBackground) {
+        if (backgroundKind(computed.getPropertyValue('background-image')) !== 'none') return false;
+        opaqueBackground = opaqueColor(computed.getPropertyValue('background-color'));
+      }
+      current = current.assignedSlot || current.parentElement || current.getRootNode()?.host || null;
     }
-    return false;
+    return opaqueBackground;
   };
   const identifierIsSensitive = (element) => sensitive.test([
     element.getAttribute('name'), element.id, element.getAttribute('autocomplete')
@@ -276,6 +280,11 @@ export function collectRuntimePageData() {
     for (const name of styleNames) styles[name] = computed.getPropertyValue(name);
     const sensitiveControl = isSensitiveControl(element);
     const visible = computed.display !== 'none' && computed.visibility !== 'hidden' && Number(computed.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+    let hasRenderedBox = visible && computed.visibility !== 'collapse';
+    for (let ancestor = composedParent(element); hasRenderedBox && ancestor; ancestor = composedParent(ancestor)) {
+      const css = geometry.get(ancestor)?.computed || getComputedStyle(ancestor);
+      if (css.display === 'none' || Number(css.opacity) === 0) hasRenderedBox = false;
+    }
     const nativeControl = ['button', 'input', 'select', 'textarea'].includes(element.localName);
     const disabled = nativeControl && element.matches(':disabled');
     const measuredTarget = targetSizeRect(element);
@@ -290,6 +299,7 @@ export function collectRuntimePageData() {
       contrastReliable: contrastReliable(element),
       backgroundImageKind: backgroundKind(computed.getPropertyValue('background-image')),
       hidden: !visible,
+      hasRenderedBox,
       visibleText: sensitiveControl ? '' : (element.innerText || '').replace(/\s+/gu, ' ').trim(),
       focusable: element.matches('a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]') && !disabled,
       ...(nativeControl ? { disabled } : {}),

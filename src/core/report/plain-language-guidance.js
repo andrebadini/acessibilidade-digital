@@ -202,6 +202,12 @@ const SPECIFIC = {
     steps: ['Localize a informação comunicada por cor.', 'Confira se um texto, símbolo ou outra indicação também permite entender a mesma informação.'],
     example: 'um campo inválido apresenta uma mensagem de erro além da borda vermelha.'
   },
+  '5.11.5': {
+    impact: 'Pessoas com baixa visão podem não distinguir uma linha, uma barra ou um símbolo que explica a informação, mesmo quando o desenho está visível na tela.',
+    correction: 'Ajuste as cores das partes necessárias à compreensão para atingir contraste de pelo menos 3:1 com o fundo e entre si, ou documente por que a apresentação específica é essencial à informação transmitida.',
+    steps: ['Identifique as partes do objeto gráfico necessárias para compreender a informação: por exemplo, as barras de um gráfico ou o caminho em um mapa. Não trate automaticamente cada pixel de uma fotografia como uma parte que precisa dessa medição.', 'Meça a relação de contraste das cores relevantes com o fundo e entre partes adjacentes necessárias: a referência é pelo menos 3:1. Se houver gradientes, transparência ou fundo variável, peça apoio para medir as cores efetivamente apresentadas, sem confiar apenas na impressão visual.', 'Verifique se a apresentação específica é essencial à informação, como as cores originais de uma obra analisada. Registre o motivo e as partes examinadas. Ter texto alternativo ou estar marcado como decorativo no código não comprova, sozinho, essa exceção.'],
+    example: 'em um mapa, uma linha cinza-clara que indica o único caminho pode desaparecer sobre o fundo branco. Torná-la mais contrastante permite perceber o trajeto; a análise se concentra nessa informação, não em todos os pixels de uma fotografia ao lado.'
+  },
   '5.12.1': {
     impact: 'Pessoas com baixa visão ou dificuldade de leitura podem confundir linhas muito próximas e perder o ponto em que estavam lendo.',
     correction: 'Ofereça entrelinhas de pelo menos 1,5 vez o tamanho da fonte ou um mecanismo para configurar esse espaçamento sem perda de conteúdo ou funcionalidade, conforme a alternativa prevista na ABNT.',
@@ -227,9 +233,9 @@ const SPECIFIC = {
     example: 'para uma fonte de 16 pixels, o ajuste de referência entre palavras é 2,56 pixels (16 × 0,16). Depois do ajuste, uma instrução pode quebrar em mais linhas, mas nenhuma palavra fica inacessível.'
   },
   '5.12.5': {
-    impact: 'Pessoas com dificuldade de leitura podem perder a sequência quando o texto justificado cria espaços desiguais entre as palavras para alinhar as duas bordas do parágrafo.',
-    correction: 'Como melhoria recomendada, ofereça uma apresentação dos blocos de texto sem alinhamento justificado, evitando esticar os espaços para alinhar as duas bordas.',
-    steps: ['Observe um parágrafo com várias linhas: o texto se alinha às duas margens, com espaços aumentados entre palavras? Compare com a evidência de alinhamento disponível.', 'Confira se há uma opção de apresentação sem justificação. A aparência é uma pista, não uma medição; registre a configuração verificada e as limitações da revisão.'],
+    impact: 'Pessoas com dificuldade de leitura podem perder a sequência quando o início das linhas muda de posição. No texto justificado, espaços desiguais entre palavras para alinhar as duas bordas também podem dificultar acompanhar o parágrafo.',
+    correction: 'Como melhoria recomendada, alinhe os blocos à esquerda para idiomas lidos da esquerda para a direita e à direita para os de leitura inversa. Se outro alinhamento for essencial à compreensão, registre essa justificativa.',
+    steps: ['Confira o idioma real do trecho, não apenas sua declaração no código. Em português, a referência é alinhamento à esquerda; em árabe ou hebraico, à direita. Compare com o alinhamento observado.', 'Examine também parágrafos centralizados, alinhados ao lado contrário ou justificados (às duas margens, aumentando os espaços entre palavras). Se houver diferença, verifique se esse alinhamento é essencial para compreender o conteúdo, como em um poema visual cuja posição das palavras transmite significado. Preferência estética, sozinha, não demonstra essa exceção.', 'Registre o bloco, o idioma, o alinhamento e a justificativa encontrada. Esta é uma recomendação; não conclua descumprimento de requisito obrigatório apenas por esse resultado.'],
     example: 'um parágrafo em português alinhado à esquerda mantém a margem direita irregular, sem aumentar os espaços para preencher toda a linha.'
   },
   '5.12.11': {
