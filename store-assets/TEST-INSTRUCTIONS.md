@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.1.13 beta 1
+# Instruções de teste — Audita Acessibilidade 1.1.14
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.13.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais.
+1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.14.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
@@ -37,7 +37,7 @@ Abra **Outra URL**, informe um endereço HTTP ou HTTPS e repita o percurso nos t
 
 Abra **Várias páginas**, informe de 2 a 20 endereços HTTP ou HTTPS, um por linha, e escolha um dos três modos de evidência. Confira as cinco etapas da página atual, a barra de avanço do lote inteiro, o relatório consolidado e a presença de resultados de todas as páginas. Nos modos com imagens, cada página sensível deve solicitar sua própria confirmação. Uma página que não puder ser observada deve aparecer como tentativa não concluída no relatório, sem impedir as próximas após a limpeza da tentativa. Durante toda a coleta, as páginas devem ser avaliadas em abas temporárias inativas: a aba original deve permanecer visível, sem rolagem, troca de foco, destaque ou navegação perceptível.
 
-## Limites declarados da beta
+## Limites declarados
 
 O mapa numerado e a legenda de anúncios estimados são produzidos no modo de evidência completa quando a coleta permite; omissões são explícitas. A retenção tem prazo de 30 dias desde o primeiro registro persistido e a limpeza ocorre quando o Chrome puder executar a extensão. A opção de excluir após exportação começa desmarcada e exige os quatro downloads confirmados da mesma revisão. Arquivos baixados são preservados. A página aberta, outra URL, o lote nos três modos, as evidências individuais, o destaque quando há fonte viva, as personas e os quatro formatos de exportação fazem parte do percurso testável.
 

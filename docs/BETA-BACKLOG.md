@@ -2,6 +2,14 @@
 
 Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. Elas não reduzem os controles de privacidade, autorização de capturas, correlação das evidências, limpeza de estado ou confiabilidade normativa.
 
+## Estado vigente — produção 1.1.14, 12/09
+
+Produção local entregue; a pausa histórica da 1.1.13 foi encerrada a pedido do usuário. Registro completo: `docs/qa/2026-09-12-production1114-release.md`. Versão correta em novos modelos desde 1.1.13 e agora visível em HTML/PDF; retomada do lote corrigida para preservar o sinal vivo de cancelamento. Duas revisões finais C=0/I=0, etapas nativas aprovadas após correção da preparação de cinco casos, pacote conferido e Google atual com quatro formatos/PDF de 24 páginas.
+
+Os itens abaixo preservam sua cronologia, não indicam que correções entregues continuam pendentes. O erro CDP isolado de 1.1.12 não foi reproduzido nas execuções posteriores e sua causa continua indeterminada, sem falha de produto demonstrada. Duas capturas auxiliares de UI após reinício continuam com timeout, sem invalidar as provas funcionais e de exportação daquele caso; outras imagens foram inspecionadas.
+
+Refinamentos futuros: alinhar automaticamente versões em toda documentação de distribuição; evitar quebra interna do número ABNT na matriz PDF; corrigir singular/plural e “0 ocorrências” em verificações positivas sem alvos; reduzir avisos redundantes. Nenhum desses itens altera os dados da auditoria. As instruções e README vigentes foram alinhados à 1.1.14 nesta entrega.
+
 ## Incidente de compatibilidade — não confundir com refinamento menor
 
 - **Produção pendente, 08/09:** a coleta real da 1.1.12 registra `versions.extension: 0.1.0` em vez de 1.1.12. RED confirmado contra o manifesto; corrigir a proveniência em novas auditorias sem modificar documentos históricos. A primeira tentativa do novo teste também teve `CDP_COMMAND_FAILED`, ainda sem causa isolada. Registro completo em `docs/qa/2026-09-08-google-1112-production-correction.md`. Não tratar o encerramento anterior como aceite do usuário à beta.
