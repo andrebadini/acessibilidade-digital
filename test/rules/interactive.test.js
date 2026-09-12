@@ -107,6 +107,48 @@ test('link and button semantics fail every observed interaction lacking its role
   assert.equal((await evaluate('link-semantics', {})).outcome, 'cantTell');
 });
 
+test('valid role replacements are not misclassified as malformed links or buttons', async () => {
+  for (const [tag, attributes, role, rule] of [
+    ['button', { role: 'menuitem' }, 'menuitem', 'button-semantics'],
+    ['button', { role: 'tab' }, 'tab', 'button-semantics'],
+    ['input', { type: 'button', role: 'switch' }, 'switch', 'button-semantics'],
+    ['a', { href: '/help', role: 'menuitem' }, 'menuitem', 'link-semantics']
+  ]) {
+    const value = snapshot([record('control', tag, { attributes, axRole: role, accessibleName: 'Ajuda' })]);
+    assert.equal((await evaluate(rule, value)).outcome, 'inapplicable', `${tag}/${role}`);
+  }
+});
+
+test('computed control roles are used when author role is absent', async () => {
+  for (const role of ['button', 'link']) {
+    const value = snapshot([record('control', 'x-control', { axRole: role, accessibleName: 'Ajuda' })]);
+    assert.equal((await evaluate(`${role}-semantics`, value)).outcome, 'passed');
+  }
+});
+
+test('AX-only components still receive name and custom semantics checks', async () => {
+  const value = snapshot([record('control', 'x-control', { axRole: 'button', accessibleName: '', visibleText: 'Salvar' })]);
+  assert.equal((await evaluate('accessible-component-name', value)).outcome, 'failed');
+  assert.equal((await evaluate('visible-label-in-name', value)).outcome, 'failed');
+  assert.equal((await evaluate('custom-component-semantics', value)).outcome, 'passed');
+});
+
+test('invalid native role replacements and roleless interactions remain failures', async () => {
+  const value = snapshot([record('control', 'button', { attributes: { role: 'heading' }, axRole: 'heading' })]);
+  assert.equal((await evaluate('button-semantics', value)).outcome, 'failed');
+  assert.equal((await evaluate('button-semantics', snapshot([
+    record('image', 'input', { attributes: { type: 'image', role: 'combobox' }, axRole: 'combobox' })
+  ]))).outcome, 'failed');
+});
+
+test('digital publishing link roles retain valid link semantics and name checks', async () => {
+  for (const role of ['doc-backlink', 'doc-biblioref', 'doc-glossref', 'doc-noteref']) {
+    const value = snapshot([record('link', 'a', { attributes: { href: '#note', role }, axRole: role, accessibleName: '' })]);
+    assert.equal((await evaluate('link-semantics', value)).outcome, 'passed');
+    assert.equal((await evaluate('link-purpose-in-context', value)).outcome, 'failed');
+  }
+});
+
 test('assisted link and button purpose rules reject objective missing semantics or names without approving quality', async () => {
   const namelessLink = snapshot([
     record('link', 'a', { attributes: { href: '/produto' }, role: 'link', accessibleName: '' })

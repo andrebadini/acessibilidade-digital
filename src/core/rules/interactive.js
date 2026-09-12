@@ -27,29 +27,42 @@ function interactiveResult(snapshot, evaluate) {
   return { ...value, targets: orderTargets(value.targets, parts.nodes) };
 }
 
+// ARIA in HTML permits these native controls to expose a different widget role.
+// Those widgets still require the component checks; they are not failed links/buttons.
+const LINK_REPLACEMENTS = new Set(['button', 'checkbox', 'menuitem', 'menuitemcheckbox',
+  'menuitemradio', 'option', 'radio', 'switch', 'tab', 'treeitem']);
+const BUTTON_REPLACEMENTS = new Set(['checkbox', 'combobox', 'gridcell', 'link', 'menuitem',
+  'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'separator', 'slider', 'switch', 'tab', 'treeitem']);
+const LINK_ROLES = new Set(['link', 'doc-backlink', 'doc-biblioref', 'doc-glossref', 'doc-noteref']);
+const controlRole = node => normalizeText(node?.axRole).toLowerCase() || roleOf(node);
+const isObservedComponent = node => isComponent({ ...node, role: controlRole(node) });
+
 function isLink(node) {
-  if (tagOf(node) === 'a' && roleOf(node) === 'button' && node?.interaction !== 'link') return false;
+  if (tagOf(node) === 'a' && LINK_REPLACEMENTS.has(controlRole(node)) && node?.interaction !== 'link') return false;
   return !isHidden(node) && (
     (tagOf(node) === 'a' && hasAttribute(node, 'href')) ||
-    roleOf(node) === 'link' || node?.interaction === 'link'
+    LINK_ROLES.has(controlRole(node)) || node?.interaction === 'link'
   );
 }
 
 function isButton(node) {
-  if (tagOf(node) === 'button' && roleOf(node) === 'link' && node?.interaction !== 'button') return false;
   const tag = tagOf(node);
   const type = normalizeText(attribute(node, 'type') ?? 'text').toLowerCase();
+  if ((tag === 'button' || (tag === 'input' && ['button', 'image', 'reset', 'submit'].includes(type))) &&
+    BUTTON_REPLACEMENTS.has(controlRole(node)) &&
+    !(tag === 'input' && type === 'image' && controlRole(node) === 'combobox') &&
+    node?.interaction !== 'button') return false;
   return !isHidden(node) && (
     tag === 'button' ||
     (tag === 'input' && ['button', 'image', 'reset', 'submit'].includes(type)) ||
-    roleOf(node) === 'button' || node?.interaction === 'button'
+    controlRole(node) === 'button' || node?.interaction === 'button'
   );
 }
 
 function hasLinkSemantics(node) {
   const native = tagOf(node) === 'a' && hasAttribute(node, 'href');
-  const role = roleOf(node);
-  return native ? !role || role === 'link' : role === 'link';
+  const role = controlRole(node);
+  return native ? !role || LINK_ROLES.has(role) : LINK_ROLES.has(role);
 }
 
 function hasButtonSemantics(node) {
@@ -57,7 +70,7 @@ function hasButtonSemantics(node) {
   const type = normalizeText(attribute(node, 'type') ?? 'text').toLowerCase();
   const native = tag === 'button' ||
     (tag === 'input' && ['button', 'image', 'reset', 'submit'].includes(type));
-  const role = roleOf(node);
+  const role = controlRole(node);
   return native ? !role || role === 'button' : role === 'button';
 }
 
@@ -205,7 +218,7 @@ function newWindowWarning(snapshot) {
 
 function accessibleComponentName(snapshot) {
   return interactiveResult(snapshot, ({ nodes }) => {
-    const components = nodes.filter(isComponent);
+    const components = nodes.filter(isObservedComponent);
     if (components.length === 0) return result('inapplicable', 'Não há componentes aplicáveis.');
     const ids = domIdIndex(nodes);
     const failures = [];
@@ -235,7 +248,7 @@ function accessibleComponentName(snapshot) {
 
 function visibleLabelInName(snapshot) {
   return interactiveResult(snapshot, ({ nodes }) => {
-    const candidates = nodes.filter(node => isComponent(node) && normalizeText(node?.visibleText));
+    const candidates = nodes.filter(node => isObservedComponent(node) && normalizeText(node?.visibleText));
     if (candidates.length === 0) {
       return result('inapplicable', 'Não há componentes com rótulo visível aplicável.');
     }
@@ -268,7 +281,7 @@ function visibleLabelInName(snapshot) {
 
 function nativeElements(snapshot) {
   return interactiveResult(snapshot, ({ nodes }) => {
-    const components = nodes.filter(isComponent);
+    const components = nodes.filter(isObservedComponent);
     if (components.length === 0) return result('inapplicable', 'Não há componentes aplicáveis.');
     const custom = components.filter(node => !isNativeControl(node));
     if (custom.length === 0) return result('passed', 'Todos os componentes observados usam elementos nativos.');
@@ -340,14 +353,14 @@ function compatibilityOf(node, role) {
 function customComponentSemantics(snapshot) {
   return interactiveResult(snapshot, ({ nodes }) => {
     const components = nodes.filter(node => !isNativeControl(node) && (
-      isComponent(node) || node?.customElement === true || node?.interactive === true
+      isObservedComponent(node) || node?.customElement === true || node?.interactive === true
     ));
     if (components.length === 0) return result('inapplicable', 'Não há componentes customizados observáveis.');
     const ids = domIdIndex(nodes);
     const failures = [];
     let incomplete = false;
     for (const node of components) {
-      const role = roleOf(node);
+      const role = roleOf(node) || controlRole(node);
       if (!role) {
         failures.push(target(node, 'Informe uma função semântica para este componente customizado.', {
           reason: 'missing-custom-role'
