@@ -253,6 +253,12 @@ function deriveRuleObservations(node) {
   }
 }
 
+function observedAxHeadingLevel(ax) {
+  if (!Array.isArray(ax?.properties)) return undefined;
+  const value = ax.properties.find(property => property?.name === 'level')?.value?.value;
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
 function copyRect(value) {
   if (Array.isArray(value) && value.length >= 4 && value.slice(0, 4).every(Number.isFinite)) {
     return { x: value[0], y: value[1], width: value[2], height: value[3] };
@@ -348,6 +354,7 @@ function normalizeSimplified(raw) {
       const description = axString(ax.description);
       const value = editable ? '' : axString(ax.value);
       if (role) normalized.axRole = role;
+      if (role === 'heading' && observedAxHeadingLevel(ax) !== undefined) normalized.headingLevel = observedAxHeadingLevel(ax);
       if (hasAxString(ax.name)) normalized.accessibleName = name;
       if (description) normalized.accessibleDescription = description;
       if (value) normalized.axValue = value;
@@ -752,6 +759,7 @@ function normalizeColumnar(raw) {
       const description = axString(ax.description);
       const value = editable ? '' : axString(ax.value);
       if (role) node.axRole = role;
+      if (role === 'heading' && observedAxHeadingLevel(ax) !== undefined) node.headingLevel = observedAxHeadingLevel(ax);
       if (hasAxString(ax.name)) node.accessibleName = name;
       if (description) node.accessibleDescription = description;
       if (value) node.axValue = value;

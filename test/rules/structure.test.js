@@ -198,8 +198,59 @@ test('main and section heading candidates fail only when absence is observable',
   ]);
   assert.equal((await evaluate('main-heading', withHeadings)).outcome, 'cantTell');
   assert.equal((await evaluate('section-headings', withHeadings)).outcome, 'cantTell');
-  assert.equal((await evaluate('main-heading', snapshot())).outcome, 'inapplicable');
+  assert.equal((await evaluate('main-heading', snapshot())).outcome, 'cantTell');
   assert.equal((await evaluate('section-headings', snapshot())).outcome, 'inapplicable');
+});
+
+test('main heading recommendation applies to pages without a native main container', async () => {
+  assert.equal((await evaluate('main-heading', snapshot([record('body', 'body')]))).outcome, 'failed');
+  assert.equal((await evaluate('main-heading', snapshot([
+    record('heading', 'h1', { role: 'heading', headingLevel: 1 })
+  ]))).outcome, 'cantTell');
+  const duplicate = await evaluate('main-heading', snapshot([
+    record('first', 'h1', { role: 'heading', headingLevel: 1 }),
+    record('second', 'div', { role: 'heading', headingLevel: 1 })
+  ]));
+  assert.equal(duplicate.outcome, 'failed');
+  assert.equal(duplicate.targets.length, 2);
+  assert.equal((await evaluate('main-heading', snapshot([
+    record('first', 'h1', { role: 'heading', headingLevel: 1 }),
+    record('hidden', 'h1', { role: 'heading', headingLevel: 1, hidden: true })
+  ]))).outcome, 'cantTell');
+});
+
+test('missing heading levels cannot prove absence of the main heading', async () => {
+  assert.equal((await evaluate('main-heading', snapshot([
+    record('heading', 'h1', { role: 'heading' })
+  ]))).outcome, 'cantTell');
+});
+
+test('main heading counts only the outer document, not embedded documents', async () => {
+  const outer = record('outer', 'h1', { axRole: 'heading', headingLevel: 1, frameId: 'main', framePath: [] });
+  const inner = record('inner', 'h1', { axRole: 'heading', headingLevel: 1, frameId: 'child', framePath: ['frame'] });
+  assert.equal((await evaluate('main-heading', snapshot([outer, inner]))).outcome, 'cantTell');
+  const missing = await evaluate('main-heading', snapshot([record('body', 'body', { frameId: 'main', framePath: [] }), inner]));
+  assert.equal(missing.outcome, 'failed');
+  assert.equal(missing.targets[0].data.reason, 'missing-main-heading');
+});
+
+test('ARIA ownership associates a listitem with a list only within its document', async () => {
+  const owner = record('list', 'div', { axRole: 'list', attributes: { 'aria-owns': 'entry' }, frameId: 'main' });
+  const item = record('item', 'div', { axRole: 'listitem', attributes: { id: 'entry' }, frameId: 'main' });
+  assert.equal((await evaluate('list-semantics', snapshot([owner, item]))).outcome, 'passed');
+  assert.equal((await evaluate('list-semantics', snapshot([owner, { ...item, frameId: 'child', framePath: ['frame'] }]))).outcome, 'failed');
+  assert.equal((await evaluate('list-semantics', snapshot([{ ...owner, hidden: true }, item]))).outcome, 'failed');
+});
+
+test('ambiguous ARIA ownership is inconclusive rather than approved', async () => {
+  const owner = record('list', 'div', { axRole: 'list', attributes: { 'aria-owns': 'entry' } });
+  const item = record('item', 'div', { axRole: 'listitem', attributes: { id: 'entry' } });
+  assert.equal((await evaluate('list-semantics', snapshot([owner, item,
+    record('duplicate', 'div', { attributes: { id: 'entry' } })
+  ]))).outcome, 'cantTell');
+  assert.equal((await evaluate('list-semantics', snapshot([owner, item,
+    { ...owner, nodeId: 'second-owner' }
+  ]))).outcome, 'cantTell');
 });
 
 test('landmark rules cover semantics, duplicate unique regions and repeated names', async () => {
@@ -263,6 +314,32 @@ test('list semantics detects list items outside a list and passes an observable 
     record('list', 'ul', { role: 'list', children: ['item'] }),
     record('item', 'li', { role: 'presentation', parentId: 'list' })
   ]))).outcome, 'failed');
+});
+
+test('ARIA menu is evaluated as a custom component, not rejected as a native list', async () => {
+  const value = snapshot([
+    record('menu', 'ul', { attributes: { role: 'menu' }, axRole: 'menu', children: ['action'] }),
+    record('action', 'li', { attributes: { role: 'menuitem' }, axRole: 'menuitem', parentId: 'menu' })
+  ]);
+  assert.equal((await evaluate('list-semantics', value)).outcome, 'inapplicable');
+});
+
+test('native listitem inside a menu cannot borrow the overridden ul list semantics', async () => {
+  const value = snapshot([
+    record('menu', 'ul', { role: 'menu', children: ['item'] }),
+    record('item', 'li', { role: 'listitem', parentId: 'menu' })
+  ]);
+  const result = await evaluate('list-semantics', value);
+  assert.equal(result.outcome, 'failed');
+  assert.deepEqual(result.targets.map(t => t.nodeId), ['item']);
+});
+
+test('computed list roles are preserved even when the author did not use list tags', async () => {
+  const value = snapshot([
+    record('list', 'div', { axRole: 'list', children: ['item'] }),
+    record('item', 'div', { axRole: 'listitem', parentId: 'list' })
+  ]);
+  assert.equal((await evaluate('list-semantics', value)).outcome, 'passed');
 });
 
 test('table semantics and header association report invalid, missing and ambiguous structures', async () => {

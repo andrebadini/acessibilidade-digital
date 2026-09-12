@@ -134,7 +134,11 @@ function frameTitle(snapshot) {
 }
 
 function headingCandidates(nodes) {
-  return nodes.filter(node => !isHidden(node) && (/^h[1-6]$/u.test(tagOf(node)) || roleOf(node) === 'heading'));
+  return nodes.filter(node => !isHidden(node) && (/^h[1-6]$/u.test(tagOf(node)) || headingRole(node) === 'heading'));
+}
+
+function headingRole(node) {
+  return normalizeText(node?.axRole).toLowerCase() || roleOf(node);
 }
 
 function observedHeadingLevel(node) {
@@ -149,18 +153,27 @@ function headingSemantics(snapshot) {
     let incomplete = false;
     for (const node of headings) {
       const native = /^h[1-6]$/u.test(tagOf(node));
-      const role = roleOf(node);
+      const role = headingRole(node);
       const level = observedHeadingLevel(node);
-      if (native && !role) {
+      const declaredLevel = attribute(node, 'aria-level');
+      const invalidDeclaredLevel = declaredLevel !== undefined &&
+        (!/^\+?\d+$/u.test(declaredLevel.trim()) || !Number.isSafeInteger(Number(declaredLevel)) || Number(declaredLevel) < 1);
+      // Browser recovery can supply level 2 even when the required author
+      // attribute is absent. Keep author conformance separate from recovery.
+      if (invalidDeclaredLevel || (!native && node.axRole === 'heading' && declaredLevel === undefined)) {
+        failures.push(target(node, 'Declare aria-level como um inteiro positivo para identificar o nível do cabeçalho.', {
+          reason: 'invalid-heading-level'
+        }));
+      } else if (native && !role) {
         incomplete = true;
-      } else if ((native && role !== 'heading') || (!native && (role !== 'heading' || level === null))) {
+      } else if ((native && role !== 'heading') || (!native && (role !== 'heading' || (level === null && !hasAttribute(node, 'aria-level'))))) {
         failures.push(target(node, 'Exponha este cabeçalho com função e nível de cabeçalho.', {
           reason: 'invalid-heading-semantics'
         }));
       } else if (level === null) {
         incomplete = true;
-      } else if (level < 1 || level > 6) {
-        failures.push(target(node, 'Use um nível de cabeçalho entre 1 e 6.', {
+      } else if (level < 1) {
+        failures.push(target(node, 'Use um nível inteiro positivo para o cabeçalho.', {
           reason: 'invalid-heading-level'
         }));
       }
@@ -204,6 +217,25 @@ function headingOrder(snapshot) {
       [],
       ['A hierarquia e a finalidade dos cabeçalhos dependem do conteúdo.']
     );
+  });
+}
+
+function mainHeading(snapshot) {
+  return structuralResult(snapshot, ({ nodes, document }) => {
+    const outerNodes = nodes.filter(node => !node.framePath?.length);
+    const headings = headingCandidates(outerNodes);
+    const primary = headings.filter(node => observedHeadingLevel(node) === 1);
+    if (primary.length > 1) return result('failed', 'Há mais de um cabeçalho principal exposto neste estado.',
+      primary.map(node => target(node, 'Identifique a página com um único cabeçalho de nível 1.', { reason: 'multiple-main-headings' })));
+    if (outerNodes.length === 0 || headings.some(node => observedHeadingLevel(node) === null)) {
+      return result('cantTell', 'A coleta não permite determinar quantos cabeçalhos principais estão disponíveis.', [],
+        ['Confirme os cabeçalhos e seus níveis no estado observado antes de concluir.']);
+    }
+    if (primary.length === 0) return result('failed', 'Não há cabeçalho de nível 1 exposto neste estado.', [
+      documentTarget(document, 'Inclua um cabeçalho principal que identifique a página.', { reason: 'missing-main-heading' })
+    ]);
+    return result('cantTell', 'Há um cabeçalho de nível 1; confirme se ele identifica o assunto da página.', [],
+      ['A descrição do assunto exige revisão humana; a contagem por si só não confirma a recomendação.']);
   });
 }
 
@@ -347,29 +379,42 @@ function landmarkUniqueNames(snapshot) {
 
 function listSemantics(snapshot) {
   return structuralResult(snapshot, ({ nodes }) => {
+    const index = nodeIndex(nodes);
+    const listRole = node => normalizeText(node?.axRole).toLowerCase() || roleOf(node) ||
+      (['ul', 'ol'].includes(tagOf(node)) ? 'list' : tagOf(node) === 'li' ? 'listitem' : '');
+    // Role replacement is legal: a UL exposed as menu is a custom component,
+    // not a malformed list. Its ARIA relationships are checked separately.
     const candidates = nodes.filter(node => !isHidden(node) && (
-      ['li', 'ol', 'ul'].includes(tagOf(node)) || ['list', 'listitem'].includes(roleOf(node))
+      ['list', 'listitem'].includes(listRole(node)) ||
+      (tagOf(node) === 'li' && ['none', 'presentation'].includes(listRole(node)) &&
+        ancestorNodes(node, index).ancestors.some(parent => listRole(parent) === 'list'))
     ));
     if (candidates.length === 0) return result('inapplicable', 'Não há listas observáveis.');
-    const index = nodeIndex(nodes);
     const failures = [];
     let incomplete = false;
     for (const node of candidates) {
       const tag = tagOf(node);
-      const role = roleOf(node);
+      const role = listRole(node);
       if ((tag === 'li' || role === 'listitem') && ['none', 'presentation'].includes(role)) {
         failures.push(target(node, 'Preserve a semântica deste item de lista.', {
           reason: 'suppressed-listitem-semantics'
         }));
         continue;
       }
-      if (['ol', 'ul'].includes(tag) && role && role !== 'list') {
-        failures.push(target(node, 'Preserve a semântica de lista deste elemento.', { reason: 'invalid-list-role' }));
-      }
-      if (tag === 'li' || role === 'listitem') {
+      if (role === 'listitem') {
+        const id = attribute(node, 'id');
+        const sameDocument = candidate => (candidate.frameId ?? 'main') === (node.frameId ?? 'main') &&
+          JSON.stringify(candidate.framePath ?? []) === JSON.stringify(node.framePath ?? []);
+        const owners = id ? nodes.filter(owner => !isHidden(owner) && sameDocument(owner) &&
+          (attribute(owner, 'aria-owns') || '').split(/\s+/u).includes(id)) : [];
+        if (owners.some(owner => listRole(owner) === 'list')) {
+          const matches = nodes.filter(candidate => sameDocument(candidate) && attribute(candidate, 'id') === id);
+          if (owners.length !== 1 || matches.length !== 1) incomplete = true;
+          continue;
+        }
         const chain = ancestorNodes(node, index);
         if (!chain.complete) incomplete = true;
-        else if (!chain.ancestors.some(parent => ['ol', 'ul'].includes(tagOf(parent)) || roleOf(parent) === 'list')) {
+        else if (!chain.ancestors.some(parent => listRole(parent) === 'list')) {
           failures.push(target(node, 'Associe este item a uma lista semântica.', {
             reason: 'listitem-outside-list'
           }));
@@ -377,8 +422,8 @@ function listSemantics(snapshot) {
       }
     }
     if (failures.length > 0) return result('failed', 'Há elementos de lista com estrutura inválida.', failures);
-    if (incomplete) return result('cantTell', 'A ancestralidade de um item de lista não foi coletada.', [], [
-      'Colete a árvore ancestral completa do item.'
+    if (incomplete) return result('cantTell', 'A relação de um item com sua lista está incompleta ou ambígua.', [], [
+      'Confirme a árvore ancestral e as referências aria-owns do item antes de concluir.'
     ]);
     return result('passed', 'A estrutura observável das listas é semântica.');
   });
@@ -501,7 +546,7 @@ export const STRUCTURE_RULES = createRuleRegistry([
   { id: 'part-language', mode: 'assisted', nbrItems: ['5.13.3'], wcag: ['3.1.2'], evaluate: partLanguage },
   { id: 'frame-title', mode: 'assisted', nbrItems: ['5.13.4'], wcag: ['1.3.1', '4.1.2'], evaluate: frameTitle },
   { id: 'heading-semantics', mode: 'automated', nbrItems: ['5.3.1'], wcag: ['1.3.1'], evaluate: headingSemantics },
-  { id: 'main-heading', mode: 'assisted', nbrItems: ['5.3.3'], wcag: ['2.4.6', '2.4.10'], evaluate: snapshot => containerHeadings(snapshot, 'main') },
+  { id: 'main-heading', mode: 'assisted', nbrItems: ['5.3.3'], wcag: ['2.4.6', '2.4.10'], evaluate: mainHeading },
   { id: 'section-headings', mode: 'assisted', nbrItems: ['5.3.4'], wcag: ['2.4.10'], evaluate: snapshot => containerHeadings(snapshot, 'section') },
   { id: 'heading-order', mode: 'assisted', nbrItems: ['5.3.5'], wcag: ['1.3.1', '2.4.6', '2.4.10'], evaluate: headingOrder },
   { id: 'landmark-semantics', mode: 'automated', nbrItems: ['5.4.1'], wcag: ['1.3.1', '1.3.6'], evaluate: landmarkSemantics },
