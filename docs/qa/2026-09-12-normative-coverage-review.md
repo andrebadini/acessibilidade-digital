@@ -6,6 +6,16 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Contraste textual: origem da amostra e inatividade — 5.11.2/5.11.3
+
+A definição 3.56 (página impressa 9) inclui texto de componente inativo em plano secundário, exceção de 5.11.2/5.11.3 (páginas 26–27). Não se trata apenas da exceção de contraste não textual em 5.11.4.
+
+RED de integração CDP/normalizador/regra: texto de botão inativo resultava em falhas, inclusive nos ancestrais com texto agregado; cenário misto gerava cinco alvos onde apenas o texto de instrução era aplicável; link ativo interno e label externo geravam sete alvos em vez de dois. A origem era a avaliação de `descendantText` de cada nó usando a cor daquele nó, repetindo texto e aplicando cores que podiam pertencer ao ancestral, não ao trecho.
+
+Correção limitada: entrada columnar identifica, após redaction, elementos com nós `#text` diretos. Sinal finito `textContrastScope` distingue a amostra direta do agregado, sem novo conteúdo textual. A regra mede o elemento proprietário do texto e aplica a exceção somente no componente nativo inativo mais próximo; um componente ativo interno interrompe a propagação. `node.text` permanece intacto para outras regras. Primeira legend, labels, instruções e atributos disabled em elementos genéricos não são isentos. Entrada simplificada/legada sem proveniência não ganha uma inferência de exclusão por igualdade de strings.
+
+GREEN focado 58/58 (normalizador, regras visuais e dois contratos de integração), diff-check verde. Inclui texto privado removido antes da derivação e cores de filho diferentes das do ancestral. Revisão independente dos três arquivos congelados sem C/I identificado; o revisor repetiu os sete testes novos de integração. Permanecem pendentes imagens de texto, demais exceções contextuais e confirmação integrada no candidato Chrome; não é encerramento de toda a regra de contraste.
+
 ### Semântica de texto especial — 5.12.8
 
 Corpo da norma, página impressa 29: identificar programaticamente a semântica de ênfases, citações, abreviaturas e outros textos especiais; a adequação do uso à finalidade é o requisito separado 5.12.9. Referência técnica complementar: [W3C H49](https://www.w3.org/WAI/WCAG22/Techniques/html/H49.html), consultada em 12/09/2026. H49 exige examinar também a informação transmitida pela apresentação; encontrar algumas tags não demonstra cobertura integral.

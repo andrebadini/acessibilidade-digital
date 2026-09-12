@@ -67,7 +67,9 @@ function isLargeText(observation) {
 
 function textContrast(snapshot, enhanced) {
   return visualResult(snapshot, ({ nodes }) => {
-    const candidates = nodes.filter(node => !isHidden(node) && normalizeText(node?.text));
+    const index = nodeIndex(nodes);
+    const candidates = nodes.filter(node => !isHidden(node) && normalizeText(node?.text) &&
+      node.textContrastScope !== 'aggregate' && !inactiveText(node, index));
     if (candidates.length === 0) return result('inapplicable', 'Não há texto visível aplicável.');
     const failures = [];
     let incomplete = false;
@@ -96,6 +98,13 @@ function textContrast(snapshot, enhanced) {
     ]);
     return result('passed', 'Todo o texto aplicável atende ao limite de contraste observado.');
   });
+}
+
+function inactiveText(node, index) {
+  for (const current of [node, ...ancestorNodes(node, index).ancestors]) {
+    if (isComponent({ ...current, role: current.axRole || current.role })) return nativeInactive(current);
+  }
+  return false;
 }
 
 function nonTextContrast(snapshot, field, kind) {

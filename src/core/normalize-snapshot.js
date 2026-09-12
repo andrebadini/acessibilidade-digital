@@ -825,6 +825,16 @@ function normalizeColumnar(raw) {
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(record.tagName),
   })));
 
+  // A container's aggregate text must not be measured again using its own colors.
+  // Derive only a finite provenance flag, after removing private/executable text.
+  const redactedById = new Map(redactedNodes.map(node => [node.nodeId, node]));
+  for (const node of redactedNodes) {
+    node.textContrastScope = node.tagName !== '#text' && node.children.some(id => {
+      const child = redactedById.get(id);
+      return child?.tagName === '#text' && !child.hidden && cleanText(child.text);
+    }) ? 'direct' : 'aggregate';
+  }
+
   const primary = documents[0] || {};
   const primaryRoot = (rootsByDocument.get(0) || []).find(record => record.nodeType === 9);
   const html = primaryRoot ? (childrenByRecord.get(primaryRoot) || []).find(record => record.nodeType === 1 && record.tagName === 'html') : null;
