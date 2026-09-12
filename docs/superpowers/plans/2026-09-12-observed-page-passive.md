@@ -40,3 +40,17 @@ GREEN: `node --test test/background/authorized-audit-starter.test.js`, 150/150, 
 Revisão B aprovada C=0/I=0/M=0, nove verificações adicionais verdes. Integrado em `1c9b296` (dois arquivos exatos). A e B congelados; não reabrir sem RED importante reproduzível.
 
 Próximo incremento C: adaptar E2E `current-page audits run in one inactive copy...` em sidepanel-flow-mv3.test.mjs para exigir documento original/estado aberto preservado; não conservar oráculo de cópia. Verificar destaque, relatório, modos e exportação no Chrome 152 isolado. Mensagens históricas ATTACHED_COPY permanecem corretas para relatórios antigos e não devem ser removidas globalmente. Não há prova de Chrome do novo roteamento ainda.
+
+## C — primeira prova real, ainda parcial
+
+Chrome for Testing confirmado em `/private/tmp/audita-cft152-hqalvn/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`, versão 152.0.7977.64. Novo caso `passive current-page observes memory-only elements without navigation or interaction`: passou em aproximadamente 2 segundos com `AUDITA_E2E_CHROME=... node --test --test-name-pattern='passive current-page observes' test/e2e/sidepanel-flow-mv3.test.mjs`. Perfil isolado gerenciado pelo helper, sem perfil pessoal.
+
+Evidência: documento/loader iguais, DOM e estilos computados preservados, foco/seleção/scroll/viewport visual iguais, zero eventos observados e zero mutações do corpo durante auditoria; zero abas criadas, owners, raw vault ou pixels. Seletor sanitizado de axe.button-name resolve ao botão criado somente em memória; achado próprio accessible-component-name falha no mesmo nodeId. Axe conserva cantTell conforme seu mapeamento suplementar, sem falsificar sua classificação. O relatório abre e mostra ABNT/WCAG e a omissão passiva.
+
+Ajustes do próprio teste: aguardar estabilização nativa do painel antes do baseline; resolver seletor sanitizado ao elemento em vez de procurar ID literal no JSON; distinguir a classificação suplementar do achado próprio. Sem mudança de produção nesta rodada. Teste congelado para revisão.
+
+Revisão agrupada: lacuna Important na instrumentação permitiria clique sem mudança visual passar despercebido. Instrumentação ampliada para o conjunto de eventos do helper original, incluindo click/pointer/beforeinput/selectionchange/focus/blur e document.hasFocus. Também fixado ruleId do achado suplementar e exigida evidência não raster. Revalidação Chrome152: 1/1 em 2,2 s; diff-check verde. A ausência conhecida da versão do navegador no coletor continua gerando limitação parcial, sem ser escondida pelo teste.
+
+C continua incompleto: modos com pixels, confirmação/restart, destaque ao vivo, quatro exportações e revisão visual ainda não demonstrados pelo caso novo. Testes antigos com expectativa de cópia continuam no arquivo e precisam ser migrados antes da suíte ampla; não os pular nem considerar esse caso único como aprovação da etapa ou da produção.
+
+Checkpoint do teste aprovado após correção agrupada: C=0/I=0/M=0 no escopo parcial. Revisor não repetiu o Chrome; conferiu as linhas corrigidas contra o resultado recente. Próxima execução deve ampliar esse caso para destaque/exportação e pixels; não reabrir o roteamento A/B sem regressão demonstrada.
