@@ -1698,9 +1698,9 @@ test('passive current-page observes memory-only elements without navigation or i
     const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
     const revision=await store.getReportRevision(${JSON.stringify(auditId)});
     const model=revision?.model;
-    return {present:Boolean(model),
+    return {present:Boolean(model),modelHash:model?.integrity?.canonicalModelHash,
       codes:model?.session?.diagnostics?.map(value=>value.code)??[],evidence:model?.evidence?.length??-1,
-      targets:model?.occurrences?.filter(value=>['axe.button-name','accessible-component-name'].includes(value.ruleId)).map(value=>({ruleId:value.ruleId,outcome:value.outcome,target:value.target})),
+      targets:model?.occurrences?.filter(value=>['axe.button-name','accessible-component-name'].includes(value.ruleId)).map(value=>({occurrenceId:value.occurrenceId,ruleId:value.ruleId,outcome:value.outcome,target:value.target})),
       created:globalThis.__auditaCurrentCopyProofV1.state.created.length,
       updates:globalThis.__auditaCurrentCopyProofV1.state.sourceUpdates};
   })()`, { awaitPromise: true });
@@ -1732,7 +1732,42 @@ test('passive current-page observes memory-only elements without navigation or i
   assert.match(reportText, /ABNT/);
   assert.match(reportText, /WCAG/);
   assert.match(reportText, /sem alterar foco/);
-  t.diagnostic('Chrome152; actual-document; memory-only finding retained; no created tabs; focus/scroll/layout preserved; report opened');
+  const occurrenceId = memoryTargets[0].occurrenceId;
+  const controlSelector = `[data-report-highlight-control="${occurrenceId}"] button`;
+  await extension.browser.command('Target.detachFromTarget', { sessionId: source.sessionId });
+  assert.equal(await extension.evaluate(report, `(() => {
+    const control=document.querySelector(${JSON.stringify(controlSelector)});
+    if(!control)return false;
+    for(let parent=control.parentElement;parent;parent=parent.parentElement)if(parent.tagName==='DETAILS')parent.open=true;
+    return true;
+  })()`), true, 'the live occurrence must offer a highlight control');
+  await extension.click(report, controlSelector);
+  const available = await extension.waitForValue(report, `document.querySelector(${JSON.stringify(controlSelector)})?.dataset.highlightAction`,
+    value => ['highlight','unavailable'].includes(value), { timeoutMs: 15_000 });
+  assert.equal(available, 'highlight');
+  await extension.click(report, controlSelector);
+  await extension.waitForValue(report, `document.querySelector(${JSON.stringify(controlSelector)})?.dataset.highlightAction`,
+    value => value === 'clear', { timeoutMs: 15_000 });
+  const highlightedSource = await extension.attachPage(extension.startPage.targetId);
+  assert.equal(await extension.evaluate(highlightedSource, 'document.querySelectorAll("[data-audita-highlight-root=v1]").length'), 1);
+  assert.equal(await extension.evaluate(highlightedSource, `(() => {
+    const overlay=document.querySelector('[data-audita-highlight-root=v1]').getBoundingClientRect();
+    const target=document.querySelector('#memory-only-unnamed').getBoundingClientRect();
+    return ['left','top','width','height'].every(key=>Math.abs(overlay[key]-target[key])<1);
+  })()`), true, 'the overlay must surround the audited element, not another node');
+  await extension.browser.command('Target.detachFromTarget', { sessionId: highlightedSource.sessionId });
+  await extension.click(report, controlSelector);
+  await extension.waitForValue(report, `document.querySelector(${JSON.stringify(controlSelector)})?.dataset.highlightAction`,
+    value => value === 'highlight', { timeoutMs: 15_000 });
+  const clearedSource = await extension.attachPage(extension.startPage.targetId);
+  assert.equal(await extension.evaluate(clearedSource, 'document.querySelectorAll("[data-audita-highlight-root=v1]").length'), 0);
+  const finalHash = await extension.evaluate(extension.harnessPage, `(async()=>{
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    return (await store.getReportRevision(${JSON.stringify(auditId)}))?.model?.integrity?.canonicalModelHash;
+  })()`, { awaitPromise: true });
+  assert.equal(typeof observed.modelHash, 'string');
+  assert.equal(finalHash, observed.modelHash, 'highlight and clear must not rewrite the audit evidence');
+  t.diagnostic('Chrome152; actual-document; memory-only finding retained; no created tabs; focus/scroll/layout preserved; report opened; highlight/clear; model hash preserved');
 });
 
 test('current-page audits run in one inactive copy and leave the original page intact', { timeout: 600_000 }, async t => {

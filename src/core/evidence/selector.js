@@ -111,7 +111,7 @@ export function buildStableSelector(node, index = {}) {
     let css;
     let confidence;
     if (id && !SENSITIVE.test(id) && idIsUnique(id, current, index)) {
-      css = `#${escapeCssIdentifier(id)}`;
+      css = `${tagOf(current)}#${escapeCssIdentifier(id)}`;
       confidence = 'high';
     } else {
       // A structural path plus independently recorded classes can be proved again

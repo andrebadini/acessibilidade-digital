@@ -54,3 +54,15 @@ Revisão agrupada: lacuna Important na instrumentação permitiria clique sem mu
 C continua incompleto: modos com pixels, confirmação/restart, destaque ao vivo, quatro exportações e revisão visual ainda não demonstrados pelo caso novo. Testes antigos com expectativa de cópia continuam no arquivo e precisam ser migrados antes da suíte ampla; não os pular nem considerar esse caso único como aprovação da etapa ou da produção.
 
 Checkpoint do teste aprovado após correção agrupada: C=0/I=0/M=0 no escopo parcial. Revisor não repetiu o Chrome; conferiu as linhas corrigidas contra o resultado recente. Próxima execução deve ampliar esse caso para destaque/exportação e pixels; não reabrir o roteamento A/B sem regressão demonstrada.
+
+### C — destaque do achado no documento observado
+
+RED real reproduzido: relatório oferecia o controle, mas a consulta de disponibilidade retornava indisponível para o botão criado em memória. O registro tinha dez alvos, sem a ocorrência do botão. Diagnóstico independente confirmou que a evidência usava `#memory-only-unnamed`, enquanto a gramática fechada do destaque exige tag no início. A ocorrência era descartada antes da prova do elemento, não por falta de evidência nem por navegação.
+
+Correção mínima no produtor: IDs únicos agora geram `button#memory-only-unnamed` (tag real + ID escapado), antes do hash da evidência. Parser, autorização, identidade, correlação e modelos já gravados não foram modificados. Teste unitário de integração entre produtor e parser confirmou RED antes da alteração. Ajustadas duas expectativas do produtor e uma da evidência integrada para o formato equivalente.
+
+GREEN: 168/168 em selector, highlight-locator, highlight-binding e run-audit. Chrome152 real: o caso passivo ampliado passou em 2,8 s, com relatório, disponibilidade, destaque geometricamente coincidente com o botão observado, remoção do destaque e hash do modelo preservado. Os controles exigem clique explícito; durante a auditoria permanecem zero eventos, zero mutações e zero navegações. Diff-check verde. Revisão independente do diff congelado solicitada.
+
+Limite do checkpoint: não demonstra suporte a todo seletor CSS; atributos/IDs fora da gramática continuam sujeitos à indisponibilidade conservadora. Não amplia permissões para contornar esses casos. Continuam pendentes em C os modos com pixels, consentimento/restart, exportações e migração dos E2E antigos de cópia; o checkpoint não aprova produção.
+
+Revisão independente concluída: C=0/I=0; 6/6 testes do seletor repetidos pelo revisor. A limitação de gramática acima foi classificada como Minor preexistente. Asserção geométrica confirmada pelo processo raiz no Chrome, juntamente com remoção e hash preservado. Checkpoint aprovado, sem declaração de suporte universal nem de produção global.

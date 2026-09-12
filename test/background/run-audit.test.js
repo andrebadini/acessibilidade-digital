@@ -3438,7 +3438,7 @@ test('orders capture→axe→collect→probes→core→normalize, correlates tar
   const correlatedEvidence = report.evidence.find(evidence =>
     axeReportOccurrence.evidenceRefs.includes(evidence.evidenceId) && evidence.nodeId === axeReportOccurrence.nodeId);
   assert.equal(axeReportOccurrence.target.selector, 'html > body > button');
-  assert.equal(correlatedEvidence.selector.css, '#continue-button');
+  assert.equal(correlatedEvidence.selector.css, 'button#continue-button');
   const inventory = await createInstalledCoreRuleInventory();
   const checkpoint = {
     version: 1, auditId: report.auditId,

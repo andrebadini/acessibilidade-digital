@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildStableSelector } from '../../src/core/evidence/selector.js';
+import { parseCssSelectorV1 } from '../../src/background/highlight-locator.js';
 
 function index(nodes) {
   const byNodeId = new Map(nodes.map(node => [String(node.nodeId), node]));
@@ -18,7 +19,7 @@ function index(nodes) {
 test('prefers a unique stable DOM id with complete CSS escaping and frame path', () => {
   const node = { nodeId: 'n1', tagName: 'button', attributes: { id: '123 a#b' }, parentId: null, framePath: ['frame-1'] };
   assert.deepEqual(buildStableSelector(node, index([node])), {
-    css: '#\\31 23\\ a\\#b', framePath: ['frame-1'], confidence: 'high'
+    css: 'button#\\31 23\\ a\\#b', framePath: ['frame-1'], confidence: 'high'
   });
 });
 
@@ -65,6 +66,15 @@ test('builds selectors by shadow scope instead of treating shadow ids as documen
   const root = { nodeId: 'root', tagName: '#document-fragment', attributes: {}, parentId: 'host', children: ['inside'], shadowRootId: 'root', shadowHostId: 'host' };
   const inside = { nodeId: 'inside', tagName: 'button', attributes: { id: 'inner' }, parentId: 'root', children: [], shadowRootId: 'root', shadowHostId: 'host' };
   const selector = buildStableSelector(inside, index([outside, host, root, inside]));
-  assert.deepEqual(selector, { css: '#account-panel >>> #inner', framePath: [], confidence: 'high' });
+  assert.deepEqual(selector, { css: 'x-host#account-panel >>> button#inner', framePath: [], confidence: 'high' });
   assert.doesNotMatch(selector.css, /\*/u);
+});
+
+test('a stable id evidence selector remains usable by the closed live-highlight grammar', () => {
+  const node = { nodeId: 'n1', tagName: 'button', attributes: { id: 'memory-only-unnamed' }, parentId: null };
+  const selector = buildStableSelector(node, index([node]));
+  const parsed = parseCssSelectorV1(selector.css);
+  assert.equal(parsed.value, 'button#memory-only-unnamed');
+  assert.equal(parsed.segments[0].tag, 'button');
+  assert.equal(parsed.segments[0].id, 'memory-only-unnamed');
 });
