@@ -56,6 +56,20 @@ test('normalizes exact 320 px, 200%, 24/44 boundaries and reduced motion', () =>
   assert.equal(probes.motion.prefersReducedMotion, true);
 });
 
+test('absence of horizontal overflow does not certify reflow or discard the measured width', async () => {
+  for (const exception of ['unknown', 'none', 'essential']) {
+    const probes = normalizeProbes({ reflow: { testedWidthCssPx: 320, horizontalOverflow: false, exception, exceptionProof: 'complete' } });
+    assert.equal(probes.reflow.outcome, 'cantTell');
+    assert.equal(probes.reflow.testedWidthCssPx, 320);
+    assert.equal(probes.reflow.horizontalOverflow, false);
+    assert.equal(probes.probeCoverage.reflow, 'cantTell');
+    const merged = mergeProbesIntoSnapshot({ schemaVersion: 1, document: { nodeId: 'document', title: 'Fixture' }, nodes: [] }, probes);
+    assert.equal(merged.document.dynamicProbes.reflow.horizontalOverflow, false);
+    const audit = await runCoreAudit(merged);
+    assert.equal(audit.ruleResults.find(rule => rule.ruleId === 'responsive-reflow').outcome, 'cantTell');
+  }
+});
+
 test('missing, timed-out or incomplete observations remain cantTell', () => {
   const probes = normalizeProbes({ warnings: [{ code: 'TIMEOUT', message: 'limite token=PROBE_WARNING_FAKE' }], actions: [{ type: 'ACTION_MARKER_FAKE', detail: 'authorization=ACTION_FAKE' }] });
   for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'motion']) {

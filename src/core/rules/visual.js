@@ -251,7 +251,9 @@ function exceptionObservation(snapshot, field, failureProperty, label) {
     const observation = document[field];
     if (label.complete && !label.complete(observation)) return result('cantTell', `${label.observation} está incompleta.`, [], [label.request]);
     if (typeof observation[failureProperty] !== 'boolean') return result('cantTell', `${label.observation} está incompleta.`, [], [label.request]);
-    if (!observation[failureProperty]) return result('passed', label.passed);
+    if (!observation[failureProperty]) return label.passNeedsReview
+      ? result('cantTell', label.passNeedsReview, [], [label.request])
+      : result('passed', label.passed);
     if (observation.exception === 'essential') return result('passed', `${label.observation} possui exceção essencial explicitamente observada.`);
     if (observation.exception !== 'none') return result('cantTell', `A exceção para ${label.observation.toLowerCase()} não foi determinada.`, [], [label.request]);
     return result('failed', label.failed, [documentTarget(document, label.message, { reason: label.reason })]);
@@ -353,7 +355,10 @@ export const VISUAL_RULES = createRuleRegistry([
     observation: 'A orientação de exibição', request: 'Teste ambas as orientações e registre se a restrição é essencial ou inexistente.', passed: 'A página não restringe a orientação.', failed: 'A página restringe a orientação sem exceção.', message: 'Permita o uso em ambas as orientações.', reason: 'orientation-restricted'
   })),
   definition('responsive-reflow', snapshot => exceptionObservation(snapshot, 'reflowObservation', 'twoDimensionalScroll', {
-    observation: 'O reflow a 320 CSS px', request: 'Teste a largura equivalente a 320 CSS px e registre rolagem bidimensional e exceção.', passed: 'Não houve rolagem bidimensional no teste de reflow.', failed: 'O conteúdo exige rolagem bidimensional sem exceção.', message: 'Faça o conteúdo refluir sem rolagem em duas dimensões.', reason: 'two-dimensional-scroll', coverageKey: 'reflow', complete: observation => finite(observation.testedWidthCssPx) && observation.testedWidthCssPx > 0 && observation.testedWidthCssPx <= 320
+    observation: 'O reflow a 320 CSS px',
+    request: 'Compare textos e funções a 320 CSS px de largura (fluxo vertical) ou 256 CSS px de altura (horizontal). Procure cortes e rolagem em duas direções; confirme se o leiaute bidimensional é essencial.',
+    passNeedsReview: 'A ausência de rolagem horizontal não comprova preservação de conteúdo e funções. Essa parte do requisito ainda precisa ser verificada.',
+    failed: 'O conteúdo exige rolagem bidimensional sem exceção.', message: 'Faça o conteúdo refluir sem rolagem em duas dimensões.', reason: 'two-dimensional-scroll', coverageKey: 'reflow', complete: observation => finite(observation.testedWidthCssPx) && observation.testedWidthCssPx > 0 && observation.testedWidthCssPx <= 320
   })),
   definition('focus-indicator-area', snapshot => focusProperty(snapshot, 'areaSufficient', FOCUS_LABELS.area)),
   definition('text-contrast-enhanced', snapshot => textContrast(snapshot, true)),

@@ -285,6 +285,24 @@ test('orientation, reflow, resizing and text spacing require completed observati
   }
 });
 
+test('reflow without horizontal scrolling cannot approve missing or lost content', async () => {
+  for (const lossOfContent of [undefined, false, true]) {
+    const result = await evaluate('responsive-reflow', snapshot([], {
+      probeCoverage: { reflow: 'complete' },
+      reflowObservation: { testedWidthCssPx: 320, twoDimensionalScroll: false,
+        ...(lossOfContent === undefined ? {} : { lossOfContent }) }
+    }));
+    assert.equal(result.outcome, 'cantTell');
+    assert.deepEqual(result.targets, []);
+  }
+});
+
+test('reflow pass limitation does not change observed orientation outcomes', async () => {
+  for (const orientationObservation of [{ restricted: false }, { restricted: true, exception: 'essential' }]) {
+    assert.equal((await evaluate('display-orientation', snapshot([], { orientationObservation }))).outcome, 'passed');
+  }
+});
+
 test('font weight accepts normalized CSS numbers and keywords without guessing relative weights', async () => {
   const largeFixture = fontWeight => snapshot([
     record('text', 'p', { text: 'Texto', contrast: {

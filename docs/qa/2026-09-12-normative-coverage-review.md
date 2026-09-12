@@ -6,6 +6,14 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Reorganização do conteúdo: medição não equivale a conformidade — 5.10.4
+
+Corpo da norma, página impressa 26: os ramos de adaptação a 320 CSS px de largura (fluxo vertical) ou 256 CSS px de altura (fluxo horizontal) também exigem preservação de informação e funcionalidade. O produtor `measureReflow` mede apenas transbordamento horizontal. Dois REDs reproduziram aprovação indevida: `normalizeProbes` convertia ausência de transbordamento em passed; `responsive-reflow` também aprovava uma observação direta sem rolagem, sem prova de preservação do conteúdo.
+
+Correção: essa medida isolada retorna cantTell nas duas rotas. Largura e transbordamento continuam disponíveis em `document.dynamicProbes`; não há nova interação ou nova flag artificial de completude. Mantida a detecção negativa com evidência de transbordamento e ausência de exceção comprovada no contrato existente. Orientação não foi alterada. A exceção final explicitamente observada de leiaute bidimensional essencial permanece: é um ramo OU independente no texto da ABNT, não deve ser eliminado por uma inferência de requisitos cumulativos. O produtor atual não infere essa essencialidade, e raw essential permanece inconclusivo.
+
+GREEN 60/60 em regras visuais e normalização de probes, incluindo preservação da medida no merge, exceções raw, observação direta com cobertura marcada completa e regressão da orientação. Diff-check verde; revisão independente sem bloqueadores, com os 60 testes repetidos. Sugestão editorial incorporada: a instrução também pede verificar a essencialidade do leiaute bidimensional. Ainda não implementa prova automática de ausência de perdas nem o teste do fluxo horizontal; são limites explícitos, não conformidades presumidas.
+
 ### Espaçamento inicial e alternativa de ajuste — 5.12.1 a 5.12.4
 
 Texto normativo conferido nas páginas impressas 27–28: cada item admite o espaçamento inicial suficiente OU mecanismo de configuração sem perda de conteúdo/funcionalidade. A função compartilhada anterior ignorava o primeiro caminho e consumia `textSpacingObservation`, que não possui produtor em `src`. Também atribuía a mesma perda conjunta aos quatro itens sem demonstrar a dimensão responsável.

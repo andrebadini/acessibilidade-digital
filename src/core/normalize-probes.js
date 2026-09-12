@@ -445,9 +445,7 @@ export function normalizeProbes(raw = {}) {
       observations: visibilityObservations
     },
     reflow: {
-      outcome: reflowValid
-        ? (!horizontalOverflow ? 'passed' : reflowException === 'none' ? 'failed' : 'cantTell')
-        : 'cantTell',
+      outcome: reflowValid && horizontalOverflow && reflowException === 'none' ? 'failed' : 'cantTell',
       testedWidthCssPx: reflowValid ? reflowWidth : null,
       horizontalOverflow: reflowValid ? horizontalOverflow : null,
       exception: reflowException
