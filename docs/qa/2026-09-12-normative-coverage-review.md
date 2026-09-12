@@ -6,6 +6,20 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Observação dinâmica de foco: separar geometria de comprovação visual
+
+ABNT, páginas impressas 10 e 26: 5.1.1 exige indicador visível; 5.1.2/5.1.3 tratam da visibilidade do elemento focado; 5.10.5 recomenda área de indicador equivalente ao perímetro com espessura de 2 CSS px. A área total do botão não mede a área de seu indicador. Estar dentro do viewport não comprova ausência de elemento sobreposto.
+
+Reprodução em Chrome 152, com contorno/sombra permanentes e botão encoberto por outro elemento: o produtor emitia indicador visível, área suficiente a partir de `width*height>=4` e interseção 1 apesar da obstrução. Também comparava o CSS do elemento anterior com o seguinte, o que não demonstra mudança de foco no mesmo elemento. No teste real, a resolução inicial de identidade devolvia null; `DOM.describeNode` diretamente pelo objectId corrigiu o pré-requisito sem depender de uma árvore frontend inicializada. A [documentação oficial do CDP](https://chromedevtools.github.io/devtools-protocol/tot/DOM/#method-describeNode) admite esse modo sem habilitar o domínio.
+
+REDs: identidade ausente; depois de corrigida a identidade, classificação visual indevida. Correção mantém Tab, IDs e retângulos, mas omite os cinco campos sem comprovação: beforeCss, afterCss, indicatorVisible, areaSufficient e intersectionRatio. Omissão de ambos os CSS evita que o fallback do normalizador recrie a conclusão indevida. A rota passiva continua sem executar esses probes. Ainda é necessário desenvolver comprovação visual adequada para ampliar essa automação; não trocar o método defeituoso por uma alegação de cobertura completa.
+
+GREEN 169/169 (adapter, normalização de probes e regras visuais), mais E2E Chrome 1/1. Revisão independente sem C/I no escopo, com 148 testes de adapter/normalizador repetidos. O revisor não executou o E2E por ambiente ausente; o resultado Chrome é da execução principal. Nenhuma mudança de consentimento, permissões ou captura.
+
+### Percurso real sem pixels após a correção de relatório
+
+Teste `passive current-page…no-pixels`, Chrome 152, no estado após `91d2d65`, com botão sem nome criado em memória e outro botão com `aria-disabled=true`: 1/1 aprovado. Revisão de contraste preservada no modelo; página original sem navegação, criação de cópia, alteração de foco/scroll/layout ou eventos de interação durante a auditoria. Relatório aberto, destaque/remoção ao redor do elemento correto, hash de evidências preservado e quatro exportações verificadas (HTML, PDF, CSV, JSON). PDF da fixture propositalmente defeituosa: 24 páginas; não é teste do Google nem prova universal de compactação. Modos com pixels permanecem pendentes de resolução da alteração de geometria pelo raster nativo.
+
 ### Relatório de componente com inatividade declarada — 5.11.4
 
 Reabertura por RED reproduzível, não por hipótese: a regra `component-contrast` já produzia uma revisão `inactive-component-unconfirmed` quando havia `aria-disabled=true`, mas o catálogo fechado de remediação não reconhecia esse motivo. A criação do modelo de relatório falhava. O teste de integração ARIA falhou também em cópia isolada de `f482c56`, confirmando problema anterior à medição passiva.

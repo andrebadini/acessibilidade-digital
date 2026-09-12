@@ -33,13 +33,16 @@ test('resolves the active element to the authoritative SnapshotV1 backend node I
     async command(method, params) {
       calls.push([method, params]);
       if (method === 'Runtime.evaluate') return { result: { objectId: 'remote-active' } };
-      if (method === 'DOM.requestNode') return { nodeId: 12 };
-      if (method === 'DOM.describeNode') return { node: { backendNodeId: 45 } };
+      if (method === 'DOM.requestNode') throw new Error('No frontend DOM tree was initialized.');
+      if (method === 'DOM.describeNode') {
+        assert.deepEqual(params, { objectId: 'remote-active', depth: 0, pierce: true });
+        return { node: { backendNodeId: 45 } };
+      }
       return {};
     },
   };
   assert.equal(await resolveActiveNodeId(cdp), 'n-45');
-  assert.deepEqual(calls.map(([method]) => method), ['Runtime.evaluate', 'DOM.requestNode', 'DOM.describeNode', 'Runtime.releaseObject']);
+  assert.deepEqual(calls.map(([method]) => method), ['Runtime.evaluate', 'DOM.describeNode', 'Runtime.releaseObject']);
 });
 
 function chromeFake() {
@@ -1811,8 +1814,8 @@ test('runs dynamic probes with viewport data captured inside the audited page', 
   const scriptResults = [
     { scroll: { x: 0, y: 0 }, focus: '', styles: true, viewport: { deviceScaleFactor: 2 } },
     '', true, 0,
-    {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
-    {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
+    { rect: { x: 0, y: 0, width: 44, height: 44 } },
+    { rect: { x: 0, y: 0, width: 44, height: 44 } },
     { testedWidthCssPx: 320, horizontalOverflow: false, exception: 'unknown' },
     { scalePercent: 200, lossOfContent: false },
     [{ selector: 'html > body > button:nth-of-type(2)', width: 44, height: 44, exception: 'unknown' }],
@@ -1845,8 +1848,8 @@ test('keeps selector and frame fallback when duplicate IDs prevent target backen
   const scriptResults = [
     { scroll: { x: 0, y: 0 }, focus: '', styles: true, viewport: { deviceScaleFactor: 1 } },
     '', true, 0,
-    {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
-    {}, { selector: 'button', indicatorVisible: true, areaSufficient: true, intersectionRatio: 1, rect: { x: 0, y: 0, width: 44, height: 44 } },
+    { rect: { x: 0, y: 0, width: 44, height: 44 } },
+    { rect: { x: 0, y: 0, width: 44, height: 44 } },
     { testedWidthCssPx: 320, horizontalOverflow: false, exception: 'unknown' },
     { scalePercent: 200, lossOfContent: false },
     [{ selector: '#duplicate', width: 20, height: 20, exception: 'unknown' }],

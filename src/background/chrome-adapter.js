@@ -1101,9 +1101,7 @@ export async function resolveActiveNodeId(cdp) {
   const objectId = remote?.result?.objectId;
   if (typeof objectId !== 'string' || !objectId) return null;
   try {
-    const requested = await cdp.command('DOM.requestNode', { objectId });
-    if (!Number.isSafeInteger(requested?.nodeId)) return null;
-    const described = await cdp.command('DOM.describeNode', { nodeId: requested.nodeId, depth: 0, pierce: true });
+    const described = await cdp.command('DOM.describeNode', { objectId, depth: 0, pierce: true });
     return Number.isSafeInteger(described?.node?.backendNodeId) ? `n-${described.node.backendNodeId}` : null;
   } finally {
     try { await cdp.command('Runtime.releaseObject', { objectId }); } catch { /* Best-effort remote handle cleanup. */ }
@@ -1154,25 +1152,18 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       }),
       getFocusableCount: () => executeOne(() => document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]:not([tabindex="-1"])').length),
       async pressTab() {
-        const before = await executeOne(() => {
-          const active = document.activeElement;
-          return active instanceof Element ? { beforeCss: { outline: getComputedStyle(active).outline } } : {};
-        });
         await cdp.command('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
         await cdp.command('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
-        const observation = await executeOne(previous => {
+        const observation = await executeOne(() => {
           const active = document.activeElement;
-          if (!(active instanceof Element)) return previous;
+          if (!(active instanceof Element)) return {};
           const rect = active.getBoundingClientRect();
-          const css = getComputedStyle(active);
+          // Component bounds and static styles do not prove a visible focus
+          // indicator, its area, or absence of occlusion. Retain geometry only.
           return {
-            ...previous, afterCss: { outline: css.outline },
-            indicatorVisible: css.outlineStyle !== 'none' || css.boxShadow !== 'none',
-            areaSufficient: rect.width * rect.height >= 4,
-            intersectionRatio: rect.top >= 0 && rect.left >= 0 && rect.bottom <= innerHeight && rect.right <= innerWidth ? 1 : 0,
             rect: { x: rect.x + scrollX, y: rect.y + scrollY, width: rect.width, height: rect.height },
           };
-        }, [before]);
+        });
         return { ...observation, nodeId: await resolveActiveNodeId(cdp) };
       },
       async measureReflow(width) {
