@@ -406,6 +406,7 @@ for (const recovered of [false, true]) test(`two sensitive batch pages finish ea
     tryEnterFinalization() { return true; },
   });
 
+  const controller = new AbortController();
   const running = execution[recovered ? 'recover' : 'run']({
     auditId, capabilityId: 'C'.repeat(22), sessionCapabilityId: 'S'.repeat(22), windowId: 9,
     ...(recovered ? {
@@ -419,13 +420,14 @@ for (const recovered of [false, true]) test(`two sensitive batch pages finish ea
       resumeCheckpoint: checkpoint(auditId, 'page-1'),
     } : { acceptedCount: 2 }),
     capturePolicy: createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false }),
-    now: () => STARTED_AT, signal: new AbortController().signal,
+    now: () => STARTED_AT, signal: controller.signal,
     reportOptions: {
       timezone: 'America/Cuiaba', manifestVersion: '1.0.6', rulesVersion: '1.0.0',
       browserVersion: 'Chrome/152.0.0.0', expectedExtensionId: EXTENSION_ID,
     },
     async onExecutionCheckpoint() {},
     async onPrivacyPaused(value) {
+      assert.equal(Object.isFrozen(controller.signal), false, 'recovery must not freeze the live cancellation signal');
       events.push(`paused:${value.pageId}`);
       pauses.push(value);
       notifyPause(value);

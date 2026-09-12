@@ -20,6 +20,14 @@ Não há RED de falha de produção associado a esse erro genérico do transport
 
 ## Aceitação ainda pendente
 
+### Gate 1.1.14 — regressão de sinal vivo na retomada do lote
+
+A suíte lógica ampla terminou com 4.047/4.048 aprovados, sem iniciar o Chrome. A falha foi reproduzida isoladamente em Node 26.5.0 e 24.19.0: `recover` congelava recursivamente o envelope incluindo `AbortSignal`; a próxima página sensível não conseguia registrar o listener de cancelamento (`Symbol(kEvents)` somente leitura).
+
+Correção mínima: manter o envelope e seus dados congelados, mas preservar a referência viva do sinal sem congelá-la. Nenhuma mudança na autorização ou sequência de páginas. O teste de duas páginas sensíveis também exige que o sinal permaneça vivo. RED em `/tmp/audita-production1114-d3Cxqz/batch-red.log`; GREEN 91/91 em `batch-green.log`, abrangendo execução de lote e run-batch. O gate amplo original permanece registrado como falho; apenas os afetados são repetidos antes da etapa nativa ainda não executada.
+
+Primeira revisão congelada de `81e56db`: C=0/I=0/M=0, 74/74 focados. A correção de lote terá revisão própria; não está coberta pela aprovação anterior.
+
 - Reconciliação final de requisitos com fontes atuais e limites explícitos.
 - Candidato de produção congelado; suíte ampla, Chrome real e revisões independentes.
 - Pacote conferido contra o código testado e novo teste do Google na versão final, incluindo leitura do PDF e versão visível.

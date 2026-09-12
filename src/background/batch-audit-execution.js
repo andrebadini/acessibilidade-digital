@@ -351,7 +351,9 @@ export function createBatchAuditExecutionV1(rawDependencies) {
       const values = queue && dense(queue.entries);
       if (!values || values.length < 2 || values.length > 20) throw new Error('BATCH_AUDIT_EXECUTION_DENIED');
       initialQueue = copyQueue(rawQueue, args.auditId, values.length);
-      args = freeze({ ...args, acceptedCount: values.length });
+      // AbortSignal is a live browser service, not immutable request data.
+      const { signal, ...recoveredArgs } = args;
+      args = Object.freeze({ ...freeze(recoveredArgs), signal, acceptedCount: values.length });
     } else {
       initialQueue = await readQueue(args.auditId, args.acceptedCount);
     }
