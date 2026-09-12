@@ -6,7 +6,6 @@ import {
   createAuthorizedAuditStarter,
   executionCheckpointStorageKey,
   readActiveAuditJobForWorker,
-  reserveAttachedCopyStartJournalV1,
   retentionPreferenceStorageKey,
 } from '../../src/background/authorized-audit-starter.js';
 import { AUDIT_EXECUTION_INTERNAL } from '../../src/background/chrome-adapter.js';
@@ -266,7 +265,7 @@ async function batchReportFixture(auditId) {
   return { model, checkpoint, inventory };
 }
 
-async function authorityFixture(area, windowId = 9) {
+async function authorityFixture(area, windowId = 9, issuer = { type: 'extension-document', documentId: 'panel-doc', path: '/src/panel/index.html' }) {
   let random = 0;
   const authority = createTargetCapabilityAuthority({
     chromeApi: { runtime: { id: 'abcdefghijklmnopabcdefghijklmnop' } },
@@ -277,7 +276,7 @@ async function authorityFixture(area, windowId = 9) {
     kind: 'attached', tabId: 17, windowId, documentId: 'document-a',
     initialUrlEvidence: 'https://example.test/', initialUrlSessionDigest: DIGEST,
     createdBy: 'user', allowedIntent: 'start-audit',
-    issuer: { type: 'extension-document', documentId: 'panel-doc', path: '/src/panel/index.html' },
+    issuer,
   });
   const senderContext = {
     issuer: { type: 'extension-document', documentId: 'panel-doc', path: '/src/panel/index.html' },
@@ -764,7 +763,56 @@ test('admits every closed capture policy before target inspection without touchi
   }
 });
 
-test('current-page no-pixels delegates only to an attached-copy URL plan and settles both owner graphs removed', async () => {
+// Set up an explicitly exchanged legacy copy through the retained URL boundary.
+// New current-page starts must never use this historical setup.
+async function beginHistoricalAttachedCopy(starter, dependencies, input) {
+  const plan = await dependencies.prepareAttachedCopyPlan({
+    capabilityId: input.capabilityId, auditId: input.auditId, senderContext: input.senderContext,
+    expectedTarget: { tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST },
+  });
+  const { eventNonce: _eventNonce, ...urlInput } = input;
+  return starter.beginAuthorizedUrlAudit({ ...urlInput, plan });
+}
+
+test('current-page admission preserves the attached document even when URL auditing is installed', async t => {
+  for (const variant of ['no-pixels', 'element-only', 'full-evidence', 'worker-event']) await t.test(variant, async () => {
+    const mode = variant === 'worker-event' ? 'no-pixels' : variant;
+    const eventNonce = variant === 'worker-event' ? 'event-nonce-12345678901234567890' : null;
+    const area = sessionArea();
+    const prepared = await authorityFixture(area, 9, eventNonce ? { type: 'worker-event', event: 'context-menu', eventNonce } : undefined);
+    const auditId = `audit-current-passive-${mode}`;
+    let executions = 0;
+    let copies = 0;
+    const dependencies = dependencyFixture({
+      area, authority: prepared.authority,
+      execution: async args => {
+        executions += 1;
+        assert.equal(args.target.kind, 'attached');
+        assert.equal(args.target.tabId, 17);
+        assert.equal(args.target.documentId, 'document-a');
+        assert.equal(args.target.windowId, 9);
+        assert.equal(args.target.initialUrlSessionDigest, DIGEST);
+        assert.equal(args.capturePolicy.mode, mode);
+        assert.equal(Boolean(args.privacyGate), mode !== 'no-pixels');
+        return Object.freeze({ version: 1, auditId, state: 'revoked', failureCode: 'AUDIT_FAILED', model: null, checkpoint: null });
+      },
+    });
+    dependencies.prepareAttachedCopyPlan = async () => { copies += 1; throw new Error('copy must not be prepared'); };
+    dependencies.runUrlAuditExecution = async () => { copies += 1; throw new Error('URL execution must not run'); };
+    dependencies.clearUrlAuditResources = async () => { copies += 1; return true; };
+    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+      capabilityId: prepared.capabilityId, eventNonce, auditId,
+      capturePolicy: createCapturePolicyV1({ mode, includeQuery: false }),
+      retentionPreference: { version: 1, deleteAfterCompleteExport: false }, senderContext: eventNonce ? null : prepared.senderContext,
+    });
+    assert.equal(started.response.ok, true);
+    await started.completion;
+    assert.equal(executions, 1);
+    assert.equal(copies, 0);
+  });
+});
+
+test('historical attached-copy plan settles both owner graphs removed', async () => {
   const area = sessionArea();
   const { authority, capabilityId, senderContext } = await authorityFixture(area);
   const auditId = 'audit-current-page-copy';
@@ -786,14 +834,6 @@ test('current-page no-pixels delegates only to an attached-copy URL plan and set
       expectedTarget: {
         tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST,
       },
-    });
-    await reserveAttachedCopyStartJournalV1({
-      sessionArea: area,
-      capabilityId,
-      auditId,
-      windowId: 9,
-      ownershipId,
-      createdAt: EPOCH + 1,
     });
     assert.equal((await authority.exchangeAttachedForNavigationCopy({
       capabilityId,
@@ -830,7 +870,7 @@ test('current-page no-pixels delegates only to an attached-copy URL plan and set
 
   let started;
   try {
-    started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    started = await beginHistoricalAttachedCopy(createAuthorizedAuditStarter(dependencies), dependencies, {
       capabilityId, eventNonce: null, auditId,
       capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
       retentionPreference: { version: 1, deleteAfterCompleteExport: false },
@@ -871,14 +911,6 @@ test('restart completes attached-copy cleanup after crash between invalidation a
     execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
   });
   firstDependencies.prepareAttachedCopyPlan = async () => {
-    await reserveAttachedCopyStartJournalV1({
-      sessionArea: area,
-      capabilityId,
-      auditId,
-      windowId: 9,
-      ownershipId,
-      createdAt: EPOCH + 1,
-    });
     assert.equal((await authority.exchangeAttachedForNavigationCopy({
       capabilityId,
       intent: 'attached-copy',
@@ -905,7 +937,7 @@ test('restart completes attached-copy cleanup after crash between invalidation a
     async disconnectSession() { return false; },
   });
 
-  const started = await createAuthorizedAuditStarter(firstDependencies).beginAuthorizedAudit({
+  const started = await beginHistoricalAttachedCopy(createAuthorizedAuditStarter(firstDependencies), firstDependencies, {
     capabilityId,
     eventNonce: null,
     auditId,
@@ -951,7 +983,7 @@ test('restart completes attached-copy cleanup after crash between invalidation a
   assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
 });
 
-test('current-page pixel modes execute only in an attached copy and publish after cleanup always', async t => {
+test('historical attached-copy pixel modes publish after cleanup always', async t => {
   for (const mode of ['full-evidence', 'element-only']) await t.test(mode, async () => {
     const area = sessionArea();
     const { authority, capabilityId, senderContext } = await authorityFixture(area);
@@ -966,9 +998,6 @@ test('current-page pixel modes execute only in an attached copy and publish afte
     });
     dependencies.prepareAttachedCopyPlan = async () => {
       effects.push('prepare-copy');
-      await reserveAttachedCopyStartJournalV1({
-        sessionArea: area, capabilityId, auditId, windowId: 9, ownershipId, createdAt: EPOCH + 1,
-      });
       assert.equal((await authority.exchangeAttachedForNavigationCopy({
         capabilityId, intent: 'attached-copy', senderContext,
       })).ok, true);
@@ -998,7 +1027,7 @@ test('current-page pixel modes execute only in an attached copy and publish afte
     };
     const cleanups = [];
     dependencies.clearUrlAuditResources = async request => { cleanups.push(structuredClone(request)); return true; };
-    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    const started = await beginHistoricalAttachedCopy(createAuthorizedAuditStarter(dependencies), dependencies, {
       capabilityId, eventNonce: null, auditId,
       capturePolicy: createCapturePolicyV1({ mode, includeQuery: false }),
       retentionPreference: { version: 1, deleteAfterCompleteExport: false },
@@ -1047,10 +1076,6 @@ test('attached-copy privacy pause survives failed publication, restart and cance
     execution: async () => { throw new Error('ORIGINAL_TAB_MUST_STAY_VIEW_ONLY'); },
   });
   dependencies.prepareAttachedCopyPlan = async () => {
-    await reserveAttachedCopyStartJournalV1({
-      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
-      windowId: 9, ownershipId, createdAt: EPOCH + 1,
-    });
     assert.equal((await prepared.authority.exchangeAttachedForNavigationCopy({
       capabilityId: prepared.capabilityId, intent: 'attached-copy', senderContext: prepared.senderContext,
     })).ok, true);
@@ -1088,7 +1113,7 @@ test('attached-copy privacy pause survives failed publication, restart and cance
     },
   });
 
-  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+  const started = await beginHistoricalAttachedCopy(createAuthorizedAuditStarter(dependencies), dependencies, {
     capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
     retentionPreference: { version: 1, deleteAfterCompleteExport: false },
     senderContext: prepared.senderContext,
@@ -1163,10 +1188,6 @@ test('attached-copy consent resume keeps its explicit purpose and cleans before 
     probeSensitiveCaptureSignals: async () => signals,
   });
   dependencies.prepareAttachedCopyPlan = async () => {
-    await reserveAttachedCopyStartJournalV1({
-      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
-      windowId: 9, ownershipId, createdAt: EPOCH + 1,
-    });
     assert.equal((await prepared.authority.exchangeAttachedForNavigationCopy({
       capabilityId: prepared.capabilityId, intent: 'attached-copy', senderContext: prepared.senderContext,
     })).ok, true);
@@ -1221,7 +1242,7 @@ test('attached-copy consent resume keeps its explicit purpose and cleans before 
     async publishResult(value) { order.push(['publish']); return issueDeferredTerminalDelivery(value); },
   });
   const starter = createAuthorizedAuditStarter(dependencies);
-  const started = await starter.beginAuthorizedAudit({
+  const started = await beginHistoricalAttachedCopy(starter, dependencies, {
     capabilityId: prepared.capabilityId, eventNonce: null, auditId, capturePolicy: policy,
     retentionPreference: { version: 1, deleteAfterCompleteExport: false },
     senderContext: prepared.senderContext,
@@ -2393,10 +2414,6 @@ async function pausedSingleUrlAuditHarness(auditId, { attachedCopy = false } = {
     });
   };
   if (attachedCopy) dependencies.prepareAttachedCopyPlan = async () => {
-    await reserveAttachedCopyStartJournalV1({
-      sessionArea: area, capabilityId: prepared.capabilityId, auditId,
-      windowId: 9, ownershipId, createdAt: EPOCH + 1,
-    });
     assert.equal((await prepared.authority.exchangeAttachedForNavigationCopy({
       capabilityId: prepared.capabilityId, intent: 'attached-copy', senderContext: prepared.senderContext,
     })).ok, true);
@@ -2411,7 +2428,7 @@ async function pausedSingleUrlAuditHarness(auditId, { attachedCopy = false } = {
   dependencies.panelCoordinator = panelCoordinator([], { async publishPrivacyPaused() { return true; } });
   const starter = createAuthorizedAuditStarter(dependencies);
   const started = attachedCopy
-    ? await starter.beginAuthorizedAudit({
+    ? await beginHistoricalAttachedCopy(starter, dependencies, {
         capabilityId: prepared.capabilityId, eventNonce: null, auditId, senderContext: prepared.senderContext,
         capturePolicy: policy,
         retentionPreference: { version: 1, deleteAfterCompleteExport: false },
