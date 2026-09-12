@@ -28,3 +28,15 @@ RED confirmado: dois testes attached (no-pixels e full-evidence) chamavam probes
 GREEN focado: `node --test test/background/run-audit.test.js test/report/diagnostic-policy.test.js`, 164/164, em 12/09. `git diff --check` verde. Ajustado teste de snippet cujo oráculo dependia de ser o primeiro bloco do relatório; agora exige o snippet correspondente, mantendo hash, remoção de conteúdo perigoso e codificação única. Revisão independente solicitada sobre os cinco arquivos congelados. Não houve Chrome, suíte ampla, empacotamento nem alteração de starter/UI nesta etapa.
 
 Revisão concluída C=0/I=0/M=0, 17 verificações adicionais verdes do revisor. Integrado em `742ca45`, cinco arquivos exatos, node_modules excluído. Incremento 1 congelado. Próximo: roteamento da página atual (incremento 2), mantendo recovery histórico de cópias e rota explícita de URL.
+
+## Incremento 2 — roteamento
+
+RED: três modos com dependências de URL presentes tentavam preparar cópia e negavam o início quando a cópia não era disponibilizada. Correção mínima remove o desvio `if (hasUrlAudit)` de `beginAuthorizedAudit`; caminho attached já existente passa a ser usado também na composição completa. Nenhuma alteração em autorização, coleta, recovery ou URL explícita.
+
+Testes históricos de cópia agora preparam o exchange real e chamam a fronteira URL explicitamente por helper de teste, sem conservar o comportamento errado em novos inícios de página atual. Casos pré-ACTIVE continuam montando journals reais. Incluído teste de evento worker, preservação do documento/tab/window/digest/modo e ausência de preparação/execução/cleanup de cópia.
+
+GREEN: `node --test test/background/authorized-audit-starter.test.js`, 150/150, diff-check verde. Dois arquivos congelados para revisão independente. Deps de fábrica e token interno agora sem chamador foram mantidos para não expandir o contrato; limpeza de código morto é Minor não bloqueante.
+
+Revisão B aprovada C=0/I=0/M=0, nove verificações adicionais verdes. Integrado em `1c9b296` (dois arquivos exatos). A e B congelados; não reabrir sem RED importante reproduzível.
+
+Próximo incremento C: adaptar E2E `current-page audits run in one inactive copy...` em sidepanel-flow-mv3.test.mjs para exigir documento original/estado aberto preservado; não conservar oráculo de cópia. Verificar destaque, relatório, modos e exportação no Chrome 152 isolado. Mensagens históricas ATTACHED_COPY permanecem corretas para relatórios antigos e não devem ser removidas globalmente. Não há prova de Chrome do novo roteamento ainda.

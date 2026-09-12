@@ -6,7 +6,7 @@
 
 Integrados e revisados em escopos limitados: estrutura d3b9355, controles a4f43a1, aplicabilidade/tabelas 21755af, axe 8c5d003, legendas 635c180, formulários 7e062f3, imagens 5284fb3. Registros abaixo são históricos; textos antigos “em revisão” não reabrem esses checkpoints.
 
-Ativo: execução passiva da página atual, plano `2026-09-12-observed-page-passive.md`. Primeiro incremento integrado em 742ca45, com 164 testes focados verdes e revisão independente C=0/I=0/M=0 (mais 17 verificações do revisor). Starter ainda usa cópia: próximo incremento é o roteamento, não anunciar mudança no painel nem nova versão.
+Ativo: execução passiva da página atual, plano `2026-09-12-observed-page-passive.md`. Primeiro incremento integrado em 742ca45, com 164 testes focados verdes e revisão independente C=0/I=0/M=0 (mais 17 verificações do revisor). Roteamento integrado em 1c9b296, com 150 testes focados verdes e revisão C=0/I=0/M=0 (mais nove do revisor). Novos inícios seguem attached; próximo incremento C verifica o percurso Chrome e apresentação, ainda sem prova visual nem nova versão.
 
 Revisão visual independente identificou cinco grupos Important adicionais, registrados na matriz de cobertura. Permanecem pendentes; não são motivos teóricos nem melhorias cosméticas. Conferência dos 146 itens e vínculos com o corpo da norma passou, mas não encerra validação dos algoritmos. Produção ainda não aprovada; sem novo ZIP ou versão.
 
