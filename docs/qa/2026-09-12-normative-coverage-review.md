@@ -6,6 +6,14 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 ## Conferência independente do catálogo (12/09)
 
+### Medição de área de acionamento separada dos limiares — 5.8.6/5.8.7
+
+A recomendação ampliada (44×44 CSS px, 5.8.6) e o requisito mínimo (24×24, 5.8.7) precisam de conclusões independentes. RED de integração demonstrou alvo observado 30×30 com exceção desconhecida: mínimo normalizado passed e aprimorado cantTell, mas a cobertura conjunta descartava a medida no merge e tornava o mínimo inconclusivo.
+
+Correção limitada: disponibilidade de medidas projetadas é separada dos outcomes dos limiares. Coleções inválidas continuam descartadas integralmente; runtime parcial continua bloqueando anexação; a regra percorre todos os candidatos e mantém inconclusivo quando faltam medidas. Um alvo 20×20 com exceção desconhecida tem sua medida preservada, sem se tornar falha. O caso com falha comprovada e outro alvo desconhecido é guarda do comportamento anterior, não segundo RED. A mudança só atua onde uma medição foi efetivamente coletada; não declara cobertura dos probes omitidos na auditoria passiva.
+
+GREEN 74/74 (normalização de probes, visual e contrato de coletor), diff-check verde e revisão independente sem bloqueadores. Revisor não repetiu os testes. Ressalva preexistente para investigação: IDs duplicados no merge usam a última observação; não foi demonstrado produtor real emitindo duplicatas contraditórias neste incremento. Não prometer preservação de todas as falhas para identidades ambíguas. Nenhuma mudança de permissão, captura ou interação.
+
 ### Reorganização do conteúdo: medição não equivale a conformidade — 5.10.4
 
 Corpo da norma, página impressa 26: os ramos de adaptação a 320 CSS px de largura (fluxo vertical) ou 256 CSS px de altura (fluxo horizontal) também exigem preservação de informação e funcionalidade. O produtor `measureReflow` mede apenas transbordamento horizontal. Dois REDs reproduziram aprovação indevida: `normalizeProbes` convertia ausência de transbordamento em passed; `responsive-reflow` também aprovava uma observação direta sem rolagem, sem prova de preservação do conteúdo.

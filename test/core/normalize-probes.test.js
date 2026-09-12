@@ -70,6 +70,45 @@ test('absence of horizontal overflow does not certify reflow or discard the meas
   }
 });
 
+test('minimum target size survives an inconclusive enhanced recommendation', async () => {
+  const probes = normalizeProbes({ targetSizes: [{ nodeId: 'n-1', width: 30, height: 30 }] });
+  assert.equal(probes.targetSizes.minimum24.outcome, 'passed');
+  assert.equal(probes.targetSizes.enhanced44.outcome, 'cantTell');
+  const snapshot = { schemaVersion: 1, document: { nodeId: 'document' }, nodes: [
+    { nodeId: 'n-1', parentId: null, children: [], tagName: 'button', attributes: {} }
+  ] };
+  const merged = mergeProbesIntoSnapshot(snapshot, probes);
+  assert.deepEqual(merged.nodes[0].targetSize, { width: 30, height: 30, exception: 'unknown' });
+  const audit = await runCoreAudit(merged);
+  assert.equal(audit.ruleResults.find(r => r.ruleId === 'target-size-minimum').outcome, 'passed');
+  assert.equal(audit.ruleResults.find(r => r.ruleId === 'target-size-enhanced').outcome, 'cantTell');
+});
+
+test('a proven undersized target is not lost because another target has an unknown enhanced exception', async () => {
+  const probes = normalizeProbes({ targetSizes: [
+    { nodeId: 'n-1', width: 12, height: 12, exception: 'none', exceptionProof: 'complete' },
+    { nodeId: 'n-2', width: 30, height: 30 }
+  ] });
+  const snapshot = { schemaVersion: 1, document: { nodeId: 'document' }, nodes: ['n-1', 'n-2'].map(nodeId =>
+    ({ nodeId, parentId: null, children: [], tagName: 'button', attributes: {} })) };
+  const audit = await runCoreAudit(mergeProbesIntoSnapshot(snapshot, probes));
+  const result = audit.ruleResults.find(r => r.ruleId === 'target-size-minimum');
+  assert.equal(result.outcome, 'failed');
+  assert.deepEqual(result.targets.map(t => t.nodeId), ['n-1']);
+});
+
+test('retaining measured target sizes does not approve unmeasured controls or partial runtime coverage', async () => {
+  const probes = normalizeProbes({ targetSizes: [{ nodeId: 'n-1', width: 30, height: 30 }] });
+  for (const partial of [false, true]) {
+    const snapshot = { schemaVersion: 1, document: { nodeId: 'document',
+      ...(partial ? { coverage: { runtime: { outcome: 'partial' } } } : {}) },
+    nodes: (partial ? ['n-1'] : ['n-1', 'n-2']).map(nodeId =>
+      ({ nodeId, parentId: null, children: [], tagName: 'button', attributes: {} })) };
+    const audit = await runCoreAudit(mergeProbesIntoSnapshot(snapshot, probes));
+    assert.equal(audit.ruleResults.find(r => r.ruleId === 'target-size-minimum').outcome, 'cantTell');
+  }
+});
+
 test('missing, timed-out or incomplete observations remain cantTell', () => {
   const probes = normalizeProbes({ warnings: [{ code: 'TIMEOUT', message: 'limite token=PROBE_WARNING_FAKE' }], actions: [{ type: 'ACTION_MARKER_FAKE', detail: 'authorization=ACTION_FAKE' }] });
   for (const key of ['focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'motion']) {

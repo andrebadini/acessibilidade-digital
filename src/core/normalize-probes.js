@@ -472,8 +472,9 @@ export function normalizeProbes(raw = {}) {
   normalized.probeCoverage = Object.fromEntries([
     'focusOrder', 'keyboardTraps', 'focusAppearance', 'obscuredTargets', 'reflow', 'textResize', 'motion'
   ].map(key => [key, normalized[key].outcome === 'cantTell' ? 'cantTell' : 'complete']));
-  normalized.probeCoverage.targetSizes = [normalized.targetSizes.minimum24, normalized.targetSizes.enhanced44]
-    .some(item => item.outcome === 'cantTell') ? 'cantTell' : 'complete';
+  // Availability of projected measurements is independent of either normative threshold.
+  // The rule still checks missing candidates and each threshold's own exceptions.
+  normalized.probeCoverage.targetSizes = targetObservations.length > 0 ? 'complete' : 'cantTell';
   probeFallbacks.set(normalized, identity.fallbacksById);
   return freezeNormalizedProbes(normalized);
 }
