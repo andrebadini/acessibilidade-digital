@@ -95,11 +95,23 @@ function normalizedClip(rect, metrics, margin = ELEMENT_CONTEXT_MARGIN) {
   };
 }
 
+function clipInsideViewports(clip, metrics) {
+  if (metrics.cssVisualViewport?.scale !== 1) return false;
+  return [metrics.cssVisualViewport, metrics.cssLayoutViewport].every(viewport => {
+    if (!viewport || !['pageX', 'pageY', 'clientWidth', 'clientHeight'].every(key => Number.isFinite(viewport[key])) ||
+      viewport.clientWidth <= 0 || viewport.clientHeight <= 0) return false;
+    const right = viewport.pageX + viewport.clientWidth;
+    const bottom = viewport.pageY + viewport.clientHeight;
+    return Number.isFinite(right) && Number.isFinite(bottom) && clip.x >= viewport.pageX && clip.y >= viewport.pageY &&
+      clip.x + clip.width <= right && clip.y + clip.height <= bottom;
+  });
+}
+
 export async function captureElement(cdp, rect, metrics = {}) {
   const geometry = normalizedClip(rect, metrics);
   if (!geometry) return { status: 'cantTell', reason: 'invalid-or-outside-rect', evidenceId: null, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
   const { clip, highlightBox } = geometry;
-  const result = await capture(cdp, { format: 'png', captureBeyondViewport: true, fromSurface: true, clip }, 'thumbnail', {
+  const result = await capture(cdp, { format: 'png', captureBeyondViewport: !clipInsideViewports(clip, metrics), fromSurface: true, clip }, 'thumbnail', {
     width: clip.width, height: clip.height, clip, highlightBox, annotationMargin: ELEMENT_CONTEXT_MARGIN,
   });
   return { ...result, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };

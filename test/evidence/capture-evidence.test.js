@@ -88,6 +88,33 @@ test('captures clamped element thumbnails and references the full-page evidence 
   assert.equal(capture.fullPageEvidenceId, 'full-page-abc');
 });
 
+test('visible capture requires the entire context crop inside both CSS viewports', async () => {
+  const viewport = { pageX: 100, pageY: 200, clientWidth: 400, clientHeight: 300 };
+  const metrics = { cssContentSize: { width: 1000, height: 2000 }, cssLayoutViewport: viewport,
+    cssVisualViewport: { ...viewport, scale: 1 }, fullPageEvidenceId: 'full-original' };
+  for (const [rect, overrides, expected] of [
+    [{ x: 124, y: 224, width: 352, height: 252 }, {}, false],
+    [{ x: 124, y: 224, width: 352.01, height: 252 }, {}, true],
+    [{ x: 110, y: 224, width: 20, height: 20 }, {}, true],
+    [{ x: 124, y: 224, width: 20, height: 20 }, { cssVisualViewport: null }, true],
+    [{ x: 124, y: 224, width: 20, height: 20 }, { cssLayoutViewport: { ...viewport, pageX: 125 } }, true],
+  ]) {
+    const cdp = fakeCdp();
+    const result = await captureElement(cdp, rect, { ...metrics, ...overrides });
+    assert.equal(cdp.calls[0][1].captureBeyondViewport, expected);
+    assert.equal(result.fullPageEvidenceId, 'full-original');
+    assert.equal(result.metadata.highlightBox.x, 24);
+    assert.equal(result.metadata.highlightBox.width, rect.width);
+  }
+  for (const override of [{ scale: 2 }, { scale: undefined }, { clientWidth: 0 }, { clientHeight: Infinity }, { pageX: NaN }]) {
+    const cdp = fakeCdp();
+    await captureElement(cdp, { x: 150, y: 250, width: 30, height: 30 }, {
+      ...metrics, cssVisualViewport: { ...metrics.cssVisualViewport, ...override },
+    });
+    assert.equal(cdp.calls[0][1].captureBeyondViewport, true);
+  }
+});
+
 test('adds evidence context around an element and records its exact box inside the crop', async () => {
   const cdp = fakeCdp();
   const capture = await captureElement(cdp, { x: 200, y: 300, width: 80, height: 40 }, {
