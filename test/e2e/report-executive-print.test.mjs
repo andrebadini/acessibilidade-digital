@@ -87,6 +87,7 @@ test('executive print keeps the complete ABNT matrix and reduces actual PDFs in 
       return {visible:visible(history),allNotes:note?.textContent===${JSON.stringify(longNote)},
         end:document.body.innerText.includes('FIM-REVISAO-NATIVA'),
         reviewer:document.body.innerText.includes('Avaliadora QA do histórico'),
+        producer:document.body.innerText.includes('Versão da extensão que realizou a auditoria: 0.1.0'),
         noHorizontalClip:note.scrollWidth<=note.clientWidth+1};
     })()`);
     for (const [key, value] of Object.entries(printHistory)) assert.equal(value, true, `${mode}: ${key}`);
@@ -121,10 +122,11 @@ test('executive print keeps the complete ABNT matrix and reduces actual PDFs in 
         historyNotice:document.querySelector('[data-report-summary-note]').textContent.includes('conclusões humanas detalhadas'),
         note:visible(document.querySelector('[data-report-summary-note]')),
         essentials:[1,6,7].every(index=>visible(document.getElementById('report-section-'+index))),
-        identity:document.body.innerText.includes(${JSON.stringify(view.modelHash)})&&document.body.innerText.includes(${JSON.stringify(view.auditId)})};
+        identity:document.body.innerText.includes(${JSON.stringify(view.modelHash)})&&document.body.innerText.includes(${JSON.stringify(view.auditId)}),
+        producer:document.body.innerText.includes('Versão da extensão que realizou a auditoria: 0.1.0')};
     })()`);
     assert.deepEqual(retained.items, view.matrix.map(row => row.id));
-    for (const key of ['annexHidden', 'detailsHidden', 'historyHidden', 'historyNotice', 'note', 'essentials', 'identity']) assert.equal(retained[key], true, `${mode}: ${key}`);
+    for (const key of ['annexHidden', 'detailsHidden', 'historyHidden', 'historyNotice', 'note', 'essentials', 'identity', 'producer']) assert.equal(retained[key], true, `${mode}: ${key}`);
     const summaryPages = await print(`${mode}-summary`);
     assert.ok(summaryPages > 1 && summaryPages < fullPages, `${mode}: full=${fullPages}, summary=${summaryPages}`);
     t.diagnostic(`${mode}: full=${fullPages} pages; summary=${summaryPages} pages; all146ABNTitems; noindividualevidence`);

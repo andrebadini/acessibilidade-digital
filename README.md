@@ -2,15 +2,15 @@
 
 Extensão MV3 para auditoria local de acessibilidade de uma página, com regras da ABNT NBR 17225:2025, referências WCAG 2.2, evidências e revisão assistida. O processamento local evita enviar conteúdo da página a um serviço externo.
 
-## Instalação da beta
+## Instalação e estado da entrega
 
-**Meta de produção ainda aberta:** a beta 1.1.13 foi solicitada pelo usuário para entrega antes de pausar o desenvolvimento; não representa encerramento da meta. A [coleta da 1.1.12 no Google](docs/qa/2026-09-08-google-1112-production-correction.md) identificou a versão incorreta no relatório. A 1.1.13 corrige novas auditorias, preservando os documentos históricos.
+**Candidata de produção 1.1.14 em validação:** a meta foi retomada em 12/09. O último pacote entregue continua sendo a beta 1.1.13 até a conclusão dos gates e a conferência do novo pacote. A [retomada](docs/qa/2026-09-12-production-resumption.md) registra o escopo e as verificações, sem tratar a beta como aceite de produção.
 
-A versão atual é **1.1.13**: confira o [guia de instalação e teste](docs/COMO-TESTAR-BETA-1.1.13.md). Novas auditorias registram a versão instalada correta; as antigas mantêm a versão de origem. Preserva dimensões observadas, redação de recomendações, nova auditoria após navegação, sinais e evidências. Os guias didáticos e grupos ABNT continuam disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
+A candidata **1.1.14** tem [guia de instalação e uso](docs/COMO-USAR.md). Acrescenta a identificação visível da versão de origem na metodologia do relatório e de sua impressão. Novas auditorias registram a versão instalada; antigas mantêm a versão de origem. Guias didáticos, grupos ABNT, sinais e evidências permanecem disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
 
-**Desenvolvimento pausado após a entrega solicitada.** [Validação e Google da própria 1.1.13](docs/qa/2026-09-08-beta1113-release.md): pacote conferido, quatro formatos exportados e PDF de 27 páginas. Aguardar o retorno do usuário antes de retomar a meta de produção.
+Histórico preservado: [validação e Google da 1.1.13](docs/qa/2026-09-08-beta1113-release.md), com quatro formatos e PDF de 27 páginas. A nova candidata terá seu próprio teste e artefatos.
 
-1. Descompacte o arquivo da beta em uma pasta própria. Se estiver usando o código-fonte, use esta pasta do projeto.
+1. Descompacte o arquivo da versão entregue em uma pasta própria. Se estiver usando o código-fonte, use esta pasta do projeto.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative o **Modo do desenvolvedor**.
 4. Escolha **Carregar sem compactação** e selecione a pasta que contém o `manifest.json`.
