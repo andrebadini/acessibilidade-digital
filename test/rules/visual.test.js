@@ -193,8 +193,11 @@ test('target sizes preserve 23.99/24 and 43.99/44 boundaries with explicit excep
 test('zoom reports restrictive viewport directives and distinguishes missing collection', async () => {
   assert.equal((await evaluate('zoom-not-blocked', snapshot([], {
     metaViewport: { userScalable: false, maximumScale: 1 }
-  }))).outcome, 'failed');
-  assert.equal((await evaluate('zoom-not-blocked', snapshot([], { metaViewport: null }))).outcome, 'passed');
+  }))).outcome, 'cantTell');
+  const restricted = await evaluate('zoom-not-blocked', snapshot([], { metaViewport: { userScalable: false } }));
+  assert.equal(restricted.targets.length, 1, 'a concrete restrictive declaration must remain actionable');
+  assert.equal((await evaluate('zoom-not-blocked', snapshot([], { metaViewport: null }))).outcome, 'cantTell');
+  assert.equal((await evaluate('zoom-not-blocked', snapshot([], { metaViewport: { userScalable: true, maximumScale: 5 } }))).outcome, 'cantTell');
   assert.equal((await evaluate('zoom-not-blocked', snapshot())).outcome, 'cantTell');
   for (const metaViewport of [
     { userScalable: 'no', maximumScale: '1' },

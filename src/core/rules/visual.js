@@ -189,7 +189,9 @@ function zoomNotBlocked(snapshot) {
     if (!hasOwn(document, 'metaViewport')) return result('cantTell', 'A diretiva meta viewport não foi coletada.', [], [
       'Colete a presença e os valores efetivos da diretiva meta viewport.'
     ]);
-    if (document.metaViewport === null) return result('passed', 'Nenhuma diretiva de viewport restringe o zoom.');
+    if (document.metaViewport === null) return result('cantTell', 'Não foi encontrada diretiva de viewport; o funcionamento do zoom ainda precisa ser verificado.', [], [
+      'Amplie a página pelo navegador e, no celular, pelo gesto de pinça. A ausência dessa diretiva não exclui outros bloqueios.'
+    ]);
     const viewport = document.metaViewport;
     if (!viewport || typeof viewport !== 'object') return result('cantTell', 'A diretiva meta viewport é inválida ou incompleta.', [], [
       'Colete user-scalable e maximum-scale em forma normalizada.'
@@ -208,8 +210,12 @@ function zoomNotBlocked(snapshot) {
     const blocked = (hasUserScalable && viewport.userScalable === false) ||
       (hasMaximumScale && viewport.maximumScale < 2);
     return blocked
-      ? result('failed', 'A diretiva de viewport restringe o zoom.', [documentTarget(document, 'Remova a restrição de ampliação da página.', { reason: 'zoom-restricted' })])
-      : result('passed', 'A diretiva de viewport observada não restringe o zoom mínimo.');
+      ? result('cantTell', 'Foi encontrada uma diretiva que solicita restringir o zoom; é necessário confirmar seu efeito.', [documentTarget(document, 'Verifique se a página permite ampliar o conteúdo no navegador e pelo gesto de pinça no celular.', { reason: 'zoom-restricted' })], [
+        'Alguns navegadores ignoram a diretiva restritiva. Registre o navegador usado e se a ampliação foi realmente impedida; o código sozinho não comprova o bloqueio.'
+      ])
+      : result('cantTell', 'A diretiva observada não solicita bloquear o zoom mínimo, mas o comportamento não foi testado.', [], [
+        'Confirme que a ampliação funciona pelo navegador e pelo gesto de pinça no celular; essa diretiva não comprova o requisito inteiro.'
+      ]);
   });
 }
 

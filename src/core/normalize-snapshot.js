@@ -20,6 +20,28 @@ function cleanText(value) {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
 }
 
+function viewportDeclaration(content) {
+  if (typeof content !== 'string' || content.length > 2048) return {};
+  const output = {};
+  const seen = new Set();
+  for (const part of content.toLowerCase().split(/[,;]/u)) {
+    const [name, value, extra] = part.split('=').map(value => value.trim());
+    if (!['user-scalable', 'maximum-scale'].includes(name)) continue;
+    if (seen.has(name) || extra !== undefined) return {};
+    seen.add(name);
+    if (name === 'user-scalable') {
+      if (!['yes', 'no', '1', '0'].includes(value)) return {};
+      output.userScalable = value === 'yes' || value === '1';
+    } else {
+      if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/u.test(value ?? '')) return {};
+      const number = Number(value);
+      if (!Number.isFinite(number) || number <= 0) return {};
+      output.maximumScale = number;
+    }
+  }
+  return output;
+}
+
 function ownData(value, key) {
   try {
     const descriptor = value !== null && typeof value === 'object'
@@ -166,6 +188,7 @@ function sanitizeAttributes(input, tagName, base) {
   const output = {};
   const normalizedInput = Object.fromEntries(Object.entries(input || {}).map(([name, value]) => [String(name).toLowerCase(), value]));
   for (const [name, rawValue] of Object.entries(normalizedInput)) {
+    if (tagName === 'meta' && cleanText(normalizedInput.name).toLowerCase() === 'viewport' && name === 'content') continue;
     if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
     if (editableElement(tagName, normalizedInput) && ['value', 'aria-valuenow', 'aria-valuetext'].includes(name)) continue;
     if (tagName === 'option' && name === 'value') continue;
@@ -492,6 +515,8 @@ function normalizeColumnar(raw) {
         backendNodeId, frameId, base,
         parentIndex: Number.isInteger(nodes.parentIndex?.[nodeIndex]) ? nodes.parentIndex[nodeIndex] : -1,
         attributes: sanitizeAttributes(rawAttributes, tagName, base),
+        ...(tagName === 'meta' && cleanText(rawAttributes.name).toLowerCase() === 'viewport'
+          ? { viewportDeclaration: viewportDeclaration(rawAttributes.content) } : {}),
         rawText: stringAt(strings, nodes.nodeValue?.[nodeIndex]),
         shadowRootType: shadowTypes.get(nodeIndex) || null,
         layout: layoutByNode.get(nodeIndex) || {},
@@ -803,6 +828,18 @@ function normalizeColumnar(raw) {
   const primary = documents[0] || {};
   const primaryRoot = (rootsByDocument.get(0) || []).find(record => record.nodeType === 9);
   const html = primaryRoot ? (childrenByRecord.get(primaryRoot) || []).find(record => record.nodeType === 1 && record.tagName === 'html') : null;
+  const viewportRecords = records.filter(record => {
+    if (record.documentIndex !== 0 || !Object.hasOwn(record, 'viewportDeclaration')) return false;
+    let current = record;
+    const visited = new Set();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      if (current.shadowRootType || EXECUTABLE_TEXT_PARENTS.has(current.tagName)) return false;
+      if (current === html) return true;
+      current = parentOfRecord(current);
+    }
+    return false;
+  });
   const document = {
     nodeId: 'document',
     title: cleanText(stringAt(strings, primary.title)),
@@ -811,6 +848,8 @@ function normalizeColumnar(raw) {
     layoutMetrics: raw.layoutMetrics && typeof raw.layoutMetrics === 'object' ? JSON.parse(JSON.stringify(raw.layoutMetrics)) : {},
     warnings: normalizedWarnings(raw, ambiguousRuntimeMatch ? [{ code: 'RUNTIME_MATCH_AMBIGUOUS' }] : []),
     accessibilityWidgetSignals: normalizedWidgetSignals(raw),
+    ...(html ? { metaViewport: viewportRecords.length === 0 ? null
+      : viewportRecords.length === 1 ? viewportRecords[0].viewportDeclaration : {} } : {}),
     ...(raw.coverage && typeof raw.coverage === 'object' ? { coverage: sanitizeJsonData(raw.coverage) } : {})
   };
   return assertSnapshotV1({ schemaVersion: 1, document, nodes: redactedNodes });

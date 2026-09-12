@@ -73,6 +73,64 @@ function collectorFixture() {
   };
 }
 
+function addViewport(raw, content, documentIndex = 0) {
+  const strings = raw.domSnapshot.strings;
+  const token = value => { let id = strings.indexOf(value); if (id < 0) id = strings.push(value) - 1; return id; };
+  const nodes = raw.domSnapshot.documents[documentIndex].nodes;
+  nodes.parentIndex.push(1);
+  nodes.nodeType.push(1);
+  nodes.nodeName.push(token('META'));
+  nodes.nodeValue.push(token(''));
+  nodes.backendNodeId.push(100 + documentIndex * 100 + nodes.nodeType.length);
+  nodes.attributes.push([token('name'), token('viewport'), token('content'), token(content)]);
+  return raw;
+}
+
+test('normalization preserves a top-document zoom restriction for the ABNT zoom rule', async () => {
+  const raw = addViewport(collectorFixture(), 'width=device-width, user-scalable=no');
+  const snapshot = normalizeSnapshot(raw);
+  assert.equal(snapshot.document.metaViewport?.userScalable, false,
+    'the observed restriction must not be lost between DOM collection and rule input');
+  const audit = await runCoreAudit(snapshot);
+  const rule = audit.ruleResults.find(value => value.ruleId === 'zoom-not-blocked');
+  assert.equal(rule.outcome, 'cantTell');
+  assert.equal(rule.targets.length, 1, 'the declaration must produce a concrete review target');
+});
+
+test('zoom metadata normalizes numbers and retains ambiguity without exporting raw content', () => {
+  for (const [content, expected] of [
+    ['user-scalable=YES; maximum-scale=2.5', { userScalable: true, maximumScale: 2.5 }],
+    ['user-scalable=0', { userScalable: false }],
+    ['width=device-width', {}],
+    ['maximum-scale=bad-secret-value', {}],
+    ['maximum-scale=1, maximum-scale=5', {}],
+    ['maximum-scale=-1', {}],
+  ]) {
+    const normalized = normalizeSnapshot(addViewport(collectorFixture(), content));
+    assert.deepEqual(normalized.document.metaViewport, expected);
+    assert.ok(normalized.nodes.filter(node=>node.tagName==='meta').every(node=>!Object.hasOwn(node.attributes,'content')));
+  }
+  const duplicate = addViewport(addViewport(collectorFixture(), 'user-scalable=no'), 'user-scalable=yes');
+  assert.deepEqual(normalizeSnapshot(duplicate).document.metaViewport, {});
+});
+
+test('viewport declarations in inert template content do not describe the page', () => {
+  const raw = addViewport(collectorFixture(), 'user-scalable=no');
+  const nodes = raw.domSnapshot.documents[0].nodes;
+  nodes.nodeName[3] = raw.domSnapshot.strings.push('TEMPLATE') - 1;
+  nodes.parentIndex[nodes.parentIndex.length - 1] = 3;
+  assert.equal(normalizeSnapshot(raw).document.metaViewport, null);
+});
+
+test('zoom metadata distinguishes observed absence and ignores another document', () => {
+  const raw = collectorFixture();
+  raw.domSnapshot.documents.push(structuredClone(raw.domSnapshot.documents[0]));
+  raw.domSnapshot.documents[1].nodes.backendNodeId = raw.domSnapshot.documents[1].nodes.backendNodeId.map(id=>id+50);
+  raw.domSnapshot.documents[1].frameId = raw.domSnapshot.strings.push('child-frame') - 1;
+  addViewport(raw, 'user-scalable=no', 1);
+  assert.equal(normalizeSnapshot(raw).document.metaViewport, null);
+});
+
 test('collector runtime records normalize into the observations consumed by the existing rules', async () => {
   const snapshot = normalizeSnapshot(collectorFixture());
   const paragraph = snapshot.nodes.find(node => node.backendNodeId === 4);

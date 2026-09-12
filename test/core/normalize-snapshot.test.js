@@ -262,7 +262,7 @@ test('merges AX and runtime data while redacting sensitive values and resource U
   const selector = buildStableSelector(button, buildSnapshotIndexes(snapshot));
   const snippet = sanitizeHtmlSnippet('<button id="send" onclick="bad()" data-token="fixture">Enviar</button>');
   const screenshot = await captureFullPage({ command: async () => ({ data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' }) }, rawMetrics(snapshot));
-  assert.deepEqual(selector, { css: '#send', framePath: [], confidence: 'high' });
+  assert.deepEqual(selector, { css: 'button#send', framePath: [], confidence: 'high' });
   assert.equal(snippet, '&lt;button id=&quot;send&quot;&gt;Enviar&lt;/button&gt;');
   assert.equal(screenshot.status, 'captured');
 });
