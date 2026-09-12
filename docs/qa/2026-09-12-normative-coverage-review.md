@@ -4,6 +4,24 @@ Esta matriz é inventário de trabalho, não prova de validação. Fonte inicial
 
 96 requisitos e 50 recomendações. Antes da entrega, registrar por item a evidência de aplicabilidade, limitações, casos de teste e resultado da revisão. Classificação e vínculo normativo também precisam de confirmação; não aceitar o catálogo como oráculo independente.
 
+## Conferência independente do catálogo (12/09)
+
+Confronto automatizado do corpo do PDF fornecido (`ABNT-NBR-17225-Acessibilidade-Digital.pdf`, páginas físicas 19–48, não o checklist) com `src/core/normative/nbr17225.js`: encontrados os 146 cabeçalhos, nenhum item ausente, nenhuma diferença requisito/recomendação e nenhuma diferença entre conjuntos de referências WCAG. Extração com pypdf do runtime local. Cabeçalhos delimitados por `^(5\.\d+\.\d+)` e terminados em `– Requisito` ou `– Recomendação`; referências `C. S. n.n.n` extraídas entre cabeçalhos consecutivos e comparadas como conjuntos ordenados. Resultado: 146/146 classificações e 146/146 vínculos coincidentes.
+
+Limite: essa conferência valida o catálogo contra o corpo textual fornecido, não a implementação das regras, sua aplicabilidade, a redação do checklist anexo, a leitura visual da página ou a conformidade do site. As pendências por item abaixo continuam válidas.
+
+## Revisão visual independente — pendências importantes
+
+Revisão somente leitura recebida em 12/09, após 5284fb3. Nenhum Critical informado; cinco grupos Important reproduzidos, ainda não corrigidos. Os 23 testes existentes visual/collector passam, mas usam campos sintéticos e não provam a ligação entre coleta e resultado. Não liberar produção com estes pontos abertos:
+
+- Foco (5.1.1–5.1.3, 5.10.5): sombra/outline permanente, área do componente e posição no viewport não demonstram, respectivamente, indicador de foco, área normativa e ausência de sobreposição.
+- Refluxo (5.10.4): ausência de overflow não demonstra ausência de perda de informação/funcionalidade; caminho horizontal também não observado.
+- Contraste textual (5.11.2–5.11.3): escopo de texto DOM não cobre imagens de texto; alternativa de componentes inativos não representada.
+- Alinhamento (5.12.5): rejeitar somente justify permite aprovação de centralização LTR; direção e exceção essencial precisam ser consideradas.
+- Lacunas coleta→regra: orientação, contrastes não textuais, espaçamentos, largura do bloco, redimensionamento, semântica especial e zoom esperam dados não produzidos/utilizáveis. Tamanho mínimo/aprimorado têm cobertura acoplada, descartando observação válida de alvo 30×30.
+
+Tratar por fronteiras pequenas com RED de integração do dado real; não trocar indiscriminadamente tudo por revisão humana nem declarar validação com fixtures sintéticas. A observação passiva da página atual é incremento separado e não encerra estes achados.
+
 | Item | Natureza | Título | Modo declarado | Regras vinculadas | Validação independente |
 |---|---|---|---|---|---|
 | 5.1.1 | Requisito | Indicador de foco visível | automated | focus-visible | Pendente |
