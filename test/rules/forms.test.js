@@ -368,41 +368,53 @@ test('required field rule checks both programmatic state and observable identifi
   ]))).outcome, 'failed');
 });
 
-test('input purpose validates autocomplete tokens for every field with an observed personal-data purpose', async () => {
+test('input purpose judges only the declaration the field itself exposes', async () => {
   const failed = await evaluate('input-purpose', snapshot([
-    record('missing', 'input', { attributes: { type: 'email' }, inputPurpose: 'email' }),
-    record('wrong', 'input', { attributes: { type: 'tel', autocomplete: 'email' }, inputPurpose: 'tel' }),
-    record('invalid', 'input', { attributes: { type: 'text', autocomplete: 'not-a-token' }, inputPurpose: 'name' }),
-    record('ok', 'input', { attributes: { type: 'email', autocomplete: 'section-checkout email' }, inputPurpose: 'email' })
+    record('plain', 'input', { attributes: { type: 'email' } }),
+    record('invalid', 'input', { attributes: { type: 'text', autocomplete: 'not-a-token' } }),
+    record('ok', 'input', { attributes: { type: 'email', autocomplete: 'section-checkout email' } })
   ]));
   assert.equal(failed.outcome, 'failed');
-  assert.deepEqual(failed.targets.map(target => target.nodeId), ['missing', 'wrong', 'invalid']);
+  assert.deepEqual(failed.targets.map(target => target.nodeId), ['invalid']);
+  assert.deepEqual(failed.targets.map(target => target.data.reason), ['invalid-or-missing-autocomplete']);
   assert.equal((await evaluate('input-purpose', snapshot([
-    record('ok', 'input', { attributes: { autocomplete: 'shipping street-address' }, inputPurpose: 'street-address' })
+    record('ok', 'input', { attributes: { autocomplete: 'shipping street-address' } })
   ]))).outcome, 'passed');
   assert.equal((await evaluate('input-purpose', snapshot())).outcome, 'inapplicable');
+
+  // A field whose only purpose evidence is its name or input type stays under review: the
+  // rule never infers personal data from the element itself.
+  const undeclared = await evaluate('input-purpose', snapshot([
+    record('named', 'input', { attributes: { type: 'email', name: 'user-email' }, accessibleName: 'E-mail' })
+  ]));
+  assert.equal(undeclared.outcome, 'cantTell');
+  assert.deepEqual(undeclared.targets, []);
+
+  // An explicit opt-out is a structural declaration with no purpose: it is not a failure,
+  // but it cannot approve determinacy either.
   assert.equal((await evaluate('input-purpose', snapshot([
-    record('unknown', 'input', { attributes: { type: 'email' } })
+    record('off', 'input', { attributes: { type: 'text', autocomplete: 'off' } })
   ]))).outcome, 'cantTell');
 
-  for (const [autocomplete, purpose] of [
-    ['username webauthn', 'username'],
-    ['section-login username webauthn', 'username'],
-    ['billing home tel webauthn', 'tel'],
-    ['work email', 'email']
+  for (const autocomplete of [
+    'username webauthn',
+    'section-login username webauthn',
+    'billing home tel webauthn',
+    'work email',
+    'nickname'
   ]) {
     assert.equal((await evaluate('input-purpose', snapshot([
-      record('valid', 'input', { attributes: { autocomplete }, inputPurpose: purpose })
+      record('valid', 'input', { attributes: { autocomplete } })
     ]))).outcome, 'passed', autocomplete);
   }
-  for (const [autocomplete, purpose] of [
-    ['webauthn username', 'username'],
-    ['home name', 'name'],
-    ['username name', 'username'],
-    ['section-login webauthn', 'username']
+  for (const autocomplete of [
+    'webauthn username',
+    'home name',
+    'username name',
+    'section-login webauthn'
   ]) {
     assert.equal((await evaluate('input-purpose', snapshot([
-      record('invalid', 'input', { attributes: { autocomplete }, inputPurpose: purpose })
+      record('invalid', 'input', { attributes: { autocomplete } })
     ]))).outcome, 'failed', autocomplete);
   }
 });

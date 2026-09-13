@@ -102,6 +102,8 @@ test('default suite keeps fast tests parallel and classifies every real-Chrome E
   assert.deepEqual(createNodeTestArgs(plan.parallel), ['--test', ...plan.parallel]);
   assert.deepEqual(createNodeTestArgs(plan.serial, { serial: true }),
     ['--test', '--test-concurrency=1', ...plan.serial]);
+  assert.deepEqual(createTestPlan(['test/e2e/field-label-review.test.mjs']).serial,
+    ['test/e2e/field-label-review.test.mjs']);
   assert.throws(() => createTestPlan([...files, 'test/e2e/new-real-browser.test.mjs']),
     error => error.code === 'TEST_PLAN_UNCLASSIFIED_E2E');
 });

@@ -8,8 +8,8 @@ Base: `1a897c4`. Norma do usuário, páginas impressas 22–25, lida diretamente
 | 5.9.2/4/5 | Revisão contextual assistida; posição, descrição e previsibilidade não estão comprovadas automaticamente. Nenhum defeito novo demonstrado nessa rodada. |
 | 5.9.3 | RED local: label com `for=other` aprovava input aninhado diferente; label implícito aprovava dois descendentes, embora só o primeiro fosse seu controle. Correção e revisão independente concluídas nesse escopo. |
 | 5.9.6 | RED local: controles com mesmo name em formulários/documentos distintos eram agrupados globalmente. Chave passa a considerar documento e formulário proprietário, incluindo atributo form explícito. Ancestralidade insuficiente/associação não demonstrada permanece pendente. Revisão corrigiu também form vazio: não referencia form de id vazio. Revisão independente concluída no diff, sem novo achado. |
-| 5.9.7 | Lacuna de automação: runtime conserva required dentro de form, consumidor pede required/requiredIndicator no nível do campo. A presença real da identificação perceptível não foi demonstrada por esse contrato. Não converter automaticamente a lacuna em falha. |
-| 5.9.8 | Lacuna de automação: consumidor pede inputPurpose não produzido. Não inferir finalidade pessoal apenas do nome/tipo/atributo autocomplete. Revisão do alcance próprio da ABNT ainda necessária. |
+| 5.9.7 | Corrigido no contrato de observação: o runtime reporta o estado obrigatório no nível do registro e o consumidor volta a julgar coerência de estado. Chrome real confirmou `required` nativo, `aria-required` e ausência em campo customizado. A identificação perceptível continua sem produtor e o item permanece em revisão, sem converter a lacuna em falha. |
+| 5.9.8 | Corrigido no contrato de observação: a finalidade declarada passa a ser lida apenas do `autocomplete` do próprio campo; declaração estruturalmente inválida é falha confirmada e campo sem declaração permanece em revisão. Nome, tipo de entrada e contexto continuam proibidos como prova. |
 
 Evidência de implementação 5.9.3/6: três REDs unitários observados antes da mudança; 18/18 testes de formulários após correção; conjunto focado forms+guidance+normalize 71/71. Chrome152 1/1 no teste novo `form-association-observation`: usa `label.control` e `input.form` como observação nativa, coleta e normaliza DOM/AX/runtime sem interação e exige alvos corretos, preservando HTML/foco/scroll. Não foi executada suíte ampla nem gerado pacote.
 
@@ -35,7 +35,22 @@ Cobertura ainda pendente, registrada para não ser confundida com conclusão:
 
 - **Produtor de identificação visual ausente.** Nenhuma evidência coletada hoje prova rótulo percebido. Permanecem insuficientes: `hasRenderedBox`, `hidden:false`, `visibleText` e presença de `label` no DOM — o RED do revisor mostrou `label` com `clip-path:inset(50%)` mantendo caixa e texto. Até existir produtor confiável, a automação de 5.9.1 fica em `cantTell` agregado, sem alvo por campo.
 - **Campos customizados com nome acessível vazio.** A preservação de detecção de nome vazio foi demonstrada para campos nativos testados, não para todo campo customizado. Em `div[role=textbox][contenteditable=true]`, o normalizador pode remover nome AX vazio por privacidade, e a regra de nome fica `cantTell`. Não enfraquecer a fronteira de privacidade para "resolver" isso; investigar cobertura dentro do contrato existente.
-- **Integração 5.9.7 e 5.9.8** segue com as lacunas já descritas na tabela acima.
+- **Identificação perceptível de obrigatoriedade (5.9.7).** O estado obrigatório agora chega ao consumidor, mas nenhum produtor demonstra que a obrigatoriedade é perceptível. O item continua em `cantTell` enquanto esse produtor não existir; a presença do atributo não é prova de percepção.
+
+## 5.9.7 e 5.9.8 — fechamento da lacuna de integração
+
+Dois REDs reais foram observados no Chrome antes das correções, ambos pelo consumidor final e não por dados injetados no teste:
+
+- 5.9.7: `native required state must survive normalization` — o coletor guardava a obrigatoriedade em `record.form.required` e o consumidor lia `required` no nível do registro, então todo campo obrigatório caía em coleta ausente.
+- 5.9.8: `declared must expose only its declared purpose` — o consumidor exigia `inputPurpose`, que nenhum produtor emitia, então o item nunca saía de coleta ausente.
+
+Correções, com a fronteira normativa preservada:
+
+- O coletor passa a reportar `required` no nível do registro para controles rotuláveis nativos: a propriedade IDL quando não há declaração ARIA, o token ARIA quando existe, e nada quando o token é malformado — deixando o consumidor relatar estado inválido em vez de inventar booleano. Campo customizado não recebe essa observação.
+- A finalidade do campo passa a ser derivada exclusivamente da declaração `autocomplete` do próprio campo, dentro da regra. Nome, tipo de entrada, texto ao redor e contexto de página continuam proibidos como prova. `autocomplete="off"` é declaração estrutural sem finalidade: não falha e também não aprova.
+- A regra 5.9.8 preserva o caso de falha real (declaração estruturalmente inválida) e mantém em revisão os campos sem declaração, sem multiplicar a pendência e sem inventar finalidade pessoal.
+
+GREEN local: 634/634 em regras, integração, core e relatório; 20/20 em formulários; Chrome real 4/4 somando `field-label-review`, `form-association-observation`, `required-field-observation` e `input-purpose-observation`. Nenhum alvo novo é produzido por suspeita; a aprovação de 5.9.8 só ocorre quando todos os campos aplicáveis têm declaração válida observada. Metadado `mode:automated` permanece inalterado pelo mesmo motivo de compatibilidade já registrado.
 
 ## Infraestrutura de teste — Chrome for Testing corrompido
 

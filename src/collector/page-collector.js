@@ -335,6 +335,24 @@ export function collectRuntimePageData() {
     }
     const nativeControl = ['button', 'input', 'select', 'textarea'].includes(element.localName);
     const disabled = nativeControl && element.matches(':disabled');
+    // Requiredness is the declaration the DOM exposes for a labelable control: the
+    // native IDL property when no ARIA declaration is present, otherwise the ARIA
+    // token. A malformed ARIA token is deliberately left unobserved so the consumer
+    // can report it as an invalid state instead of inventing a boolean. This is an
+    // observed state, not a claim about the perceptible indicator the ABNT
+    // requirement also demands, and it is reported at the record level because the
+    // runtime contract that reaches ABNT 5.9.7 reads it there; the nested form
+    // record keeps the raw native observation for field-level consumers.
+    const nativeLabelable = element instanceof HTMLInputElement || element instanceof HTMLSelectElement ||
+      element instanceof HTMLTextAreaElement;
+    const ariaRequired = element.getAttribute?.('aria-required');
+    const required = !nativeLabelable || element.type === 'hidden'
+      ? undefined
+      : ariaRequired === null || ariaRequired === undefined
+        ? element.required === true
+        : ['true', 'false'].includes(String(ariaRequired).trim().toLowerCase())
+          ? String(ariaRequired).trim().toLowerCase() === 'true'
+          : undefined;
     const measuredTarget = targetSizeRect(element);
     const measuredLine = hasRenderedBox ? charactersPerLine(element) : undefined;
     const record = {
@@ -353,6 +371,7 @@ export function collectRuntimePageData() {
       visibleText: sensitiveControl ? '' : (element.innerText || '').replace(/\s+/gu, ' ').trim(),
       focusable: element.matches('a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]') && !disabled,
       ...(nativeControl ? { disabled } : {}),
+      ...(required === undefined ? {} : { required }),
       active: document.activeElement === element,
       shadowHost: Boolean(element.shadowRoot),
       shadowRootMode: element.shadowRoot?.mode || null
@@ -365,7 +384,7 @@ export function collectRuntimePageData() {
       const warning = adjacentWarning(element);
       if (typeof warning === 'boolean') record.adjacentNewWindowWarning = warning;
     }
-    if (element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
+    if (nativeLabelable) {
       record.form = {
         type: element instanceof HTMLInputElement ? element.type : element.localName,
         checked: element instanceof HTMLInputElement ? element.checked : undefined,

@@ -305,32 +305,56 @@ function validAutocomplete(value, purpose) {
     fieldToken === purpose && (!hasContactType || contactPurpose);
 }
 
+// The declared purpose is read only from the field's own autocomplete declaration. An
+// undeclared purpose is unobserved (null) and keeps the requirement under review; a
+// declared but malformed token resolves to an empty purpose the consumer can contradict.
+const AUTOCOMPLETE_STRUCTURE = new Set(['billing', 'shipping', 'home', 'work', 'mobile', 'fax', 'pager', 'webauthn']);
+
+function declaredPurpose(field) {
+  const tokens = normalizeText(attribute(field, 'autocomplete')).toLowerCase().split(/\s+/u).filter(Boolean);
+  if (tokens.length === 0) return null;
+  if (['on', 'off'].includes(tokens[0])) return '';
+  const last = tokens[tokens.length - 1];
+  if (last !== 'webauthn') return last;
+  // "webauthn" is a credential qualifier that follows the purpose token, as in
+  // "username webauthn". Only a declaration made of structural tokens alone states the
+  // purpose as username.
+  const purposeTokens = tokens.slice(1).filter(token => !AUTOCOMPLETE_STRUCTURE.has(token) &&
+    !(token.startsWith('section-') && token.length > 8));
+  return purposeTokens.length === 0 ? 'username' : purposeTokens[purposeTokens.length - 1];
+}
+
 function inputPurpose(snapshot) {
   return formResult(snapshot, ({ nodes }) => {
     const fields = fieldsOf(nodes);
     if (fields.length === 0) return result('inapplicable', 'Não há campos de entrada aplicáveis.');
-    const targets = fields.filter(node => hasOwn(node, 'inputPurpose'));
-    if (targets.length === 0) {
-      return result('cantTell', 'A finalidade dos campos não foi normalizada.', [], [
-        'Colete a finalidade observável dos campos que recebem dados pessoais.'
+    // The only observed source of a field purpose is the autocomplete declaration of the
+    // field itself. Name, input type, surrounding text and page context are never used as
+    // evidence of a personal-data purpose, so a field that declares nothing keeps the
+    // requirement under review instead of becoming a failure.
+    const declared = fields.map(field => ({ field, purpose: declaredPurpose(field) }))
+      .filter(candidate => candidate.purpose !== null);
+    if (declared.length === 0) {
+      return result('cantTell', 'A determinação programática do tipo de dado não foi observada em nenhum campo.', [], [
+        'A finalidade observável vem da declaração autocomplete do próprio campo; nome, tipo de entrada e texto ao redor não são usados como prova.'
       ]);
     }
     const failures = [];
-    let incomplete = targets.length !== fields.length;
-    for (const field of targets) {
-      const purpose = normalizeText(field.inputPurpose).toLowerCase();
-      const autocomplete = attribute(field, 'autocomplete');
+    let incomplete = declared.length !== fields.length;
+    for (const { field, purpose } of declared) {
       if (!purpose) incomplete = true;
-      else if (!validAutocomplete(autocomplete, purpose)) {
+      else if (!validAutocomplete(attribute(field, 'autocomplete'), purpose)) {
         failures.push(target(field, 'Use autocomplete válido e compatível com a finalidade deste campo.', {
           reason: 'invalid-or-missing-autocomplete'
         }));
       }
     }
     if (failures.length > 0) return result('failed', 'Há campos com finalidade sem autocomplete válido.', failures);
-    if (incomplete) return result('cantTell', 'A finalidade de um campo não foi normalizada.', [], [
-      'Colete a finalidade observável de todos os campos aplicáveis.'
-    ]);
+    if (incomplete) {
+      return result('cantTell', 'A determinação programática do tipo de dado não foi observada em todos os campos.', [], [
+        'Declare a finalidade com um autocomplete válido ou registre por que o campo não tem finalidade de dado pessoal a determinar.'
+      ]);
+    }
     return result('passed', 'Os campos aplicáveis possuem autocomplete compatível com sua finalidade.');
   });
 }
