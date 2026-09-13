@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { runRules } from '../../src/core/rules/run-rules.js';
 import { FORM_RULES } from '../../src/core/rules/forms.js';
+import { INTERACTIVE_RULES } from '../../src/core/rules/interactive.js';
 import { normalizeSnapshot } from '../../src/core/normalize-snapshot.js';
 
 test('a programmatic aria-label is not reported as a missing label association', async () => {
@@ -18,6 +19,24 @@ test('aria-labelledby associates a field with collected label text', async () =>
     record('field', 'input', { attributes: { 'aria-labelledby': 'field-name' }, accessibleName: 'Nome' })
   ]);
   assert.equal((await evaluate('form-label-association', value)).outcome, 'passed');
+});
+
+test('field-label review separates accessible naming from visual identification without multiplying findings', async () => {
+  for (const field of [
+    record('field', 'input', { attributes: { 'aria-label': 'Nome' }, accessibleName: 'Nome' }),
+    record('field', 'input', { accessibleName: '' }),
+    record('field', 'div', { attributes: { role: 'textbox', contenteditable: 'true' }, accessibleName: '' }),
+    record('field', 'input', { attributes: { 'aria-hidden': 'true' }, hasRenderedBox: true }),
+  ]) {
+    const result = await evaluate('form-field-label', snapshot([field]));
+    assert.equal(result.outcome, 'cantTell');
+    assert.deepEqual(result.targets, []);
+  }
+  const many = Array.from({ length: 100 }, (_, index) => record(`field-${index}`, 'input', { accessibleName: 'Nome' }));
+  const result = await evaluate('form-field-label', snapshot(many));
+  assert.equal(result.outcome, 'cantTell');
+  assert.deepEqual(result.targets, []);
+  assert.equal((await evaluate('form-field-label', snapshot())).outcome, 'inapplicable');
 });
 
 test('a wrapping label with an explicit for cannot label a different nested field', async () => {
@@ -125,7 +144,7 @@ function snapshot(nodes = [], document = {}) {
 }
 
 async function evaluate(ruleId, value) {
-  const rule = FORM_RULES.find(candidate => candidate.id === ruleId);
+  const rule = [...FORM_RULES, ...INTERACTIVE_RULES].find(candidate => candidate.id === ruleId);
   assert.ok(rule, `Regra ausente: ${ruleId}`);
   return (await runRules(value, {}, [rule]))[0];
 }
@@ -152,8 +171,8 @@ test('form rules declare exact ABNT, WCAG and mode metadata', () => {
   );
 });
 
-test('form field label reports every unnamed field and distinguishes missing collection data', async () => {
-  const failed = await evaluate('form-field-label', snapshot([
+test('missing accessible names remain automated findings under their own requirement', async () => {
+  const failed = await evaluate('accessible-component-name', snapshot([
     record('name', 'input', { attributes: { type: 'text' }, role: 'textbox', accessibleName: '' }),
     record('ok', 'select', { role: 'combobox', accessibleName: 'Estado' }),
     record('email', 'input', { attributes: { type: 'email' }, role: 'textbox', accessibleName: '' })
@@ -161,13 +180,13 @@ test('form field label reports every unnamed field and distinguishes missing col
   assert.equal(failed.outcome, 'failed');
   assert.deepEqual(failed.targets.map(target => target.nodeId), ['name', 'email']);
   failed.targets.forEach(assertEvidence);
-  assert.equal((await evaluate('form-field-label', snapshot([
+  assert.equal((await evaluate('accessible-component-name', snapshot([
     record('ok', 'textarea', { role: 'textbox', accessibleName: 'Mensagem' })
   ]))).outcome, 'passed');
-  assert.equal((await evaluate('form-field-label', snapshot())).outcome, 'inapplicable');
+  assert.equal((await evaluate('accessible-component-name', snapshot())).outcome, 'inapplicable');
   const unknown = record('unknown', 'input', { attributes: { type: 'text' }, role: 'textbox' });
   delete unknown.accessibleName;
-  assert.equal((await evaluate('form-field-label', snapshot([unknown]))).outcome, 'cantTell');
+  assert.equal((await evaluate('accessible-component-name', snapshot([unknown]))).outcome, 'cantTell');
 });
 
 test('form label association accepts explicit unique for and fails missing or ambiguous references', async () => {

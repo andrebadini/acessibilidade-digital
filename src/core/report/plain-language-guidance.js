@@ -178,8 +178,8 @@ const SPECIFIC = {
     example: 'um botão com desenho de lupa recebe o nome “Buscar”; o desenho sozinho pode não explicar a ação a quem não o vê.'
   },
   '5.9.1': {
-    correction: 'Identifique o campo com um rótulo que explique qual informação preencher e que esteja disponível às tecnologias assistivas.',
-    steps: ['Procure a identificação do campo antes de preenchê-lo. Se houver uma dica dentro da caixa, confira se ela desaparece ao digitar; não use dados pessoais reais no teste.', 'Confira também o nome anunciado ao chegar ao campo pelo leitor de tela. Não conclua que a identificação é suficiente apenas porque há texto perto da caixa.'],
+    correction: 'Identifique o campo com um rótulo. A norma também admite um campo com propósito visualmente evidente e nome acessível que o identifique.',
+    steps: ['Procure a identificação do campo antes de preenchê-lo. Se houver uma dica dentro da caixa, confira se ela desaparece ao digitar; não use dados pessoais reais no teste.', 'Confira também o nome anunciado ao chegar ao campo pelo leitor de tela. Um nome anunciado pode existir sem texto visível. Não conclua que a identificação é suficiente apenas porque há texto perto da caixa ou porque existe aria-label no código.', 'Verifique o rótulo que identifica o campo ou registre por que o propósito é visualmente evidente e qual nome acessível o acompanha. A ausência de um elemento HTML label não prova, sozinha, falta de identificação visual; a associação programática é uma verificação separada, no item 5.9.3.'],
     example: 'um campo apresenta “Nome completo” como identificação, em vez de depender apenas de uma dica que some quando a pessoa começa a escrever.'
   },
   '5.9.2': {

@@ -37,23 +37,19 @@ function isNativeLabelable(node) {
 
 function formFieldLabel(snapshot) {
   return formResult(snapshot, ({ nodes }) => {
-    const fields = fieldsOf(nodes);
+    const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton']);
+    const fields = nodes.filter(node => {
+      if (node.hasRenderedBox === false || (node.hasRenderedBox !== true && isHidden(node))) return false;
+      const tag = tagOf(node);
+      const native = ['select', 'textarea'].includes(tag) || (tag === 'input' &&
+        !['button', 'hidden', 'image', 'reset', 'submit'].includes(normalizeText(attribute(node, 'type')).toLowerCase()));
+      return native || inputRoles.has(normalizeText(node.axRole).toLowerCase() || roleOf(node));
+    });
     if (fields.length === 0) return result('inapplicable', 'Não há campos de formulário aplicáveis.');
-    const failures = [];
-    let incomplete = false;
-    for (const field of fields) {
-      if (!hasOwn(field, 'accessibleName')) incomplete = true;
-      else if (!normalizeText(field.accessibleName)) {
-        failures.push(target(field, 'Forneça um rótulo acessível para este campo.', {
-          reason: 'missing-field-label'
-        }));
-      }
-    }
-    if (failures.length > 0) return result('failed', 'Há campos sem rótulo acessível.', failures);
-    if (incomplete) return result('cantTell', 'O nome acessível de um campo não foi coletado.', [], [
-      'Colete o nome acessível calculado de todos os campos.'
+    return result('cantTell', 'Há campos cuja identificação visual precisa ser confirmada. O nome acessível, sozinho, não demonstra atendimento nem falha do item 5.9.1.', [], [
+      'Confirme um rótulo que identifique cada campo ou, como alternativa, um propósito visualmente evidente acompanhado de nome acessível. Caixa e texto no DOM não provam percepção visual: podem estar recortados ou ocultos. Esta pendência é agregada, não uma ocorrência de erro para cada campo.',
+      'Associação programática, nome acessível e descrição do propósito são verificados separadamente. Não conclua ausência de rótulo visual apenas porque o nome acessível está vazio ou não foi coletado.'
     ]);
-    return result('passed', 'Todos os campos aplicáveis possuem rótulo acessível.');
   });
 }
 
