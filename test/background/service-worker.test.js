@@ -2431,6 +2431,10 @@ test('R3-E terminal commit schedules retention without holding the starter lock 
   assert.match(connected.sessionCapabilityId ?? '', /^[A-Za-z0-9_-]{22}$/u);
   assert.equal(connected.state, 'view-only');
   assert.equal(opened.ok, true, JSON.stringify(opened));
+  // The report launch key is published before the terminal commit requests expiry
+  // scheduling, so this waits for the real request instead of sampling a flag that the
+  // scheduling path sets asynchronously.
+  for (let attempt = 0; attempt < 200 && !schedulingPending; attempt += 1) await tick();
   assert.equal(schedulingPending, true, 'the real terminal path must request expiry scheduling');
   assert.equal((await auditStore.getLatest()).auditId, auditId);
   schedulingGate.resolve();

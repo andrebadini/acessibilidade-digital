@@ -745,7 +745,19 @@ async function removeOwnedRunRoot(path) {
   if (dirname(checked) !== canonicalTmp || !/^audita-real-chrome-[A-Za-z0-9]{6}$/u.test(basename(checked))) {
     throw fixed('UNSAFE_QA_CLEANUP');
   }
-  await rm(checked, { recursive: true, force: false });
+  // Chrome can still be finishing writes in its temporary profile after the browser
+  // process exits, which makes a single recursive removal fail with ENOTEMPTY or EBUSY.
+  // Retry only those transient races on the already validated owned path; any other
+  // failure still surfaces unchanged.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(checked, { recursive: true, force: false });
+      return;
+    } catch (error) {
+      if (!['ENOTEMPTY', 'EBUSY', 'ENOENT'].includes(error?.code) || attempt >= 20) throw error;
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
+    }
+  }
 }
 
 export async function terminateChromeProcess(chrome, options = {}) {
