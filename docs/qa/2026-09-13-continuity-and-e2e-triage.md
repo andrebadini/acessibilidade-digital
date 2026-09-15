@@ -32,6 +32,11 @@ Nos dois itens o metadado `mode:automated` foi mantido por compatibilidade com r
 | Chrome real: `report-executive-print`, `report-print-layout` | 2/2 |
 | Chrome real: `batch-audit-mv3` | 1/1 após o fix de cleanup abaixo |
 | Suíte completa `scripts/run-tests.mjs` | 4171 testes, 4161 passando, 10 falhando (ver abaixo) |
+| `scripts/verify-project.mjs` com `AUDITA_VERIFY_SKIP_TESTS=1` | GREEN: catálogo 130/146 (96 requisitos e 50 recomendações), identidade neutra, assinaturas HTML/JSON/PDF, fixtures e varredura de privacidade |
+
+O `verify` completo depende de `npm test` passar sem falhas; hoje ele reprova por causa das 10 falhas preexistentes registradas abaixo, e não por qualquer verificação estática.
+
+Confirmação adicional da falha de exportação: manter o pedido aberto por três minutos não produz resposta nem arquivo. Um pedido sem `sessionCapabilityId` responde `INVALID_MESSAGE` em 1 ms, o que mostra que o envelope correto passa da validação e trava depois dela.
 
 ## Infraestrutura: Chrome for Testing corrompido
 
