@@ -1652,3 +1652,32 @@ function deferred() {
   const promise = new Promise(next => { resolve = next; });
   return { promise, resolve };
 }
+
+test('a transient interrupted signal does not discard a download that Chrome reports complete', async () => {
+  const listeners = new Set();
+  let searchState = 'in_progress';
+  const chromeApi = {
+    runtime: {},
+    downloads: {
+      onChanged: {
+        addListener(listener) { listeners.add(listener); },
+        removeListener(listener) { listeners.delete(listener); },
+      },
+      download(_options, callback) { callback(77); },
+      search(_query, callback) {
+        callback([searchState === 'complete' ? { id: 77, state: 'complete' }
+          : { id: 77, state: 'interrupted', error: 'NETWORK_FAILED' }]);
+      },
+    },
+  };
+  const adapter = createDownloadsAdapter(chromeApi, { createObjectURL() { return 'blob:test'; }, revokeObjectURL() {} });
+  const pending = adapter.waitForDownload(77, { timeoutMs: 5_000 });
+  // Chrome can report an interruption and still finish the very same download: by the time
+  // the durable search is repeated the artifact is already complete. The authority is that
+  // search result, so the signal alone must not end the wait.
+  searchState = 'complete';
+  for (const listener of [...listeners]) listener({ id: 77, state: { current: 'interrupted' }, error: { current: 'NETWORK_FAILED' } });
+  const settled = await pending;
+  assert.deepEqual(settled, { id: 77, state: 'complete' });
+  assert.equal(listeners.size, 0, 'the terminal wait releases its listener');
+});

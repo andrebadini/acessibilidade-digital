@@ -433,17 +433,36 @@ export function createDownloadsAdapter(chromeApi, urlApi = globalThis.URL) {
           chromeApi.downloads.onChanged.removeListener(listener);
           handler(value);
         };
+        // Chrome can emit an interruption and still finish the very same download, and it
+        // finishes under a different physical name when the profile renames artifacts. The
+        // durable search result is the authority, so an interruption signal is confirmed
+        // before it is allowed to end the wait; a download that really stopped stays a
+        // failure and the timeout still bounds the confirmation.
+        const confirmInterrupted = errorCode => {
+          invokeChrome(chromeApi, callback => chromeApi.downloads.search({ id: downloadId }, callback)).then(items => {
+            const item = items?.[0];
+            if (item?.state === 'complete') {
+              finish(resolve, { id: downloadId, state: 'complete' });
+              return;
+            }
+            const code = typeof item?.error === 'string' && item.error ? item.error : errorCode;
+            finish(reject, Object.assign(new Error(code ?? 'Download interrompido.'), { name: 'DownloadInterruptedError' }));
+          }, () => finish(reject, Object.assign(new Error(errorCode ?? 'Download interrompido.'), { name: 'DownloadInterruptedError' })));
+        };
         const listener = delta => {
           if (delta?.id !== downloadId || !delta.state?.current) return;
           if (delta.state.current === 'complete') finish(resolve, { id: downloadId, state: 'complete' });
-          if (delta.state.current === 'interrupted') finish(reject, Object.assign(new Error(delta.error?.current ?? 'Download interrompido.'), { name: 'DownloadInterruptedError' }));
+          if (delta.state.current === 'interrupted') {
+            const code = typeof delta.error?.current === 'string' ? delta.error.current : null;
+            confirmInterrupted(code);
+          }
         };
         const timer = setTimeout(() => finish(reject, new DOMException('Download excedeu o tempo limite.', 'TimeoutError')), timeoutMs);
         chromeApi.downloads.onChanged.addListener(listener);
         invokeChrome(chromeApi, callback => chromeApi.downloads.search({ id: downloadId }, callback)).then(items => {
           const item = items?.[0];
           if (item?.state === 'complete') finish(resolve, { id: downloadId, state: 'complete' });
-          else if (item?.state === 'interrupted') finish(reject, Object.assign(new Error(item.error ?? 'Download interrompido.'), { name: 'DownloadInterruptedError' }));
+          else if (item?.state === 'interrupted') confirmInterrupted(item.error);
         }, error => finish(reject, error));
       });
     },
