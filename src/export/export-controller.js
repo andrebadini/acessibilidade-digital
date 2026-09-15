@@ -358,12 +358,25 @@ function isAttestedArtifactFilename(value, requestedBaseName, format) {
     value === `${prefix}${index}${suffix}`;
 }
 
+// A review-ready revision has no generated-artifact claim to retrofit, so the durable
+// delivery receipt is the authority. That authority covers partial deliveries too: the
+// product deliberately records which formats were delivered and which limitations applied.
+// Requiring a complete receipt here rejected every honest partial delivery — the shape a
+// current-page audit actually produces — so the immutable path now validates the receipt's
+// own order and shape and lets the shared validator decide consistency.
 function immutableRevisionFormats(receipt, artifactBaseName) {
-  if (!receipt || receipt.status !== 'complete' || !Array.isArray(receipt.formats) || receipt.formats.length !== EXPORT_FORMATS_V1.length ||
-    receipt.formats.some((entry, index) => entry?.format !== EXPORT_FORMATS_V1[index] || entry.status !== 'complete')) {
+  if (!receipt || !['complete', 'partial'].includes(receipt.status) || !Array.isArray(receipt.formats) ||
+    receipt.formats.length === 0 || receipt.formats.length > EXPORT_FORMATS_V1.length ||
+    receipt.formats.some((entry, index) => entry?.format !== EXPORT_FORMATS_V1[index])) {
     throw new TypeError('Recibo completo da revisão imutável inválido.');
   }
-  return { formats: [...EXPORT_FORMATS_V1], missing: [], missingLimitations: [], baseName: artifactBaseName };
+  const delivered = receipt.formats.map(entry => entry.format);
+  return {
+    formats: delivered,
+    missing: EXPORT_FORMATS_V1.filter(format => !delivered.includes(format)),
+    missingLimitations: [],
+    baseName: artifactBaseName,
+  };
 }
 
 function validateImmutableRevisionCorrelation({ model, json, csv, pdf, formats, receipt, exportDeliveryIdentity }) {
