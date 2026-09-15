@@ -154,3 +154,23 @@ Confirmado por stash no estado limpo do HEAD: mesmas 9 falhas, sempre `PERSONA_C
 - Comparação com AMAWeb/AccessMonitor usando versão atual contra versão atual.
 - Revisão integrada independente desta rodada.
 - Pacote de distribuição da versão efetivamente testada.
+
+## Rodada 3 — achado que estreita a busca da causa raiz
+
+Medição nova, com o worker vivo e a página do relatório aberta por auditoria anexada:
+
+- `chrome.storage.session` contém dez chaves, entre elas `audita:report-launch:v1:<auditId>`, `audita:report-launch-tab:v1:<tabId>` e `audita:retention-preference:v1:<auditId>`.
+- **Não existe** nenhuma chave `audita:report-consumer:v1:…` nesse momento, nem `audita:export-session:v1:…`.
+
+Isso é relevante porque `authorizeIntent` exige um consumidor vivo cujo grafo bata com o lançamento:
+
+```
+consumer.state === 'active' && consumer.intents.includes(intent) && launch.state === 'connected'
+&& consumer.tabId === launch.tabId && consumer.documentId === launch.documentId
+```
+
+Sem registro de consumidor, `exactLiveConsumerGraph` é falso e `authorizeExport` nega. É a explicação mais provável para a aba de exportação fechar cerca de dois segundos depois de abrir, sem nunca gravar sessão de exportação: `EXPORT_CONNECT` é negado e a página fecha a si mesma em `fail()`.
+
+Ressalva importante: a leitura foi feita a partir da página do relatório. As chaves de consumidor podem ter nome ou área diferentes do que o filtro procurava, então isto é uma hipótese forte e **não** uma prova. O passo decisivo é registrar, dentro de `reportLaunch.authorizeIntent`, qual das cláusulas do grafo falha na auditoria anexada — uma leitura de diagnóstico temporária, removida em seguida, como foi feito na rodada 2.
+
+Caminho alternativo se a hipótese se confirmar: a auditoria por URL não apresenta o problema, então comparar como o consumidor é criado nos dois modos (`launch.version` 2 com `source.state === 'result'`) deve apontar a diferença.
