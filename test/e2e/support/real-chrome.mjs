@@ -194,8 +194,16 @@ export function createCdpPipeTransport({
     pending.delete(message.id);
     completed.add(message.id);
     clearTimeout(item.timer);
-    if (plain(message.error)) item.reject(fixed('CDP_COMMAND_FAILED'));
-    else if (Object.hasOwn(message, 'result') && plain(message.result)) item.resolve(message.result);
+    if (plain(message.error)) {
+      // The failure code stays closed, but the raw DevTools detail is diagnostic, not secret,
+      // and without it a real protocol failure is indistinguishable from a closed pipe.
+      item.reject(Object.assign(fixed('CDP_COMMAND_FAILED'), {
+        detail: Object.freeze({
+          code: typeof message.error.code === 'number' ? message.error.code : null,
+          message: typeof message.error.message === 'string' ? message.error.message.slice(0, 300) : null,
+        }),
+      }));
+    } else if (Object.hasOwn(message, 'result') && plain(message.result)) item.resolve(message.result);
     else fatal('CDP_FRAME_INVALID');
   };
 
