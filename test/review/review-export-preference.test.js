@@ -4,18 +4,55 @@ import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 
 const source = await readFile(new URL('../../src/review/review.js', import.meta.url), 'utf8');
-const requestSource = source.slice(source.indexOf('async function requestExport('), source.indexOf('\nasync function returnToAuditedPage'));
+const requestSource = source.slice(source.indexOf('const EXPORT_CONFIRMATION_TIMEOUT_MS'),
+  source.indexOf('\nasync function returnToAuditedPage'));
+const EXPORT_CONFIRMATION_TIMEOUT_MS = Number(
+  source.slice(source.indexOf('const EXPORT_CONFIRMATION_TIMEOUT_MS')).match(/=\s*([\d_]+)/u)[1].replaceAll('_', ''),
+);
 
 test('review forwards explicit export choice; a default request never inherits deletion', async () => {
   const sent = [];
   const request = runInNewContext(`${requestSource}; requestExport`, {
     auditModel: { auditId: 'audit-a' }, reportSessionCapabilityId: 'S'.repeat(22),
-    regenerate: {}, status: {}, async sendWorkerRequest(value) { sent.push(value); return { ok: true }; },
+    regenerate: {}, status: {}, exportConfirmationTimer: null,
+    async sendWorkerRequest(value) { sent.push(value); return { ok: true }; },
+    setTimeout: () => 0, clearTimeout: () => {},
   });
   await request({ deleteAfterCompleteExport: true });
   await request();
   assert.deepEqual(sent.map(value => value.deleteAfterCompleteExport), [true, false]);
   assert.match(source, /onExport:\s*options\s*=>\s*\{\s*void requestExport\(options\)/u);
+});
+
+test('an unconfirmed export stops waiting and says so instead of staying queued', async () => {
+  let scheduled = null;
+  let cleared = 0;
+  const auditModel = { auditId: 'audit-a' };
+  const status = { textContent: '' };
+  const regenerate = {};
+  const request = runInNewContext(`${requestSource}; requestExport`, {
+    auditModel, status, regenerate, reportSessionCapabilityId: 'S'.repeat(22), exportConfirmationTimer: null,
+    async sendWorkerRequest() { return { ok: true }; },
+    setTimeout(callback, delayMs) { scheduled = { callback, delayMs }; return 7; },
+    clearTimeout() { cleared += 1; },
+  });
+  await request();
+  assert.equal(status.textContent, 'Relatório atualizado na fila de geração.');
+  assert.equal(scheduled.delayMs, EXPORT_CONFIRMATION_TIMEOUT_MS);
+  assert.equal(cleared, 2, 'a confirmed acknowledgement must cancel the bounded notice');
+  // The deadline fires while the same audit is still open: the screen must stop claiming
+  // the report is queued and must offer a way forward.
+  status.textContent = 'Relatório atualizado na fila de geração.';
+  scheduled.callback();
+  assert.match(status.textContent, /não foi confirmada/u);
+  assert.match(status.textContent, /Tente novamente/u);
+  assert.doesNotMatch(status.textContent, /na fila de geração/u);
+  assert.equal(regenerate.disabled, false);
+  // A deadline that arrives after the auditor has moved on must not overwrite the screen.
+  auditModel.auditId = 'audit-b';
+  status.textContent = 'estado da auditoria nova';
+  scheduled.callback();
+  assert.equal(status.textContent, 'estado da auditoria nova');
 });
 
 test('regenerate uses the same current checkbox choice as the main export button', () => {

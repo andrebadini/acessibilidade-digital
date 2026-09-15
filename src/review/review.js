@@ -271,14 +271,34 @@ const deleteAuditController = createDestructiveDialog({
 
 deleteAudit.addEventListener('click', () => deleteAuditController.open(deleteAudit));
 
+// The worker acknowledges the request before the files exist, and the export tab closes
+// itself on failure without telling this page. Without a deadline the screen would keep
+// saying "na fila de geração" forever, with no file, no error and no way forward, so the
+// request is bounded and an unconfirmed outcome is reported as exactly that.
+const EXPORT_CONFIRMATION_TIMEOUT_MS = 120_000;
+let exportConfirmationTimer = null;
+
 async function requestExport({ deleteAfterCompleteExport = false } = {}) {
   if (!auditModel?.auditId) return;
+  const requestedAuditId = auditModel.auditId;
   regenerate.disabled = true;
   status.textContent = 'Solicitando a geração do relatório.';
-  const response = await sendWorkerRequest({
-    type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: reportSessionCapabilityId, auditId: auditModel.auditId,
-    deleteAfterCompleteExport: deleteAfterCompleteExport === true,
-  });
+  clearTimeout(exportConfirmationTimer);
+  exportConfirmationTimer = setTimeout(() => {
+    if (auditModel?.auditId !== requestedAuditId) return;
+    regenerate.disabled = false;
+    status.textContent = 'A geração dos arquivos não foi confirmada, então os arquivos não foram baixados. '
+      + 'Tente novamente; se persistir, feche as abas de exportação abertas antes de repetir.';
+  }, EXPORT_CONFIRMATION_TIMEOUT_MS);
+  let response = null;
+  try {
+    response = await sendWorkerRequest({
+      type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: reportSessionCapabilityId, auditId: requestedAuditId,
+      deleteAfterCompleteExport: deleteAfterCompleteExport === true,
+    });
+  } catch { /* the bounded notice above still reports the unconfirmed outcome */ }
+  clearTimeout(exportConfirmationTimer);
+  exportConfirmationTimer = null;
   regenerate.disabled = false;
   status.textContent = response?.ok ? 'Relatório atualizado na fila de geração.' : 'Não foi possível gerar o relatório atualizado.';
 }
