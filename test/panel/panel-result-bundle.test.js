@@ -271,6 +271,11 @@ test('keeps an image issue visible when an earlier card alone exceeds the occurr
     model: input.reportRevision.model, executionCheckpoint: input.reportRevision.checkpoint, inventory: input.inventory,
   });
   assert.deepEqual(complete.groups.failed.map(card => card.occurrenceIds.length), [70, 1]);
+  // The panel truncates its interactive projection, but the headline totals must still match
+  // the complete report for the same model: a person comparing the panel with the report
+  // cannot see two different numbers for the same audit.
+  assert.deepEqual(complete.counts, bundle.summary.counts,
+    'panel and report totals must agree for the same revision');
   assert.equal(JSON.stringify(input.reportRevision.model), originalModel);
 });
 
