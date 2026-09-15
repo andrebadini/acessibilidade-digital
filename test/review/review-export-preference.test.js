@@ -67,3 +67,19 @@ test('regenerate uses the same current checkbox choice as the main export button
   });
   assert.deepEqual(values, [true]);
 });
+
+test('the report summary line names checks and occurrences instead of calling occurrences failures', () => {
+  const lineSource = source.slice(source.indexOf('function reportStatusLine('), source.indexOf('\nvoid start()'));
+  const line = runInNewContext(`${lineSource}; reportStatusLine`, {})(
+    { counts: { errors: { checkKeys: 4, occurrences: 5 }, humanReview: { checkKeys: 7, occurrences: 7 } }, checklist: [1, 2, 3] },
+  );
+  assert.equal(line, '4 verificações com falha confirmada (5 ocorrências); 7 verificações sob revisão humana (7 ocorrências). Checklist separado: 3 verificações ainda sem conclusão.');
+  const single = runInNewContext(`${lineSource}; reportStatusLine`, {})(
+    { counts: { errors: { checkKeys: 1, occurrences: 1 }, humanReview: { checkKeys: 0, occurrences: 0 } }, checklist: [1] },
+  );
+  assert.equal(single, '1 verificação com falha confirmada (1 ocorrência); 0 verificações sob revisão humana (0 ocorrências). Checklist separado: 1 verificação ainda sem conclusão.');
+  // A missing or hostile summary must still produce a readable line, never "undefined".
+  const hostile = runInNewContext(`${lineSource}; reportStatusLine`, {})({});
+  assert.doesNotMatch(hostile, /undefined|NaN/u);
+  assert.match(hostile, /^0 verificações com falha confirmada/u);
+});

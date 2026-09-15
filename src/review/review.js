@@ -566,7 +566,20 @@ async function start() {
   for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);
   const latest = await store.getLatest();
   status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true ? EXPORT_CLEANUP_MESSAGE
-    : `${summary.counts.errors.occurrences} falhas confirmadas; ${summary.counts.humanReview.occurrences} suspeitas a confirmar. Checklist separado: ${summary.checklist?.length ?? 0} verificações ainda sem conclusão.`;
+    : reportStatusLine(summary);
+}
+
+// The stored counts distinguish checks from occurrences: one requirement can fail on several
+// elements. Naming the occurrence total "falhas" made the summary look inconsistent with the
+// panel and with the summary cards, which show both numbers, so the line names what it counts
+// and keeps the two totals apart.
+function reportStatusLine(summary) {
+  const counts = summary?.counts ?? {};
+  const number = value => (Number.isSafeInteger(value) ? value : 0);
+  const failures = `${number(counts.errors?.checkKeys)} ${number(counts.errors?.checkKeys) === 1 ? 'verificação' : 'verificações'} com falha confirmada (${number(counts.errors?.occurrences)} ${number(counts.errors?.occurrences) === 1 ? 'ocorrência' : 'ocorrências'})`;
+  const suspects = `${number(counts.humanReview?.checkKeys)} ${number(counts.humanReview?.checkKeys) === 1 ? 'verificação' : 'verificações'} sob revisão humana (${number(counts.humanReview?.occurrences)} ${number(counts.humanReview?.occurrences) === 1 ? 'ocorrência' : 'ocorrências'})`;
+  const checklist = number(summary?.checklist?.length);
+  return `${failures}; ${suspects}. Checklist separado: ${checklist} ${checklist === 1 ? 'verificação ainda sem conclusão' : 'verificações ainda sem conclusão'}.`;
 }
 
 void start().catch(() => { status.textContent = 'Não foi possível carregar a revisão.'; });
