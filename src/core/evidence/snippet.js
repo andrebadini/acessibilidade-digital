@@ -200,6 +200,18 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
   // existia para campo editável. Sem isto, `<p>senha: <code>X</code></p>` e `<th>chave:</th><td>X</td>`
   // entregavam a credencial inteira (Critical medido na revisão da 1.1.27).
   let pendingValueRedaction = false;
+  let pendingValueTail = false;
+  // O rótulo e o separador podem estar em NÓS diferentes (`<span>senha</span>: <span>X</span>`) e o
+  // valor pode ser interrompido por marcação (`senha: p4<span>X</span>`). Por isso a decisão não olha
+  // um fragmento isolado: ela olha o texto ACUMULADO, com as entidades decodificadas, e uma vez
+  // decidida continua valendo até alguém consumi-la.
+  let textStream = '';
+  const DECODED_ENTITIES = [
+    [/&(?:quot|#0*34|#x0*22);/giu, '"'], [/&(?:apos|#0*39|#x0*27);/giu, "'"],
+    [/&(?:amp|#0*38|#x0*26);/giu, '&'], [/&(?:nbsp|#0*160|#x0*a0);/giu, ' '],
+    [/&(?:lt|#0*60|#x0*3c);/giu, '<'], [/&(?:gt|#0*62|#x0*3e);/giu, '>'],
+  ];
+  const decodeEntities = value => DECODED_ENTITIES.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value);
   const emitText = fragment => {
     if (privateStructure.length || pendingPrivateRoot) return;
     // Fragmento só de espaço não decide nada: entre `<th>chave:</th>` e `<td>` existe um fragmento
@@ -208,13 +220,28 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       output += fragment;
       return;
     }
-    if (pendingValueRedaction) {
+    if (pendingValueRedaction || pendingValueTail) {
       pendingValueRedaction = false;
+      pendingValueTail = false;
       output += '[redacted]';
       return;
     }
-    output += sanitizeText(fragment);
-    pendingValueRedaction = endsWithCredentialLabel(fragment);
+    const sanitized = sanitizeText(fragment);
+    // O valor pode continuar depois da quebra de linha DENTRO do mesmo fragmento (`token: A\nB`): o
+    // tarjador para na quebra, então o resto do fragmento depois do marcador também sai tarjado. É
+    // fail-closed: prosa que venha depois de uma credencial no mesmo nó de texto se perde, e o preço
+    // está declarado — nenhuma forma de token distingue prosa de uma frase-senha.
+    const marker = sanitized.lastIndexOf('[redacted]');
+    const remainder = marker < 0 ? '' : sanitized.slice(marker + '[redacted]'.length);
+    const emitted = marker >= 0 && /\S/u.test(remainder) ? `${sanitized.slice(0, marker)}[redacted]` : sanitized;
+    output += emitted;
+    textStream += ` ${decodeEntities(fragment)} `;
+    pendingValueRedaction = endsWithCredentialLabel(textStream);
+    // Um fragmento que JÁ sofreu tarjamento pode ter sido cortado pela marcação no meio do valor
+    // (`senha: p4<span>X</span>`), então o fragmento seguinte também é tarjado — mas só enquanto a
+    // marcação não fechar o elemento: `</p>` encerra a continuação, e o parágrafo seguinte de
+    // `authorization=X</p><p>conteúdo público</p>` continua sendo evidência.
+    pendingValueTail = sanitized.includes('[redacted]');
   };
   while (position < html.length) {
     const opening = html.indexOf('<', position);
@@ -278,10 +305,19 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
     // (`<img alt="…">`), só os atributos caem e o trecho continua — tratar um vazio como raiz privada
     // encerraria o trecho inteiro por causa do `break` que existe para o campo editável.
     let stripValueAttributes = false;
+    if (parsed.closing) pendingValueTail = false;
     if (pendingValueRedaction && !parsed.closing) {
-      pendingValueRedaction = false;
-      if (parsed.selfClosing || VOID_ELEMENTS.has(parsed.name)) stripValueAttributes = true;
-      else pendingPrivateRoot = true;
+      if (parsed.selfClosing || VOID_ELEMENTS.has(parsed.name)) {
+        // Elemento vazio com atributos ERA o candidato a valor (`<img alt="…">`): os atributos caem e a
+        // espera termina. Sem atributos (`<br>`, `<hr>`) ele não pode ter sido o valor, então a espera
+        // continua — era por encerrar a espera que `<p>senha:<br>X</p>` e `<p>senha:</p><hr><p>X</p>`
+        // entregavam a credencial.
+        stripValueAttributes = true;
+        if (parsed.attributes.length > 0) pendingValueRedaction = false;
+      } else {
+        pendingValueRedaction = false;
+        pendingPrivateRoot = true;
+      }
     }
     const forcedPrivateRoot = pendingPrivateRoot;
     output += sanitizeTag(parsed, {

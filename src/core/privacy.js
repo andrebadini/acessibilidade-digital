@@ -33,7 +33,21 @@ const BARE_PASS_SOURCE = String.raw`(?<!by)(?<!com)pass(?!ed|es|ive|ing|o|age|po
 // formas de credencial continuam tarjadas (`auth`, `authorization`, `authentication`, `authToken`,
 // `oauth`) e as inocentes passam a ser preservadas: medido nas duas direções, zero credencial perdida
 // e dezesseis palavras legítimas recuperadas.
-const SENSITIVE_WORD_SOURCE = String.raw`pwd|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)`;
+// Chaves que carregam credencial como PARÂMETRO de URL ou SEGMENTO de rota sem serem, por si,
+// palavra do vocabulário sensível — o `code` de um fluxo OAuth, a `assertion` de um SAML. Entram nas
+// regras de URL (texto e sanitizador de evidência) e NÃO no vocabulário de chave, para `code` não
+// tarjar qualquer campo de código do produto. Medido na revisão da 1.1.28: `?code=`, `#code=`,
+// `#assertion=` e a rota `#/authorize/code/X` chegavam a cinco superfícies entregues.
+const URL_CREDENTIAL_KEY_SOURCE = String.raw`code|access[-_]?token|refresh[-_]?token|id[-_]?token|assertion|saml[-_]?response`;
+const URL_CREDENTIAL_PARAM = new RegExp(String.raw`([?&;#])((?:${URL_CREDENTIAL_KEY_SOURCE})=)[^&#\s]*`, 'giu');
+const URL_CREDENTIAL_SEGMENT = new RegExp(String.raw`([#/])((?:${URL_CREDENTIAL_KEY_SOURCE})/)[^/?#\s]*`, 'giu');
+export const URL_CREDENTIAL_KEY = new RegExp(String.raw`^(?:${URL_CREDENTIAL_KEY_SOURCE})$`, 'iu');
+// O que segue o rótulo precisa TER CARA DE VALOR para a cauda ser tarjada: dígito, símbolo,
+// maiúscula e minúscula misturadas ou comprimento de segredo. Sem isso, rótulos legítimos como
+// `Senha da conta` e `Chave da API` — que são nomes acessíveis de verdade, medidos nos testes do
+// normalizador — viravam `Senha [redacted]`, e o relatório perdia a evidência do rótulo.
+const VALUE_LIKE_TAIL_SOURCE = String.raw`\S*(?:\d|[^\p{L}\s]|\S{12,})\S*`;
+const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)`;
 export const SENSITIVE_KEY = new RegExp(
   `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
 
@@ -42,7 +56,12 @@ export const SENSITIVE_KEY = new RegExp(
 // deixava as duas passarem. Quem faz a fronteira é o próprio separador, que precisa vir logo depois do
 // rótulo; o preço são falsos positivos estreitos como `surpass:` e `obsessão:`, que precisam do
 // separador para morder — e esse preço é aceito na direção segura.
-const VALUE_LABEL_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|password|authorization|${SENSITIVE_WORD_SOURCE})`;
+// O rótulo aceita um sufixo curto de letras e dígitos: `tokens:`, `secrets:`, `sessions:`,
+// `cookies:`, `apiKeys:`, `senhaAtual:`, `credenciaisDeAcesso:`, `chaveDeApi:` e `authentication:` são a
+// MESMA credencial que a forma simples, e passavam intactos porque o separador tinha de vir colado na
+// palavra (Minor M1 da revisão da 1.1.28). O sufixo não afeta a exceção ancorada dos atributos de
+// rótulo, que usa o vocabulário de chave sem sufixo.
+const VALUE_LABEL_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|password|authorization|${SENSITIVE_WORD_SOURCE})[A-Za-z0-9]{0,24}`;
 // O valor vai até o fim da linha, sem teto, sem terminador e sem alternativa entre aspas. Duas
 // revisões seguidas mediram a mesma classe por caminhos diferentes: a 1.1.26 tinha o teto de 120
 // caracteres e o `;` devolvendo a cauda; a 1.1.27 tirou o teto mas manteve `<` como parada e a
@@ -53,7 +72,11 @@ const VALUE_LABEL_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PAS
 // separador. Agora o valor é qualquer coisa até a quebra de linha, e o separador aceita a aspa e as
 // setas de quem escreve credencial em código.
 const VALUE_SOURCE = String.raw`\S[^\n]*`;
-const VALUE_SEPARATOR_SOURCE = String.raw`(\s*['"]?\s*(?:[:=]|->|=>|→)\s*)`;
+// O separador aceita a aspa — literal, escapada de JSON (`\"`) ou codificada em entidade
+// (`&quot;`, `&#34;`, `&#x22;`) — porque `{"senha": "X"}` e `{&quot;senha&quot;: &quot;X&quot;}` são a
+// mesma credencial, e era exatamente a aspa entre o rótulo e o `:` que fazia essas formas passarem
+// depois do primeiro conserto (medido na revisão da 1.1.28).
+const VALUE_SEPARATOR_SOURCE = String.raw`(\s*(?:(?:<[^<>]{0,200}>)|&quot;|&#0*34;|&#x0*22;|\\?['"]|\s){0,20}(?:[:=]|->|=>|→)\s*)`;
 // Um fragmento de texto que TERMINA no rótulo com o separador está esperando o valor no nó
 // seguinte (`<p>senha: <code>…</code></p>`, `<th>chave:</th><td>…</td>`). O sanitizador de trecho
 // usa este predicado para tratar o que vem depois como valor, em vez de confiar que rótulo e valor
@@ -206,6 +229,18 @@ export function backgroundImageKind(value) {
 // O valor é consumido por INTEIRO (até 120 caracteres, parando em quebra de linha, `<` ou `;`), não
 // só o primeiro token: `cartão: 4111 1111 1111 1111` deixava 12 dos 16 dígitos no texto (achado N2 da
 // revisão da 1.1.25). O limite evita engolir uma linha inteira de prosa legítima.
+/**
+ * Tarja texto do autor que carrega credencial SEM separador — `senha abc`, `token abc`. É a forma que
+ * o navegador entrega no nome acessível calculado a partir de `placeholder`/`alt`/`title`: o sanitizador
+ * de trecho descarta o ATRIBUTO, mas o texto já calculado seguia para o relatório como nome acessível e
+ * prévia de anúncio (I1 da revisão da 1.1.28). A regra exige conteúdo DEPOIS da palavra, então
+ * `Digite sua senha` continua intacto — o rótulo puro não é segredo.
+ */
+export function redactCredentialLabelTail(value) {
+  return String(value ?? '').replace(
+    new RegExp(`(${VALUE_LABEL_SOURCE})(\\s+)(${VALUE_LIKE_TAIL_SOURCE})`, 'giu'), '$1$2[redacted]');
+}
+
 /** Verdadeiro quando o texto termina em rótulo de credencial com o separador, sem o valor. */
 export function endsWithCredentialLabel(value) {
   return DANGLING_VALUE_LABEL.test(String(value ?? ''));
@@ -215,12 +250,24 @@ export function redactSensitiveText(value) {
   return String(value ?? '')
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
     .replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}${VALUE_SOURCE}`, 'giu'), '$1$2[redacted]')
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@');
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@')
+    .replace(URL_CREDENTIAL_PARAM, '$1$2[redacted]')
+    .replace(URL_CREDENTIAL_SEGMENT, '$1$2[redacted]');
+}
+
+// Uma string que CONTÉM marcação é fonte de HTML, não prosa: nela vale a regra estrita de cauda
+// (`senha abc` vira `senha [redacted]`), porque foi assim que `data-note="<b>senha abc</b>"`
+// atravessava o tarjador de valores, que exige separador. Prosa comum não tem marcação e continua
+// intacta — foi a decisão que preservou o controle negativo do A1 ("A sessão discutiu o cartão…").
+const MARKUP_BEARING = /<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?>/iu;
+function redactStringValue(value) {
+  const redacted = redactSensitiveText(value);
+  return MARKUP_BEARING.test(redacted) ? redactCredentialLabelTail(redacted) : redacted;
 }
 
 export function sanitizeJsonData(value, ancestors = new WeakSet()) {
   if (value === null || typeof value === 'boolean') return value;
-  if (typeof value === 'string') return redactSensitiveText(value);
+  if (typeof value === 'string') return redactStringValue(value);
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value !== 'object' || ancestors.has(value)) return null;
   ancestors.add(value);

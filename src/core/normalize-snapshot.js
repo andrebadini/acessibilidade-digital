@@ -2,6 +2,7 @@ import { assertSnapshotV1 } from './snapshot-schema.js';
 import { escapeCssIdentifier } from './evidence/selector.js';
 import {
   backgroundImageKind,
+  redactCredentialLabelTail,
   redactNormalizedNode,
   sanitizeEvidenceUrl,
   sanitizeJsonData,
@@ -246,6 +247,16 @@ function axString(value) {
   return '';
 }
 
+// O nome acessível e a descrição nascem de atributos do autor (`placeholder`, `alt`, `title`,
+// `aria-label`) e são entregues no relatório como nome e prévia de anúncio. O sanitizador de trecho
+// descarta o ATRIBUTO que menciona credencial, mas o texto já calculado pelo navegador seguia inteiro:
+// `placeholder="senha abc"` chegava como nome acessível `senha abc` (I1 da revisão da 1.1.28). Aqui a
+// mesma decisão é aplicada ao TEXTO — palavra de credencial COM conteúdo depois é tarjada, e o rótulo
+// puro (`Senha`, `Digite sua senha`) continua sendo evidência.
+function projectAccessibleText(value) {
+  return redactCredentialLabelTail(value);
+}
+
 function hasAxString(value) {
   if (typeof value === 'string') return true;
   return Boolean(value && typeof value === 'object' &&
@@ -409,9 +420,9 @@ function normalizeSimplified(raw) {
       const value = editable ? '' : axString(ax.value);
       if (role) normalized.axRole = role;
       if (role === 'heading' && observedAxHeadingLevel(ax) !== undefined) normalized.headingLevel = observedAxHeadingLevel(ax);
-      if (hasAxString(ax.name)) normalized.accessibleName = name;
-      if (description) normalized.accessibleDescription = description;
-      if (value) normalized.axValue = value;
+      if (hasAxString(ax.name)) normalized.accessibleName = projectAccessibleText(name);
+      if (description) normalized.accessibleDescription = projectAccessibleText(description);
+      if (value) normalized.axValue = projectAccessibleText(value);
     }
     deriveRuleObservations(normalized);
     return normalized;
@@ -816,9 +827,9 @@ function normalizeColumnar(raw) {
       const value = editable ? '' : axString(ax.value);
       if (role) node.axRole = role;
       if (role === 'heading' && observedAxHeadingLevel(ax) !== undefined) node.headingLevel = observedAxHeadingLevel(ax);
-      if (hasAxString(ax.name)) node.accessibleName = name;
-      if (description) node.accessibleDescription = description;
-      if (value) node.axValue = value;
+      if (hasAxString(ax.name)) node.accessibleName = projectAccessibleText(name);
+      if (description) node.accessibleDescription = projectAccessibleText(description);
+      if (value) node.axValue = projectAccessibleText(value);
     }
     deriveRuleObservations(node);
     outputByRecord.set(record, node);

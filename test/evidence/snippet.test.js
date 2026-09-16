@@ -125,8 +125,10 @@ test('nenhum valor de credencial sobrevive ao trecho, nem em texto nem em atribu
   // atributo `data-note="cartão: 4111 1111 1111 1111"` era copiado literalmente porque a regra só
   // olhava a palavra sensível no nome, nunca o valor. A métrica é a da classe: nenhum caractere que
   // só exista no valor pode sobreviver, em nenhuma dessas formas.
-  const sentinela = /[Zq]/gu;
-  const marca = valor => `Zq${valor}`;
+  // O sentinela não pode colidir com o que o próprio sanitizador emite: `&quot;` contém `q`, e uma
+  // métrica por letra acusava vazamento onde o valor já tinha sido tarjado.
+  const sentinela = /[Ww]/gu;
+  const marca = valor => `Ww${valor}`;
   const casos = [
     ['texto com rótulo em português', `<p>senha: ${marca('abc')}</p>`],
     ['texto com cartão', `<p>cartão: ${marca('')} 1111 1111 1111</p>`],
@@ -151,6 +153,25 @@ test('nenhum valor de credencial sobrevive ao trecho, nem em texto nem em atribu
     ['atributo do elemento seguinte', `<p>senha: <img alt="${marca('abc')}"></p>`],
     ['atributo em subárvore', `<p>senha: <span data-x="${marca('abc')}">texto</span></p>`],
     ['atributo aninhado fundo', `<div>token: <span><b title="${marca('abc')}">x</b></span></div>`],
+    // Formas que a revisão da 1.1.28 mediu sobrevivendo: o vazio consumia a espera, a marcação cortava
+    // o valor e as entidades e aspas escapadas escondiam o separador.
+    ['vazio sem atributo no meio', `<p>senha:<br>${marca('abc')}</p>`],
+    ['vazio sem atributo entre blocos', `<p>senha:</p><hr><p>${marca('abc')}</p>`],
+    ['vazio com atributo antes do valor', `<table><tr><th>chave:</th><br><td>${marca('abc')}</td></tr></table>`],
+    ['rótulo e separador em nós', `<pre><span>senha</span>: <span>${marca('abc')}</span></pre>`],
+    ['separador em outro nó', `<th>chave<span>:</span></th><td>${marca('abc')}</td></tr>`],
+    ['valor parcial e resto em nó', `<p>senha: p4<span>${marca('abc')}</span></p>`],
+    ['entidade aspa', `<pre>{&quot;senha&quot;: &quot;${marca('abc')}&quot;}</pre>`],
+    ['entidade numérica', `<pre>{&#34;senha&#34;: &#34;${marca('abc')}&#34;}</pre>`],
+    ['aspa escapada', `<pre>{\\"senha\\": \\"${marca('abc')}\\"}</pre>`],
+    ['lista de descrição', `<dl><dt>senha:</dt><dd>${marca('abc')}</dd></dl>`],
+    // Cauda do valor dividida por vazio ou por quebra de linha: o valor era tarjado até a quebra e o
+    // resto continuava no trecho.
+    ['cauda depois de vazio', `<p>senha: ${marca('a')}<br>${marca('b')}</p>`],
+    ['cauda depois de quebra de linha', `<p>token: ${marca('a')}\n${marca('b')}</p>`],
+    // Rótulo com sufixo curto (Minor M1 da revisão da 1.1.28).
+    ['rótulo com sufixo', `<p>senhaAtual: ${marca('abc')}</p>`],
+    ['rótulo plural em inglês', `<p>tokens: ${marca('abc')}</p>`],
   ];
   for (const [nome, html] of casos) {
     const trecho = sanitizeHtmlSnippetSource(html);

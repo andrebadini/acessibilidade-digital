@@ -1,5 +1,19 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.29, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.29.zip` (`6926fe17…c74bf`), **sem revisão independente ainda**.
+> Fecha o veredito da 1.1.28 inteiro. Para os critérios, **5** é onde está a mudança: a classe do C1 —
+> credencial da página chegando ao entregável — continuava aberta em oito formas de HTML comum, e agora o
+> sanitizador de trecho decide sobre o **texto acumulado** (entidades decodificadas), a espera atravessa
+> fragmentos, elementos vazios sem atributo e tags de fechamento, e o separador aceita aspa literal,
+> escapada e codificada. Os dois **Important** também estão fechados: a credencial que chegava pelo **nome
+> acessível** de `placeholder`/`alt`/`title` (tarjada por cauda, exigindo cara de valor, para rótulos
+> legítimos continuarem sendo evidência) e as chaves de credencial de URL em consulta, fragmento e rota. A
+> métrica da classe passou de 81 para **115 combinações**, com **zero** segredos sobreviventes, e a prova
+> de não vacuidade é por mutação. **10** volta a **Atendido** (nenhum Critical/Important conhecido em
+> aberto); **11** ganha os quatro Minors e as seis observações da 1.1.28, todas com desfecho; **8**
+> continua **Parcial**, porque depende de pessoa de fora.
+
 > **Incremento 1.1.28, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.28.zip` (`32647285…070e2`), **sem revisão independente ainda**.
 > Fecha o veredito da 1.1.27 inteiro: o **Critical C1** que aquela versão declarava fechado continuava

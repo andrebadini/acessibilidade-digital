@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { redactNormalizedNode, sanitizeEvidenceUrl, sanitizeJsonData, sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
+import { redactCredentialLabelTail, redactNormalizedNode, redactSensitiveText, sanitizeEvidenceUrl, sanitizeJsonData, sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
 
 const FALLBACK_WARNING = {
   code: 'PROBE_FAILED',
@@ -346,6 +346,65 @@ test('o valor tarjado é consumido por inteiro, não só o primeiro token (achad
   // Controle negativo: prosa sem rótulo sensível continua intacta.
   const prosa = 'A sessão de perguntas discutiu o cartão de crédito como tema e a chave do problema.';
   assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
+});
+
+test('credencial em parâmetro, fragmento ou rota de URL é tarjada no texto (Important da revisão da 1.1.28)', () => {
+  // A revisão mediu `?code=`, `#code=`, `#assertion=` e a rota `#/authorize/code/X` chegando a cinco
+  // superfícies entregues. `code` e `assertion` não são palavras do vocabulário de chave (tarjariam
+  // qualquer campo de código), então a regra é de URL: chave de credencial em parâmetro, fragmento ou
+  // segmento de rota.
+  const segredo = 'S3GR3D0XYZQ';
+  const casos = [
+    `https://exemplo.test/p?code=${segredo}`, `https://exemplo.test/p?assertion=${segredo}`,
+    `https://exemplo.test/p#code=${segredo}`, `https://exemplo.test/p#assertion=${segredo}`,
+    `https://exemplo.test/p#/authorize?code=${segredo}`,
+    `https://exemplo.test/p#/authorize/code/${segredo}`,
+    `https://exemplo.test/p#access_token=${segredo}`,
+  ];
+  for (const url of casos) {
+    assert.doesNotMatch(redactSensitiveText(url), /S3GR3D0XYZQ/u, `${url} não pode manter o valor`);
+    assert.match(redactSensitiveText(url), /\[redacted\]/u, `${url} precisa registrar o tarjamento`);
+  }
+  // Controle negativo: consulta e fragmento sem credencial continuam sendo endereço útil.
+  const inocente = 'https://exemplo.test/p?lang=pt#secao';
+  assert.equal(redactSensitiveText(inocente), inocente);
+});
+
+test('rótulo com sufixo curto é a mesma credencial (Minor M1 da revisão da 1.1.28)', () => {
+  // `tokens:`, `secrets:`, `sessions:`, `cookies:`, `apiKeys:`, `senhaAtual:`, `credenciaisDeAcesso:`,
+  // `chaveDeApi:`, `bearer:` e `authentication:` são a mesma credencial que a forma simples, e passavam
+  // porque o separador tinha de vir colado na palavra.
+  const segredo = 'S3GR3D0XYZQ';
+  const rotulos = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:',
+    'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'autenticacaoDoUsuario:'];
+  for (const rotulo of rotulos) {
+    const texto = `${rotulo} ${segredo}`;
+    assert.doesNotMatch(redactSensitiveText(texto), /S3GR3D0XYZQ/u, `${rotulo} precisa tarjar o valor`);
+    assert.doesNotMatch(sanitizeJsonData({ texto }).texto, /S3GR3D0XYZQ/u, `${rotulo} precisa tarjar no JSON`);
+  }
+  // O outro lado: prosa e rótulos legítimos continuam intactos.
+  for (const prosa of ['A senha do teste é forte.', 'Senha da conta', 'Chave da API', 'O passeio de barco passou pelo cais.']) {
+    assert.equal(redactSensitiveText(prosa), prosa);
+  }
+});
+
+test('string que carrega marcação usa a regra estrita de cauda (Important da revisão da 1.1.28)', () => {
+  // `placeholder="senha abc"` vira texto no nome acessível, e ali a regra de separador não age. Numa
+  // string que CONTÉM marcação vale a regra estrita; em prosa comum, não — foi essa distinção que
+  // preservou o controle negativo do A1 ("A sessão discutiu o cartão…") e os rótulos de verdade
+  // ("Senha da conta"), que o normalizador fixa em teste próprio.
+  const contaminado = sanitizeJsonData({ texto: '<b>senha abc123</b>' }).texto;
+  assert.doesNotMatch(contaminado, /abc123/u);
+  for (const prosa of ['A senha do teste é forte.', 'A sessão de perguntas discutiu o cartão de crédito como tema.']) {
+    assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
+  }
+  // A cauda exige CARA DE VALOR: dígito, símbolo ou comprimento de segredo.
+  for (const rotulo of ['Senha da conta', 'Chave da API', 'Digite sua senha', 'Informe a senha']) {
+    assert.equal(redactCredentialLabelTail(rotulo), rotulo, `${rotulo} é rótulo, não valor`);
+  }
+  for (const comValor of ['senha abc123', 'chave ABC-123', 'token eyJhbGciOiJIUzI1NiJ9']) {
+    assert.match(redactCredentialLabelTail(comValor), /\[redacted\]/u, `${comValor} carrega valor`);
+  }
 });
 
 test('os plurais em português são a mesma credencial (Minor da revisão da 1.1.27)', () => {

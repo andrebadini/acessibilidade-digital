@@ -4,27 +4,31 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.28 preparada — sem revisão independente ainda.** A revisão da **1.1.27** saiu com
-**1 Critical, 0 Important, 4 Minor e 5 observações**: ela confirmou tudo o que a 1.1.27 declarava ter
-fechado (o Important da 1.1.26, o `compass`, os nomes dos seis E2E, as formas de credencial que a 1.1.24
-tarjava) e mediu **zero perdas** de vocabulário em 95 formas × 3 gerações —, mas mostrou que o **Critical
-C1 continuava aberto** quando rótulo e valor estão em **nós diferentes**: `<p>senha: <code>X</code></p>`,
-`<th>chave:</th><td>X</td>` e `<pre>{"senha": "X"}</pre>` entregavam a credencial inteira ao modelo, ao
-relatório e aos artefatos HTML/JSON. A causa raiz era o padrão do valor: `[^\n<]+` é obrigatório e não
-pode começar em `<`, então o motor fazia backtracking do separador e escrevia `[redacted]` **ao lado** do
-valor intacto; a alternativa entre aspas devolvia a cauda; e a aspa de fechamento da chave JSON ficava
-entre o rótulo e o separador.
+**Versão 1.1.29 preparada — sem revisão independente ainda.** A revisão da **1.1.28** saiu com
+**1 Critical, 2 Important, 4 Minor e 6 observações**: ela confirmou tudo o que a 1.1.28 dizia ter fechado
+(as sete formas da 1.1.27, a exceção ancorada dos atributos, o fragmento de URL no trecho, os plurais em
+português) e mediu **zero regressões** contra as três gerações anteriores —, mas mostrou que a **classe do
+C1 continuava aberta** em oito formas de HTML comum que o fixture não cobria: `<p>senha:<br>X</p>`, o
+rótulo e o separador em nós diferentes (realce de sintaxe), o separador dentro de um `<span>`, o valor
+depois de um `<hr>`, o valor cortado no meio por uma tag, e o JSON com aspa escapada (`\"`) ou codificada
+em entidade (`&quot;`, `&#34;`). A causa: a espera exigia rótulo **e** separador no mesmo fragmento de
+texto, e qualquer elemento vazio consumia a espera.
 
-A 1.1.28 fecha isso nas duas camadas: o valor passa a ser qualquer coisa até a quebra de linha
-(`\S[^\n]*`, sem teto, sem `;` e sem alternativa entre aspas), o separador aceita aspa e as setas de
-quem escreve credencial em código (`->`, `=>`, `→`), e o sanitizador de trecho passa a tratar o **nó
-seguinte** como valor — tarjando o fragmento e removendo os atributos do próximo elemento, com a
-subárvore como raiz privada e o elemento vazio apenas sem atributos, para não encerrar o trecho. A prova
-é por mutação composta: com os sanitizadores exatos da 1.1.27, o E2E do produto reprova nomeando
-`relatório, modelo e revisão guardados, artefato html, artefato json`; com a correção, passa. Fecha
-também os três Minors: o fragmento de URL com `code` (que a 1.1.26 apagava por acidente e o A7 deixou
-passar), os **plurais em português** (`credenciais`, `sessões`, `cartões`, `autorizações`,
-`autenticações`) e os meus números sem escopo.
+A 1.1.29 fecha a classe de forma estrutural: o sanitizador de trecho decide sobre o **texto acumulado**
+(com entidades decodificadas), a espera **atravessa** fragmentos, elementos vazios **sem** atributo
+(`<br>`, `<hr>`) e tags de fechamento, e o separador aceita aspa literal, escapada e codificada — com o
+elemento vazio **com** atributos consumindo a espera, porque era ele o candidato a valor. Fecha também os
+dois **Important**: a credencial que chegava pelo **nome acessível** de `placeholder`/`alt`/`title` (agora
+tarjada por cauda, exigindo cara de valor, para `Senha da conta` continuar sendo evidência) e as chaves de
+credencial de URL (`?code=`, `#code=`, `#assertion=`, rota `#/authorize/code/X`). E os Minors: rótulos com
+sufixo (`tokens:`, `senhaAtual:`, `apiKeys:`, `bearer:`, `authentication:`), a cauda do valor dividida por
+`<br>` ou quebra de linha, e o número da suíte que eu citava errado.
+
+A métrica da classe passou a ser **115 combinações** — todas as formas que as três revisões mediram mais
+variações próprias — com asserção de **zero segredos sobreviventes** em cada caminho (trecho, JSON, nome
+acessível, URL). A prova de não vacuidade é por mutação: com os sanitizadores da 1.1.28, o E2E do produto
+reprova nomeando `relatório, modelo e revisão guardados, artefato html, artefato json`; com a correção,
+passa.
 
 Os seis E2E de escopo citados nas versões anteriores são **percurso obrigatório**
 (`mandatory-journey-mv3`), exportação da página atual, impressão executiva, layout de impressão,

@@ -10,7 +10,9 @@ import { startFixtureServer, launchUnpackedExtension, resolveRealChromeTestBinar
 // "Recibo completo da revisão imutável inválido." while closing the export tab silently.
 //
 // The page also carries credential-shaped content of its own, in text, in a value in ANOTHER node
-// (inline element, table cell, JSON inside pre), in an attribute value and in the URL. The sweep at the end of this test is only worth something if the material it sweeps
+// (inline element, table cell, JSON inside pre, after a void element, split across nodes, behind HTML
+// entities), in an attribute value and in the URL — including a credential key in the query and in the
+// fragment. Every one of these shapes was measured leaking by an independent review at some point. The sweep at the end of this test is only worth something if the material it sweeps
 // exists, so the fixture makes it exist: without it the label scan was vacuously green (any list,
 // including an empty one, cleared the homepage), and measuring non-vacuously is what found the
 // snippet sanitizer shipping `senha: …` and `cartão: 4111 1111 1111 1111` into the delivered HTML
@@ -23,7 +25,16 @@ const DOCUMENT = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <table><tbody><tr><th scope="row">chave:</th><td>${CREDENTIAL}</td></tr></tbody></table>
 <pre id="credential-json">{"senha": "${CREDENTIAL}"}</pre>
 <p id="credential-multi">cartão: 4111 1111 1111 1111</p>
+<p id="credential-br">token:<br>${CREDENTIAL}</p>
+<p id="credential-newline">senha: ${CREDENTIAL.slice(0, 4)}
+${CREDENTIAL.slice(4)}</p>
+<p id="credential-suffix">senhaAtual: ${CREDENTIAL}</p>
+<p id="credential-split"><span>chave</span>: <span>${CREDENTIAL}</span></p>
+<pre id="credential-entity">{&quot;senha&quot;: &quot;${CREDENTIAL}&quot;}</pre>
 <div id="credential-attribute" data-note="chave: ${CREDENTIAL}">Nota do autor</div>
+<a id="credential-query" href="/current?code=${CREDENTIAL}">código</a>
+<a id="credential-hash" href="/current#assertion=${CREDENTIAL}">afirmação</a>
+<input id="credential-placeholder" placeholder="senha ${CREDENTIAL}" aria-label="Campo">
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
 <button id="missing-name"></button><input id="missing-label" type="text">
 <a href="/current">clique aqui</a></main></body></html>`;
