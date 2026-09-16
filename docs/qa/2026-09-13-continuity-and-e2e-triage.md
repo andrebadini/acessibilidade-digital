@@ -1346,8 +1346,40 @@ Aproveitei a rodada para finalmente instrumentar o que estava registrado como "n
 - **Todas as oito** terminam em `PERSONA_CLEANUP_UNCONFIRMED` no início da auditoria, e não em códigos diferentes por rotas diferentes como eu havia escrito. A causa é do **fixture**, não do produto: o mock de `scripting.executeScript` daquele cenário responde toda injeção com `() => globalThis.location?.href`, e o runtime de persona injeta `applyAuditaPersonaCommand` com `documentIds` (o mock decide por `frameIds`). A barreira de limpeza pede uma confirmação exata `{ok:true, state:'absent'|'revoked'}` e o runtime devolve `result-mismatch`, então o início é recusado. Em Chrome real o percurso principal funciona — o E2E do percurso passa —, e é por isso que a falha não aparece no produto.
 - A asserção `sourceSnapshots > 0`, que decide três das oito, é **insatisfazível por construção**: o contador só incrementa quando existe `audita:start-journal:v1` na sessão, e o único escritor dessa chave (`reserveAttachedCopyStartJournalV1`) tem um único chamador — `prepareAttachedCopyPlan`, que está morto desde `1c9b296`. Medi: a chave está **ausente** nos oito modos, e `executeScript` é chamado 5 vezes em cada um. A expectativa ficou para trás quando o ramo de cópia anexada foi removido; ela mede um desenho que não existe mais.
 
-Correção fica para incremento próprio, porque a primeira tentativa de ensinar o fixture a responder a sondagem de persona fez o cenário **travar**, e um travamento precisa de causa estabelecida antes de qualquer ajuste. O que esta rodada entrega é a causa, não o conserto.
+Correção fica para incremento próprio, e a terceira dimensão do problema foi medida depois: **o cenário aciona um ponto de entrada que não existe mais**. Ele chama `auditStarter.beginAuthorizedAudit` com `senderContext` e sem `eventNonce`, esperando o ramo de auditoria por URL que `1c9b296` removeu dali. Hoje uma auditoria por URL começa em `side-panel-intent-router.js:545`, que monta o próprio plano (`kind: 'single'`, `navigationPurpose: 'single-url'`) e chama `beginAuthorizedUrlAudit`. O caminho que o cenário acaba exercitando é o de página atual, que usa `runAttachedAuditExecution` — função que o fixture não intercepta, e é por isso que `execution.promise` nunca resolve e o cenário trava. Medi as camadas uma a uma: com o fixture respondendo à sondagem de persona, `started.response` passa a `{ok:true,state:'running'}` e o travamento acontece **depois**, em `await execution.promise`, porque `runUrlAuditExecution` nunca chega a ser chamado.
+
+Tentei a correção mínima num worktree de rascunho — um gancho opcional `options.runAttachedAuditExecution` no worker, simétrico ao `options.runUrlAuditExecution` que já existe — e ele funciona. Mas reescrever o cenário inteiro já travou uma vez, e a decisão é **substituí-lo** por um que exercite o que o trabalhador padrão garante hoje, em vez de remendar um que descreve um ponto de entrada removido; a cobertura da auditoria por URL já existe em `side-panel-intent-router.test.js` e `authorized-audit-starter.test.js`. O gancho fica preparado e não aplicado.
+
+**A maquinaria do diário de início ficou inerte, e não vou refatorá-la.** `reserveAttachedCopyStartJournalV1` não tem chamador, então `audita:start-journal:v1` nunca é escrita, e as 117 referências a `AUDIT_RECOVERY_REQUIRED` que a leem são defesa inerte. Removê-las é refactor grande em caminho sensível, com quatro arquivos de teste envolvidos, e o ganho é limpeza, não correção. Fica registrado como observação estrutural medida.
 
 ### Uma nona falha apareceu, e é instabilidade sob carga
 
 Na primeira execução da suíte, `annotation-map` falhou em "times out a stalled bitmap allocation". Isolei: **26/26 passam** rodando o arquivo sozinho, e a segunda execução completa voltou a 8 falhas com esse teste verde. É teste sensível a tempo sob carga paralela, não regressão desta rodada — mas é uma nona fonte de ruído no portão de release e fica registrada como tal.
+
+## Rodada 46 — o pacote extraído passou a ser executado, e isso fecha o critério 12
+
+O critério 12 estava registrado com uma ressalva honesta: os 199 arquivos do zip eram byte a byte idênticos à árvore que o Chrome real carrega, então **os bytes executados eram os bytes empacotados**, mas o ato de extrair o zip nunca tinha sido exercitado. A ressalva vinha de um `WAIT_TIMEOUT` antigo: o harness abre `chrome-extension://<id>/test/e2e/fixtures/real-tab-harness.html`, e a distribuição exclui `test/`, corretamente.
+
+**A hipótese nova que faltava era trivial e eu não a tinha tentado:** extrair o pacote e **acrescentar a árvore de teste** ao diretório extraído. O produto nunca referencia `test/` — não há `content_scripts` declarado e o manifesto não aponta para lá —, então os bytes do produto executados continuam sendo exatamente os empacotados; só os fixtures de teste, que não fazem parte da entrega, passam a existir ao lado. Nenhuma linha de produto ou de teste precisou mudar.
+
+Procedimento, e o que ele mede:
+
+```
+unzip -q release/audita-acessibilidade-1.1.17.zip -d /private/tmp/pkg117
+cp -R test /private/tmp/pkg117/test
+diff -r --exclude=popup /private/tmp/pkg117/src src   # idêntico
+diff /private/tmp/pkg117/manifest.json manifest.json # idêntico
+```
+
+Com os bytes conferidos **antes** da execução, rodei do diretório extraído, no Chrome 152.0.7977.64:
+
+- `mandatory-journey-mv3`: **1/1** — percurso completo numa sessão, `journey ok; audit=bc4fe20a…; formats=html,pdf,csv,json`;
+- `current-page-export-mv3`: 1/1 — auditoria da página atual exporta os quatro artefatos verificados;
+- `highlight-marking-mv3`: 1/1 — o destaque desenha a caixa marcada sobre o elemento auditado;
+- `page-markers-signals-mv3`: 1/1 — os sinais numerados são desenhados sobre a página auditada;
+- `report-version-provenance`: 1/1 — o relatório registra a versão que fez a auditoria;
+- `resource-url-privacy`: 1/1 — a URL de recurso mantém origem e caminho e nunca query ou fragmento.
+
+**6/6 verdes a partir do pacote extraído.** O percurso obrigatório e as garantias que o critério 12 pede foram executados sobre os bytes entregues, não sobre a árvore.
+
+**O que ficou de fora, e por quê.** A execução dos 34 arquivos de Chrome real de uma vez falhou com `CDP_COMMAND_TIMEOUT` em parte deles, porque a revisão independente da 1.1.17 estava rodando Chrome ao mesmo tempo — é contenção, não produto: os seis acima, executados logo depois, passaram. A bateria completa a partir do pacote fica para quando não houver outra instância ativa, e o resultado será registrado aqui.
