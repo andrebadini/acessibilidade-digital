@@ -1618,3 +1618,33 @@ As oito falhas da fase paralela vinham de **um** cenário de `service-worker.tes
 **Mudança só de teste:** `git diff --stat HEAD~1..HEAD -- src release/ manifest.json` está vazio — nenhum byte empacotado se moveu, o hash fixado do artefato continua o mesmo e a revisão da 1.1.19 não foi afetada.
 
 **Conferência do que a aposentadoria deixou descoberto, feita depois de aposentar.** `test/background/page-marker-origin-cache.test.js` tem **11 testes** cobrindo o cache em si: registro e leitura de registros congelados, isolamento entre auditorias e abas, envelopes malformados, violações de identificador e de tempo recusadas sem substituir registro válido, expiração exata, duplicata idempotente sem renovar TTL, capacidade com remoção da origem mais antiga e poda de expirados antes da evicção. Ou seja: o **comportamento** do cache — inclusive os caminhos de recusa que o cenário aposentado exercitava como `cache-reject` e `cache-throw` — está coberto em unidade. O que se perdeu foi apenas a **ligação da fábrica com o trabalhador através do fluxo removido**, e essa só volta com a reescrita sobre `beginAuthorizedUrlAudit` que ficou no backlog. É a diferença entre perder cobertura e perder encanamento, e ela está registrada para não ser confundida depois.
+
+## Leitura refinada das falhas seriais (logs da triagem): não é só carga — e o teto de 30 s é a variável decisiva
+
+Os logs do lote e das execuções isoladas que a triagem está rodando mudam parte da minha leitura anterior, e mudam para melhor em precisão:
+
+**Um fluxo pesado passa, e passa afirmando o que mais importa:**
+
+```
+✔ full-evidence persists no raster before consent and rehydrates after worker restart (19 s)
+ℹ Chrome=152; source=single-url; modes=full-evidence,element-only; worker-restart=rehydrated;
+  pre-consent-raster=0; one-shot=confirmed; cancel-cleanup=owned-only; document-drift=denied
+```
+
+Ou seja: evidência completa com consentimento, reinício do trabalhador, confirmação one-shot, limpeza restrita ao que é da auditoria e recusa por deriva de documento — tudo isso **é exercitado e passa**. É a melhor evidência isolada que temos do critério 5.
+
+**As falhas se dividem em dois grupos, e agora com tempos que dizem coisas diferentes:**
+
+```
+30 005 ms  element-only confirms once and keeps the full-page capture omitted
+30 005 ms  full-evidence rehydrates after worker restart and exports all four formats
+30 027 ms  no-pixels shows progress, completes in the copy and exposes a view-only report
+30 720 ms  full-evidence can be cancelled at the privacy pause without touching the source
+32 011 ms  original-page ABNT markers visual review and verified exports      ← também isolado
+32 169 ms  original-page ABNT markers remain usable across idle and preserve the report ← isolado
+121 595 ms current-page audits run in one inactive copy and leave the original page intact
+```
+
+Cinco caem a poucos milissegundos de **30 s**, que é o `DEFAULT_COMMAND_TIMEOUT_MS` do harness. E, diferente do que eu supus, **não é só efeito de carga**: os dois de marcadores falham **igualmente isolados**, com o mesmo ~32 s. Então o que existe é um conjunto de fluxos que **estoura o teto de comando do próprio harness de forma reprodutível**, e um (`current-page audits run in one inactive copy`, 121 s) que é lento por outro motivo.
+
+**A consequência é metodológica e vale para a conclusão:** enquanto o teto for 30 s, esses testes não conseguem distinguir "o produto travou" de "o comando demorou mais que o teto". O experimento decisivo é **elevar o teto numa cópia de rascunho e repetir** — se passarem, o problema é o harness e a correção não toca asserção nenhuma; se continuarem falhando, é produto e vira achado. É exatamente o que a triagem tem condições de fazer e eu não, porque qualquer execução minha agora competiria com a dela pela mesma máquina.
