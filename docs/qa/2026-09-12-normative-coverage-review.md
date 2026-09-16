@@ -382,3 +382,27 @@ Depois de acertar o método nos doze itens acima, apliquei-o ao catálogo inteir
 **O que isso muda na matriz.** As 146 linhas deixam de ter a parte **normativa** da coluna "Validação independente" em aberto: natureza e título conferem em todas, as referências conferem em 143 por igualdade exata e nas 3 restantes a explicação está medida e registrada. **O que continua pendente é a outra parte da coluna** — a validação de **comportamento e cobertura**: o que cada regra observa, com que dados, com que resultado, e onde a resposta correta é "não conclui". Isso não se resolve por conferência de texto normativo e é o trabalho que resta.
 
 **Nota de método, para quem repetir:** a extração precisa (a) descartar a entrada do **índice**, que tem o mesmo formato e linhas pontilhadas; (b) descartar **referências cruzadas**, que aparecem como `5.1.3, Título.` — com vírgula depois do id — e não como `5.1.3 Título – Requisito`; e (c) **não** limitar a janela pelo próximo id cego, porque NOTAs citam ids vizinhos antes da linha "C. S.". As três armadilhas produziram, cada uma, um falso alarme contra o catálogo antes de eu entendê-las.
+
+## Achado: as cinco normalizações normativas estão documentadas no código e **não chegam ao relatório entregue**
+
+Conferindo níveis em três fontes — o que a norma **imprime**, o que o **catálogo** registra e o que a **WCAG 2.2** define oficialmente (`src/core/normative/wcag22.js`) —, o resultado é limpo:
+
+| verificação | resultado |
+|---|---|
+| nível no catálogo diferente do nível oficial da WCAG 2.2 | **0** de 146 |
+| item em que a norma imprime nível diferente do oficial **sem** nota editorial | **0** |
+| `printedLevel` do catálogo diferente do que a norma realmente imprime | **0** |
+
+O catálogo tem **cinco notas editoriais**, todas com impresso, normalizado e justificativa:
+
+- **5.9.1** — o Anexo C imprime o critério `3.2.2`; a Seção 5 imprime `3.3.2`. Normalizado para 3.3.2: *"A Seção 5 é a fonte normativa primária; o Anexo C é informativo."*
+- **5.9.2** — Anexo C `1.3.1` contra Seção 5 `1.3.2`; normalizado para 1.3.2, mesma razão.
+- **5.9.4** — a norma imprime o critério 2.4.6 com **nível A**; normalizado para **AA**, *"o nível oficial do critério 2.4.6 na WCAG 2.2 é AA"*.
+- **5.9.17** — o Anexo C remete a `5.8.18`, **item que não existe**; normalizado para `5.9.18` pela sequência.
+- **5.12.1** — o Anexo C imprime `5.1.12`; normalizado para `5.12.1` conforme a Seção 5.
+
+**O achado:** essas cinco notas são renderizadas **apenas pelo renderizador de modelo** (`src/core/report/html.js`, cartão "Notas de integridade normativa"). O relatório que a pessoa recebe vem do renderizador de revisão, e nele **não há** o cartão nem os textos: procurei no HTML entregue da 1.1.20, na página real do Google e na fixture, por *"Notas de integridade normativa"*, *"A Seção 5 é a fonte normativa primária"*, *"O nível oficial do critério 2.4.6"* e *"O item 5.8.18 não existe"* — **zero ocorrências nos dois**. A seção 7 do relatório entregue chama-se "Metodologia, fontes, integridade, evidências técnicas e anexos", tem versão, revisão, hash de integridade, identidade de entrega e fontes oficiais, e **não traz as notas**.
+
+**Por que isso importa, e por que não é defeito de conclusão.** As normalizações estão **certas** — seguem a fonte normativa primária e o nível oficial da WCAG. O que falta é **declará-las a quem lê**: um auditor com a norma impressa na mão vê o relatório citando `3.3.2` para o 5.9.1 onde o Anexo C diz `3.2.2`, e `AA` para o 5.9.4 onde a norma imprime `A`, **sem nenhuma explicação no documento**. Para um produto cuja utilidade declarada inclui fiscalização e cuja meta exige rastreabilidade, isso é lacuna de transparência — não de acerto. É o **mesmo padrão arquitetural** que a revisão da 1.1.19 apontou no achado A.2: um mecanismo bem construído que não alcança o artefato entregue.
+
+**Conserto especificado, para o próximo incremento de apresentação:** levar as notas ao renderizador de revisão (`report-view.js` / `renderReportViewDocument`) — seja como bloco próprio na seção de metodologia, seja como nota por item na matriz dos 146, que é onde alguém vai comparar com a norma. **Não** corrigi agora: o incremento 1.1.20 está congelado para revisão independente, e trocar bytes entregues durante a revisão invalidaria o veredito. É achado **anterior** a este delta — as notas nunca foram entregues.
