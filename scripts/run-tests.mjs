@@ -28,6 +28,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/personas-mv3-csp.test.mjs',
   'test/e2e/public-axe-map-mv3.test.mjs',
   'test/e2e/report-executive-print.test.mjs',
+  'test/e2e/report-print-breaks.test.mjs',
   'test/e2e/report-print-layout.test.mjs',
   'test/e2e/report-version-provenance.test.mjs',
   'test/e2e/required-field-observation.test.mjs',

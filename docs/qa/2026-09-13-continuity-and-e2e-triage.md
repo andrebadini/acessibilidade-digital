@@ -8,15 +8,17 @@ Esta trilha é **cronológica e passa de 2.100 linhas**; ela registra o caminho,
 
 | Documento | Para que serve |
 |---|---|
-| `docs/qa/2026-09-16-estado-dos-criterios-1.1.19.md` | Os 12 critérios de conclusão, um por linha, com a evidência de cada um e o que falta. O cabeçalho diz o que o incremento 1.1.20 mudou neles. |
-| `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` | Todo achado das revisões da 1.1.16 à 1.1.19, com desfecho e a medição que o sustenta, mais o backlog aberto. |
-| `docs/qa/revisoes/` | Os relatórios integrais das revisões independentes. `REVIEW-1.1.19.md` é o último concluído; o da 1.1.20 ainda não existe. |
+| `docs/qa/2026-09-16-estado-dos-criterios-1.1.19.md` | Os 12 critérios de conclusão, um por linha, com a evidência de cada um e o que falta. |
+| `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` | Todo achado das revisões, de 1.1.16 a **1.1.21**, com desfecho e a medição que o sustenta, mais o backlog aberto. |
+| `docs/qa/revisoes/` | Os relatórios integrais das revisões independentes. O último concluído é o da **1.1.21** (`/private/tmp/adv121/REVIEW-1.1.21.md`); o da 1.1.22 ainda não existe. |
 
-**Artefato corrente:** `release/audita-acessibilidade-1.1.20.zip`, SHA-256 `140e30bb8884d27799e4df9252ea79186fd553471d9e46a54a3c6c0a56c6e1b1`. Ele corrige dois defeitos **de apresentação** medidos no PDF entregue da 1.1.19 (limitação dita duas vezes no sumário executivo; 56 de 146 rótulos de item quebrados na matriz impressa).
+**Artefato corrente:** `release/audita-acessibilidade-1.1.22.zip`, SHA-256 `c2d6c44d02dec5c1f0e3081c50633cc61232dbd38bca0dbc9ba06579be5951b5` — **preparado e medido, ainda sem revisão independente**. Ele fecha o Minor 3 da revisão da 1.1.21 (a cláusula em linguagem simples não chegava ao PDF), o Minor 2 (3 quebras de palavra no cabeçalho do anexo), o Minor 4 (nenhuma guarda automatizada do comportamento de impressão) e leva ao relatório entregue a proveniência que só existia no modelo (viewport, ledger normativo com SHA-256, método e as cinco notas de integridade normativa).
 
-**Números que valem hoje, e não os das rodadas antigas:** fase paralela da suíte **verde na 1.1.20** (4180 testes, 4179 passam, 0 falham); `release-package` 7/7 com o pacote reconstruído e conferido; `verify-project` estático verde. Na fase serial, a última medição completa (1.1.19) deu **9 falhas, todas em `test/e2e/sidepanel-flow-mv3.test.mjs`**, arquivo de outro incremento — a 1.1.20 foi verificada nos quatro E2E de relatório, impressão e exportação, mas a fase serial completa **ainda não foi re-executada nela**.
+**A 1.1.21 é a candidata aprovada:** revisão independente com **0 Critical, 0 Important e 5 Minor**; o Important da 1.1.20 foi reproduzido e está fechado (matriz: 56 → 0 rótulos de item; 50 → 0 palavras partidas). O zip dela é `4e9174f8…0e13c5`, 199 entradas, conferido byte a byte nos dois sentidos.
 
-**O que está aberto:** (1) o veredito da revisão independente **da 1.1.20**, que é o portão do critério 10 e está em curso; (2) as 9 falhas do arquivo do outro incremento, cujo conserto está especificado mas não é meu para editar; (3) o critério 8, que segue **Parcial** por falta de teste com pessoa leiga; (4) uma decisão de produto sobre auditoria com handoff falho ser exportável. **A 1.1.20 não é candidata enquanto (1) não fechar.**
+**Números que valem hoje, e não os das rodadas antigas:** fase paralela da suíte **verde na 1.1.22** (4.180 testes, 4.179 passam, 1 pulado, 0 falham); `release-package` + `extension-shell` **12/12** com o pacote reconstruído e o digest fixado; os seis E2E de Chrome real do escopo (percurso obrigatório, exportação da página atual, impressão executiva, layout de impressão, **quebras de impressão** e proveniência de versão) **6/6 verdes**; auditoria empacotada da página real do Google em modo sem imagens: **0 falhas confirmadas, 9 resultados positivos, 109 verificações no checklist, cobertura 28,5%, índice 9,0/10, 18 páginas, quatro exportações completas**, com **notas editoriais 5/5, viewport, ledger e método presentes no PDF e no HTML entregues** e **0 palavras partidas** no documento.
+
+**O que está aberto:** (1) a revisão independente **da 1.1.22**, portão do critério 10; (2) as 9 falhas do arquivo do outro incremento (`test/e2e/sidepanel-flow-mv3.test.mjs`), cujo conserto está especificado mas não é meu para editar; (3) o critério 8, que segue **Parcial** por falta de teste com pessoa leiga; (4) uma decisão de produto sobre auditoria com handoff falho ser exportável; (5) os quatro Minors herdados (V6–V9 no registro).
 
 ## Entregas desta rodada
 

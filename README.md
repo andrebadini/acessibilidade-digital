@@ -4,17 +4,30 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.21 preparada — a revisão independente deste artefato ainda não foi feita.** A revisão da
-1.1.20 deu **0 Critical, 1 Important e 5 Minor**, e o Important era uma **regressão introduzida pela
-própria correção** da 1.1.20: a regra que impedia o número do item de quebrar alargava a primeira
-coluna da matriz, estreitava a coluna "Classificação" e passava a partir a palavra **"Recomendação"**
-no meio (`Recomendaçã` / `o ABNT`) em **50 das 146 linhas** do PDF entregue. Ou seja: as quebras no
-meio de token na matriz impressa foram de **56 para 50**, não para zero, como a versão anterior deste
-texto dizia. Corrigido com `overflow-wrap:normal` nas células da matriz, ao lado da regra do rótulo.
-Medição no mesmo PDF entregue, com métrica sensível aos dois defeitos: **0 rótulos de item quebrados e
-0 fragmentos de palavra**, com a mesma paginação de 18 páginas. O título do bloco de limitações também
-passa a trazer, em linguagem simples, a contrapartida da observação passiva — antes ela existia só
-dentro da entrada com código.
+**Versão 1.1.22 preparada — a revisão independente deste artefato ainda não foi feita.** A revisão da
+1.1.21 deu **0 Critical, 0 Important e 5 Minor** e aprovou aquele artefato como candidato: a regressão
+Important da 1.1.20 está fechada e foi **reproduzida por detector independente** — na matriz do PDF
+entregue, **56 quebras de rótulo de item** na 1.1.19, **0 quebras de item e 50 palavras partidas** na
+1.1.20 (`Recomendaçã` / `o ABNT`) e **0 e 0** na 1.1.21, com A/B/C controlado sobre os mesmos bytes de
+modelo (0 / 50 / 0) e conferência página a página.
+
+Três afirmações minhas **não se sustentaram como escritas** e estão corrigidas aqui: (a) a paginação
+**mudou** — no A/B controlado sobre o mesmo modelo, a regra nova imprime **uma página a menos**
+(15 → 14); os totais ao vivo (18 / 18 / 17) vêm de capturas com conteúdo diferente e não isolam causa,
+e "18 páginas" é propriedade de uma captura, não do artefato; (b) "0 fragmentos de palavra" valia para
+a **matriz**, não para o documento: restavam **3** quebras no cabeçalho da tabela de anexos
+(`Evidênc` / `ia`), pré-existentes desde a 1.1.19; (c) a cláusula em linguagem simples do Minor 5
+existia **só na aba interativa** e não chegava ao HTML/PDF entregue.
+
+A **1.1.22** completa o que faltava: a cláusula em linguagem simples passa a ser derivada do **código
+do diagnóstico** (não da forma exata da frase) e chega aos dois renderizadores; o cabeçalho de tabela
+não parte mais palavra (`thead th{overflow-wrap:normal}`), zerando as 3 quebras do anexo; o relatório
+entregue passa a trazer a proveniência que já estava no modelo (método, regras, **viewport observado**,
+**ledger normativo com arquivo e SHA-256** e as **cinco notas de integridade normativa**); e um E2E
+novo mede a folha de impressão na largura real da página, com controles positivos que **falham na CSS
+da 1.1.20 (50 quebras) e passam na atual**. O teste do baseline `78ba813` deixou de depender do
+diretório de invocação — era ele que fazia uma cópia sem `.git` registrar 1 falha que não era do
+produto.
 
 **Versão 1.1.20 — revisão independente concluída: pode substituir a 1.1.19, com o Important acima.**
 Ela corrigiu dois defeitos de apresentação medidos no PDF entregue da 1.1.19, nenhum de correção.

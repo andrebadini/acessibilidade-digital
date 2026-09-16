@@ -189,6 +189,20 @@ export function deriveSystemLimitations(model) {
 }
 
 /**
+ * O estado observado inclui o viewport: uma auditoria sensível a layout responsivo não é
+ * reproduzível sem ele. Devolve `null` quando as dimensões não foram registradas — nesse caso a
+ * limitação de viewport de `deriveSystemLimitations` já explica a ausência, e o relatório não deve
+ * estimar valores.
+ */
+export function viewportSummary(viewport) {
+  const width = viewport?.width ?? null;
+  const height = viewport?.height ?? null;
+  const scale = viewport?.deviceScaleFactor ?? null;
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  return `${width} × ${height} CSS px; escala ${Number.isFinite(scale) ? scale : 'não registrada'}`;
+}
+
+/**
  * What the details list shows, and therefore what its headline counts.
  *
  * A limitation sentence that is also a policy diagnostic is stated in plain language by

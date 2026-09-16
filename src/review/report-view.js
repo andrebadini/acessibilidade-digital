@@ -8,7 +8,7 @@ import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE } from '../core/report/diagnostic-policy.js';
-import { listedLimitations } from '../core/report/text-policy.js';
+import { listedLimitations, viewportSummary } from '../core/report/text-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
 import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/plain-language-guidance.js';
@@ -283,6 +283,32 @@ export function collectFilterOptions(model, summary) {
   });
 }
 
+/**
+ * Cláusulas em linguagem simples do título de limitações, para leigos não precisarem ler o código
+ * em maiúsculas. A decisão vem do **código do diagnóstico**, nunca da forma exata da frase: a lista
+ * pode guardar a forma codificada ou a simples (`listedLimitations`) e a cláusula não pode
+ * desaparecer por causa disso. Uma única derivação serve a aba e o relatório entregue — o Minor 5 da
+ * revisão da 1.1.20 foi corrigido só na aba e não chegava ao PDF justamente por haver duas lógicas.
+ */
+export function projectLimitationClauses(model, technicalEvidence) {
+  const codes = new Set();
+  for (const entry of model.session?.diagnostics ?? []) if (entry?.code) codes.add(entry.code);
+  for (const page of model.pages ?? []) for (const entry of page.diagnostics ?? []) if (entry?.code) codes.add(entry.code);
+  const clauses = [];
+  if (codes.has('PIXEL_CAPTURE_OMITTED')) clauses.push('Modo sem imagens: nenhuma captura raster.');
+  else if (codes.has('FULL_PAGE_CAPTURE_OMITTED') &&
+    !technicalEvidence.some(evidence => evidence.kind === 'full-page') &&
+    technicalEvidence.some(evidence => evidence.kind === 'element')) {
+    clauses.push(technicalEvidence.some(evidence => evidence.kind === 'element' && isSafePngDataUrl(evidence.dataUrl))
+      ? 'Captura integral omitida: miniaturas de elementos disponíveis.'
+      : 'Captura integral omitida: evidências estruturais de elementos registradas, sem miniaturas PNG disponíveis.');
+  }
+  if (codes.has('DYNAMIC_PROBES_OMITTED_PASSIVE')) {
+    clauses.push('Observação passiva: sem testes interativos de teclado, redimensionamento e movimento.');
+  }
+  return freeze(clauses);
+}
+
 export function projectExecutive(model, summary) {
   return freeze({
     identity: { ...summary.identity },
@@ -363,9 +389,15 @@ export function projectReaderMaps(model) {
 }
 
 export function projectMethodology(model) {
+  const environmentViewport = model.environment?.viewport ?? {};
   return freeze({
     methodology: copyData(model.methodology), versions: copyData(model.versions),
     normative: copyData(model.normative), integrity: copyData(model.integrity),
+    viewport: freeze({
+      width: Number.isFinite(environmentViewport.width) ? environmentViewport.width : null,
+      height: Number.isFinite(environmentViewport.height) ? environmentViewport.height : null,
+      deviceScaleFactor: Number.isFinite(environmentViewport.deviceScaleFactor) ? environmentViewport.deviceScaleFactor : null,
+    }),
     caveats: [
       'A cobertura mede a execução automática; não é nota, certificação ou declaração de conformidade.',
       'As prévias de anúncio são estimativas e não transcrições literais de tecnologia assistiva.',
@@ -399,14 +431,15 @@ export function buildReportView({ model: inputModel, summary: inputSummary, mode
       typeof modelHash !== 'string' || !/^[a-f0-9]{64}$/u.test(modelHash) ||
       modelHash !== model.integrity.canonicalModelHash || summary.identity.status !== model.session.status ||
       summary.identity.finalUrl !== model.finalUrl || summary.identity.completedAt !== model.timestamps.endedAt) denied();
+    const technicalEvidence = projectTechnicalEvidence(model);
     return freeze({
       version: 1, auditId: model.auditId, modelRevision, modelHash,
       filters: collectFilterOptions(model, summary),
-      executive: projectExecutive(model, summary),
+      executive: freeze({ ...projectExecutive(model, summary), limitationClauses: projectLimitationClauses(model, technicalEvidence) }),
       issues: projectIssues(model, summary),
       checklist: (summary.checklist ?? []).map(card => projectCard(card, 'humanReview', model,
         new Map(model.reviewDecisions.map(row => [row.occurrenceId, row])))),
-      technicalEvidence: projectTechnicalEvidence(model),
+      technicalEvidence,
       readerMaps: projectReaderMaps(model),
       methodology: projectMethodology(model),
       exports: projectExports(model),
@@ -966,27 +999,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   executive.append(checklistElement(document, view.checklist, view.technicalEvidence));
   const limitations = document.createElement('details');
   limitations.setAttribute('data-report-limitations', '');
-  const noPixelEvidence = view.executive.limitations.includes(
-    'PIXEL_CAPTURE_OMITTED: Nenhuma captura raster foi coletada no modo sem imagens.');
-  const elementOnlyEvidence = view.executive.limitations.includes(
-    'FULL_PAGE_CAPTURE_OMITTED: A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.') &&
-    !view.technicalEvidence.some(evidence => evidence.kind === 'full-page') &&
-    view.technicalEvidence.some(evidence => evidence.kind === 'element');
-  const elementThumbnailAvailable = view.technicalEvidence.some(evidence =>
-    evidence.kind === 'element' && isSafePngDataUrl(evidence.dataUrl));
-  const summaryClauses = [];
-  if (noPixelEvidence) summaryClauses.push('Modo sem imagens: nenhuma captura raster.');
-  else if (elementOnlyEvidence) {
-    summaryClauses.push(elementThumbnailAvailable
-      ? 'Captura integral omitida: miniaturas de elementos disponíveis.'
-      : 'Captura integral omitida: evidências estruturais de elementos registradas, sem miniaturas PNG disponíveis.');
-  }
-  // The plain sentence of the passive-observation diagnostic now lives inside the coded entry of the
-  // list, so the headline carries its plain-language counterpart. Without it, a reader who is not
-  // technical meets an uppercase code to learn that the interactive checks were not run.
-  if (view.executive.limitations.includes(`DYNAMIC_PROBES_OMITTED_PASSIVE: ${DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE}`)) {
-    summaryClauses.push('Observação passiva: sem testes interativos de teclado, redimensionamento e movimento.');
-  }
+  const summaryClauses = [...(view.executive.limitationClauses ?? [])];
   const limitationSummary = summaryClauses.length === 0 ? null : summaryClauses.join(' · ');
   // The list carries the technical codes, and a limitation that is also a policy diagnostic is stated
   // in plain language by `deriveSystemLimitations` (text-policy.js) and again here with the code in
@@ -1160,6 +1173,13 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
 
   const methodology = section(document, 6);
   methodology.append(element(document, 'p', `Versão da extensão que realizou a auditoria: ${view.methodology.versions.extension}.`));
+  const methodFacts = [`Método: ${view.methodology.methodology.name}.`,
+    `Regras próprias: ${view.methodology.methodology.coreRuleCount}.`,
+    `Regras suplementares: ${view.methodology.methodology.supplementalRuleCount}.`,
+    `Itens normativos: ${view.methodology.methodology.itemCount}.`];
+  const observedViewport = viewportSummary(view.methodology.viewport);
+  if (observedViewport !== null) methodFacts.push(`Viewport observado: ${observedViewport}.`);
+  methodology.append(element(document, 'p', methodFacts.join(' ')));
   appendTextList(document, methodology, view.methodology.caveats, 'Sem ressalvas adicionais.');
   methodology.append(element(document, 'p', `Auditoria: ${view.auditId}. Revisão do modelo: ${view.modelRevision}. Integridade: ${view.modelHash}.`));
   const officialSources = document.createElement('div'); officialSources.setAttribute('data-official-sources', '');
@@ -1169,6 +1189,24 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     sourceText.setAttribute('data-official-source', ''); officialSources.append(sourceText);
   }
   methodology.append(officialSources);
+  const ledger = document.createElement('div'); ledger.setAttribute('data-normative-ledger', '');
+  ledger.append(element(document, 'h3', 'Ledger normativo'));
+  const ledgerList = document.createElement('ul');
+  for (const source of view.methodology.normative.sources) {
+    const locator = source.localCopy
+      ? `arquivo ${source.localCopy.fileName}; SHA-256 ${source.localCopy.sha256}`
+      : `URL ${source.url}`;
+    ledgerList.append(element(document, 'li', `${source.title} — versão ${source.version}; identificador ${source.id}; ${locator}.`));
+  }
+  ledger.append(ledgerList); methodology.append(ledger);
+  const notes = document.createElement('div'); notes.setAttribute('data-editorial-notes', '');
+  notes.append(element(document, 'h3', 'Notas de integridade normativa'));
+  notes.append(element(document, 'p', 'Informação impressa e normalização adotada permanecem separadas; o relatório não atribui à ABNT errata não localizada.'));
+  const notesList = document.createElement('ul');
+  for (const note of view.methodology.normative.editorialNotes) {
+    notesList.append(element(document, 'li', `${note.itemId}: impresso “${note.printed}”; normalização “${note.normalized}”. ${note.rationale}`));
+  }
+  notes.append(notesList); methodology.append(notes);
   const sources = document.createElement('details'); sources.setAttribute('data-technical-evidence', '');
   sources.setAttribute('data-report-annex', '');
   sources.append(element(document, 'summary', `Consultar evidências técnicas e anexos (${view.technicalEvidence.length})`));

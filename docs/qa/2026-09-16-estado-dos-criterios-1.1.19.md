@@ -1,5 +1,23 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.22, e o que ele muda aqui.** O artefato corrente é
+> `release/audita-acessibilidade-1.1.22.zip` (`c2d6c44d…5951b5`), ainda **sem revisão independente**.
+> Ele fecha três Minors da revisão da 1.1.21: a cláusula em linguagem simples passa a chegar ao
+> **PDF/HTML entregue** (não só à aba) e passa a ser derivada do **código** do diagnóstico em vez da
+> forma exata da frase; o cabeçalho da tabela de anexos deixa de partir palavra (`Evidênc`/`ia`,
+> 3 → 0); e o comportamento de impressão da matriz ganha **guarda automatizada** — um E2E que mede a
+> folha na largura real da página e **falha na CSS da 1.1.20** (50 quebras sob compressão) e passa na
+> atual. Leva também ao entregue a proveniência que só existia no modelo (viewport, ledger normativo
+> com arquivo e SHA-256, método e as cinco notas de integridade normativa), medida nos bytes
+> empacotados. Para os critérios: **12** passa a ter medição na versão efetivamente empacotada
+> (auditoria real do Google: 0 falhas, 9 positivos, 109 no checklist, 18 páginas, quatro exportações
+> completas, notas 5/5 e 0 palavras partidas); **7** ganha rastreabilidade normativa no artefato
+> entregue; **2** foi re-verificado (fase paralela 4.137/4.136/0 com 1 pulado, `release-package` +
+> `extension-shell` 12/12, seis E2E de Chrome real verdes); **10** segue pendente até a revisão da
+> 1.1.22; **8** continua **Parcial**. A frase "mesma paginação de 18 páginas" do bloco abaixo está
+> **corrigida** pela revisão da 1.1.21: no A/B controlado a regra imprime uma página a menos, e o
+> total depende do conteúdo da captura.
+
 > **Incremento 1.1.20 (apresentação), e o que ele muda aqui.** O artefato corrente passou a ser
 > `release/audita-acessibilidade-1.1.20.zip` (`140e30bb…6e1b1`), com duas correções de apresentação
 > medidas no artefato entregue da página real: a limitação deixou de ser dita duas vezes no sumário

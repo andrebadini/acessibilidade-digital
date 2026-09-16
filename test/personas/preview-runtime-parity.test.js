@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import vm from 'node:vm';
 
 import { computeAccessibleText } from '../../src/core/accessibility/accessible-name.js';
 import { buildAnnouncementPreview } from '../../src/core/accessibility/announcement.js';
+
+// A raiz do repositório vem do próprio arquivo, não do diretório de invocação: sem isto o teste
+// passava rodando da raiz e falhava com "Command failed: git show" quando a suíte era lançada de
+// outro diretório — foi assim que uma revisão independente registrou 1 falha que não era do produto.
+const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 const runtimeUrl = new URL('../../src/core/accessibility/accessible-preview-runtime.classic.js', import.meta.url);
 const namespaceExpression = 'globalThis[Symbol.for("audita.accessible-preview.runtime.v1")]';
@@ -79,7 +85,7 @@ test('classic and ESM facades produce byte-identical accessible previews', async
 
 test('normative ESM exports remain byte-identical to the 78ba813 baseline', async () => {
   const loadBaseline = async path => {
-    const source = execFileSync('git', ['show', `78ba813:${path}`], { encoding: 'utf8' });
+    const source = execFileSync('git', ['show', `78ba813:${path}`], { encoding: 'utf8', cwd: repositoryRoot });
     return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
   };
   const baselineAnnouncement = await loadBaseline('src/core/accessibility/announcement.js');

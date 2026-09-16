@@ -11,7 +11,7 @@ import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { buildReportView, projectExecutive, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
+import { buildReportView, projectExecutive, projectLimitationClauses, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
 import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
@@ -22,6 +22,7 @@ const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_
 const ATTACHED_COPY_RELOADED_MESSAGE = 'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
 const ATTACHED_COPY_EVIDENCE_ONLY_MESSAGE = 'A página foi avaliada em uma cópia temporária já removida. O destaque ao vivo não está disponível; consulte as capturas e os seletores registrados no momento da auditoria.';
 const ATTACHED_COPY_RETURN_MESSAGE = 'Retorno e destaque na aba original indisponíveis: a auditoria usou uma cópia temporária e não alterou a aba original.';
+
 
 for (const producer of ['1.1.13', 'não disponível']) {
   test(`visible reports preserve recorded producer ${producer} without rewriting evidence`, async () => {
@@ -39,6 +40,39 @@ for (const producer of ['1.1.13', 'não disponível']) {
     assert.equal(JSON.stringify(model), before);
   });
 }
+
+test('proveniência registrada no modelo chega ao relatório entregue: método, viewport, ledger e notas editoriais', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const surfaces = [['aba', root.textContent]];
+  for (const forPrint of [false, true]) {
+    const html = renderHtmlReport(model, { reportView: view, forPrint });
+    const visibleText = html.replace(/<style[^>]*>[\s\S]*?<\/style>|<script[^>]*>[\s\S]*?<\/script>/gu, ' ').replace(/<[^>]*>/gu, ' ');
+    surfaces.push([`entregue forPrint=${forPrint}`, visibleText]);
+  }
+  const { viewport } = model.environment;
+  const expected = [
+    `Método: ${model.methodology.name}.`,
+    `Regras próprias: ${model.methodology.coreRuleCount}.`,
+    `Itens normativos: ${model.methodology.itemCount}.`,
+    `Viewport observado: ${viewport.width} × ${viewport.height} CSS px; escala ${viewport.deviceScaleFactor}.`,
+    'Ledger normativo',
+    'Notas de integridade normativa',
+  ];
+  for (const source of model.normative.sources.filter(entry => entry.localCopy)) {
+    expected.push(source.localCopy.fileName, source.localCopy.sha256);
+  }
+  for (const note of model.normative.editorialNotes) {
+    expected.push(note.itemId, note.printed, note.normalized);
+  }
+  for (const [surface, text] of surfaces) {
+    const flat = text.replace(/\s+/gu, ' ');
+    for (const fragment of expected) {
+      assert.ok(flat.includes(fragment), `${surface} deve registrar a proveniência ${JSON.stringify(fragment)}`);
+    }
+  }
+});
 
 test('checklist has didactic guidance separately from findings and only a compact reference in the PDF', async () => {
   const { model, summary } = await fixture();
@@ -952,16 +986,56 @@ test('live report puts the decision summary before compact navigation and expose
   assert.equal(exportCalls, 1);
 });
 
-test('surfaces no-pixels collection in the visible limitations summary', async () => {
-  const { model, summary } = await fixture();
-  const view = structuredClone(buildReportView({
-    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
-  }));
-  view.executive.limitations.push('PIXEL_CAPTURE_OMITTED: Nenhuma captura raster foi coletada no modo sem imagens.');
-  const root = renderReportView({ view, document: new Document(), onExport() {} });
+test('cláusula em linguagem simples segue o CÓDIGO do diagnóstico e chega à aba e ao relatório entregue', async () => {
+  // A derivação decide pelo código, não pela forma exata da frase: a lista pode guardar a forma
+  // codificada ou a simples e a cláusula não pode sumir por isso (fragilidade apontada na revisão).
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [{ code: 'PIXEL_CAPTURE_OMITTED' }] }, pages: [] }, []),
+    ['Modo sem imagens: nenhuma captura raster.']);
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [{ code: 'DYNAMIC_PROBES_OMITTED_PASSIVE' }] }, pages: [] }, []),
+    ['Observação passiva: sem testes interativos de teclado, redimensionamento e movimento.']);
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [{ code: 'DYNAMIC_PROBES_INCOMPLETE' }] }, pages: [] }, []), []);
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [] }, pages: [] }, []), []);
+  // O código pode estar só nos diagnósticos da página.
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [] }, pages: [{ diagnostics: [{ code: 'PIXEL_CAPTURE_OMITTED' }] }] }, []),
+    ['Modo sem imagens: nenhuma captura raster.']);
+  // Captura integral omitida distingue miniatura disponível de evidência estrutural.
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [{ code: 'FULL_PAGE_CAPTURE_OMITTED' }] }, pages: [] },
+    [{ kind: 'element', dataUrl: 'data:image/png;base64,AAAA' }]),
+  ['Captura integral omitida: miniaturas de elementos disponíveis.']);
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [{ code: 'FULL_PAGE_CAPTURE_OMITTED' }] }, pages: [] },
+    [{ kind: 'element', dataUrl: null }]),
+  ['Captura integral omitida: evidências estruturais de elementos registradas, sem miniaturas PNG disponíveis.']);
 
-  assert.match(root.querySelector('[data-report-limitations]').querySelector('summary').textContent,
-    /modo sem imagens.*nenhuma captura raster/iu);
+  // E a cláusula derivada precisa chegar aos três lugares: aba, HTML entregue e HTML de impressão.
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash }));
+  const clauses = ['Modo sem imagens: nenhuma captura raster.',
+    'Observação passiva: sem testes interativos de teclado, redimensionamento e movimento.'];
+  view.executive.limitationClauses = clauses;
+  // O documento entregue exige ReportViewV1 congelada.
+  const freezeDeep = value => {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      for (const child of Object.values(value)) freezeDeep(child);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  freezeDeep(view);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const surfaces = [['aba', root.querySelector('[data-report-limitations] summary').textContent]];
+  for (const forPrint of [false, true]) {
+    const html = renderHtmlReport(model, { reportView: view, forPrint });
+    const headline = /Limitações registradas \([\s\S]*?<\/summary>/u.exec(html);
+    assert.ok(headline, `entregue forPrint=${forPrint} precisa do título das limitações`);
+    surfaces.push([`entregue forPrint=${forPrint}`, headline[0].replace(/<[^>]*>/gu, ' ')]);
+  }
+  for (const [surface, text] of surfaces) {
+    for (const clause of clauses) {
+      assert.ok(text.includes(clause), `${surface} deve trazer a cláusula ${JSON.stringify(clause)}`);
+    }
+  }
+  // A cláusula não entra na contagem do título, que continua sendo o número de itens da lista.
+  assert.match(surfaces[1][1], new RegExp(`Limitações registradas \\(${view.executive.limitations.length}\\)`, 'u'));
 });
 
 test('element-only report discloses the omitted full-page capture in plain language and preserves its technical code in details', async () => {
