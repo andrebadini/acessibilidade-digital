@@ -4,9 +4,17 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão de produção 1.1.15 preparada:** o candidato 1.1.14 foi congelado e revisado no SHA
+`607fc02`; desde então entraram nesta árvore as correções apontadas pela revisão independente
+(recomendação não atendida deixando de receber a frase de inconformidade, decisão humana sem nota
+deixando de carimbar falha confirmada, e URL de recurso deixando de levar query para o relatório),
+a origem dos sinais numerados na página e o primeiro produtor de recorte de 5.9.1. Por isso o pacote
+passou a se identificar como 1.1.15, para não se confundir com o candidato revisado. Registro da
+1.1.14 preservado abaixo.
+
 **Versão de produção 1.1.14 entregue:** confira o [registro de validação e pacote](docs/qa/2026-09-12-production1114-release.md). A meta foi retomada em 12/09 e encerrada após correções, revisões independentes, testes no Chrome e avaliação do Google com esta versão. Distribuição local, sem publicação em loja.
 
-A versão **1.1.14** tem [guia de instalação e uso](docs/COMO-USAR.md). Acrescenta a identificação visível da versão de origem na metodologia do relatório e de sua impressão e corrige o sinal de cancelamento na retomada de lotes. Novas auditorias registram a versão instalada; antigas mantêm a versão de origem. Guias didáticos, grupos ABNT, sinais e evidências permanecem disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
+A versão **1.1.15** tem [guia de instalação e uso](docs/COMO-USAR.md). Acrescenta a identificação visível da versão de origem na metodologia do relatório e de sua impressão e corrige o sinal de cancelamento na retomada de lotes. Novas auditorias registram a versão instalada; antigas mantêm a versão de origem. Guias didáticos, grupos ABNT, sinais e evidências permanecem disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
 
 Google na **1.1.14**, em 12/09: 0 falhas de requisitos confirmadas, 1 recomendação não atendida e 2 verificações com suspeitas (3 ocorrências); PDF de 24 páginas e quatro formatos exportados. Histórico preservado: [validação e Google da 1.1.13](docs/qa/2026-09-08-beta1113-release.md). Não são testes simultâneos ou de estados idênticos da página.
 

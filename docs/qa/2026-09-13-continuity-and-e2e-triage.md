@@ -1097,3 +1097,33 @@ Fecha a última lacuna de verificação das exportações e remove a divergênci
 ### Suíte
 
 Sem mudança de produto nesta rodada. `src/` limpo; suíte e pacote nas condições verificadas nas rodadas 34 e 36.
+
+## Rodada 39 — a versão estava mentindo: bump para 1.1.15
+
+Achado desta rodada, e é de procedência, não de código.
+
+O candidato de produção **1.1.14 foi congelado e revisado no SHA `607fc02`** — está registrado em `docs/qa/2026-09-12-production1114-release.md`, com duas revisões independentes C=0/I=0, pacote de 198 entradas conferido byte a byte e o SHA anotado. Só que, desde o commit de congelamento `81e56db`, entraram **39 commits em `src/`**: as três correções Important da revisão independente, o fechamento do vazamento de URL de recurso, a origem dos sinais numerados, o primeiro produtor de recorte de 5.9.1 e a preservação da identidade declarada em campos customizados.
+
+O pacote que eu vinha gerando carregava esse código novo **sob o número 1.1.14**, e o relatório imprime "Versão da extensão que realizou a auditoria: …" a partir do manifesto em execução. Ou seja: o artefato se identificava como o candidato revisado, e o relatório de uma auditoria feita com ele declararia 1.1.14 apontando para um SHA que não corresponde ao código que rodou. Isso é exatamente a confusão entre incremento e entrega que a meta proíbe, e é o mesmo tipo de divergência que eu registrei no AccessMonitor — `manifest.json` e README discordando sobre a versão.
+
+**Perguntei antes de agir**, porque mexer no número é decisão de registro de entrega e não correção técnica: a opção de subir para 1.1.15 foi a escolhida.
+
+### O que mudou
+
+- `manifest.json`: `version` e `version_name` para **1.1.15**.
+- `test/extension-shell.test.js` e `test/release-package.test.js`: as duas asserções que fixavam 1.1.14.
+- `store-assets/STORE-LISTING.md`: o título declara a versão do pacote e o teste de release-assets exige que ela case com `version_name`.
+- `store-assets/TEST-INSTRUCTIONS.md` e `docs/COMO-USAR.md`: nome do ZIP e versão a conferir.
+- `README.md`: passou a declarar 1.1.15 e a explicar por que o número subiu, mantendo o registro da 1.1.14 logo abaixo em vez de apagá-lo.
+
+Nada em `docs/qa/` nem em `docs/superpowers/` foi reescrito: são registro histórico do que foi congelado e revisado, e mudá-los seria reescrever a história.
+
+### Prova
+
+- O relatório da versão nova registra a versão certa, medido em Chrome real: **"Versão da extensão que realizou a auditoria: 1.1.15."** Isso virou teste permanente — `test/e2e/report-version-provenance.test.mjs`, registrado no runner — que amarra a cadeia inteira: manifesto, runtime (`chrome.runtime.getManifest`), modelo da auditoria e relatório renderizado. A versão não é constante em lugar nenhum; o teste verifica que o que o manifesto declara é o que o relatório imprime.
+- Pacote reconstruído: **`audita-acessibilidade-1.1.15.zip`, 199 arquivos, 4.236.689 bytes, SHA-256 `7210d77a4544a559c038f5ecd058c9e6d9bc82fbb0dfa37418a29f2c4c032ba5`**, e o manifesto dentro dele declara 1.1.15 nos dois campos.
+- Suíte: **4183 testes, 4175 passam, 8 falham** — as mesmas 8 pré-existentes. Uma nona falha apareceu na primeira execução (`release-assets`, "listing must identify the version declared by the package") e era consequência direta e correta do bump: o teste pegou o documento desalinhado. Corrigido o listing, voltou a 8.
+
+### O que isto não resolve
+
+O pacote 1.1.15 **não passou por revisão independente**. A revisão C=0/I=0 vale para `607fc02`, que é a 1.1.14. As correções pós-revisão têm teste e medição própria cada uma, mas a revisão integrada do conjunto, como artefato, não foi feita — e o critério "não há falha Critical/Important conhecida" depende dela para valer sobre este número. Registro isto explicitamente para que ninguém leia "1.1.15 empacotada e verde" como "1.1.15 revisada".
