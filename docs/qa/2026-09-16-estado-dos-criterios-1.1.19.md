@@ -1,5 +1,18 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.20 (apresentação), e o que ele muda aqui.** O artefato corrente passou a ser
+> `release/audita-acessibilidade-1.1.20.zip` (`140e30bb…6e1b1`), com duas correções de apresentação
+> medidas no artefato entregue da página real: a limitação deixou de ser dita duas vezes no sumário
+> executivo (8 → 6 entradas, 2 → 0 repetições, título coerente com a lista) e o rótulo do item deixou
+> de quebrar no meio na matriz impressa (**56 → 0**), com a **mesma paginação de 18 páginas**. Nada
+> disso altera contagem, classificação, frase legal ou conclusão. Para os critérios: **2 e 12** foram
+> re-verificados com o artefato novo (fase paralela 4180/4179/0, `release-package` 7/7, quatro E2E de
+> relatório, impressão e exportação verdes); **8** melhora em legibilidade mas continua **Parcial**
+> por falta de teste com pessoa leiga; **10** volta a depender de veredito, porque a revisão
+> independente **do artefato 1.1.20 ainda não saiu** — o checkout congelado é `a73a9e3` em
+> `/private/tmp/audita-review-120`. Os números das linhas abaixo continuam sendo os medidos na
+> 1.1.19, que é o que eles documentam.
+
 Registro de 16/09/2026, na revisão `dad1cda` (manifest 1.1.19, artefato `audita-acessibilidade-1.1.19.zip`,
 SHA-256 `0e429e226e07e5de365e1fed6542398f1d2acb8e80eada4babb78e0e0af14ec9`). Cada linha diz **o que foi
 medido**, **como** e **o que falta**. Onde não há medição, está escrito que não há — este documento não
