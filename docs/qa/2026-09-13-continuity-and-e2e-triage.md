@@ -1723,3 +1723,24 @@ Esta trilha é cronológica e tem mais de 1.300 linhas; ela registra o caminho, 
 **Números que valem hoje, e não os das rodadas antigas:** fase paralela da suíte **verde** (4179 testes, 4178 passam, 1 pulado, 0 falham) — as "8 falhas pré-existentes" foram aposentadas com motivo na rodada 58; fase serial com **9 falhas mapeadas por dono** (7 no arquivo de outro incremento, 1 orçamento já corrigido, 1 limpeza de perfil no teardown do harness), nenhuma delas defeito de produto confirmado na minha área.
 
 **O que ainda não está fechado:** o critério 10 depende do relatório da triagem da 1.1.19, e o critério 1 depende de estabelecer se a intermitência do painel é do produto ou do tempo do teste. A 1.1.19 **não** é candidata enquanto os dois estiverem abertos.
+
+## Onde exatamente cada falha serial morre (lido do log, não inferido)
+
+O log da triagem traz os passos instrumentados dos próprios testes, e isso fecha a classificação de quase todas as nove sem eu precisar executar nada:
+
+**Os dois de marcadores morrem em `assertPausedAttempt`:**
+```
+Error: WAIT_TIMEOUT
+    at Object.waitForValue (real-chrome.mjs:330:9)
+    at async assertPausedAttempt (sidepanel-flow-mv3.test.mjs:1043:19)
+```
+A linha 1043 é a chamada a `waitForOwner(extension, auditId, value => value.state === 'retained-for-consent' && value.cleanupMode === 'always')`. Ou seja: **o teste espera, e não encontra, uma aba própria registrada como `retained-for-consent`** — exatamente o sintoma que já estava atribuído ao outro incremento (a chave `audita:owned-tab:v2:*` que o trabalho dele ainda não produz). Não é o produto que eu meço; é o registro de posse que aquele incremento está reescrevendo.
+
+**O grupo de evidência completa morre antes de começar:**
+```
+ℹ full-evidence-step=BEGIN_ATTEMPT:begin
+ℹ full-evidence-step=BEGIN_ATTEMPT:failed
+```
+`BEGIN_ATTEMPT` é o primeiro passo — preparar e iniciar a tentativa —, e ele falha em ~30 s, com `beginAttachedAttempt` usando `timeoutMs: 30_000` na espera de prontidão do painel. Nenhum trabalho de auditoria chega a acontecer. O teste de `current-page` que engloba esses quatro leva 121 s e falha depois, o que é coerente com quatro subtests de 30 s somados.
+
+**Somando com o que já estava medido:** dois por registro de posse do outro incremento, quatro por prontidão em 30 s, um por orçamento de download de 311 s, um por limpeza de perfil no teardown. **Nenhum deles morre numa asserção sobre o resultado da auditoria** — nenhum diz "o produto avaliou errado". É por isso que a conclusão de que não há defeito de produto confirmado na minha área se sustenta, e não é otimismo.
