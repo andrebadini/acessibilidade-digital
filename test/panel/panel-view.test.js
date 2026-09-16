@@ -1308,3 +1308,41 @@ test('running view starts indeterminate and becomes determinate only after a val
   assert.equal(root.querySelectorAll('[data-phase-state="complete"]')
     .every(item => /concluída/u.test(item.textContent)), true);
 });
+
+test('todo controle da própria interface do painel tem nome acessível', () => {
+  // O produto audita acessibilidade alheia: a interface dele precisa passar no mesmo critério. Nenhum
+  // teste varria os controles em busca de nome acessível — só contava botões por intenção. Uma pessoa
+  // com leitor de tela ouve o nome; um botão sem nome é uma barreira no nosso próprio produto.
+  // Uma tela só não basta: a varredura percorre TODAS as telas que o painel pode mostrar, porque um
+  // controle sem nome numa tela de erro ou de pausa de privacidade é a mesma barreira.
+  const telas = ['initial', 'running', 'result', 'batch', 'single-url', 'start-failed', 'unavailable'];
+  let controlesVarridos = 0;
+  for (const screen of telas) {
+    const { state, summary, detail } = fixture();
+    const variacao = { ...state, screen };
+    let root;
+    try {
+      root = renderPanelView({ view: buildPanelView({ state: variacao, summary, detail }), document: new TestDocument(), onIntent() {} });
+    } catch {
+      continue; // tela que exige outros dados de fixture não entra na varredura
+    }
+    const elementos = [];
+    (function walk(node) {
+      for (const child of node.children ?? []) { elementos.push(child); walk(child); }
+    })(root);
+    const interativos = elementos.filter(node => ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'A'].includes(String(node.tagName).toUpperCase()));
+    controlesVarridos += interativos.length;
+    // `<label for>` explícito também dá nome acessível: sem isto a varredura acusaria campo rotulado.
+    const rotulos = new Set(elementos.filter(node => String(node.tagName).toUpperCase() === 'LABEL')
+      .map(node => node.getAttribute('for')).filter(Boolean));
+    const semNome = [];
+    for (const node of interativos) {
+      const rotulo = [node.textContent, node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('placeholder')]
+        .map(valor => String(valor ?? '').trim()).find(valor => valor.length > 0);
+      if (rotulo || node.getAttribute('aria-labelledby') || rotulos.has(node.getAttribute('id'))) continue;
+      semNome.push(`${node.tagName}${node.getAttribute('type') ? `[type="${node.getAttribute('type')}"]` : ''}${node.getAttribute('id') ? `#${node.getAttribute('id')}` : ''}`);
+    }
+    assert.deepEqual(semNome, [], `tela ${screen}: controles sem nome acessível: ${semNome.join(', ')}`);
+  }
+  assert.ok(controlesVarridos > 0, 'a varredura precisa encontrar controles, senão ela é vacuosa');
+});
