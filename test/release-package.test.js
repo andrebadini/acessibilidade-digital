@@ -122,6 +122,58 @@ test('builds the public ZIP reproducibly in an isolated temporary directory', as
   assert.equal(entries.some(path => /(?:^|\/)(?:test|docs|store-assets|fixtures|node_modules)(?:\/|$)/u.test(path)), false);
 });
 
+test('every packaged byte is the byte in the reviewed working tree', async t => {
+  // The distribution deliberately ships only manifest.json, src, vendor and the four runtime icons,
+  // and it does not ship test/, which is why the real-Chrome harness cannot drive a packaged
+  // extension: the harness opens /test/e2e/fixtures/real-tab-harness.html, a file the package must
+  // not contain. Since the artifact cannot be executed through that path, this proves the next best
+  // thing and says so: the artifact is exactly the shipped subset of this tree, byte for byte, so
+  // the harness results that describe this tree also describe the artifact. It does not replace
+  // running the artifact, and it does not cover a build made from a different tree.
+  const isolatedRelease = await mkdtemp(join(tmpdir(), 'audita-release-test-'));
+  const extracted = await mkdtemp(join(tmpdir(), 'audita-package-content-'));
+  t.after(async () => {
+    await rm(isolatedRelease, { recursive: true, force: true });
+    await rm(extracted, { recursive: true, force: true });
+  });
+  build(isolatedRelease);
+
+  const unzip = spawnSync('unzip', ['-qq', join(isolatedRelease, packageName), '-d', extracted], { encoding: 'utf8' });
+  assert.equal(unzip.status, 0, unzip.stderr);
+
+  const walk = async (directory, prefix = '') => {
+    const found = [];
+    for (const entry of (await readdir(join(directory, prefix), { withFileTypes: true }))) {
+      const relative = prefix ? join(prefix, entry.name) : entry.name;
+      if (entry.isDirectory()) found.push(...await walk(directory, relative));
+      else if (entry.isFile()) found.push(relative);
+    }
+    return found.sort();
+  };
+  const packaged = await walk(extracted);
+  assert.ok(packaged.includes('manifest.json'), 'o pacote precisa do manifesto');
+
+  const differences = [];
+  for (const relative of packaged) {
+    const fromPackage = await readFile(join(extracted, relative));
+    const fromTree = await readFile(join(root, relative)).catch(() => null);
+    if (fromTree === null) { differences.push(`${relative}: ausente na árvore`); continue; }
+    if (await digest(join(extracted, relative)) !== await digest(join(root, relative))) {
+      differences.push(`${relative}: conteúdo difere`);
+    }
+    assert.ok(fromPackage.length > 0 || fromTree.length === 0, relative);
+  }
+  assert.deepEqual(differences, [], 'todo arquivo do pacote precisa ser idêntico ao da árvore');
+
+  // And the reverse direction, so a shipped file cannot be quietly left out of the package.
+  const shipped = (await walk(join(root, 'src'))).map(path => path);
+  const shippedVendor = (await walk(join(root, 'vendor'))).map(path => join('vendor', path.replace(/^vendor[\\/]/u, '')));
+  const missing = [...shipped.filter(path => path.startsWith('src')), ...shippedVendor]
+    .filter(path => !packaged.includes(path));
+  assert.deepEqual(missing, [], 'nenhum arquivo de src/ ou vendor/ pode ficar fora do pacote');
+  t.diagnostic(`pacote conferido byte a byte: ${packaged.length} arquivos idênticos à árvore revisada`);
+});
+
 test('rejects temporary release targets that could broaden package cleanup', async t => {
   const validationFixture = await mkdtemp(join(tmpdir(), 'audita-release-validation-'));
   const nested = await mkdtemp(join(validationFixture, 'audita-release-test-'));
