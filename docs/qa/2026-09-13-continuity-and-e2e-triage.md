@@ -1383,3 +1383,5 @@ Com os bytes conferidos **antes** da execução, rodei do diretório extraído, 
 **6/6 verdes a partir do pacote extraído.** O percurso obrigatório e as garantias que o critério 12 pede foram executados sobre os bytes entregues, não sobre a árvore.
 
 **O que ficou de fora, e por quê.** A execução dos 34 arquivos de Chrome real de uma vez falhou com `CDP_COMMAND_TIMEOUT` em parte deles, porque a revisão independente da 1.1.17 estava rodando Chrome ao mesmo tempo — é contenção, não produto: os seis acima, executados logo depois, passaram. A bateria completa a partir do pacote fica para quando não houver outra instância ativa, e o resultado será registrado aqui.
+
+**Identidade de bytes conferida por completo, além do `src/`:** `vendor/` idêntico, `assets/` idêntico exceto as duas fontes de desenho (`icon-1024.png` e `icon-source.svg`), que a distribuição exclui e que o manifesto **não** referencia — os quatro ícones declarados (16/32/48/128) estão os quatro no pacote. `manifest.json` idêntico. Contagem: 199 arquivos no zip e 199 no diretório extraído. Nada no pacote está faltando em relação ao que o manifesto usa.
