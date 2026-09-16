@@ -289,3 +289,55 @@ test('valores com rótulo em português também são tarjados no texto (achado A
   const prosa = 'A sessão de perguntas discutiu o cartão de crédito como tema e a chave do problema.';
   assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
 });
+
+test('o radical de senha não pode PERDER grafias que a versão anterior tarjava (achado N1 da 1.1.25)', () => {
+  // A revisão da 1.1.25 mediu que a minha troca de radical (A2) ganhou 13 formas e perdeu 8 que a
+  // 1.1.24 tarjava. A lição é de método: cada troca de vocabulário tem de ser medida contra o
+  // vocabulário ANTERIOR, não só contra o alvo novo. Estas oito são as perdidas.
+  const perdidas = ['motdepasse', 'passwrd', 'passw0rd', 'palavra-passe', 'palavrapasse',
+    'frase-passe', 'frasepasse', 'passwort'];
+  const ganhasNoA2 = ['bypasscode', 'bypass_code', 'bypasswd', 'bypass_key', 'bypassword'];
+  const originais = ['password', 'passwd', 'pass', 'userPassword', 'passcode', 'passphrase',
+    'pass-word', 'pass word', 'pwdField', 'senha', 'cpf', 'chaveAcesso'];
+  for (const chave of [...perdidas, ...ganhasNoA2, ...originais]) {
+    assert.equal(sanitizeJsonData({ [chave]: 'x' })[chave], '[redacted]', `${chave} precisa ser tarjado`);
+  }
+  // E o outro lado continua preservado — inclusive palavras que contêm "pass" sem serem credencial.
+  const inocentes = ['passed', 'passes', 'bypass', 'passive', 'passing', 'passo', 'passage',
+    'passport', 'bypasses', 'passer', 'passable', 'passepartout', 'passim', 'contato', 'pixelRatio', 'cargo'];
+  for (const chave of inocentes) {
+    assert.notEqual(sanitizeJsonData({ [chave]: 'x' })[chave], '[redacted]', `${chave} não pode ser perdido`);
+  }
+});
+
+test('o valor tarjado é consumido por inteiro, não só o primeiro token (achados N2 e O2 da 1.1.25)', () => {
+  // A revisão mediu que o meu teste do A1 passava TRIVIALMENTE: em `cartão: 4111 1111 1111 1111` só o
+  // primeiro token era substituído e 12 dos 16 dígitos sobreviviam. A asserção agora é sobre
+  // QUALQUER dígito remanescente, não sobre o primeiro token.
+  const casos = [
+    'cartão: 4111 1111 1111 1111',
+    'CPF: 123.456.789-00',
+    'senha: S3G R3D0',
+    'senha: "S3G R3D0"',
+    'chave: ABC 123 DEF 456',
+    'pwd: 99887766',
+    'passcode: 4455 6677',
+    'passphrase: uma frase secreta longa',
+    'pass: 1234',
+    'auth: token-abc-123',
+  ];
+  for (const texto of casos) {
+    const saida = sanitizeJsonData({ texto }).texto;
+    assert.match(saida, /\[redacted\]/u, `"${texto}" precisa registrar o tarjamento`);
+    const rotulo = texto.slice(0, texto.indexOf(":"));
+    const depois = saida.slice(saida.indexOf(':') + 1);
+    assert.ok(!/[0-9]/.test(depois), `"${texto}" não pode deixar dígito depois do rótulo (sobrou ${JSON.stringify(depois)})`);
+    assert.ok(!depois.includes(rotulo), `"${texto}" não pode reexpor o rótulo`);
+  }
+  // Controle negativo: prosa sem rótulo sensível continua intacta, e uma frase longa não é consumida.
+  const prosa = 'A sessão de perguntas discutiu o cartão de crédito como tema e a chave do problema.';
+  assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
+  const longa = 'senha: ' + 'conteúdo longo '.repeat(20) + 'FIM-DA-LINHA';
+  const saida = sanitizeJsonData({ texto: longa }).texto;
+  assert.ok(saida.includes('FIM-DA-LINHA'), 'o consumo do valor é limitado e não engole a linha inteira');
+});

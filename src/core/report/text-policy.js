@@ -225,9 +225,13 @@ export function listedLimitations(limitations) {
     if (typeof value !== 'string') return null;
     let rest = value;
     let body = null;
-    for (let separator = rest.indexOf(': '); separator > 0; separator = rest.indexOf(': ')) {
+    // Qualquer espaço depois dos dois pontos (comum, tab, quebra de linha, não separável), não só o
+    // espaço comum: a alegação do V7 era mais larga que o código enquanto o separador era `': '`
+    // literal (achado N3 da revisão da 1.1.25). Sem separador nenhum continua fora, de propósito.
+    for (let match = /:([\s\u00a0])/u.exec(rest); match && match.index > 0; match = /:([\s\u00a0])/u.exec(rest)) {
+      const separator = match.index;
       if (rest.slice(0, separator).includes(' ')) break;
-      rest = rest.slice(separator + 2);
+      rest = rest.slice(separator + 1 + match[1].length);
       body = rest.trim();
     }
     return body;

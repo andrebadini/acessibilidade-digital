@@ -4,7 +4,17 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.25 preparada — sem revisão independente ainda.** A revisão da **1.1.24** saiu favorável
+**Versão 1.1.26 preparada — sem revisão independente ainda.** A revisão da **1.1.25** saiu favorável
+(**0 Critical, 0 Important**, 4 Minor + 4 observações) e aprovou aquele artefato como candidato. A 1.1.26
+fecha o que ela achou, e a lição de método está no primeiro item: **N1**, oito grafias de credencial
+(`motdepasse`, `passwrd`, `passw0rd`, `palavra-passe`, `palavrapasse`, `frase-passe`, `frasepasse`,
+`passwort`) que a 1.1.24 tarjava e a minha troca de radical perdeu — cada troca de vocabulário passa a ser
+medida contra o vocabulário anterior, não só contra o alvo novo; **N2**, o valor tarjado passa a ser
+consumido por inteiro (antes `cartão: 4111 1111 1111 1111` deixava 12 dos 16 dígitos) e o teste passou a
+afirmar que nenhum dígito sobra; **N3**, a deduplicação aceita qualquer espaço depois dos dois pontos; e
+**O2**, o tarjador de valores passou a conhecer `pwd`, `passcode`, `passphrase`, `pass` e `auth`.
+Os seis E2E de escopo citados nas versões anteriores são curto-circuito, exportação da página atual,
+impressão executiva, layout de impressão, quebras de impressão e proveniência de versão. A revisão da **1.1.24** saiu favorável
 (**0 Critical, 0 Important**, 4 Minor + 2 observações) e aprovou aquele artefato como candidato. A 1.1.25
 fecha o que ela achou: o **A2**, uma regressão de privacidade que eu introduzi na 1.1.23 — o lookbehind de
 dois caracteres deixava escapar `bypasscode`, `bypass_code`, `bypasswd`, `bypass_key` e `bypassword`, que

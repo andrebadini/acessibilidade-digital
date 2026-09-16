@@ -97,3 +97,18 @@ test('dois códigos com a mesma frase produzem UMA entrada na lista (o código e
   const outra = 'ANNOTATION_MAP_PARTIAL: O mapa visual foi gerado com cobertura parcial e limitações explícitas.';
   assert.deepEqual(listedLimitations([primeira, segunda, outra, corpo]), [primeira, outra]);
 });
+
+test('a deduplicação aceita qualquer espaço depois dos dois pontos, não só o espaço comum', () => {
+  // A revisão da 1.1.25 mediu que a minha alegação do V7 era mais larga que o código: o separador era
+  // `': '` literal, então tab, quebra de linha e espaço não separável escapavam. O código passou a
+  // aceitar qualquer espaço — e esta é a forma de a frase voltar a valer o que o código faz.
+  const separadores = [' ', '\t', '\n', '\u00a0'];
+  for (const separador of separadores) {
+    const codificada = `CODE:${separador}frase repetida.`;
+    assert.deepEqual(listedLimitations([codificada, 'frase repetida.']), [codificada],
+      `separador ${JSON.stringify(separador)} precisa ser reconhecido`);
+  }
+  // Sem separador nenhum continua fora, e isso fica declarado: não é forma que o gerador produza.
+  assert.deepEqual(listedLimitations(['CODE:frase colada.', 'frase colada.']),
+    ['CODE:frase colada.', 'frase colada.']);
+});

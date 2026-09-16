@@ -1,16 +1,21 @@
-// Fronteira do radical de senha: ele exige cauda de credencial (word/wd/code/phrase/key, com ou sem
-// separador) ou a palavra inteira `pass` — e `pass` sozinho não pode vir precedido de "by", senão
-// "bypass" (WCAG 2.4.1) seria tarjado. O lookbehind de dois caracteres da 1.1.23 deixava escapar
-// `bypasscode`, `bypass_code`, `bypasswd`, `bypass_key` e `bypassword`, que ERA tarjado antes (achado
-// A2 da revisão da 1.1.24). `passed`, `passes`, `passive`, `passing`, `passage` e `passport` ficam
-// preservados.
+// Radical de senha: LISTA de caudas de credencial (word/wd/wrd/w0rd/wort/code/phrase/key, com ou sem
+// separador), a palavra inteira `pass` (desde que não venha de "by" nem seja sufixo de palavra
+// inocente) e as formas compostas de outros idiomas (`palavra-passe`, `frase-passe`, `mot de passe`).
+// Duas lições medidas, nesta ordem: o lookbehind de dois caracteres da 1.1.23 deixava escapar
+// `bypasscode` e companhia (A2, 1.1.24); e o radical fechado que corrigiu o A2 PERDEU oito grafias
+// que a versão anterior tarjava — `motdepasse`, `passwrd`, `passw0rd`, `palavra-passe`,
+// `palavrapasse`, `frase-passe`, `frasepasse`, `passwort` (N1, 1.1.25). Por isso o teste fixa os três
+// conjuntos: o que precisa ser tarjado, o que precisa ser preservado e o que a versão anterior já
+// tarjava. `passed`, `passes`, `passive`, `passing`, `passo`, `passage`, `passport`, `passer`,
+// `passable`, `passepartout` e `passim` ficam preservados; `compass` continua sendo tarjado de
+// propósito, porque excluí-lo exigiria abrir mão de `myPass`/`userPass`.
 //
 // Vocabulário sensível, em inglês e em português: uma página brasileira pode expor a credencial em
 // `?senha=` ou `?cpf=`, e o produto afirma que a URL entregue é sanitizada. A expansão é sempre para
 // o lado seguro (tarjar a mais), mas os radicais curtos ficam de fora de propósito: "conta" pegaria
 // "contato", "pix" pegaria "pixelRatio" e "rg" pegaria "cargo" — perder esses campos seria corromper
 // o relatório, não protegê-lo.
-export const SENSITIVE_KEY = /(?:pass[-_ ]?(?:word|wd|code|phrase|key)|(?<!by)pass(?![-_a-z])|pwd|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)/iu;
+export const SENSITIVE_KEY = /(?:pass[-_ ]?(?:word|wd|wrd|w0rd|wort|code|phrase|key)|(?<!by)pass(?!ed|es|ive|ing|o|age|port|[-_a-z])|palavra[-_ ]?passe|frase[-_ ]?passe|mot[-_ ]?de[-_ ]?passe|pwd|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)/iu;
 export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
 // Public storage failures stay independent from browser/IndexedDB error details,
@@ -155,10 +160,13 @@ export function backgroundImageKind(value) {
   return 'mixed';
 }
 
+// O valor é consumido por INTEIRO (até 120 caracteres, parando em quebra de linha, `<` ou `;`), não
+// só o primeiro token: `cartão: 4111 1111 1111 1111` deixava 12 dos 16 dígitos no texto (achado N2 da
+// revisão da 1.1.25). O limite evita engolir uma linha inteira de prosa legítima.
 export function redactSensitiveText(value) {
   return String(value ?? '')
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
-    .replace(/\b(authorization|password|passwd|token|secret|api[-_ ]?key|csrf|xsrf|otp|session|cookie|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s<]+)/giu, '$1$2[redacted]')
+    .replace(/\b(authorization|password|passwd|pwd|passcode|passphrase|pass|token|secret|auth|api[-_ ]?key|csrf|xsrf|otp|session|cookie|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\n<;]{1,120})/giu, '$1$2[redacted]')
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@');
 }
 
