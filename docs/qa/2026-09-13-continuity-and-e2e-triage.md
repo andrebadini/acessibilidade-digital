@@ -914,3 +914,39 @@ A distinção que importa: a exigência de "não fazer o usuário assistir a rol
 **Cobertura nova.** `test/e2e/offscreen-highlight-scroll-mv3.test.mjs`, registrado em `scripts/run-tests.mjs`: exige que a leitura do relatório deixe a página onde estava, que a fixture coloque a falha confirmada abaixo da dobra, que a ação oferecida seja a que promete "Ver", que após o clique o elemento esteja dentro da viewport **sem encostar na borda**, que a marcação esteja sobre ele com tolerância de 2 px, que o foco não se mova e que a rolagem tenha parado — o que falharia se alguém trocasse por uma animação. Verde, 3,0 s, com o diagnóstico `scrollY 0 -> 2826; element top 314 of 649; mark on target; focus kept`.
 
 Também merece registro o método: o revisor deixou um arquivo temporário no worktree (`tmp-scroll-probe.test.mjs`). Removi depois de extrair o valor dele. O achado era bom — a hipótese era legítima e valia medir —, mas a sonda media a página errada, e só a reprodução com a fixture certa revelou isso.
+
+## Rodada 33 — três achados Important da revisão independente, corrigidos com RED medido
+
+A revisão integrada independente entregou três achados Important. Os três atacavam requisitos explícitos do produto, e os três foram corrigidos com o RED observado antes da correção. Também registro duas coisas que **tentei e revertei**, porque a tentativa errada tem valor.
+
+### A1 — "Inconformidade ao item N" emitida para recomendações
+
+`legalAnalysis` (`src/core/report/html.js`) aceitava `['requirement','recommendation']` e imprimia a frase curta para os dois. Um item como 5.1.2 — que é **recomendação** e automatizado — produzia "Inconformidade ao item 5.1.2 da ABNT NBR 17225:2025". O resto do produto recusa exatamente isso: o painel (`panel-detail.js`) e a view do relatório (`report-view.js`) exigem `classification === 'requirement'`, `finding-kind.js` mapeia recomendação não atendida para `advisory`, e o texto didático diz que isso "não demonstra descumprimento do mínimo nem determina infração ou multa".
+
+RED medido no card real, antes de tocar no código: a ocorrência `occ-recommendation-failed` trazia `<section class="legal-analysis">…Inconformidade ao item 5.1.2…`, com a ficha exibindo "Recomendação ABNT" ao lado. Corrigido para `item.classification !== 'requirement'`. O teste que fixava o comportamento errado (`keeps eligible failed ABNT references concise including recommendations`) foi reescrito: agora exige a frase para o requisito 5.1.1, exige a **ausência** dela para a recomendação 5.1.2, e conta uma única seção `legal-analysis`.
+
+Escala do que estava em jogo: **50 dos 146 itens são recomendação**, e 8 deles são automatizados — 5.1.2, 5.4.4, 5.8.6, 5.9.14, 5.10.5, 5.11.2, 5.12.5, 5.15.3. O revisor confirmou por leitura que pelo menos um (`uniqueLandmarks` → 5.4.4) pode retornar `failed`. Nenhum deles pode mais receber a frase de inconformidade.
+
+### A3 — decisão humana sem nota carimbava "Falha confirmada"
+
+`treatmentTone` (`src/core/report/evidence-treatment.js`) pintava o tom como falha só pelo par `outcome === 'failed' || answer === 'não conforme'`, **sem exigir nota**. O portão normativo (`consumer-basis.js`) exige nota: sem ela, o produto se recusa a emitir a referência. Resultado medido: a mesma decisão sem nota produzia a legenda "✕ Falha confirmada — moldura vermelha sólida" **e** `legalReference: null`. As duas superfícies discordavam sobre o mesmo ato.
+
+A nota é opcional por desenho ("Nota opcional" na revisão). Corrigido: o tom `failed` por decisão humana passa a exigir nota não vazia; sem ela a ocorrência continua em revisão, que é o que ela é. O teste que fixava o comportamento antigo foi reescrito com três ocorrências — com nota (falha), sem nota (revisão) e sem decisão (revisão) — e uma expectativa minha intermediária errada foi corrigida no caminho: o produto emite **um derivado por tom distinto** da mesma evidência, não um por ocorrência.
+
+### A2 — URL de recurso levando entrada refletida ao relatório
+
+O achado é real e medi o vazamento. Mas a primeira correção que tentei estava **larga demais** e vale registrar: troquei `sanitizeResourceUrl` pela sanitização estrutural, que remove a query de **todo** atributo de URL. Isso derrubou **63 testes** — os contratos de `href`, vínculo de evidência, destaque e o próprio teste que exige `URL da mídia: https://media.test/a&b` com a query preservada. Revertei por inteiro e fui ao ponto certo.
+
+O ponto certo é o coletor, onde o valor nasce. `cleanUrl` (`src/collector/page-collector.js`) apagava só parâmetros com nome sensível em inglês, e por isso `?q=<CPF>` e `?nome=Maria&email=<...>` passavam. Agora ele remove query e fragmento **estruturalmente** e mantém origem e caminho, que é o que identifica o recurso. Cobertura nova: `test/e2e/resource-url-privacy.test.mjs`, com cinco imagens (sem query, com CPF, com dados pessoais, com fragmento, com credencial), exigindo origem e caminho preservados e o registro de mídia limpo, sem tocar na página.
+
+### O que continua ABERTO depois desta rodada, com o tamanho exato
+
+O atributo **cru** `src` do elemento ainda preserva parâmetros de query não sensíveis: `sanitizeResourceUrl` mantém a query porque os mesmos atributos servem a links de navegação, cujo endereço é o dado sob teste. Medi isso no instantâneo: `src: "http://…/foto.png?q=MEU-CPF-123.456.789-00"` sobrevive. O coletor já limpa o registro de mídia, então o vazamento está limitado ao valor do atributo no instantâneo; fechá-lo exige mudar o contrato de URL também para `href`, o que é decisão com raio de alcance próprio e **não foi tomada**. O teste registra o estado medido — e afirma explicitamente que a lacuna está aberta — em vez de escondê-la atrás de uma asserção mais fraca.
+
+### Achados menores registrados, não corrigidos
+
+Do relatório do revisor, ficam no backlog sem bloquear: A4 (perda de conexão e falha de destaque anunciadas só na região visualmente oculta), A6 (`clip-path: url(...)` sem redação, sem caminho até o relatório), A7 (allowlists divergentes de `contenteditable` entre `privacy.js` e `snippet.js`), A8 (`getEvidenceUrl` interno não força `includeQuery === false`), A9 (limpeza de downloads sem estado terminal), A10 ("Revisão humana" somando checklist no caminho legado) e A11 (donut somando os quatro grupos). A5 permanece como já documentado na rodada 31 — o filtro de vocabulário inglês —, com a classificação Minor do revisor aceita, porque o conteúdo digitado não vaza.
+
+### Suíte
+
+4183 testes, 4175 passam, 8 falham — as mesmas 8 pré-existentes. `git diff --check` verde.

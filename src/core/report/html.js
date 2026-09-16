@@ -503,7 +503,12 @@ function normativeMapping(occurrence, item) {
 }
 
 function legalAnalysis(occurrence, item, anchor, displayOutcome, decision) {
-  if (displayOutcome !== 'failed' || !item || !['requirement', 'recommendation'].includes(item.classification)) return '';
+  // Only a requirement can carry the short nonconformity reference. An unmet recommendation is an
+  // improvement the page should make, not a breach of the mandatory minimum, and the rest of the
+  // product already refuses to convert it: the panel and the report view both gate on
+  // classification === 'requirement', and the didactic text states that an unmet recommendation
+  // neither demonstrates a breach of the minimum nor determines a fine.
+  if (displayOutcome !== 'failed' || !item || item.classification !== 'requirement') return '';
   const automaticBasis = consumerBasisForOccurrence(occurrence);
   const reviewedFailure = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme';
   if ((!automaticBasis && !reviewedFailure) || (automaticBasis && occurrence.legalAnalysis?.basisRef !== automaticBasis.id)) return '';

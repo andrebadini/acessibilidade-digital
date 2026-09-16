@@ -117,3 +117,18 @@ O que uma implementação correta exige, e que fica registrado como desenho a ex
 3. a reprovação confirmada continua reservada ao caso em que **nenhum** marcador foi declarado, porque aí não há o que perceber.
 
 Os três passos são coerentes entre si e nenhum deles pode ser feito sozinho sem produzir conclusão errada. Enquanto os três não forem feitos juntos, 5.9.7 permanece em `cantTell` agregado — sem alvo por campo, sem aprovação falsa e sem reprovação falsa.
+
+### Correção do predicado de recorte, encontrada por tentativa de refutação
+
+Depois de implementar `clippedAway`, escrevi uma sondagem cujo único objetivo era **refutar** a detecção: dezessete declarações de recorte num rótulo visível, medindo quais viravam alvo. Ela expôs dois falsos negativos reais, os dois em `clip-path:inset(...)`:
+
+- `inset(50% round 10px)` — recorte total, não detectado, porque a expressão regular exigia que o parêntese fechasse logo após os valores e o `round` no fim quebrava o casamento.
+- `inset(50% 0%)` — recorte total na vertical, não detectado, porque eu exigia 49% ou mais em **todos** os tokens e ignorava a expansão CSS de um a quatro valores.
+
+Também confirmei que a detecção **não** produz falso positivo nos casos que devem passar: `inset(0%)`, `inset(10%)`, `inset(25%)`, `inset(40%)`, `circle(50%)`, `ellipse(25% 25%)`, `polygon(...)`, `clip: auto` e `clip-path: none` — nenhum vira alvo. E `clip:rect(0px,0px,0px,0px)` continua detectado enquanto `clip:rect(0px,100px,30px,0px)` não.
+
+Correção: o predicado agora expande os valores como margens (um valor para os quatro lados, dois para vertical e horizontal, três para topo, horizontal e base) e aceita o `round` opcional. A condição é **um eixo fechado**, não dois: 50% à esquerda e à direita zera a largura independentemente dos valores verticais.
+
+Ao escrever os testes unitários errei **sete vezes** a expansão do `inset` — cheguei a afirmar que `inset(50% 0% 0% 0%)` fechava o eixo horizontal quando na verdade fecha o topo. Cada erro foi corrigido pela medição, não por releitura, e o teste final usa uma matriz de valores em vez de estilos escritos à mão, justamente para não repetir esse tipo de engano.
+
+Cobertura: matriz de seis casos que fecham um eixo (incluindo as duas formas com `round`) e seis que não fecham, mais a lista de formas não interpretadas. 21/21 em formulários.

@@ -30,6 +30,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/report-executive-print.test.mjs',
   'test/e2e/report-print-layout.test.mjs',
   'test/e2e/required-field-observation.test.mjs',
+  'test/e2e/resource-url-privacy.test.mjs',
   'test/e2e/retention-indexeddb-mv3.test.mjs',
   'test/e2e/sidepanel-flow-mv3.test.mjs',
   'test/e2e/text-alignment-observation.test.mjs',

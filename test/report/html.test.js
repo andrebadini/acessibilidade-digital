@@ -490,19 +490,29 @@ test('renders the approved ten-section information hierarchy before technical me
   assert.doesNotMatch(html, /percentual de conformidade/iu);
 });
 
-test('keeps eligible failed ABNT references concise including recommendations', () => {
+test('reserves the short nonconformity reference for requirements, never for recommendations', () => {
+  // The whole product refuses to turn an unmet recommendation into a mandatory infraction: the
+  // panel and the report view both gate the reference on classification === 'requirement', and the
+  // didactic text says an unmet recommendation neither shows a breach of the minimum nor
+  // determines a fine. This legacy renderer accepted both classifications, so an item like 5.1.2,
+  // which is a recommendation and automated, printed "Inconformidade ao item 5.1.2" while the
+  // production path printed nothing. The wording has to follow the classification.
   const html = renderHtmlReport(withFailedRecommendation());
   const failedRequirement = occurrenceCard(html, 'occ-focus-failed');
   const failedRecommendation = occurrenceCard(html, 'occ-recommendation-failed');
   const humanReview = occurrenceCard(html, 'occ-focus-review');
-  for (const card of [failedRequirement, failedRecommendation]) {
-    assert.match(card, /Inconformidade ao item 5\.1\.[12] da ABNT NBR 17225:2025/u);
-    assert.doesNotMatch(card, /Quando aplicável a uma relação de consumo|A conclusão jurídica depende/u);
-    assert.doesNotMatch(card, /conclusão jurídica final|certificação jurídica automática/iu);
-  }
+  assert.match(failedRequirement, /Inconformidade ao item 5\.1\.1 da ABNT NBR 17225:2025/u);
+  assert.doesNotMatch(failedRequirement, /Quando aplicável a uma relação de consumo|A conclusão jurídica depende/u);
+  assert.doesNotMatch(failedRequirement, /conclusão jurídica final|certificação jurídica automática/iu);
+
+  // 5.1.2 is a recommendation: the card names it as one and carries no nonconformity reference.
   assert.match(failedRecommendation, /Recomendação ABNT/u);
+  assert.doesNotMatch(failedRecommendation, /Inconformidade ao item/u);
+  assert.doesNotMatch(failedRecommendation, /class="legal-analysis"/u);
+
   assert.doesNotMatch(humanReview, /Base consumerista padronizada para análise/u);
-  assert.equal((html.match(/class="legal-analysis"/gu) || []).length, 2);
+  assert.equal((html.match(/class="legal-analysis"/gu) || []).length, 1,
+    'only the requirement may carry the short nonconformity reference');
 });
 
 test('keeps engine result, human decision and derived display state visibly separate', () => {

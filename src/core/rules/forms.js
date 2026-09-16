@@ -40,16 +40,32 @@ function isNativeLabelable(node) {
 // preenchido. O que a medição pode afirmar com segurança é o inverso — quando o recorte está
 // aplicado, o rótulo não está visível —, e é isso que este predicado detecta. Ele é deliberadamente
 // conservador: só reconhece o recorte declarado nas folhas de estilo, nunca "parece escondido".
-function collapsedInsets(value) {
-  const match = /^inset\(\s*([^)]*)\)$/iu.exec(normalizeText(value));
-  if (!match) return false;
-  const parts = match[1].split(/\s+/u).filter(Boolean);
-  if (parts.length === 0 || parts.length > 4) return false;
+// A sintaxe inset aceita de um a quatro valores e os expande como as margens: um valor vale para
+// os quatro lados, dois valem para vertical e horizontal, três para topo, horizontal e base. Uma
+// tentativa anterior exigia 49% ou mais em todos os tokens e por isso deixava passar
+// `inset(50% 0%)` (50% na vertical já colapsa a altura) e `inset(50% round 10px)` (o `round` no
+// fim quebrava a expressão regular). Ambos foram encontrados por uma sondagem feita para refutar
+// a detecção, e ambos são recortes totais.
+function insetSides(argument) {
+  const parts = normalizeText(argument).split(/\s+/u).filter(Boolean);
+  if (parts.length === 0 || parts.length > 4) return null;
   const percents = parts.map(part => {
     const number = /^(-?\d+(?:\.\d+)?)%$/u.exec(part);
     return number ? Number(number[1]) : null;
   });
-  return percents.every(percent => percent !== null && percent >= 49);
+  if (percents.some(percent => percent === null)) return null;
+  const [first, second = first, third = first, fourth = second] = percents;
+  return { top: first, right: second, bottom: third, left: fourth };
+}
+
+/** Colapsa quando o recorte fecha um eixo inteiro. Não é uma prova de invisibilidade: um eixo
+ *  fechado num elemento com a outra dimensão ainda positiva não o esconde por completo. */
+function collapsedInsets(value) {
+  const match = /^inset\(\s*([^)]*?)\s*(?:round\s[^)]*)?\)$/iu.exec(normalizeText(value));
+  if (!match) return false;
+  const sides = insetSides(match[1]);
+  if (!sides) return false;
+  return (sides.top >= 49 && sides.bottom >= 49) || (sides.left >= 49 && sides.right >= 49);
 }
 
 function clippedAway(node) {

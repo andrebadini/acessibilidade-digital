@@ -12,18 +12,23 @@ export function collectRuntimePageData() {
     'overflow-y', 'clip', 'clip-path', 'animation-duration', 'animation-iteration-count',
     'transition-duration'
   ];
+  // Resource provenance keeps the origin and the path, which is what identifies the file, and
+  // drops the query and the fragment structurally. A name-based filter only catches English
+  // credential vocabulary, so a page that reflects typed input into a resource URL — `?q=<CPF>`,
+  // `?email=<address>` — carried it into the exported report as "URL da mídia". The evidence URL
+  // already drops the query; this makes the same rule structural for resources instead of a word
+  // list, which is the only way it holds for Portuguese and for parameters nobody anticipated.
   const cleanUrl = (value) => {
     if (typeof value !== 'string' || value.trim() === '') return '';
     if (/^data:/iu.test(value)) return 'data:[redacted]';
     if (/^blob:/iu.test(value)) return 'blob:[redacted]';
     try {
       const url = new URL(value, document.baseURI);
+      if (!['http:', 'https:'].includes(url.protocol)) return '';
       url.username = '';
       url.password = '';
-      for (const key of [...url.searchParams.keys()]) {
-        if (sensitive.test(key)) url.searchParams.delete(key);
-      }
-      if (sensitive.test(url.hash)) url.hash = '';
+      url.search = '';
+      url.hash = '';
       return url.href;
     } catch {
       return '';

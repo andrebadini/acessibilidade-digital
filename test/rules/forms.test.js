@@ -75,6 +75,45 @@ test('a clipped label becomes a per-field target and never a confirmed failure',
   ]);
   assert.deepEqual((await evaluate('form-field-label', partial)).targets, []);
 
+  // inset accepts one to four values and expands them like margins: one value applies to all four
+  // sides, two to vertical and horizontal, three to top, horizontal and bottom, four to top, right,
+  // bottom and left. A first implementation required 49% or more in every token, and a probe
+  // written to refute the detection found total clips it missed: the `round` keyword broke the
+  // expression match, and a two-value inset closed one axis while the other token stayed 0%.
+  // The rule is one closed axis, not two: 50% on left and right trims the width to zero whatever
+  // the vertical values are.
+  const withInset = (top, right, bottom, left) => {
+    const value = snapshot([
+      record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+        styles: { 'clip-path': `inset(${top}% ${right}% ${bottom}% ${left}%)`, clip: 'auto' } }),
+      record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+    ]);
+    return value;
+  };
+  for (const sides of [[50, 50, 50, 50], [50, 0, 50, 0], [0, 50, 0, 50], [25, 50, 25, 50],
+    [50, 25, 50, 25], [100, 100, 100, 100]]) {
+    const value = withInset(...sides);
+    assert.deepEqual((await evaluate('form-field-label', value)).targets.map(entry => entry.nodeId), ['field'],
+      `inset(${sides.join('% ')}%) closes an axis and must be treated as clipped`);
+  }
+  for (const sides of [[0, 0, 0, 0], [10, 10, 10, 10], [40, 40, 40, 40], [0, 0, 40, 0],
+    [40, 0, 0, 0], [0, 40, 0, 0]]) {
+    const value = withInset(...sides);
+    assert.deepEqual((await evaluate('form-field-label', value)).targets, [],
+      `inset(${sides.join('% ')}%) leaves both axes open and must not become a target`);
+  }
+  // The keyword form and the other shapes: `round` must not stop the match, and shapes the
+  // detection does not parse must never turn a visible label into a target.
+  for (const [style, expected] of [['inset(50% round 10px)', 1], ['inset(50% 0% round 4px)', 1],
+    ['circle(50%)', 0], ['ellipse(25% 25%)', 0], ['polygon(0 0, 100% 0, 100% 100%)', 0], ['none', 0]]) {
+    const style_ = snapshot([
+      record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+        styles: { 'clip-path': style, clip: 'auto' } }),
+      record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+    ]);
+    assert.equal((await evaluate('form-field-label', style_)).targets.length, expected, `${style}`);
+  }
+
   // The legacy clip:rect(0,0,0,0) technique counts as hidden too.
   const legacy = snapshot([
     record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,

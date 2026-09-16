@@ -23,7 +23,14 @@ function treatmentTone(occurrence) {
   if (!occurrence || typeof occurrence !== 'object' ||
     !NORMATIVE_CLASSIFICATIONS.has(occurrence.classification)) return null;
   const answer = occurrence.decision?.answer;
-  if (occurrence.outcome === 'failed' || answer === 'não conforme') {
+  // An engine failure is its own verdict. A human "não conforme" is a verdict too, but only when it
+  // carries the note the normative gate requires: that gate refuses to emit the reference for a
+  // decision without a note, so stamping the capture "Falha confirmada" in that case makes the two
+  // surfaces disagree about one act — the picture confirming a failure the report declines to
+  // qualify. Without the note the occurrence stays in review, which is what it is.
+  const reviewedFailure = answer === 'não conforme' &&
+    typeof occurrence.decision?.note === 'string' && occurrence.decision.note.trim().length > 0;
+  if (occurrence.outcome === 'failed' || reviewedFailure) {
     return occurrence.classification === 'recommendation' ? 'advisory' : 'failed';
   }
   if (answer === 'conforme') return null;
