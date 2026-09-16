@@ -1572,3 +1572,19 @@ O documento do usuário `entregas/comparacao-avaliadores-externos.md` (fora do r
 - o número atual que existe é o da página do Google medido sobre os bytes empacotados (0 falhas, 1 alerta, 3 suspeitas com 4 ocorrências, 9 positivos, cobertura 29,2%, índice 9,0/10, PDF de 17 páginas), com ponteiro para o registro de método nesta trilha.
 
 As conclusões técnicas do documento (natureza local do processamento, ABNT contra WCAG, tratamento da incerteza, unidades de contagem e ausência de nota única) continuam corretas para a versão atual — e a terceira ficou **mais** verdadeira depois das correções: "não converte suspeita em infração" agora vale também para 5.9.7.
+
+## Pista medida para a intermitência do painel (critério 1), sem executar Chrome
+
+A asserção que falhou uma vez em três execuções está em `test/e2e/mandatory-journey-mv3.test.mjs`:
+
+```js
+linha 68:  const panelSize = await evaluate(panel, `({ w: innerWidth, h: innerHeight })`);   // linha de base
+linha 175: assert.deepEqual(await evaluate(panel, `({ w: innerWidth, h: innerHeight })`), panelSize,
+             'the side panel must not resize itself during the journey');
+```
+
+A linha de base é capturada **assim que o documento do painel carrega**. E é isso que o harness espera: `openSidePanelFromAction` aguarda o contexto exato de `SIDE_PANEL`, o alvo de página e o carregamento por CDP — **não espera o tamanho estabilizar**. O painel lateral é dimensionado pelo navegador, e nada no helper garante que a largura já tenha assentado no instante da primeira medição.
+
+**Hipótese, e o que ela prevê.** Se o que varia é o *assentamento* do painel depois do carregamento, então a diferença aparece entre a medição inicial e a final mesmo sem o produto redimensionar nada — e o teste acusaria o produto por um artefato de tempo. A previsão testável é: medir `innerWidth` repetidamente logo após a abertura, antes de qualquer ação do percurso, e ver se ele muda sozinho. Se mudar, a correção é **do teste** (esperar o tamanho estabilizar antes de gravar a linha de base, ou comparar com tolerância documentada), não do produto.
+
+**O que isto não é.** Não é conclusão: eu não medi. É a pista com o lugar exato onde olhar, para a triagem confirmar ou refutar — e ela tem a medição em mãos.
