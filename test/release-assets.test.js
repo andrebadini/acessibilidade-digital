@@ -99,9 +99,25 @@ test('publishes a complete privacy policy in Markdown and standalone HTML', asyn
 test('ships beta test instructions for the complete current-page journey and declares deferred controls', async () => {
   const instructions = (await read('store-assets/TEST-INSTRUCTIONS.md')).toString('utf8');
   for (const phrase of [
-    'Carregar sem compactação', 'painel lateral', 'Evidência completa', 'Somente elementos', 'Sem imagens',
-    'Continuar e capturar', 'WCAG 2.2', 'ABNT NBR 17225', 'Abrir relatório completo',
-    'HTML', 'PDF', 'CSV', 'JSON-LD/EARL', 'Outra URL', 'Várias páginas', 'mapa numerado',
+    'Carregar sem compactação', 'painel lateral', 'WCAG 2.2', 'ABNT NBR 17225',
+    'HTML', 'PDF', 'CSV', 'JSON-LD/EARL', 'mapa numerado',
   ]) assert.match(instructions, new RegExp(phrase, 'iu'));
   assert.doesNotMatch(instructions, /campo “Endereço do site”|aba descartável|1\.0\.1/iu);
+  // Rótulos que o roteiro manda CLICAR precisam existir no produto: a versão anterior deste teste só
+  // exigia que a palavra estivesse no documento, e por isso "Várias páginas" (o botão real é "Lote de
+  // páginas") passou por várias versões sem que ninguém notasse — um teste que se lê a si mesmo.
+  const productUi = [
+    await read('src/panel/panel-view.js'),
+    await read('src/review/report-view.js'),
+    await read('src/review/index.html'),
+  ].map(buffer => buffer.toString('utf8')).join('\n');
+  for (const label of [
+    'Evidência completa', 'Somente elementos', 'Sem imagens', 'Continuar e capturar',
+    'Auditar a página atual', 'Outra URL', 'Lote de páginas', 'Abrir relatório completo',
+    'Destacar elemento', 'Mostrar sinais na página', 'Ver e destacar na página',
+    'Refazer auditoria', 'Gerar relatório atualizado', 'Imprimir resumo / salvar PDF',
+  ]) {
+    assert.match(instructions, new RegExp(label, 'iu'), `o roteiro precisa citar ${label}`);
+    assert.ok(productUi.includes(label), `o rótulo ${label} citado no roteiro não existe no produto`);
+  }
 });
