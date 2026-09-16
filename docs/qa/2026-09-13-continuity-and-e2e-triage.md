@@ -2271,3 +2271,13 @@ Com o Chrome livre (a revisão da 1.1.25 estava na fase de análise), rodei os *
 
 **Correção ao que eu havia registrado sobre as falhas do arquivo alheio.** A rodada 57 apontou a espera impossível por registro de posse (`assertPausedAttempt`) como causa. A execução completa mostra que **as falhas não são só essa**: o arquivo falha em
 `original-page ABNT markers remain usable across idle…` e `…visual review and verified exports` (WAIT_TIMEOUT, ~32 s cada), em `passive current-page observes memory-only elements…` (element-only e full-evidence, AssertionError), em `full-evidence can be cancelled at the privacy pause…` (WAIT_TIMEOUT) e em `current-page audits run in one inactive copy…`. Ou seja: **a posse explica parte, não o conjunto**, e o ponteiro da rodada 57 vale para os casos de pausa/consentimento — os demais precisam da mesma análise caso a caso quando o dono do arquivo retomar. Nenhuma dessas falhas é do produto: todas estão num arquivo sob edição de outro incremento.
+
+## Rodada 61 — a própria interface do painel varrida por nome acessível
+
+O produto audita acessibilidade alheia e não tinha nenhum teste que varresse os **próprios** controles: os testes de painel contavam botões por intenção, nunca conferiam se cada um tem nome acessível. Um botão ou campo sem nome é uma barreira dentro do nosso produto para quem usa leitor de tela — e é o tipo de coisa que a meta pede que a interface resolva, não que o relatório mencione.
+
+A varredura nova percorre as **sete telas** do painel (`initial`, `running`, `result`, `batch`, `single-url`, `start-failed`, `unavailable`) e exige, para cada `button`/`input`/`select`/`textarea`/`a`: texto, `aria-label`, `aria-labelledby`, `title`, `placeholder` ou `<label for>` correspondente. Ela se declara vacuosa se não encontrar controle nenhum.
+
+**Resultado: nenhum controle sem nome em nenhuma das telas** (52/52 no arquivo). Isso não fecha o critério 8 — que depende de uma pessoa de fora —, mas fecha a parte que se pode afirmar por medição automática: a interface não tem controle inaudível.
+
+**Registro de método, o quarto desta sessão.** A primeira versão da varredura acusou **três `INPUT` sem nome na tela inicial**. Antes de registrar como defeito, fui ver a matéria-prima: são campos com `<label for>` explícito, que a métrica não enxergava. A varredura passou a reconhecer `label[for]` — e o resultado virou verde. A acusação era da métrica, não do produto; é a mesma classe dos três casos anteriores (quebra de palavra de uma letra, `printedId` como identidade, alternância satisfeita pelo código).
