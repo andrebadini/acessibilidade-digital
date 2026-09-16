@@ -1588,3 +1588,19 @@ A linha de base é capturada **assim que o documento do painel carrega**. E é i
 **Hipótese, e o que ela prevê.** Se o que varia é o *assentamento* do painel depois do carregamento, então a diferença aparece entre a medição inicial e a final mesmo sem o produto redimensionar nada — e o teste acusaria o produto por um artefato de tempo. A previsão testável é: medir `innerWidth` repetidamente logo após a abertura, antes de qualquer ação do percurso, e ver se ele muda sozinho. Se mudar, a correção é **do teste** (esperar o tamanho estabilizar antes de gravar a linha de base, ou comparar com tolerância documentada), não do produto.
 
 **O que isto não é.** Não é conclusão: eu não medi. É a pista com o lugar exato onde olhar, para a triagem confirmar ou refutar — e ela tem a medição em mãos.
+
+## Padrão medido nas falhas da fase serial: ~30 s é o teto de comando do harness
+
+Leitura do log do lote serial que a triagem está rodando (medição dela). O que salta não é só *quantas* falham, mas **quanto tempo** cada uma leva antes de falhar:
+
+```
+✖ full-evidence can be cancelled at the privacy pause …        30 720 ms
+✖ no-pixels shows progress, completes in the copy …            30 027 ms
+✖ original-page ABNT markers remain usable across idle …       31 868 ms
+✖ original-page ABNT markers visual review and verified …      32 131 ms
+✖ runs pinned local axe in every isolated frame under CSP       1 535 ms   ← não é tempo
+```
+
+Quatro das cinco caem em torno de **30 s**, que é exatamente o `DEFAULT_COMMAND_TIMEOUT_MS = 30_000` do próprio harness (`test/e2e/support/real-chrome.mjs`). Isso desloca a hipótese: não são asserções sobre comportamento do produto falhando, são **comandos CDP que não respondem dentro do teto padrão** quando a máquina está carregada — coerente com o fato de os mesmos fluxos passarem isolados (o percurso obrigatório passou duas vezes comigo e uma com ela; `passive current-page` passou neste mesmo lote com o diagnóstico completo). A quinta é diferente e por isso é a que merece atenção: falha em **1,5 s**, rápido demais para ser tempo, e é a única candidata a defeito ou a asserção desatualizada.
+
+**O que isto muda.** O orçamento de download que eu já havia elevado (60/90/120 s → 300 s) era só uma das pontas; o teto de 30 s por comando CDP é a outra, e é do harness, não de cada teste. Se a triagem confirmar a leitura, a correção é de infraestrutura de teste — elevar o teto de comando para os fluxos pesados, sem tocar em asserção nenhuma —, e não de produto. Registro como leitura de log, não como conclusão: quem está medindo é a triagem.
