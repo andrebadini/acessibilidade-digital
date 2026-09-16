@@ -10,7 +10,14 @@
 > com o digest fixado, seis E2E do escopo 6/6, E2E de consentimento de pixels 10/10 com a asserção nova
 > da manchete, auditoria real do Google com 0 falhas, 9 positivos, 109 no checklist, 18 páginas e quatro
 > exportações completas, artefato entregue com notas 5/5 nos dois formatos e proveniência presente);
-> **10** segue pendente até a revisão da 1.1.25; **8** continua **Parcial**.
+> **9** ganha a verificação estática do `verify-project` (modo `AUDITA_VERIFY_SKIP_TESTS=1`, verde na
+> 1.1.25): manifest MV3 com CSP sem origem remota e sem `unsafe-eval`, axe-core fixado em 4.13.0 no
+> pacote e no lock, catálogo **130/146 (96 requisitos / 50 recomendações)**, **identidade neutra**
+> (nenhuma marca institucional), HTML/JSON/PDF, fixtures, privacidade e varredura de segredo/origem
+> remota em `src/`. **7** fica coberto por essa mesma checagem mais a conferência normativa dos 146
+> itens. **10** segue pendente até a revisão da 1.1.25; **8** continua **Parcial**. A execução completa
+> do `verify-project` (que roda `npm test`, incluindo a fase serial de Chrome real) fica para depois da
+> fase serial.
 
 > **Incremento 1.1.24, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.24.zip` (`978fa19e…665c01`), **sem revisão independente ainda**.
