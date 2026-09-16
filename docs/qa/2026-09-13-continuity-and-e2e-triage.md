@@ -2235,3 +2235,22 @@ Verificação larga e sem Chrome, sobre os bytes **empacotados** da 1.1.22 (audi
 
 1. `printedId` tem 145 valores distintos para 146 itens: o item **5.12.1** ("Espaçamento entre as linhas") imprime `5.1.12` porque é assim que o **Anexo C** o numera, e há **nota editorial** registrando exatamente isso (`field: printedId`, impresso `5.1.12 no Anexo C`, normalizado `5.12.1 conforme a Seção 5`). A identidade correta é `id` — e por `id` são 146 distintos. Minha primeira comparação usou `printedId` como identidade e acusou uma divergência que não existe: erro da métrica, não do artefato.
 2. A matriz do HTML é ordenada **lexicograficamente** (`.sort((l, r) => l.id.localeCompare(r.id))`, `report-view.js:423`), então a sequência é 5.1.1, 5.1.10, 5.1.11, …, 5.1.2; o JSON segue a ordem do catálogo (numérica). É **deliberado no código** e não confunde dado nenhum (cada linha carrega seu id), mas quem confere item a item contra a norma impressa lê fora da ordem dela. Fica como **candidato a Minor de apresentação** para o próximo incremento — não mexo agora porque o artefato 1.1.22 está congelado para revisão e a revisão está justamente comparando as linhas da matriz.
+
+## Rodada 59 — material de loja conferido contra o código, e um teste que se lia a si mesmo
+
+Nenhuma revisão independente olhou `store-assets/` até aqui: as revisões mediram produto, pacote e relatório. Conferi o material de distribuição contra o código, promessa por promessa, e achei um defeito de documentação com causa interessante.
+
+**O defeito:** o roteiro de teste mandava clicar em **"Várias páginas"**, rótulo que **não existe** — o botão é **"Lote de páginas"** (`panel-view.js:236`). Passou por várias versões porque o teste que o protegia (`test/release-assets.test.js`) só verificava que a palavra estava **no documento**: um teste que se lê a si mesmo, sem nunca conferir o produto. Corrigido o rótulo e, principalmente, o teste: os 14 rótulos que o roteiro manda **clicar** agora precisam existir em `panel-view.js`, `report-view.js` ou `review/index.html`. O reforço apontou na hora um segundo defeito — o roteiro não citava **Imprimir resumo / salvar PDF**, controle que existe no guia do usuário e no README; entrou como passo 10, com os passos renumerados em ordem (1..14).
+
+**Promessas do material conferidas no código** (todas verdadeiras):
+
+| Promessa no material | Onde está no produto |
+|---|---|
+| Lote de **2 a 20** URLs | `panel-state.js:736` e `panel-view.js:31` ("Informe pelo menos 2 URLs válidas e diferentes") |
+| Retenção de **30 dias** desde o primeiro registro | `src/storage/audit-retention.js:3` (`RETENTION_MS = 30 * 24 * 60 * 60 * 1000`) |
+| Abas temporárias **inativas** | `run-audit.js:368` e `:821`, `export-launch.js:208`/`:216` (`active: false`) |
+| Exclusão após exportação **começa desmarcada** | `report-view.js:1027` (`deleteAfterExport.checked = false`) |
+| **Cinco etapas** de progresso | `RUNNING_PHASES`, `panel-view.js:14-20` (abertura, leitura, verificação, evidências, relatório) |
+| Quatro formatos, sem código remoto, sem vínculo institucional | `EXPORT_FORMATS_V1`; pacote MV3 verificado pelas revisões; material diz "ferramenta independente" |
+
+Nada disso toca bytes de produto: o digest da 1.1.24 continua o fixado (`978fa19e…665c01`) e `release-package` segue verde.
