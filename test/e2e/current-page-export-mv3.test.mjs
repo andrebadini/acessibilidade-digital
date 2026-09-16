@@ -42,6 +42,37 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
   const auditId = await extension.readAttribute(panel, '[data-screen="result"]', 'data-audit-id');
   assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
 
+  // Ask for one live marking before exporting. Besides being part of the required journey, this is
+  // what makes the audit mint the highlight nonce — the value that binds one marking to one document.
+  // Without it the nonce sweep below would have nothing to sweep and would pass vacuously.
+  const candidates = await evaluate(panel,
+    `Array.from(document.querySelectorAll('[data-result-card][data-classification="failed"] button[data-intent="SELECT_OCCURRENCE"]'), element => element.dataset.focusId)`);
+  assert.ok(candidates.length > 0, 'a fixture precisa produzir um achado confirmado para o destaque');
+  let highlighted = false;
+  for (const focusId of candidates) {
+    await evaluate(panel, `(() => {
+      const button = [...document.querySelectorAll('button[data-focus-id]')].find(node => node.dataset.focusId === ${JSON.stringify(focusId)});
+      const group = button?.closest('details[data-abnt-group]');
+      if (group && !group.open) group.querySelector('summary').click();
+      return Boolean(button);
+    })()`);
+    await extension.click(panel, `button[data-focus-id="${focusId}"]`);
+    // The action starts as `highlight-checking` while the worker proves the binding, exactly as in
+    // the mandatory journey; reading it immediately would sample that transient state.
+    const action = await waitForValue(panel,
+      `document.querySelector('[data-result-detail] .detail-actions [data-action]')?.dataset.action ?? null`,
+      value => value !== null && value !== 'highlight-checking', { timeoutMs: 5_000, intervalMs: 25 })
+      .catch(() => null);
+    if (action !== 'highlight-occurrence') continue;
+    await extension.click(panel, '[data-result-detail] .detail-actions [data-action="highlight-occurrence"]');
+    await waitForValue(extension.startPage.page,
+      `Boolean(document.querySelector('[data-audita-highlight-root]'))`, value => value === true,
+      { timeoutMs: 10_000, intervalMs: 50 });
+    highlighted = true;
+    break;
+  }
+  assert.equal(highlighted, true, 'o percurso precisa oferecer "Destacar elemento" em um achado confirmado');
+
   await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
   const report = await extension.waitForReport({ auditId });
   await waitForValue(report, `Boolean(document.querySelector('button[data-report-export]'))`, value => value === true, { timeoutMs: 30_000 });
@@ -72,11 +103,21 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
       if (match && /^[A-Za-z0-9_-]{22}$/u.test(match[1])) ids.add(match[1]);
     }
     for (const match of dump.matchAll(/owner_[A-Za-z0-9_-]{22}/gu)) ids.add(match[0]);
+    let highlightNonces = 0;
+    for (const [key, value] of Object.entries(session)) {
+      if (!key.startsWith('audita:highlight-bindings')) continue;
+      for (const match of JSON.stringify(value).matchAll(/"nonce":"([A-Za-z0-9_-]{22})"/gu)) {
+        ids.add(match[1]);
+        highlightNonces += 1;
+      }
+    }
     const secrets = [...ids];
     const localText = JSON.stringify(local);
-    return { secrets, durableLeaks: secrets.filter(id => localText.includes(id)) };
+    return { secrets, highlightNonces, durableLeaks: secrets.filter(id => localText.includes(id)) };
   })()`, { awaitPromise: true });
   assert.ok(collected.secrets.length > 0, 'a auditoria precisa ter emitido ao menos um segredo de sessão para a varredura valer');
+  assert.ok(collected.highlightNonces > 0,
+    'a varredura do nonce do destaque precisa ter um nonce real para varrer, senão ela passa por vacuidade');
 
   const surfaces = {
     'página auditada': await evaluate(extension.startPage.page, 'document.documentElement.outerHTML'),
