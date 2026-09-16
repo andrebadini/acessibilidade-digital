@@ -1744,3 +1744,21 @@ A linha 1043 é a chamada a `waitForOwner(extension, auditId, value => value.sta
 `BEGIN_ATTEMPT` é o primeiro passo — preparar e iniciar a tentativa —, e ele falha em ~30 s, com `beginAttachedAttempt` usando `timeoutMs: 30_000` na espera de prontidão do painel. Nenhum trabalho de auditoria chega a acontecer. O teste de `current-page` que engloba esses quatro leva 121 s e falha depois, o que é coerente com quatro subtests de 30 s somados.
 
 **Somando com o que já estava medido:** dois por registro de posse do outro incremento, quatro por prontidão em 30 s, um por orçamento de download de 311 s, um por limpeza de perfil no teardown. **Nenhum deles morre numa asserção sobre o resultado da auditoria** — nenhum diz "o produto avaliou errado". É por isso que a conclusão de que não há defeito de produto confirmado na minha área se sustenta, e não é otimismo.
+
+## Confirmado pelo diagnóstico da triagem: os dois de marcadores morrem em `waitForOwner`
+
+O diagnóstico dirigido dela rodou os dois testes isolados e o rastro é inequívoco:
+
+```
+Error: WAIT_TIMEOUT
+    at async waitForOwner (site19/test/e2e/sidepanel-flow-mv3.test.mjs:904:12)
+    at async assertPausedAttempt (sidepanel-flow-mv3.test.mjs:1064:19)
+```
+
+É o mesmo ponto que eu havia localizado lendo os rastros do lote (`assertPausedAttempt` → `waitForOwner`), agora com a função interna nomeada: **o registro de posse nunca chega ao estado `retained-for-consent`** que o teste exige. Duas leituras independentes, o mesmo lugar.
+
+**E o tempo conta uma segunda história.** Isolados, os dois levam **151,9 s e 152,1 s** (304 s no total) — ou seja, a espera do `waitForOwner` tem orçamento próprio de ~150 s e ele expira. No lote, os mesmos testes morriam em ~32 s. Isso significa que a superfície da falha **muda com o orçamento**: no lote, o teto de 30 s de algum comando aborta antes; isolado, o teste chega a esperar os ~150 s do próprio `waitForOwner` e falha ali. Não é contradição entre as duas execuções — é a mesma causa (o dono não aparece) vista por dois relógios diferentes.
+
+**O que isso decide.** A hipótese de "é só o teto de 30 s do harness" **não explica estes dois**: com orçamento de 150 s eles continuam falhando. A correção de uma linha que preparei ajuda o grupo de prontidão (os quatro de `BEGIN_ATTEMPT`), não estes. Estes são o registro de posse do outro incremento, e é exatamente o que a triagem está dumpando para decidir se é defeito de produto ou expectativa desatualizada do arquivo alheio.
+
+**Nota de método:** o `ADV119_OWNER_DUMP` saiu como `[object Object]` — o dump não foi serializado com `JSON.stringify`, então o conteúdo do dono não ficou legível nessa passagem. É problema do diagnóstico dela, não do produto, e não afeta o rastro de pilha acima.
