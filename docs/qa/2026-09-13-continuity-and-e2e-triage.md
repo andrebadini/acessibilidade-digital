@@ -484,3 +484,37 @@ Todos os seis passam, inclusive `chrome.storage.session.get(null).then(...)` e I
 Fica registrado porque duas rodadas foram gastas contornando uma limitação inexistente, e porque a conclusão certa naquele momento teria sido "minha sonda não mede o que eu penso", não "o helper não serve".
 
 Nenhuma alteração de código: o comportamento medido é o correto.
+
+## Estado consolidado ao fim desta sequência de rodadas
+
+Repositório saudável e verificado no HEAD `9d666a2`: **1406/1406** testes fora do Chrome (regras, integração, core, relatório, painel, revisão, exportação, navegador, destaque), `verify-project` estático GREEN, `git diff --check` limpo, árvore sem alterações pendentes além dos dois arquivos antigos preservados (`docs/superpowers/plans/2026-09-12-observed-page-passive.md` e `test/e2e/sidepanel-flow-mv3.test.mjs`).
+
+### Fechado e verificado em Chrome real nesta sequência
+
+- 5.9.1: identificação visual separada de nome acessível, pendência agregada sem alvo por campo (`e7adb4d`).
+- 5.9.7 e 5.9.8: lacunas de contrato de observação fechadas, com RED real antes de cada correção (`5da4a6d`).
+- Classificação de todos os E2E de Chrome real no runner, que antes abortava a suíte inteira antes de rodar qualquer teste (`5da4a6d`).
+- Cleanup do perfil temporário e corrida do teste de retenção (`e7414b4`).
+- Exportação da página atual: entrega os quatro formatos, com recibo durável conferido por bytes e SHA-256 (`ea3686c`).
+- Recibo parcial de revisão `review-ready` aceito, coerente com o que o produto já persiste (`6b2cac2`).
+- Destaque individual verificado ponta a ponta, agora com teste que exige a marcação na página e não apenas a oferta (`22ea7f8`).
+- Linha de status do relatório separando verificações de ocorrências (`0201f72`).
+- Oferta de sinais sem promessa de recuperação impossível (`6faf023`).
+
+### Pendência obrigatória restante
+
+**Sinais numerados na página não funcionam na auditoria da página atual.** Causa raiz medida: ao fim da auditoria a aba de origem não tem contexto de extensão, e o caminho dos sinais exige uma ponte viva (`audita-page-markers-v1`) mais origem registrada, enquanto o destaque individual funciona porque prova o alvo por `chrome.debugger`/CDP na aba viva. Correção especificada: dar aos sinais o mesmo mecanismo de prova e injeção, usando `runAuditaPageMarkersCommand`, que já é injetável.
+
+Não implementei nesta sequência porque é mudança de arquitetura no caminho de autorização e prova de documento — exatamente o tipo de alteração que o escopo manda tratar como incremento próprio, com RED, e não como remendo ao lado de um botão. Deixar isso pela metade seria pior que deixá-lo aberto e documentado.
+
+### Outras pendências registradas
+
+- `sidepanel-flow-mv3`: 9 de 12 cenários falham, preexistente (confirmado por stash). Próxima medição já delimitada: conferir no cenário oficial se o painel realmente passa por `[data-screen="running"][data-session-status="privacy-paused"]` com "Campo de senha" e "Conteúdo marcado como privado" na lista.
+- `service-worker.test.js`: 9 falhas `PERSONA_CLEANUP_UNCONFIRMED`, preexistentes, confirmadas no HEAD limpo.
+- Campos customizados editáveis: o nome acessível não chega ao consumidor por allowlist de privacidade; exige decisão de fronteira.
+- Produtor de identificação visual para 5.9.1 e produtor de obrigatoriedade perceptível para 5.9.7: ausentes.
+- Inspeção visual de HTML/PDF feita nesta versão (23 páginas, 1,07 MB, resumo honesto); comparação AMAWeb/AccessMonitor registrada com o confronto histórico.
+
+### Lição de método que custou rodadas
+
+Três hipóteses minhas foram publicadas como diagnóstico antes de estarem provadas, e duas estavam erradas: o "defeito de destaque" que não existia (a raiz do overlay é filha de `documentElement`, e eu media `body`) e a "limitação do helper de avaliação" (medida depois, sem defeito algum). A terceira — o cache de origem — foi descartada por medição. O custo foi de várias rodadas. O que funcionou foi sempre o mesmo: medir o estado real, com clique nativo, procurando o nó pelo atributo em todo o documento, e desconfiar da própria sonda antes de culpar o produto.
