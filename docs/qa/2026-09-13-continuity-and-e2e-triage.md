@@ -1193,3 +1193,30 @@ Isto é o inverso do que eu esperava encontrar, e vale registrar como método: q
 4. **9 cenários de `sidepanel-flow`**: causa diagnosticada (sessão pausada não tem registro de aba própria), pertence a outro incremento.
 5. **Vocabulário português no filtro de privacidade**: `SENSITIVE_KEY` não pega "senha".
 6. **Apresentação da fórmula**: o bloco da metodologia fica recolhido na aba e no exportado.
+
+## Rodada 42 — o artefato entregue, agora construído e fixado por hash
+
+Depois do commit `49d70ca` (alinhamento da fronteira do veredito humano) notei que o ZIP 1.1.15 com que eu vinha trabalhando tinha sido construído **antes** daquela mudança. Ou seja: fonte e artefato divergiam, e o meu próprio teste de pacote **não pegava isso** — ele constrói um ZIP novo a partir da árvore atual e confere contra ela, o que prova reprodutibilidade e fidelidade, mas nunca compara com o artefato entregue.
+
+Duas coisas corrigidas, e as duas importam para o critério 12:
+
+**1. O artefato canônico não existia.** `release/` não tinha `audita-acessibilidade-1.1.15.zip` — o diretório guarda 1.1.6 a 1.1.14 e a 1.1.15 nunca foi gerada ali. Construí pelo caminho oficial do projeto, `npm run build:release`, como o próprio registro de entrega da 1.1.14 descreve. Resultado:
+
+```
+audita-acessibilidade-1.1.15.zip
+SHA-256 5619e27d4002620fa61d57d24b06279dbc5a7ace1ec50a3e9b9df0b775b6b03b
+1.044.162 bytes · 199 arquivos · unzip -t sem erro
+manifesto dentro: version 1.1.15, version_name 1.1.15
+src/ do artefato idêntico à árvore, exceto src/popup que a distribuição não leva
+a correção do alinhamento presente no artefato
+```
+
+**2. O teste agora fixa o hash do artefato entregue.** `test/release-package.test.js` registra `5619e27d…` e exige que o ZIP construído a partir da árvore atual produza exatamente esse digest. Com isso, **um pacote obsoleto ou um fonte que andou sem reconstrução passa a falhar a suíte**, que era o buraco real: até aqui, eu podia mudar `src/` e continuar chamando de entregue um ZIP antigo sem que nada reclamasse. Foi exatamente o que aconteceu entre as rodadas 41 e 42.
+
+O teste também diz, no comentário, o que ele **não** prova: que o artefato executa. Executá-lo continua fora de alcance pelo harness, pelas razões medidas na rodada 40.
+
+### Estado da entrega
+
+- Artefato: `release/audita-acessibilidade-1.1.15.zip`, SHA-256 `5619e27d…`, construído do fonte atual e conferido byte a byte contra ele.
+- Revisão independente: 1.1.15 aprovado sem Critical/Important; o Minor apontado foi resolvido no commit `49d70ca`, que é anterior a este artefato — então **o artefato entregue inclui a resolução do achado da revisão**.
+- Suíte: 4184 testes, 4176 passam, 8 falham (as mesmas pré-existentes).

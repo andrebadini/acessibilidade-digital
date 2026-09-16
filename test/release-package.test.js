@@ -10,6 +10,10 @@ import test from 'node:test';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const releaseDirectory = fileURLToPath(new URL('../release/', import.meta.url));
 const packageName = 'audita-acessibilidade-1.1.15.zip';
+// The digest of the artifact that is actually delivered. It is recorded here so a source change
+// that was not followed by a rebuild fails the suite: the test builds from the current tree, so a
+// stale release/audita-acessibilidade-1.1.15.zip and a drifted source cannot both stay green.
+const deliveredPackageSha256 = '5619e27d4002620fa61d57d24b06279dbc5a7ace1ec50a3e9b9df0b775b6b03b';
 
 function runBuild(args) {
   return spawnSync(process.execPath, ['scripts/build-release.mjs', ...args], {
@@ -108,6 +112,9 @@ test('builds the public ZIP reproducibly in an isolated temporary directory', as
   const second = await digest(output);
   assert.equal(second, first);
   assert.deepEqual(await snapshotRelease(), releaseBefore, 'o teste não pode tocar em release/');
+
+  assert.equal(await digest(output), deliveredPackageSha256,
+    'o pacote construído a partir desta árvore precisa ser o artefato entregue; se o fonte mudou, reconstrua e atualize o hash registrado');
 
   const listing = spawnSync('unzip', ['-Z1', output], { encoding: 'utf8' });
   assert.equal(listing.status, 0, listing.stderr);
