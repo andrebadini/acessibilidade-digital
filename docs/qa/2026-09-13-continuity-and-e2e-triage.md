@@ -1463,3 +1463,27 @@ O passo "testar página simples, como Google" também estava pendente para esta 
 **Uma nota de infraestrutura:** a primeira tentativa de exportar estourou o tempo de espera (`DOWNLOAD_PROOF_TIMEOUT`) com 240 s; com 420 s os quatro arquivos saíram íntegros. A exportação desta página leva mais de quatro minutos, o que é útil saber antes de rodar o percurso completo em página grande.
 
 **Detecção conferida na fixture de defeitos conhecidos (falsos negativos).** A página de inspeção injeta um botão sem nome acessível, um campo sem rótulo, um link "clique aqui", um campo obrigatório com marcação, um obrigatório sem marcação e um com `aria-required` inválido. O relatório entregue traz **duas não conformidades confirmadas, exatamente as duas que a ABNT trata como requisito verificável no escopo automático** — item **5.13.10** (componente sem nome acessível, para o botão) e item **5.9.3** (rótulo de campo associado, para o campo sem rótulo) —, e as imprime com a frase legal. Não houve falha confirmada para o link "clique aqui" nem para os campos obrigatórios: o link é o caso de propósito genérico, que é suspeita e não infração, e os obrigatórios agora são suspeita por definição. O que a fixture prova é que **defeito injetado conhecido continua sendo detectado e classificado no grupo certo** depois de todas as mudanças desta sessão em 5.9.7 — o item que deixou de reprovar não arrastou os itens vizinhos.
+
+## Rodada 50 — dois defeitos de infraestrutura de teste que escondiam o E2E de Chrome
+
+Ao rodar os E2E de modo de evidência a partir do pacote extraído da 1.1.18, um deles falhou com `DOWNLOAD_PROOF_TIMEOUT`. Investiguei em vez de registrar "instabilidade", e encontrei **dois defeitos reais de infraestrutura**, nenhum deles no produto.
+
+**1. A suíte nunca executava os 34 E2E de Chrome real.** `scripts/run-tests.mjs` fazia:
+
+```js
+const parallelStatus = await runTests(plan.parallel);
+if (parallelStatus !== 0) return parallelStatus;   // <- parava aqui
+return runTests(plan.serial, { serial: true });
+```
+
+A fase paralela tem **oito falhas pré-existentes conhecidas**, então `parallelStatus !== 0` **sempre**, e a fase serial — os 34 arquivos de Chrome real, incluindo `mandatory-journey-mv3` — **nunca chegava a rodar**. Confirmei no log da suíte: `grep -c "mandatory journey"` devolveu **0**. Ou seja, todas as vezes que registrei "4185 testes, 4176 passam, 8 falham" eu estava reportando **apenas a fase paralela**, sem nenhum E2E de Chrome, e apresentando isso como suíte completa. É um erro meu de relato, e a causa é o runner.
+
+Corrigido: as duas fases sempre executam e o pior resultado é o que sai. `scripts/` não faz parte do pacote, então isso não alterou o artefato nem invalidou a revisão em curso.
+
+**2. Um E2E falhava de verdade, e ninguém via.** `test/e2e/batch-pixel-consent-mv3.test.mjs` falha com `DOWNLOAD_PROOF_TIMEOUT` **na própria árvore**, não só na cópia do pacote: reproduzi com `node --test test/e2e/batch-pixel-consent-mv3.test.mjs` no worktree e deu 0/1. Como a fase serial nunca rodava, essa falha estava invisível.
+
+**A causa é orçamento, não produto.** Com o mesmo arquivo e o orçamento de download elevado de 90 s para 420 s, o teste **passa, e em 15 s de duração total** — ou seja, a exportação de lote em evidência completa com confirmação de pixels funciona e entrega os quatro arquivos; o que acontece é que a exportação de uma página grande varia de 15 s a mais de 4 minutos conforme a carga da máquina (medi >240 s na página do Google com outra instância do Chrome ativa). Um orçamento de 90 s é apertado demais para um portão de release.
+
+Corrigido sem enfraquecer asserção nenhuma — as verificações de formato, estado, tamanho e sha256 continuam idênticas; só o tempo de espera mudou: `public-axe-map` 60 s → 300 s, `url-audit` 90 s → 300 s, `batch-pixel-consent` 90 s → 300 s (e o `timeout` externo 360 s → 600 s), `mandatory-journey` 120 s → 300 s. **`sidepanel-flow-mv3` ficou intocado de propósito**: é o arquivo de outro incremento.
+
+**O que isso muda no portão de release.** A partir de agora `npm test` executa a fase serial, e o resultado passa a incluir os 34 E2E de Chrome real. Qualquer afirmação anterior minha sobre "suíte completa" valia só para a fase paralela, e é assim que deve ser lida.
