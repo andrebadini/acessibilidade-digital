@@ -676,3 +676,31 @@ Ressalva de método: a terceira sonda não cobriu o retorno antecipado de `show(
 **Retratação registrada**: a conclusão da rodada 21, em que atribuí a falha ao alvo fixo da injeção, não se sustenta. A injeção por `tabId` funcionar continua verdadeiro e útil, mas não é a causa: o pedido nem chega lá. Também cai a hipótese da rodada 12 e a explicação por contexto de extensão como causa.
 
 Nada foi alterado no produto. As três sondas foram revertidas (`git checkout --`) e a árvore está sem alterações em `src/`.
+
+## Rodada 26 — o bloqueio está entre a sessão de marcadores e o cliente de porta
+
+Fechei a lacuna de medição que a rodada 25 deixou aberta, com sonda no retorno antecipado de `show()`. Resultado:
+
+```
+BEFORE     {"markerRegion":true,"status":"idle","button":"Mostrar sinais na página"}
+SHOW-DIAG  {"proceeded":true,"status":"idle","ids":1,"revision":1}
+PORT-HEAD  null
+PORT-GUARD null
+```
+
+Leitura: `show()` **não** retorna cedo. O contexto existe, tem 1 identificador, revisão 1, e o status está `idle` — exatamente o estado em que a função deve pedir. Ela prossegue, monta o pedido e chama `request('PANEL_SHOW_PAGE_MARKERS', …)`.
+
+E, apesar disso, nenhuma das duas sondas do cliente de porta registra nada: nem o retorno antecipado (`!started || !ready || currentPort === null`), nem o guard de revisão dos marcadores.
+
+O caminho, então, é: `panel.js` → `pageMarkers.show()` → `request(...)` → `requestPanelIntent(message)` → `sessionPortClient?.requestIntent(message) ?? Promise.resolve(null)`. Duas explicações possíveis restam, e a primeira é a que o código sugere:
+
+- `sessionPortClient` é `null` ou `undefined` no momento do clique, e o `??` devolve `Promise.resolve(null)` **sem nunca chamar `requestIntent`**. Isso produz exatamente o observado: pedido nunca feito, worker nunca consultado, sondas do cliente mudas, e `show()` publicando a indisponibilidade porque a resposta é nula.
+- `requestIntent` é chamado, mas por outra instância do cliente que não a que instrumentei.
+
+A primeira explicaria também por que o painel funciona para o resto: a auditoria foi iniciada antes, com o cliente vivo; se ele foi descartado depois, o resultado continua na tela e só as ações que dependem de novo pedido falham — que é exatamente o sintoma.
+
+Onde medir em seguida, e é uma linha: registrar `sessionPortClient === null` e `started/ready` no momento do clique, em `requestPanelIntent`. Se o cliente estiver nulo, a correção é de ciclo de vida do cliente de sessão, não do caminho de marcadores — e nesse caso o defeito afeta qualquer ação pós-resultado que dependa de novo pedido, não só os sinais. Vale verificar se `GET_HIGHLIGHT_AVAILABILITY` e `PANEL_OPEN_REPORT` sofrem do mesmo, porque o relatório abriu normalmente na minha medição, o que sugeriria cliente vivo e enfraqueceria esta hipótese.
+
+Registro a tensão em vez de escolher um lado: o relatório abrir indica cliente vivo; as sondas mudas indicam que `requestIntent` não foi executado. Uma das duas leituras está errada, e a medição de uma linha acima decide qual.
+
+Nada alterado no produto; as sondas foram revertidas e 82/82 testes das duas famílias do painel seguem verdes.
