@@ -2080,3 +2080,25 @@ Para a próxima rodada não repetir a análise, o conserto de (1) está pronto p
 - **Por que isso preserva o teste fixado:** `DYNAMIC_PROBES_INCOMPLETE` **não** está no conjunto fechado acima (conferido no código), então a mensagem dele nunca entra em `model.limitations` e a entrada `DYNAMIC_PROBES_INCOMPLETE: As verificações dinâmicas atingiram o tempo limite.` — afirmada em `test/review/report-view.test.js:694-696` — continua presente depois do filtro. O RED do incremento é um teste que injeta um diagnóstico do conjunto fechado e exige a frase **uma** vez.
 - **(3) fica para o mesmo incremento**, em CSS de impressão da matriz: impedir a quebra dentro do rótulo do item. A verificação não é unitária — é regenerar o PDF e recontar as quebras com a mesma medição desta rodada (**56** hoje), que é o número a cair para zero.
 - **Sequência obrigatória:** conserto → testes → bump para 1.1.20 (manifesto, README, `docs/COMO-USAR.md`, `store-assets/*` e os testes que fixam versão) → pacote novo com `sha256` conferido → **revisão independente do artefato novo**, porque a 1.1.19 deixa de descrever a árvore no instante em que o primeiro byte de produto mudar.
+
+## Rodada 55 — incremento de apresentação 1.1.20, com as duas correções medidas
+
+Os dois defeitos de apresentação da rodada 54 foram corrigidos, com RED antes de cada um e verificação no artefato entregue depois.
+
+**Correção 1 — a limitação não é dita duas vezes.** O conserto não foi onde eu tinha escrito primeiro. Eu havia proposto filtrar as entradas codificadas em `report-view.js`, e isso **quebrou dois testes existentes** cujo nome diz o contrato: *"discloses the omitted full-page capture in plain language and preserves its technical code in details"*. O contrato real é: **frase simples no título (`<summary>`) e forma com código na lista de detalhes** (`report-view.test.js:979-982`). O defeito não era o modelo de dados, era a **lista** repetir a frase simples ao lado da forma codificada. Correção: um `listedLimitations()` compartilhado em `text-policy.js` — a lista mantém a forma com código, não repete a frase simples, e o título conta o que a lista mostra. Os dois renderizadores passam a usar a mesma função, porque eles **já divergiram uma vez**: `report-view.js` monta a aba interativa e `html.js` monta o HTML/PDF entregue, e eu tinha corrigido só o primeiro — o teste de unidade ficou verde e o artefato entregue continuou com 8 entradas. Foi a medição no HTML entregue que pegou isso.
+
+**Correção 2 — o número do item não quebra no meio.** Regra de impressão `.matrix-scroll th[scope="row"]{white-space:nowrap}` em `report.css.js`. Trocar o CSS **invalidou o hash de CSP do próprio relatório**, e o teste de integridade do projeto (`test/report/html.test.js`) reprovou na hora — a rede de segurança funcionou como o comentário do módulo prometia. Hash atualizado para `sha256-5WbvaexQZLTkq1hshbOAr04inQqSIE0FA6Kyu5IaVx4=`.
+
+**Medição no artefato entregue, página real do Google, antes e depois:**
+
+| | 1.1.19 empacotada | 1.1.20 da árvore |
+|---|---|---|
+| páginas do PDF | 18 | **18** (sem inflar) |
+| rótulos de item quebrados | **56** | **0** |
+| entradas de limitação | **8** | **6** |
+| frases repetidas | **2** | **0** |
+| título | "Limitações registradas (8)" | "**Limitações registradas (6)**" |
+
+**Portão de testes do incremento:** fase paralela **4180 testes, 4179 passam, 0 falham**; `release-package` 7/7 com o pacote novo reconstruído e conferido; os quatro E2E de relatório, impressão e exportação passam (`current-page-export` com a varredura de segredos, `report-print-layout`, `report-executive-print`, `mandatory-journey`).
+
+**Artefato:** `release/audita-acessibilidade-1.1.20.zip`, SHA-256 `140e30bb8884d27799e4df9252ea79186fd553471d9e46a54a3c6c0a56c6e1b1`, fixado em `test/release-package.test.js` e conferido nos dois sentidos (arquivo entregue e reconstrução isolada). **A revisão independente deste artefato ainda não foi feita** — a 1.1.19 foi revisada e este incremento muda bytes entregues, então o veredito dela não cobre a 1.1.20.

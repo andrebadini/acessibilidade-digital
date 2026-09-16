@@ -188,6 +188,24 @@ export function deriveSystemLimitations(model) {
   return [...new Set(output)];
 }
 
+/**
+ * What the details list shows, and therefore what its headline counts.
+ *
+ * A limitation sentence that is also a policy diagnostic is stated in plain language by
+ * `deriveSystemLimitations` and again with the code in front by the report projection. The list keeps
+ * the coded form for traceability and does not repeat the plain sentence next to it. Measured in the
+ * delivered 1.1.19 report: 8 entries for 6 distinct sentences on the first page of the PDF.
+ */
+export function listedLimitations(limitations) {
+  if (!Array.isArray(limitations)) return [];
+  const codedMessages = new Set();
+  for (const value of limitations) {
+    const match = /^[A-Z][A-Z0-9_]{3,}: ([\s\S]+)$/u.exec(typeof value === 'string' ? value : '');
+    if (match) codedMessages.add(match[1]);
+  }
+  return limitations.filter(value => !codedMessages.has(value));
+}
+
 export function derivePageLimitations(model, page) {
   const output = [];
   if (Object.values(page.coverage ?? {}).some(channel => channel?.outcome === 'partial') ||

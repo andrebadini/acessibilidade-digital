@@ -1498,3 +1498,54 @@ test('review CSS keeps the summary and evidence usable from 320px through deskto
   assert.match(css, /@media\s+print[^]*?\[data-evidence-kind="full-page"\]\s*>\s*\.evidence-media[^{]*\{[^}]*max-height:\s*210mm[^}]*object-fit:\s*contain/isu);
   assert.match(css, /@media\s+print[^]*?\[data-report-issue\][^}]*\[data-report-technical\][^}]*\[data-report-evidence\][^{]*\{[^}]*break-inside:\s*auto/isu);
 });
+
+test('a limitation that is also a policy diagnostic is not stated twice in the details list', async () => {
+  // `deriveSystemLimitations` (text-policy.js) pushes the plain sentence of a closed set of policy
+  // diagnostics into `model.limitations`, and the report projection also carries the `CODE: sentence`
+  // form for traceability. Both in the same list states one limitation twice: the delivered 1.1.19
+  // report rendered 8 entries for 6 distinct sentences on the first page of the PDF. The list keeps
+  // the coded form (that contract is pinned separately) and drops the plain duplicate, and the
+  // headline counts the list. Both renderers are checked here on purpose: the interactive report and
+  // the delivered HTML/PDF are built by different code, and fixing only one of them was a mistake I
+  // already made once.
+  const message = 'Nenhuma captura raster foi coletada no modo sem imagens.';
+  const coded = `PIXEL_CAPTURE_OMITTED: ${message}`;
+  const { model, summary } = await fixture();
+  // The plain sentence arrives through `model.limitations` and the coded form through the projection,
+  // which is the delivered state. The view is cloned so the two can be pushed, then frozen again
+  // because the delivered renderer requires a frozen ReportViewV1.
+  const view = structuredClone(buildReportView({
+    model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash,
+  }));
+  view.executive.limitations.push(message, coded);
+  Object.freeze(view.executive.limitations);
+  Object.freeze(view);
+
+  const assertList = (items, where) => {
+    assert.equal(items.filter(value => value === message).length, 0,
+      `${where}: a frase simples não pode se repetir junto da forma com código: ${JSON.stringify(items)}`);
+    assert.equal(items.filter(value => value === coded).length, 1,
+      `${where}: a forma com código é o que a lista mantém`);
+  };
+
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const interactive = root.querySelector('[data-report-limitations]');
+  const interactiveItems = [...interactive.querySelectorAll('li')].map(node => node.textContent);
+  assertList(interactiveItems, 'relatório interativo');
+  assert.match(interactive.querySelector('summary').textContent,
+    new RegExp(`Limitações registradas \\(${interactiveItems.length}\\)`, 'u'),
+    'relatório interativo: a contagem do título precisa contar o que a lista mostra');
+
+  for (const forPrint of [false, true]) {
+    const html = renderHtmlReport(model, { reportView: view, forPrint });
+    // The print document opens the disclosures, so the tag carries `open` as well.
+    const found = /<details[^>]*data-report-limitations[^>]*>([\s\S]*?)<\/details>/u.exec(html);
+    assert.ok(found, `HTML entregue (forPrint=${forPrint}) sem o bloco de limitações; blocos presentes: ${
+      [...new Set(html.match(/data-report-[a-z-]+/gu) ?? [])].slice(0, 14).join(', ')}`);
+    const block = found[1];
+    const deliveredItems = [...block.matchAll(/<li>([\s\S]*?)<\/li>/gu)].map(match => match[1]);
+    assertList(deliveredItems, `HTML entregue (forPrint=${forPrint})`);
+    assert.match(block, new RegExp(`Limitações registradas \\(${deliveredItems.length}\\)`, 'u'),
+      `HTML entregue (forPrint=${forPrint}): a contagem do título precisa contar o que a lista mostra`);
+  }
+});

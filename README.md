@@ -4,7 +4,18 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão de produção 1.1.19 preparada:** a revisão independente da 1.1.18 confirmou que os três
+**Versão 1.1.20 preparada — revisão independente deste artefato ainda pendente.** A inspeção visual
+do PDF que a 1.1.19 entregou mediu dois defeitos de apresentação no artefato principal, nenhum deles
+de correção. Primeiro: o sumário executivo listava **8 limitações para 6 frases distintas**, porque a
+frase simples de um diagnóstico de política entrava na lista junto da forma `CÓDIGO: mensagem`; agora
+a lista mantém a forma com código, não repete a frase, e o título conta o que a lista mostra.
+Segundo: **56 dos 146 números de item quebravam no meio** na matriz impressa (`5.10.` numa linha, `1`
+na seguinte); a regra de impressão impede a quebra, e a medição do mesmo PDF caiu para zero com a
+mesma paginação. Contagem, classificação, frase legal e conclusão não mudam. Como muda bytes
+entregues, o pacote passa a se identificar como 1.1.20 — e a revisão independente **deste** artefato
+ainda não foi feita.
+
+**Versão de produção 1.1.19 (revisada):** a revisão independente da 1.1.18 confirmou que os três
 achados Important anteriores estavam fechados, mas mediu um quarto, da mesma classe: quando um campo
 tem o atributo nativo `required` **e** um token ARIA malformado, o coletor deixa o estado sem
 observação e a devolução antecipada de "faltam dados" **descartava todos os alvos do item** — um
@@ -40,7 +51,7 @@ passou a se identificar como 1.1.15, para não se confundir com o candidato revi
 
 **Versão de produção 1.1.14 entregue:** confira o [registro de validação e pacote](docs/qa/2026-09-12-production1114-release.md). A meta foi retomada em 12/09 e encerrada após correções, revisões independentes, testes no Chrome e avaliação do Google com esta versão. Distribuição local, sem publicação em loja.
 
-A versão **1.1.19** tem [guia de instalação e uso](docs/COMO-USAR.md). Acrescenta a identificação visível da versão de origem na metodologia do relatório e de sua impressão e corrige o sinal de cancelamento na retomada de lotes. Novas auditorias registram a versão instalada; antigas mantêm a versão de origem. Guias didáticos, grupos ABNT, sinais e evidências permanecem disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
+A versão **1.1.20** tem [guia de instalação e uso](docs/COMO-USAR.md). Novas auditorias registram a versão instalada; antigas mantêm a versão de origem. Guias didáticos, grupos ABNT, sinais e evidências permanecem disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
 
 Google na **1.1.14**, em 12/09: 0 falhas de requisitos confirmadas, 1 recomendação não atendida e 2 verificações com suspeitas (3 ocorrências); PDF de 24 páginas e quatro formatos exportados. Histórico preservado: [validação e Google da 1.1.13](docs/qa/2026-09-08-beta1113-release.md). Não são testes simultâneos ou de estados idênticos da página.
 

@@ -8,6 +8,7 @@ import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
+import { listedLimitations } from '../core/report/text-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
 import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/plain-language-guidance.js';
@@ -980,10 +981,15 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
         ? 'Captura integral omitida: miniaturas de elementos disponíveis.'
         : 'Captura integral omitida: evidências estruturais de elementos registradas, sem miniaturas PNG disponíveis.'
       : null;
-  limitations.append(element(document, 'summary', `Limitações registradas (${view.executive.limitations.length})${
+  // The list carries the technical codes, and a limitation that is also a policy diagnostic is stated
+  // in plain language by `deriveSystemLimitations` (text-policy.js) and again here with the code in
+  // front. `listedLimitations` is shared with the delivered renderer so the two cannot diverge again:
+  // the details keep the coded form, the plain duplicate goes, and the headline counts the list.
+  const limitationsList = listedLimitations(view.executive.limitations);
+  limitations.append(element(document, 'summary', `Limitações registradas (${limitationsList.length})${
     limitationSummary === null ? '' : ` · ${limitationSummary}`
   }`));
-  appendTextList(document, limitations, view.executive.limitations, 'Nenhuma limitação crítica registrada.');
+  appendTextList(document, limitations, limitationsList, 'Nenhuma limitação crítica registrada.');
   const actions = document.createElement('div');
   actions.setAttribute('class', 'executive-actions');
   actions.setAttribute('data-report-executive-actions', '');
