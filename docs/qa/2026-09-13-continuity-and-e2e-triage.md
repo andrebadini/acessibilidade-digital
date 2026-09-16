@@ -1825,3 +1825,20 @@ Lendo o que o produto gravou sobre si mesmo:
 **As três rotas convergentes, agora completas:** (1) o rastro de pilha localiza a morte em `waitForOwner`; (2) o dump 2 mostra `owned: []` com `privacy-paused` alcançado; (3) o dump 3 mostra que a própria sessão se declara `mode: "attached"` com `ownershipId: false`. Nenhuma delas é interpretação minha — as três são medição.
 
 **O que isso muda no critério 10:** os dois de marcadores **não são falha de produto**. Sobram no portão serial: quatro de prontidão (teto de 30 s do harness, com correção de uma linha mapeada), um de orçamento de download e um de limpeza de perfil no teardown — nenhum deles em asserção sobre resultado de auditoria.
+
+## Verificação preparada para o teto de comando (um comando, quando o Chrome estiver livre)
+
+As quatro falhas de prontidão (`full-evidence can be cancelled`, `no-pixels shows progress`, `element-only confirms once`, `full-evidence rehydrates`) e a de `current-page audits run in one inactive copy` estão **todas no mesmo arquivo do outro incremento**, `test/e2e/sidepanel-flow-mv3.test.mjs` — que eu executo, mas não modifico. Isso significa que a correção de uma linha no harness (teto de comando) e a verificação dela **não exigem tocar no arquivo alheio**:
+
+```
+# 1. aplicar (só test/e2e/support/real-chrome.mjs:13)
+#    DEFAULT_COMMAND_TIMEOUT_MS: 30_000 -> 120_000
+
+# 2. verificar, rodando só o arquivo afetado, sem a bateria inteira
+AUDITA_E2E_CHROME="…/Google Chrome for Testing" \
+  node --test test/e2e/sidepanel-flow-mv3.test.mjs
+```
+
+**O que conta como confirmação:** as cinco saírem de falha para verde (ou para uma falha *diferente*, que seria produto e não teto). **O que conta como refutação:** continuarem falhando no mesmo ponto. E o teste decisivo de que a correção é do harness e não um mascaramento é simples: um comando que trave de verdade continua falhando, só depois de 120 s em vez de 30 — nenhuma asserção muda, porque a constante governa apenas quanto tempo se espera por uma resposta de CDP.
+
+**Ordem:** aplicar **depois** do relatório da triagem, para que a fotografia que ela descreve (9 falhas, com a assinatura de 30 s) continue sendo a fotografia da árvore naquele momento, e a mudança apareça como o que é — uma correção posterior, com a medição antes e depois.
