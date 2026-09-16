@@ -1624,3 +1624,40 @@ test('a limitation that is also a policy diagnostic is not stated twice in the d
       `HTML entregue (forPrint=${forPrint}): a contagem do título precisa contar o que a lista mostra`);
   }
 });
+
+// Controles sem nome acessível no documento que a pessoa recebe. A checagem é testada contra um
+// exemplo sintético, senão um erro nela passaria por verde para sempre — foi o que aconteceu com
+// outras métricas desta sessão.
+function controlesSemNome(html) {
+  const semNome = [];
+  for (const match of html.matchAll(/<button([^>]*)>([\s\S]*?)<\/button>/gu)) {
+    const texto = match[2].replace(/<[^>]+>/gu, '').trim();
+    if (!texto && !/aria-label\s*=\s*"[^"]+"/u.test(match[1]) && !/aria-labelledby\s*=\s*"[^"]+"/u.test(match[1])) {
+      semNome.push(`<button${match[1].slice(0, 60)}>`);
+    }
+  }
+  for (const match of html.matchAll(/<input([^>]*)>/gu)) {
+    if (!/aria-label\s*=\s*"[^"]+"/u.test(match[1]) && !/aria-labelledby\s*=\s*"[^"]+"/u.test(match[1]) &&
+      !/title\s*=\s*"[^"]+"/u.test(match[1]) && !/placeholder\s*=\s*"[^"]+"/u.test(match[1]) &&
+      !/type\s*=\s*"(?:hidden|submit|button)"/u.test(match[1])) {
+      semNome.push(`<input${match[1].slice(0, 60)}>`);
+    }
+  }
+  return semNome;
+}
+
+test('a checagem de nome acessível reprova um controle sem nome (não vacuidade da própria checagem)', () => {
+  assert.deepEqual(controlesSemNome('<button></button><input id="x">'), ['<button>', '<input id="x">']);
+  assert.deepEqual(controlesSemNome('<button aria-label="Exportar"></button><button>Imprimir</button><input type="hidden">'), []);
+});
+
+test('todo controle do documento entregue tem nome acessível, no relatório e no resumo impresso', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  for (const forPrint of [false, true]) {
+    const html = renderHtmlReport(model, { reportView: view, forPrint });
+    const botoes = [...html.matchAll(/<button/gu)].length;
+    assert.ok(botoes > 0, `forPrint=${forPrint}: a varredura precisa encontrar controles, senão é vacuosa`);
+    assert.deepEqual(controlesSemNome(html), [], `forPrint=${forPrint}: controles sem nome acessível`);
+  }
+});
