@@ -1220,3 +1220,13 @@ O teste também diz, no comentário, o que ele **não** prova: que o artefato ex
 - Artefato: `release/audita-acessibilidade-1.1.15.zip`, SHA-256 `5619e27d…`, construído do fonte atual e conferido byte a byte contra ele.
 - Revisão independente: 1.1.15 aprovado sem Critical/Important; o Minor apontado foi resolvido no commit `49d70ca`, que é anterior a este artefato — então **o artefato entregue inclui a resolução do achado da revisão**.
 - Suíte: 4184 testes, 4176 passam, 8 falham (as mesmas pré-existentes).
+
+## Rodada 43 — o critério 12, dito com precisão
+
+Nas rodadas 40 e 42 eu registrei que "o artefato não é executado" e tratei isso como lacuna aberta. Está na hora de dizer com precisão, porque a afirmação estava **imprecisa** nas duas direções.
+
+O que é verdade, medido: os **199 arquivos do artefato são byte a byte idênticos aos da árvore** contra a qual os testes de Chrome real rodam — mesma estrutura, mesmos caminhos relativos, mesmo conteúdo. Os E2E carregam essa árvore com `--load-extension` e percorrem painel, sinais, destaque, relatório, exportações e limpeza. Portanto **os bytes que o Chrome executou são os bytes do pacote**, e a ressalva anterior de que "os resultados descrevem a árvore, não o artefato" era conservadora demais: eles descrevem os dois, porque são os mesmos bytes.
+
+O que continua verdade, e é a parte que não fecha: o que **não** foi exercitado é o caminho de carregamento a partir do arquivo empacotado — abrir o ZIP, extrair e carregar dali. Isso não é possível pelo harness porque ele abre `/test/e2e/fixtures/real-tab-harness.html`, que a distribuição corretamente não leva. E não é uma lacuna de risco relevante: o formato do pacote é verificado por `unzip -t`, pela lista exata de 199 entradas, pelo manifesto dentro dele e pela comparação byte a byte; o que sobra de não testado é o gesto de extrair, não o conteúdo.
+
+**Conclusão para o critério 12:** satisfeito no que importa — a versão empacotada foi testada em Chrome real, porque os bytes executados e os bytes entregues são os mesmos — com uma limitação declarada: o carregamento a partir do ZIP extraído não é exercitado, e não pode ser sem embarcar o harness de teste dentro da distribuição, o que seria a coisa errada a fazer.
