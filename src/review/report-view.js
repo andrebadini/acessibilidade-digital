@@ -7,7 +7,7 @@ import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
-import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
+import { ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { listedLimitations } from '../core/report/text-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
@@ -974,13 +974,20 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     view.technicalEvidence.some(evidence => evidence.kind === 'element');
   const elementThumbnailAvailable = view.technicalEvidence.some(evidence =>
     evidence.kind === 'element' && isSafePngDataUrl(evidence.dataUrl));
-  const limitationSummary = noPixelEvidence
-    ? 'Modo sem imagens: nenhuma captura raster.'
-    : elementOnlyEvidence
-      ? elementThumbnailAvailable
-        ? 'Captura integral omitida: miniaturas de elementos disponíveis.'
-        : 'Captura integral omitida: evidências estruturais de elementos registradas, sem miniaturas PNG disponíveis.'
-      : null;
+  const summaryClauses = [];
+  if (noPixelEvidence) summaryClauses.push('Modo sem imagens: nenhuma captura raster.');
+  else if (elementOnlyEvidence) {
+    summaryClauses.push(elementThumbnailAvailable
+      ? 'Captura integral omitida: miniaturas de elementos disponíveis.'
+      : 'Captura integral omitida: evidências estruturais de elementos registradas, sem miniaturas PNG disponíveis.');
+  }
+  // The plain sentence of the passive-observation diagnostic now lives inside the coded entry of the
+  // list, so the headline carries its plain-language counterpart. Without it, a reader who is not
+  // technical meets an uppercase code to learn that the interactive checks were not run.
+  if (view.executive.limitations.includes(`DYNAMIC_PROBES_OMITTED_PASSIVE: ${DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE}`)) {
+    summaryClauses.push('Observação passiva: sem testes interativos de teclado, redimensionamento e movimento.');
+  }
+  const limitationSummary = summaryClauses.length === 0 ? null : summaryClauses.join(' · ');
   // The list carries the technical codes, and a limitation that is also a policy diagnostic is stated
   // in plain language by `deriveSystemLimitations` (text-policy.js) and again here with the code in
   // front. `listedLimitations` is shared with the delivered renderer so the two cannot diverge again:

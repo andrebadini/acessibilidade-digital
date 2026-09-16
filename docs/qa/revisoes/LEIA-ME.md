@@ -8,6 +8,7 @@ Cópias integrais dos relatórios produzidos pelos revisores independentes desta
 | `REVIEW-1.1.17.md` | diff `3cacadd..c64221d` e o zip da 1.1.17 | 0 Critical, 3 Important, 5 Minor | `audita-acessibilidade-1.1.17.zip` (`c0cc4118…`) |
 | `REVIEW-1.1.18.md` | diff `c64221d..75e2717` e o zip da 1.1.18 | 0 Critical, 1 Important, 3 Minor | `audita-acessibilidade-1.1.18.zip` (`c76d49ce…`) |
 | `REVIEW-1.1.19.md` | diff `75e2717..dad1cda`, o zip da 1.1.19 **e** a triagem das 9 falhas da fase serial de Chrome real | 0 Critical, 2 Important — **ambos de documentação/afirmação, nenhum de produto** —, 0 Minor | `audita-acessibilidade-1.1.19.zip` (`0e429e22…`) |
+| `REVIEW-1.1.20.md` | diff `1da3d68..f0a9192` + `a73a9e3`, o zip da 1.1.20, com par empacotado 1.1.19 ↔ 1.1.20 e A/B controlado de CSS | 0 Critical, **1 Important — regressão de apresentação introduzida pela correção 2** —, 5 Minor | `audita-acessibilidade-1.1.20.zip` (`140e30bb…`) |
 
 **Os textos estão em inglês porque os revisores os escreveram assim**; não foram traduzidos para não alterar a evidência. O desfecho de cada achado, em português e com a medição que o sustenta, está em `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md`.
 

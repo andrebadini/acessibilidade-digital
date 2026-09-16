@@ -4,16 +4,25 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.20 preparada — revisão independente deste artefato ainda pendente.** A inspeção visual
-do PDF que a 1.1.19 entregou mediu dois defeitos de apresentação no artefato principal, nenhum deles
-de correção. Primeiro: o sumário executivo listava **8 limitações para 6 frases distintas**, porque a
+**Versão 1.1.21 preparada — a revisão independente deste artefato ainda não foi feita.** A revisão da
+1.1.20 deu **0 Critical, 1 Important e 5 Minor**, e o Important era uma **regressão introduzida pela
+própria correção** da 1.1.20: a regra que impedia o número do item de quebrar alargava a primeira
+coluna da matriz, estreitava a coluna "Classificação" e passava a partir a palavra **"Recomendação"**
+no meio (`Recomendaçã` / `o ABNT`) em **50 das 146 linhas** do PDF entregue. Ou seja: as quebras no
+meio de token na matriz impressa foram de **56 para 50**, não para zero, como a versão anterior deste
+texto dizia. Corrigido com `overflow-wrap:normal` nas células da matriz, ao lado da regra do rótulo.
+Medição no mesmo PDF entregue, com métrica sensível aos dois defeitos: **0 rótulos de item quebrados e
+0 fragmentos de palavra**, com a mesma paginação de 18 páginas. O título do bloco de limitações também
+passa a trazer, em linguagem simples, a contrapartida da observação passiva — antes ela existia só
+dentro da entrada com código.
+
+**Versão 1.1.20 — revisão independente concluída: pode substituir a 1.1.19, com o Important acima.**
+Ela corrigiu dois defeitos de apresentação medidos no PDF entregue da 1.1.19, nenhum de correção.
+Primeiro: o sumário executivo listava **8 limitações para 6 frases distintas**, porque a
 frase simples de um diagnóstico de política entrava na lista junto da forma `CÓDIGO: mensagem`; agora
 a lista mantém a forma com código, não repete a frase, e o título conta o que a lista mostra.
 Segundo: **56 dos 146 números de item quebravam no meio** na matriz impressa (`5.10.` numa linha, `1`
-na seguinte); a regra de impressão impede a quebra, e a medição do mesmo PDF caiu para zero com a
-mesma paginação. Contagem, classificação, frase legal e conclusão não mudam. Como muda bytes
-entregues, o pacote passa a se identificar como 1.1.20 — e a revisão independente **deste** artefato
-ainda não foi feita.
+na seguinte). Contagem, classificação, frase legal e conclusão não mudam em nenhuma das duas.
 
 **Versão de produção 1.1.19 (revisada):** a revisão independente da 1.1.18 confirmou que os três
 achados Important anteriores estavam fechados, mas mediu um quarto, da mesma classe: quando um campo

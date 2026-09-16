@@ -2186,3 +2186,24 @@ O critério 9 tinha a evidência do módulo de leitor de tela e do mapa de anún
 - há **13** menções de "Anúncio estimado" no documento, nas fichas que têm prévia.
 
 Ou seja, a exigência da meta — "explique honestamente que a simulação e o anúncio estimado não equivalem ao comportamento exato de todos os leitores de tela" — não é só uma string no código: ela **chega ao artefato que a pessoa usuária recebe**, na versão corrente.
+
+## Rodada 56 — veredito da 1.1.20 e o incremento 1.1.21 que corrige a regressão
+
+**A revisão independente da 1.1.20 voltou: 0 Critical, 1 Important, 5 Minor, e nenhuma alegação refutada.** Relatório integral em `docs/qa/revisoes/REVIEW-1.1.20.md`. Ela reproduziu as três alegações **nos próprios bytes empacotados**, com par 1.1.19 ↔ 1.1.20 rodado pelo mesmo driver, e acrescentou o que faltava: a perna "1.1.20 a partir do pacote". Confirmou também, por medição independente, a contenção da minha regra (a tabela de anexos está fora do `.matrix-scroll` e a geometria dela é idêntica com e sem a regra), que o CSV não carrega texto de limitação e que o JSON entregue é idêntico entre as duas versões — a mudança era mesmo só de apresentação.
+
+**O Important é uma regressão minha, e a revisão está certa.** A regra `.matrix-scroll th[scope="row"]{white-space:nowrap}` alargou a primeira coluna (52,89 → 59,7 px) e estreitou a coluna "Classificação", que passou a partir a palavra **"Recomendação"** no meio (`Recomendaçã` / `o ABNT`) em **50 das 146 linhas** do PDF. O total de quebras no meio de token na matriz impressa foi de **56 para 50**, não para zero. Minha medição contava só rótulos de item; a dela contava quebra de palavra — **a métrica estava estreita, e foi isso que me deixou passar um defeito que eu mesmo introduzi**.
+
+**Correção, e a métrica que a verifica.** Acrescentei `.matrix-scroll td,.matrix-scroll th{overflow-wrap:normal;word-break:normal}` ao bloco de impressão, ao lado da regra do rótulo: a célula do item continua sem quebrar e as demais palavras só quebram nos espaços. A métrica nova conta **fragmentos**: quantas vezes `Recomendaçã` aparece sem o `o` que completa a palavra.
+
+| PDF entregue | páginas | rótulos de item quebrados | fragmentos de "Recomendação" |
+|---|---|---|---|
+| 1.1.19 (pacote, medido pela revisão) | 18 | **56** | 0 |
+| 1.1.20 (pacote, medido pela revisão) | 18 | 0 | **50** |
+| **1.1.21 (árvore, Google real)** | **18** | **0** | **0** |
+| 1.1.21 (árvore, fixture) | 23 | 0 | 0 |
+
+**Minor 5 também corrigido**, porque ele nasceu da minha própria correção: a frase simples do diagnóstico de observação passiva passou a existir só dentro da entrada com código, então o título do bloco ganhou a contrapartida em linguagem simples — *"Observação passiva: sem testes interativos de teclado, redimensionamento e movimento."* — composta junto das cláusulas que já existiam.
+
+**Os quatro Minors restantes vão para o backlog com a análise da revisão**, sem bloquear: duplicação residual quando dois códigos compartilham a mesma mensagem (12 códigos `ANNOTATION_MAP_*`; mecanismo medido, ocorrência em auditoria real é inferência); `listedLimitations` é heurística de forma onde o módulo já tem conjunto fechado; entrada não-array devolve `[]` em silêncio (caminho *fail-open* hoje inalcançável); e hash de CSP obsoleto desestiliza sem erro (a suíte pega, mutação confirmada).
+
+**Portão de testes da 1.1.21:** fase paralela **4180 testes, 4179 passam, 0 falham**; `release-package` 7/7 com o pacote novo reconstruído; `extension-shell` 5/5; os quatro E2E de relatório, impressão e exportação verdes, com a varredura de segredos em 3 × 9 superfícies. Artefato `release/audita-acessibilidade-1.1.21.zip`, SHA-256 `4e9174f8d10e0f3d631c3445a09f3d5569f2d165f044177cf5863122d10e13c5`, fixado em teste. **A revisão independente da 1.1.21 ainda não foi feita.**
