@@ -65,6 +65,18 @@ A revisão da 1.1.19 julgou duas coisas ao mesmo tempo: a correção do campo ob
 
 **Hipótese minha, refutada pela triagem.** Eu havia pré-validado subir o teto de comando do harness (`DEFAULT_COMMAND_TIMEOUT_MS`) de 30 s para 120 s — 39/39 no arquivo de contrato do próprio harness, ou seja, a constante é livre para mudar — e estava a um passo de aplicá-la. A triagem refuta a necessidade: os dois `CDP_COMMAND_TIMEOUT` (subtests 8 e 9) **têm causa** no painel deixado em `privacy-paused` pelo primeiro subteste, não em teto insuficiente. Com o teto maior, 30 s de falha virariam 120 s de falha. **Não aplicada**, e a hipótese fica retirada com o motivo escrito: mudança pré-validada não é mudança justificada.
 
+## Achado aberto meu: as normalizações normativas não chegam ao relatório entregue
+
+Achado da verificação dos 146 itens contra o PDF (16/09), **anterior** a este delta e **não** corrigido porque o 1.1.20 estava congelado para revisão.
+
+**Medido:** o catálogo tem **cinco notas editoriais** corretas e justificadas — 5.9.1 e 5.9.2 (o Anexo C imprime critério diferente da Seção 5), 5.9.4 (a norma imprime o 2.4.6 com nível A; normalizado para AA, o oficial da WCAG 2.2), 5.9.17 (o Anexo C remete a um item que não existe) e 5.12.1 (numeração do Anexo C). Conferência de níveis em três fontes: **0 divergências** de nível no catálogo contra a WCAG oficial, **0** casos de impressão divergente sem nota, **0** `printedLevel` errado.
+
+**O defeito é de entrega, não de conteúdo:** essas notas são renderizadas **só pelo renderizador de modelo** (`html.js`, cartão "Notas de integridade normativa"), e o relatório que a pessoa recebe vem do renderizador de revisão. No HTML entregue da 1.1.20 — página real do Google e fixture — procurei pelo título do cartão e pelos quatro textos das notas: **zero ocorrências nos dois**. A seção 7 do relatório entregue tem versão, revisão, hash e fontes oficiais, e não traz as notas.
+
+**Consequência:** um auditor com a norma impressa vê o relatório citando `3.3.2` no 5.9.1 onde o Anexo C diz `3.2.2`, e `AA` no 5.9.4 onde a norma imprime `A`, sem explicação no documento. As normalizações estão certas; falta declará-las. É o **mesmo padrão** do achado A.2 da revisão da 1.1.19 — mecanismo bem construído que não alcança o artefato.
+
+**Conserto especificado:** levar as notas ao renderizador de revisão (bloco na seção de metodologia, ou nota por item na matriz dos 146, que é onde alguém compara com a norma).
+
 ## Achado aberto que a revisão deixou como suspeita, e que eu levei até o código
 
 A revisão da 1.1.19 registrou, na seção "não verificado", uma suspeita sobre `persistExportSuccess` e escreveu que não a mediu. Fui atrás dela, porque suspeita não medida em caminho de erro é dívida. **O mecanismo está confirmado por leitura; o alcance é inferido, e eu não o executei.**
