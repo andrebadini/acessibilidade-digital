@@ -636,10 +636,21 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
   await extension.click(report, 'button[data-report-export]');
   // 250 ms, not 50 ms. Measured with a control: this file, unchanged, timed out at 312 s three
   // times in a row (`DOWNLOAD_PROOF_TIMEOUT`, ~5 s of CPU — it was waiting, not computing), while
-  // changing *only* this interval to 250 ms made the very same assertion pass in 14,9 s. The proof
-  // polls the extension's own IndexedDB for the durable receipt, and at 20 Hz it starves the heavy
-  // full-evidence batch export it is waiting for. The assertion is untouched: the four artifacts
-  // still have to exist, complete, with matching byte length and sha256.
+  // changing *only* this interval to 250 ms made the very same assertion pass in 14,9 s.
+  //
+  // It is not a slow export, and a bigger budget does not help: with the interval left at 50 ms and
+  // the proof given 900 s, the run still failed, and the diagnostic showed why — the export attempt
+  // never started at all (durable receipt null, delivery journal empty, `exportStatus` null), and the
+  // panel kept saying "Relatório atualizado na fila de geração." while the export tab opened and
+  // closed. The 20 Hz poll of the extension's own IndexedDB aborts the attempt before it claims the
+  // lease; at 4 Hz it claims, delivers and closes in ~15 s.
+  //
+  // What the product does while that happens is honest and bounded — `review.js:278` reports the
+  // unconfirmed outcome after 120 s instead of promising a file forever — so this is a harness
+  // defect, not a silent product failure.
+  //
+  // The assertion is untouched: the four artifacts still have to exist, complete, with matching byte
+  // length and sha256.
   const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 250 });
   assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json'],
     'P5B_REPORT_EXPORT_FORMATS_MISSING');

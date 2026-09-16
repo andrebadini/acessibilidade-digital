@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { realpath } from 'node:fs/promises';
+import { readdir, readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { startFixtureServer, launchUnpackedExtension, resolveRealChromeTestBinary, evaluate, waitForValue, waitForFourDownloads } from './support/real-chrome.mjs';
 
@@ -57,5 +57,60 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
   }
   // The source page must not have been navigated by the export.
   assert.equal(await evaluate(extension.startPage.page, 'location.href'), sourceUrl);
+
+  // Opaque audit secrets stay confined to the session area. The capability ids and any ownership
+  // id are the nonces of this product: they bind one audit to one user event, and the meta requires
+  // that they never reach the DOM, the reducer, the model, the report, a URL or the logs. Unit tests
+  // assert containment statically; this is the runtime sweep over a real audit's real surfaces.
+  const collected = await evaluate(extension.harnessPage, `(async()=>{
+    const session = await chrome.storage.session.get(null);
+    const local = await chrome.storage.local.get(null);
+    const dump = JSON.stringify(session);
+    const ids = new Set();
+    for (const key of Reflect.ownKeys(session)) {
+      const match = /^audita:(?:audit-session|target)-capability:v\\d+:(.+)$/u.exec(key);
+      if (match && /^[A-Za-z0-9_-]{22}$/u.test(match[1])) ids.add(match[1]);
+    }
+    for (const match of dump.matchAll(/owner_[A-Za-z0-9_-]{22}/gu)) ids.add(match[0]);
+    const secrets = [...ids];
+    const localText = JSON.stringify(local);
+    return { secrets, durableLeaks: secrets.filter(id => localText.includes(id)) };
+  })()`, { awaitPromise: true });
+  assert.ok(collected.secrets.length > 0, 'a auditoria precisa ter emitido ao menos um segredo de sessão para a varredura valer');
+
+  const surfaces = {
+    'página auditada': await evaluate(extension.startPage.page, 'document.documentElement.outerHTML'),
+    painel: await evaluate(panel, 'document.documentElement.outerHTML'),
+    relatório: await evaluate(report, 'document.documentElement.outerHTML'),
+    'URLs de abas': (await evaluate(extension.harnessPage,
+      `chrome.tabs.query({}).then(rows => rows.map(row => String(row.url ?? '')).join('\\n'))`,
+      { awaitPromise: true })) ?? '',
+    'armazenamento durável': JSON.stringify(await evaluate(extension.harnessPage,
+      `chrome.storage.local.get(null)`, { awaitPromise: true })),
+    'modelo e revisão guardados': await evaluate(extension.harnessPage, `import(chrome.runtime.getURL('/src/storage/audit-store.js'))
+      .then(async module => {
+        const store = module.createAuditStore();
+        const [snapshot, revision] = await Promise.all([
+          store.getAuditSnapshot(${JSON.stringify(auditId)}), store.getReportRevision(${JSON.stringify(auditId)}),
+        ]);
+        return JSON.stringify({ snapshot, revision });
+      })`, { awaitPromise: true }),
+  };
+  const directory = extension.downloadDirectory;
+  for (const name of await readdir(directory)) {
+    const extensionName = name.split('.').at(-1);
+    // The PDF is a compressed binary stream: a substring sweep over its bytes cannot clear it, and
+    // this test does not claim to. The three text artifacts are swept byte for byte.
+    if (!['html', 'csv', 'json'].includes(extensionName)) continue;
+    surfaces[`artefato ${extensionName}`] = (await readFile(`${directory}/${name}`)).toString('utf8');
+  }
+  for (const [surface, text] of Object.entries(surfaces)) {
+    for (const secret of collected.secrets) {
+      assert.equal(text.includes(secret), false,
+        `segredo de sessão vazou para ${surface}: ${JSON.stringify({ auditId, length: secret.length })}`);
+    }
+  }
+  assert.deepEqual(collected.durableLeaks, [], 'segredo de sessão não pode estar no armazenamento durável');
+  t.diagnostic(`segredos varridos=${collected.secrets.length}; superfícies=${Object.keys(surfaces).length}`);
   await extension.close();
 });
