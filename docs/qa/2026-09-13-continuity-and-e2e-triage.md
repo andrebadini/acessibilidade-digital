@@ -1789,3 +1789,15 @@ O diagnóstico refinado dela produziu o estado real, e ele é legível:
 **Também confirma a leitura dos dois relógios:** nesta passagem o teste falhou em **31,9 s**, contra 151,9 s na execução anterior dos mesmos casos. Mesma causa, orçamentos diferentes.
 
 **O que falta:** a conclusão da triagem sobre de quem é a expectativa. Se ela confirmar que o registro de posse não pertence a este fluxo, estes dois deixam de ser falha e passam a ser teste a corrigir — no arquivo do outro incremento, que eu não altero.
+
+## Corroboração por leitura do código: a posse pertence ao caminho que cria aba descartável
+
+Somei à medição da triagem uma leitura do código, para não depender só do dump dela. O que está escrito:
+
+- `src/background/run-audit.js` tem **duas** construções de `createOwnedTabRegistry` — uma por volta da linha 263 e outra por volta da 1828 —, ou seja, cada caminho de execução tem o seu registro.
+- No caminho que **cria** aba, `createTab` é método **obrigatório** do adaptador e é exigido exatamente quando **não** se está retomando (`run-audit.js:247-248`: `if (!resuming) { createTab = requiredAdapterMethod(args.chromeAdapter, 'createTab'); … }`), e a aba é criada inativa em `about:blank` (`:368`) para depois navegar.
+- O caminho **anexado** (página atual) recebe `ownedTabs` para consulta e limpeza, mas não tem cópia a criar: a aba auditada é a do próprio usuário.
+
+**Conclusão, com o limite explícito do que li:** a escrita no registro de posse está amarrada à criação de uma aba descartável, e o fluxo da página atual não cria nenhuma. Um registro de posse **vazio** nesse fluxo é o comportamento esperado, não um registro que o produto esqueceu de gravar — e isso é coerente, ponto a ponto, com o dump da triagem (`owned: []`, nenhuma chave `audita:owned-tab:v2:*`, e mesmo assim `state: "privacy-paused"` alcançado e correlacionado).
+
+Não afirmei que li o fluxo anexado inteiro; afirmei o que li, e o que li sustenta a mesma leitura que a medição dela produziu por outro caminho.
