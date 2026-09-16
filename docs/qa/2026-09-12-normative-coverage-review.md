@@ -332,3 +332,30 @@ Tratar por fronteiras pequenas com RED de integração do dado real; não trocar
 | 5.16.4 | Recomendação | Interrupções | manual |  | Pendente |
 | 5.16.5 | Recomendação | Reautenticação | manual |  | Pendente |
 | 5.16.6 | Recomendação | Tempo de inatividade | manual |  | Pendente |
+
+## Verificação normativa independente — os itens cuja implementação estava em questão (16/09)
+
+A lista de lacunas acima ("orientação, contrastes não textuais, espaçamentos, largura do bloco, redimensionamento, semântica especial e zoom esperam dados não produzidos/utilizáveis", de 12/09) é anterior a vários incrementos. Duas coisas foram feitas agora: conferir **se a lacuna de dados ainda existe** e conferir **a fidelidade normativa** desses itens contra o PDF da norma, que é a coluna "Validação independente" da matriz.
+
+**Sobre a lacuna de dados: pelo menos uma fechou.** O item 5.12.6 hoje tem medição de largura de linha no produtor (`src/core/rules/visual.js:421-427`) e devolve `cantTell` com alvo e limitação explícita citando as duas alternativas da norma — 80 caracteres por linha ou mecanismo de configuração —, e não uma reprovação. Não afirmei que todas fecharam: verifiquei essa.
+
+**Fidelidade normativa, lida do PDF fornecido (SHA-256 `1c3ee66b…`), na lista de itens da própria norma:**
+
+| Item | Norma diz | Catálogo diz | Título | C.S. na norma | C.S. no catálogo |
+|---|---|---|---|---|---|
+| 5.10.4 | Requisito | requirement | Design responsivo ✔ | não recuperado | 1.4.10 AA |
+| 5.11.5 | Requisito | requirement | Contraste para objetos gráficos ✔ | 1.4.11 AA ✔ | 1.4.11 AA |
+| 5.12.1 | Requisito | requirement | Espaçamento entre as linhas ✔ | não recuperado | 1.4.12 AA, 1.4.8 AAA |
+| 5.12.2 | Requisito | requirement | Espaçamento entre os parágrafos ✔ | 1.4.12 AA ✔ | 1.4.12 AA, 1.4.8 AAA |
+| 5.12.3 | Requisito | requirement | Espaçamento entre as letras ✔ | 1.4.12 AA ✔ | 1.4.12 AA |
+| 5.12.4 | Requisito | requirement | Espaçamento entre as palavras ✔ | 1.4.12 AA ✔ | 1.4.12 AA |
+| 5.12.6 | Requisito | requirement | Largura de blocos de texto ✔ | 1.4.10 ✔ | 1.4.10 AA, 1.4.8 AAA |
+| 5.12.7 | Requisito | requirement | Texto redimensionado ✔ | 1.4.4 AA ✔ | 1.4.4 AA, 1.4.8 AAA |
+| 5.12.8 | Requisito | requirement | Semântica de texto especial ✔ | 1.3.1 A ✔ | 1.3.1 A |
+| 5.12.10 | Recomendação | recommendation | Definições de significado ✔ | (não extraído) | 3.1.3 AAA |
+| 5.8.6 | Recomendação | recommendation | Área de acionamento (aprimorada) ✔ | não recuperado | 2.5.8 AA, 2.5.5 AAA |
+| 5.8.7 | Requisito | requirement | Área de acionamento (mínima) ✔ | não recuperado | 2.5.8 AA |
+
+**O que isso prova e o que não prova.** Prova que, para estes doze itens, **natureza e título no catálogo correspondem ao que a norma escreve**, e que em sete deles a referência WCAG também corresponde — inclusive com o nível de conformidade. **Não prova** a fidelidade de 5.10.4, 5.12.1, 5.8.6 e 5.8.7 no campo WCAG: minha extração não recuperou a linha "C. S." desses quatro na lista de itens, e eu **não** vou declarar verificado o que não li. A limitação é do meu método de extração, não uma suspeita sobre o catálogo — e é o que fica anotado para quem quiser fechar essas quatro linhas.
+
+**O que continua pendente nestas linhas da matriz** é a validação de **comportamento e cobertura** (o que a regra observa, com que dados e com que resultado), que é a maior parte da coluna "Validação independente" e não se resolve por conferência de texto normativo.
