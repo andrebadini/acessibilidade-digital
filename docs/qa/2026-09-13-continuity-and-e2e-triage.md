@@ -2140,3 +2140,13 @@ Procurei **todos** os consumidores de `view.executive.limitations` depois de cor
 **Por que isso importa para quem mexer depois:** `listedLimitations` remove a frase simples quando existe a forma codificada com o mesmo corpo — e `ATTACHED_COPY_RELOADED` está no conjunto fechado que põe a frase simples em `model.limitations`. Se alguém aplicar o filtro **na projeção** (ou em tudo que `review.js` recebe) em vez de aplicá-lo nos dois pontos de renderização, a frase simples some, `hasAttachedCopyReloadedLimitation` passa a devolver falso, e o controle de retorno deixa de avisar que o destaque ao vivo não está disponível — **em silêncio**, porque nada lança. É o mesmo modo de falha que eu quase introduzi na primeira tentativa de conserto, por um caminho diferente.
 
 **O que me diz que o portão segue de pé:** `test/review/report-view.test.js` exercita esse caminho empurrando `ATTACHED_COPY_RELOADED_MESSAGE` na lista, e a suíte passa 53/53 depois da correção. O filtro ficou onde devia: nos renderizadores, não no modelo.
+
+### Procurei o mesmo defeito em outros títulos, e não há (resultado negativo medido)
+
+Depois de corrigir o título das limitações que contava 8 para 6 frases, fui atrás da **mesma classe** em outros lugares: título que promete um número e lista que mostra outro. Medi no HTML entregue da 1.1.20:
+
+- **Matriz ABNT:** o título diz "Consultar a matriz completa dos **146** itens" e há exatamente **146** linhas `<th scope="row">` de item ✔
+- **Checklist:** o título diz "Checklist separado — **109** verificações ainda sem conclusão" e o bloco do checklist tem exatamente **109** elementos `data-checklist-question` ✔
+- Os **3** elementos `data-checklist-question` que sobram no documento estão no **sumário executivo**: são as 3 suspeitas, renderizadas com o mesmo marcador. Somados aos 109 dão 112 — e os 112 "Verificar o item" do documento se explicam como 109 no bloco do checklist mais 1 em cada uma das 3 fichas de suspeita.
+
+**Conclusão:** a incoerência que eu tinha acabado de corrigir **não se repete** nesses dois títulos, e os números que pareciam divergir têm explicação medida, não presumida. Fica registrado porque um resultado negativo medido também é resultado — e porque o marcador `data-checklist-question` ser reutilizado no sumário para suspeitas é uma armadilha para quem for contar por atributo em vez de por seção.
