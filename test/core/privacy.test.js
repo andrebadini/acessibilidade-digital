@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sanitizeEvidenceUrl, sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
+import { redactNormalizedNode, sanitizeEvidenceUrl, sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
 
 const FALLBACK_WARNING = {
   code: 'PROBE_FAILED',
@@ -155,4 +155,58 @@ test('bounds warning leaf strings and never coerces hostile values', () => {
     assert.doesNotMatch(JSON.stringify(sanitized), new RegExp(marker));
   }
   assert.equal(coercions, 0);
+});
+
+// A custom editable widget keeps the identity its author declared and loses what the user
+// typed. Before this, the field arrived with no id, no label and no reference, so no rule
+// could judge it: an anonymous field is a false negative, not privacy. The declarations that
+// survive are exactly the author's, and a credential-shaped one still does not.
+function editableField(attributes) {
+  return {
+    tagName: 'div', nodeId: 'n1', attributes: { ...attributes, contenteditable: 'true', role: 'textbox' },
+    text: 'texto que o usuário digitou', visibleText: 'texto que o usuário digitou',
+    accessibleName: 'texto que o usuário digitou', axValue: 'texto que o usuário digitou',
+  };
+}
+
+test('a custom editable field keeps its author-declared identity and never the typed content', () => {
+  const redacted = redactNormalizedNode(editableField({
+    id: 'campo-a', 'aria-labelledby': 'rotulo-a', 'aria-label': 'Rótulo direto do campo A',
+  }), { privateText: true, privateTextRoot: true });
+  assert.equal(redacted.attributes.id, 'campo-a');
+  assert.equal(redacted.attributes['aria-labelledby'], 'rotulo-a');
+  assert.equal(redacted.attributes['aria-label'], 'Rótulo direto do campo A');
+  assert.equal(redacted.attributes.role, 'textbox');
+  assert.equal(redacted.text, '');
+  assert.equal(redacted.visibleText, '');
+  assert.equal(redacted.valueStatus, 'omitted-privacy');
+  assert.equal(Object.hasOwn(redacted, 'accessibleName'), false,
+    'the accessibility-tree name may derive from contents, so it must stay redacted');
+  assert.doesNotMatch(JSON.stringify(redacted), /texto que o usuário digitou/u);
+});
+
+test('a credential-shaped author declaration is dropped instead of preserved', () => {
+  const redacted = redactNormalizedNode(editableField({
+    id: 'campo-token', 'aria-label': 'token de acesso do usuário',
+  }), { privateText: true, privateTextRoot: true });
+  assert.equal(Object.hasOwn(redacted.attributes, 'id'), false);
+  assert.equal(Object.hasOwn(redacted.attributes, 'aria-label'), false);
+  assert.doesNotMatch(JSON.stringify(redacted), /token de acesso/u);
+});
+
+test('an author-declared id is dropped when it cannot be an identifier or looks sensitive', () => {
+  // The gate is the identifier rule plus the sensitive-word rejection, not a semantic parser:
+  // a value that is not shaped like an identifier, or that names a credential, does not survive.
+  // The sensitive-word list is English-centric, so 'sessao-do-usuario' survives: the identifier
+  // shape gate accepts it and no sensitive word matches. That gap is real and is recorded in the
+  // QA log rather than hidden here, because widening the list changes redaction for every field.
+  for (const id of ['1campo', 'campo;senha', 'api_key_do_servico', 'token-do-campo']) {
+    const redacted = redactNormalizedNode(editableField({ id }), { privateText: true, privateTextRoot: true });
+    assert.equal(Object.hasOwn(redacted.attributes, 'id'), false, `id ${id} should be dropped`);
+    assert.doesNotMatch(JSON.stringify(redacted), new RegExp(id, 'u'));
+  }
+  // A whitespace-separated value is accepted as an id because the identifier gate normalizes
+  // the spacing; recording it makes the actual behaviour explicit rather than assumed.
+  const spaced = redactNormalizedNode(editableField({ id: 'campo a' }), { privateText: true, privateTextRoot: true });
+  assert.equal(spaced.attributes.id, 'campo a');
 });

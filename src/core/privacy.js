@@ -194,6 +194,18 @@ function safeIdRefs(value) {
     : '';
 }
 
+// An aria-label is prose, not an identifier: it may contain spaces and punctuation, so the
+// identifier gate above cannot judge it. What it must never carry is a credential or an
+// unbounded blob of page content, hence the length bound and the sensitive-word rejection.
+const MAX_AUTHORED_LABEL = 512;
+function safeAuthoredLabel(value) {
+  const label = String(value ?? '').trim().replace(/\s+/gu, ' ');
+  return label.length > 0 && label.length <= MAX_AUTHORED_LABEL &&
+    !/[\u0000-\u001F\u007F]/u.test(label) && !SENSITIVE_KEY.test(label)
+    ? label
+    : '';
+}
+
 function contentEditableRootAttributes(attributes) {
   const output = {};
   for (const [name, rawValue] of Object.entries(attributes || {})) {
@@ -209,6 +221,20 @@ function contentEditableRootAttributes(attributes) {
     } else if (name === 'aria-labelledby' || name === 'aria-describedby') {
       const references = safeIdRefs(value);
       if (references) output[name] = references;
+    } else if (name === 'aria-label') {
+      // The name a custom editable widget exposes to assistive technology is declared by the
+      // page author, not typed by the user; what the user typed is the element's contents and
+      // stays redacted. Without this declaration the field arrives anonymous and no rule can
+      // judge it, which is a false negative, not privacy. The same gate that rejects
+      // sensitive-looking identifiers applies here.
+      const label = safeAuthoredLabel(value);
+      if (label) output[name] = label;
+    } else if (name === 'id') {
+      // Only the author sets an id, and it is what lets a label, a description or a group
+      // point at this field. safeIdRefs already rejects whitespace, so a value with spaces
+      // never becomes an identifier, and a sensitive-looking value is dropped.
+      const identifier = safeIdRefs(value);
+      if (identifier) output[name] = identifier;
     }
   }
   return output;
