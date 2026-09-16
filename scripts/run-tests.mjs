@@ -17,6 +17,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/focus-observation-contract.test.mjs',
   'test/e2e/form-association-observation.test.mjs',
   'test/e2e/graphic-visibility-observation.test.mjs',
+  'test/e2e/highlight-marking-mv3.test.mjs',
   'test/e2e/link-role-observation.test.mjs',
   'test/e2e/mhtml-state-characterization.test.mjs',
   'test/e2e/native-disabled-collector.test.mjs',
