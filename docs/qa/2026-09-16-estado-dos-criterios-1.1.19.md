@@ -7,7 +7,9 @@
 > de quebrar no meio na matriz impressa (**56 → 0**), com a **mesma paginação de 18 páginas**. Nada
 > disso altera contagem, classificação, frase legal ou conclusão. Para os critérios: **2 e 12** foram
 > re-verificados com o artefato novo (fase paralela 4180/4179/0, `release-package` 7/7, quatro E2E de
-> relatório, impressão e exportação verdes); **8** melhora em legibilidade mas continua **Parcial**
+> relatório, impressão e exportação verdes, e `verify-project` **estático** verde com os testes
+> pulados — a execução completa do `verify`, que roda a suíte, fica para depois do veredito porque o
+> Chrome está com a revisão); **8** melhora em legibilidade mas continua **Parcial**
 > por falta de teste com pessoa leiga; **10** volta a depender de veredito, porque a revisão
 > independente **do artefato 1.1.20 ainda não saiu** — o checkout congelado é `a73a9e3` em
 > `/private/tmp/audita-review-120`. Os números das linhas abaixo continuam sendo os medidos na
