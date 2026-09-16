@@ -2102,3 +2102,21 @@ Os dois defeitos de apresentação da rodada 54 foram corrigidos, com RED antes 
 **Portão de testes do incremento:** fase paralela **4180 testes, 4179 passam, 0 falham**; `release-package` 7/7 com o pacote novo reconstruído e conferido; os quatro E2E de relatório, impressão e exportação passam (`current-page-export` com a varredura de segredos, `report-print-layout`, `report-executive-print`, `mandatory-journey`).
 
 **Artefato:** `release/audita-acessibilidade-1.1.20.zip`, SHA-256 `140e30bb8884d27799e4df9252ea79186fd553471d9e46a54a3c6c0a56c6e1b1`, fixado em `test/release-package.test.js` e conferido nos dois sentidos (arquivo entregue e reconstrução isolada). **A revisão independente deste artefato ainda não foi feita** — a 1.1.19 foi revisada e este incremento muda bytes entregues, então o veredito dela não cobre a 1.1.20.
+
+### Ataque à função nova, feito por mim antes de a revisão chegar
+
+`listedLimitations()` é uma função que **remove** itens, então o risco dela é jogar fora uma limitação que o usuário precisava ver. Testei os casos adversariais com o módulo real:
+
+| entrada | resultado |
+|---|---|
+| frase simples + forma codificada do mesmo corpo | fica **só a codificada** — é o conserto |
+| forma codificada sem frase simples correspondente | fica (nada se perde) |
+| corpo vazio depois dos dois-pontos (`CÓDIGO: `) | fica (a expressão exige corpo não vazio) |
+| código de três letras (`ABC: algo`) | não é tratado como código; **os dois ficam** |
+| valor multilinha | tratado |
+| não-array | devolve `[]` sem lançar |
+| array com não-string (`42`, objeto) | passa intacto, sem lançar |
+| mesmo corpo com **dois códigos diferentes** | **os dois ficam** — a frase aparece duas vezes, uma por código |
+| frase simples legítima que comece com `TOKEN: ` | seria tratada como codificada |
+
+**Nenhum desses dois últimos é alcançável hoje, e isso foi medido:** varri as limitações canônicas que `deriveSystemLimitations` produz e **nenhuma** casa com o padrão `^[A-Z][A-Z0-9_]{3,}: ` (as que têm acento, como `ATENÇÃO:`, não casam porque `Ç`/`Ã` não pertencem a `[A-Z0-9_]`). E dois diagnósticos com a mesma mensagem e códigos diferentes não existem em `diagnostic-policy.js` — os dois `NAVIGATION_FAILED` têm mensagens diferentes de propósito. Ficam registrados como **arestas latentes**: se algum dia uma limitação canônica ganhar forma `CODIGO: …` ou dois códigos compartilharem a mesma frase, a lista volta a repetir, e é aí que esta função precisa ser revista.
