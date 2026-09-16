@@ -91,3 +91,29 @@ O produtor ausente começou a ser fechado, e o escopo é estreito de propósito.
 **Verificação.** Medido antes de concluir: o RED no E2E mostrou o alvo novo surgindo com `reason: 'clipped-label'` e `selectorHint: '#name'` antes de eu ajustar a expectativa. Testes: `test/rules/forms.test.js` com quatro casos (recorte por `clip-path`, rótulo visível sem alvo, `inset(10%)` parcial sem alvo, `clip: rect(0,0,0,0)` legado com alvo); `test/e2e/field-label-review.test.mjs` em Chrome real confirmando o alvo no caso nativo e ausência de alvo no campo customizado com rótulo visível. Focado: 21/21 formulários, 896/896 em regras, core, integração, painel e relatório, Chrome real 1/1, `verify-project` GREEN.
 
 **O que continua pendente, e não é pouco.** Este produtor cobre **um** mecanismo de ocultação — recorte declarado. Continuam sem prova: rótulo fora da tela por posicionamento, rótulo coberto por outro elemento, rótulo com contraste insuficiente, `font-size: 0`, `text-indent` negativo, `opacity` muito baixa sem ser zero, e o caso mais comum de todos, que é o campo sem nenhum rótulo associado. Para todos esses, 5.9.1 segue em revisão agregada. **Não declaro a automação de 5.9.1 concluída**: o que existe agora é o primeiro produtor, com escopo explícito, substituindo a inferência incorreta que havia antes.
+
+## 5.9.7 — por que o produtor de perceptibilidade NÃO foi implementado nesta rodada
+
+Registro a decisão e o raciocínio, porque "não implementei" precisa ser distinguível de "esqueci".
+
+A lacuna é conhecida: a regra `required-field-identification` lê `field.requiredIndicator`, e nenhum produtor emite esse campo. Com isso, todo campo obrigatório cai em `cantTell` ("Faltam dados do estado ou da identificação de campo obrigatório"). É cobertura incompleta, mas é uma conclusão **honesta**: não afirma nada que não foi medido.
+
+Examinei o caminho óbvio — fazer o coletor emitir `requiredIndicator` quando o rótulo associado traz um marcador declarado (`*`, `(obrigatório)`, "obrigatório") — e **descartei**, por um motivo concreto. A regra trata `requiredIndicator` não vazio como `passed`:
+
+```
+} else if (!normalizeText(field.requiredIndicator)) {
+  failures.push(target(field, 'Identifique de modo perceptível que este campo é obrigatório.', …));
+}
+…
+return result('passed', 'Os campos obrigatórios possuem estado e identificação observáveis.');
+```
+
+Produzir esse campo faria a regra declarar **aprovado** um campo só porque existe um asterisco no texto do rótulo. Isso é exatamente a confusão proibida — presença de marcador não é prova de percepção, do mesmo modo que `hasRenderedBox` e `visibleText` não provaram identificação visual em 5.9.1. Eu estaria trocando uma lacuna honesta (`cantTell`) por um veredito falso (`passed`), que é estritamente pior para uma ferramenta de fiscalização.
+
+O que uma implementação correta exige, e que fica registrado como desenho a executar:
+
+1. o coletor precisa reportar o marcador declarado **e** se ele é percebível — a evidência de recorte já existe desde esta rodada (`clip-path` e `clip` em `styleNames`, com o predicado `clippedAway` em `forms.js`), então o insumo está disponível;
+2. a regra precisa parar de tratar "indicador não vazio" como aprovação e passar a tratar como **revisão**, do mesmo jeito que 5.9.1 faz agora: um marcador declarado e visível é indício forte, não prova de percepção, porque percepção depende de contraste, tamanho e posição que a árvore de acessibilidade não mede;
+3. a reprovação confirmada continua reservada ao caso em que **nenhum** marcador foi declarado, porque aí não há o que perceber.
+
+Os três passos são coerentes entre si e nenhum deles pode ser feito sozinho sem produzir conclusão errada. Enquanto os três não forem feitos juntos, 5.9.7 permanece em `cantTell` agregado — sem alvo por campo, sem aprovação falsa e sem reprovação falsa.
