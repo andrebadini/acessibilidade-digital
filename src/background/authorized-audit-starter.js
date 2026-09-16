@@ -30,6 +30,7 @@ const FACTORY_KEYS = Object.freeze([
   'readAuditSnapshot', 'readReportRevision', 'readLatest', 'buildPanelResultBundle', 'recordHighlightBinding',
   'pixelCommitClock', 'epochNow', 'modelNow', 'createAbortController', 'pixelState', 'probeDocumentIdentity',
   'probeSensitiveCaptureSignals', 'pixelAttemptLifecycle', 'schedulePixelExpiry', 'prepareAttachedCopyPlan',
+  'recordPageMarkerOrigin',
 ]);
 const URL_FACTORY_KEYS = Object.freeze([...FACTORY_KEYS, 'runUrlAuditExecution', 'clearUrlAuditResources']);
 const BATCH_FACTORY_KEYS = Object.freeze([
@@ -677,7 +678,7 @@ export function createAuthorizedAuditStarter(input) {
     readAuditSnapshot, readReportRevision, readLatest, buildPanelResultBundle, recordHighlightBinding,
     pixelCommitClock, epochNow, modelNow, createAbortController, pixelState,
     probeDocumentIdentity, probeSensitiveCaptureSignals,
-    pixelAttemptLifecycle, schedulePixelExpiry, prepareAttachedCopyPlan,
+    pixelAttemptLifecycle, schedulePixelExpiry, prepareAttachedCopyPlan, recordPageMarkerOrigin,
   } = dependencies;
   const runUrlAuditExecution = hasUrlAudit ? dependencies.runUrlAuditExecution : null;
   const clearUrlAuditResources = hasUrlAudit ? dependencies.clearUrlAuditResources : null;
@@ -2292,6 +2293,17 @@ export function createAuthorizedAuditStarter(input) {
             if (grant.windowId !== fact.windowId || grant.target.tabId !== target.tabId ||
               grant.target.documentId !== target.documentId ||
               grant.target.initialUrlSessionDigest !== target.urlSessionDigest) throw TARGET_UNAVAILABLE_SENTINEL;
+            // Provenance for the numbered in-page signals: tab, window, document and session
+            // digest of the document this audit is bound to. The panel cannot resolve a target
+            // from the audit id alone, and without a registered origin every marker request is
+            // answered PAGE_MARKERS_UNAVAILABLE. Only the attached mode has a live page to mark.
+            try {
+              recordPageMarkerOrigin(Object.freeze({
+                auditId: args.auditId, tabId: grant.target.tabId, windowId: grant.target.windowId,
+                documentId: grant.target.documentId,
+                urlSessionDigest: grant.target.initialUrlSessionDigest,
+              }));
+            } catch { /* losing optional provenance must not abort the audit */ }
             journal = freeze({ ...journal, state: 'claimed', sessionCapabilityId: claimed.sessionCapabilityId, updatedAt: safeEpoch(epochNow) });
             await writeConfirmed(sessionArea, START_JOURNAL_KEY, journal, journalRecord, 'START_JOURNAL_DENIED');
             const postGrant = safeEpoch(epochNow);

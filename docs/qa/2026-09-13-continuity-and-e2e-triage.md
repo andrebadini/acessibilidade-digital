@@ -733,3 +733,44 @@ O que isso diz sobre o método desta sessão, e registro sem atenuar: três veze
 Próxima medição, agora com essa regra: confirmar a presença da sonda no arquivo antes de rodar, e registrá-la no ponto de entrada do cliente de porta e na resposta recebida, para separar "resposta negada pelo worker" de "resposta descartada pelo cliente".
 
 Nada alterado no produto; a sonda desta rodada foi revertida e `src/` está limpo.
+
+## Rodada 28 — causa raiz dos sinais: a proveniência nunca era registrada; corrigido e medido
+
+Apliquei a regra que faltava (confirmar a sonda no arquivo e que ela dispara) e medi a resposta real do worker antes de qualquer hipótese:
+
+```
+DISPATCH_IN:audit="68a3732d-…"        ← o worker é consultado
+PROBE_ALIVE_V1 SHOW:audit="68a3732d-…" ← a sonda do controller existe e dispara
+SHOW:ORIGIN:o=false:ob=false          ← getOrigin(auditId) devolve null
+DISPATCH:PANEL_SHOW_PAGE_MARKERS->"PAGE_MARKERS_UNAVAILABLE"
+```
+
+`o=false` é `originCache.get(auditId) === null`. Não era o painel, não era o cliente de porta, não era o controller: era o **cache de origem vazio**. Em `page-markers-controller.js` o `show()` resolve o alvo por `getOrigin(request.auditId)` (linha 354) e recusa quando não há origem — corretamente, porque sem tab/janela/documento/digest não existe alvo confiável para marcar.
+
+Por que estava vazio: `pageMarkerOriginCache.register` tinha **uma única chamada** em todo o produto, dentro de `prepareAttachedCopyPlan` em `service-worker.js`. O commit `1c9b296` ("fix: keep current-page audits bound to the observed document") removeu o ramo de auditoria de URL que invocava `prepareAttachedCopyPlan`, e com isso a função passou a ser apenas desestruturada em `authorized-audit-starter.js` (`FACTORY_KEYS`, linha 32) e **nunca chamada**. A proveniência órfã: o cache ficou sem quem o alimentasse, e todo pedido de sinais passou a receber `PAGE_MARKERS_UNAVAILABLE`.
+
+Correção: registrada a origem no início da auditoria anexada, a partir do `grant` que a própria starter acabou de validar contra o alvo inspecionado (`authorized-audit-starter.js`, logo após a comparação de `grant.target`). É o único ponto em que o worker tem, ao mesmo tempo, o `auditId` e o alvo provado; a autoridade de captura continua vindo do worker e os seis guards do controller seguem valendo no momento de marcar.
+
+Medição depois da correção, no caminho real:
+
+```
+DISPATCH:PANEL_SHOW_PAGE_MARKERS->true
+PAGE {"roots":1,"buttons":2}      ← um overlay com 2 sinais numerados
+AUDIT_MS 423    (running → result; resumo "2 Falhas confirmadas", 2 ocorrências)
+MARKERS_MS 107  status=active
+```
+
+Cobertura nova, para o defeito não voltar silenciosamente:
+
+- `test/e2e/page-markers-signals-mv3.test.mjs` (real Chrome, registrado em `scripts/run-tests.mjs`): exige que a leitura do relatório não desenhe nada, que o painel ofereça os sinais, que o estado fique `active` e **não** `unavailable`, que exista uma raiz de overlay com ao menos dois sinais numerados desenhados com área visível, que exatamente um anel esteja visível — o do sinal que o painel também reporta como selecionado — e que esse anel cubra um elemento real de `main`, sem mover rolagem nem foco. Inclui âncoras de que o relatório é o da página do fixture ("Falhas confirmadas" e a origem), para não passar com painel obsoleto.
+- `test/background/authorized-audit-starter.test.js`: a origem é registrada exatamente uma vez, congelada e com o alvo do grant; um alvo rejeitado não registra nada; um gravador que lança não aborta a auditoria nem vaza a mensagem; um gravador que devolve `false` não impede o início.
+
+Duas asserções minhas erraram antes de acertar, e o erro era do teste, não do produto: eu esperava um anel por sinal quando `updateGroup` (linha 410 de `page-markers-overlay.js`) desenha anel **só para o sinal selecionado**; e esperava zero anéis quando o painel abre com a primeira ocorrência selecionada. Medido o overlay real (`ringDisplay: block` no Sinal 1, `none` no Sinal 2), o teste passou a afirmar o comportamento correto do produto.
+
+`scripts/verify-project.mjs` GREEN (130 regras, 146 itens, 96 requisitos/50 recomendações).
+
+### Estado da suíte depois da correção
+
+`node scripts/run-tests.mjs`: **4179 testes, 4171 passam, 8 falham**. As oito são pré-existentes e ficam em `test/background/service-worker.test.js` no modo "default worker snapshots the current page…": quatro (`stored`, `cache-reject`, `cache-throw`, `factory-throw`) terminam em `PERSONA_CLEANUP_UNCONFIRMED` no lugar de `{ok:true,state:'running'}`, e quatro (`source-failure`, `vault-failure`, `vault-invalid`) caem no mesmo código por outra rota. Comparei os nomes antes e depois no HEAD limpo: o conjunto é o mesmo, menos `marker-cleanup-denied`, que **passou a passar** — de 9 para 8.
+
+A oitava mudança foi numa asserção do próprio teste: `assert.deepEqual(markerInvalidations, [17])` esperava uma invalidação de aba que só existia dentro do ramo removido em `1c9b296`. Como a invalidação de marcadores por mudança de documento ou fechamento de aba é do caminho de ciclo de vida (`audit-lifecycle.js`), a expectativa correta nesse ponto é que o caminho da auditoria de URL **não** toque nos marcadores da aba. Atualizei as duas ocorrências com essa justificativa; não mexi nas oito falhas pré-existentes, que têm outra causa.

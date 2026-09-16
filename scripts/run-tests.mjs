@@ -21,6 +21,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/link-role-observation.test.mjs',
   'test/e2e/mhtml-state-characterization.test.mjs',
   'test/e2e/native-disabled-collector.test.mjs',
+  'test/e2e/page-markers-signals-mv3.test.mjs',
   'test/e2e/passive-target-size.test.mjs',
   'test/e2e/personas-mv3-csp.test.mjs',
   'test/e2e/public-axe-map-mv3.test.mjs',

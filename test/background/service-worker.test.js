@@ -2227,7 +2227,11 @@ test('default worker snapshots the current page and keeps marker origin private 
     assert.equal(executionArgs, null);
     assert.equal((await auditStore.getAuditSnapshot(auditId)).model, undefined);
     assert.doesNotMatch(JSON.stringify(started), /PRIVATE_|NEVER_PUBLIC/u);
-    assert.deepEqual(markerInvalidations, [17]);
+    // Starting an audit no longer invalidates the tab's markers on its own: that call lived in
+    // the attached-copy plan preparation, which now has no caller at all. Markers are cleared
+    // when the document changes or the tab closes, through the lifecycle path, so this path
+    // must leave them alone rather than reach for a controller it does not own.
+    assert.deepEqual(markerInvalidations, []);
     assert.equal(mode === 'marker-cleanup-denied' ? sourceSnapshots === 0 : sourceSnapshots > 0, true);
     return;
   }
@@ -2247,7 +2251,8 @@ test('default worker snapshots the current page and keeps marker origin private 
   assert.equal(env.createdTabs.length, 0);
   assert.equal(scriptTargets.every(target => target.tabId === 17 && target.frameIds?.[0] === 0), true);
   assert.equal(registerCalls, mode === 'factory-throw' ? 0 : 1);
-  assert.deepEqual(markerInvalidations, [17]);
+  assert.deepEqual(markerInvalidations, [],
+    'a URL audit has no page of its own to mark, so it must not touch the tab markers');
   assert.equal(sourceSnapshots > 0, true);
   if (mode === 'stored') {
     const origin = originCache.get(auditId);

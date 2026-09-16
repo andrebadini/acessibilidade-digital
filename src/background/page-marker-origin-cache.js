@@ -8,6 +8,9 @@ const RESERVED = new Set(['__proto__', 'prototype', 'constructor']);
 const TTL_MS = 1_800_000;
 const CAPACITY = 128;
 
+/** The lifetime the cache itself accepts, so callers cannot hand it a record it must reject. */
+export const PAGE_MARKER_ORIGIN_TTL_MS = TTL_MS;
+
 function exactData(value, expectedKeys) {
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;

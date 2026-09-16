@@ -539,6 +539,7 @@ function dependencyFixture({
       return createPanelResultBundleV1({ reportRevision, inventory });
     },
     async recordHighlightBinding() { return null; },
+    recordPageMarkerOrigin() { return true; },
     pixelCommitClock: pixelCommitClock(),
     epochNow: () => EPOCH + 1,
     modelNow: () => '2026-08-29T12:00:00.000Z',
@@ -691,6 +692,7 @@ function capturePolicyGateHarness() {
     probeDocumentIdentity: touched('probeDocumentIdentity'),
     probeSensitiveCaptureSignals: touched('probeSensitiveCaptureSignals'),
     prepareAttachedCopyPlan: touched('prepareAttachedCopyPlan'),
+    recordPageMarkerOrigin: touched('recordPageMarkerOrigin'),
     schedulePixelExpiry: touched('schedulePixelExpiry'),
     pixelAttemptLifecycle: {
       prepareResume: touched('pixelAttemptLifecycle.prepareResume'),
@@ -5466,4 +5468,109 @@ test('restart blocks an uncorrelated privacy-paused batch ACTIVE without touchin
   assert.equal(cleanupCalls, 0);
   assert.deepEqual(area.values[ACTIVE_AUDIT_JOB_KEY], hostile);
   assert.deepEqual(await readActiveAuditJobForWorker({ sessionArea: area }), hostile);
+});
+
+test('an attached audit records the page marker origin from the grant it just validated', async () => {
+  // The panel cannot mark a page it cannot name: it holds only the audit id, so the worker has
+  // to remember which tab, window, document and session digest the audit was bound to. That
+  // provenance has exactly one trustworthy source at start time — the capability grant the
+  // authority just issued and this test proves was validated against the inspected target.
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const recorded = [];
+  const dependencies = dependencyFixture({
+    area,
+    authority: prepared.authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.recordPageMarkerOrigin = value => { recorded.push(value); return true; };
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId: 'audit-marker-origin',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.equal(started.response.ok, true);
+  assert.equal(recorded.length, 1, 'the origin is recorded exactly once per attached audit');
+  const [origin] = recorded;
+  assert.equal(Object.isFrozen(origin), true, 'the provenance must be frozen before it leaves the starter');
+  assert.deepEqual(origin, {
+    auditId: 'audit-marker-origin',
+    tabId: 17,
+    windowId: 9,
+    documentId: 'document-a',
+    urlSessionDigest: DIGEST,
+  });
+});
+
+test('a rejected target never records a page marker origin', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const recorded = [];
+  const dependencies = dependencyFixture({
+    area,
+    authority: prepared.authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.recordPageMarkerOrigin = value => { recorded.push(value); return true; };
+  dependencies.readAuditSnapshot = async () => { throw new Error('TARGET_UNAVAILABLE'); };
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId: 'audit-marker-origin-denied',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.equal(started.response.ok, false);
+  assert.deepEqual(recorded, [], 'provenance may only be recorded for an audit that actually started');
+});
+
+test('a page marker origin recorder that fails cannot abort the audit or leak its error', async () => {
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const dependencies = dependencyFixture({
+    area,
+    authority: prepared.authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.recordPageMarkerOrigin = () => { throw new Error('private provenance detail'); };
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId: 'audit-marker-origin-hostile',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.equal(started.response.ok, true, 'losing optional provenance must not refuse a started audit');
+  assert.equal(JSON.stringify(started.response).includes('private provenance detail'), false);
+});
+
+test('an attached audit still starts when the page marker origin recorder reports nothing', async () => {
+  // The hook is a reporting channel, not a gate: a recorder that declines or answers false may
+  // never turn a valid audit start into a refusal.
+  const area = sessionArea();
+  const prepared = await authorityFixture(area);
+  const dependencies = dependencyFixture({
+    area,
+    authority: prepared.authority,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  dependencies.recordPageMarkerOrigin = () => false;
+
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedAudit({
+    capabilityId: prepared.capabilityId,
+    eventNonce: null,
+    auditId: 'audit-marker-origin-declined',
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    senderContext: prepared.senderContext,
+  });
+  assert.equal(started.response.ok, true, 'the provenance hook is never a start precondition');
 });

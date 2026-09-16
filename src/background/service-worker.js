@@ -5,7 +5,7 @@ import {
   createSessionUrlDigestManager,
 } from '../core/privacy/session-url-digest.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
-import { createPageMarkerOriginCache } from './page-marker-origin-cache.js';
+import { createPageMarkerOriginCache, PAGE_MARKER_ORIGIN_TTL_MS } from './page-marker-origin-cache.js';
 import { createPageMarkersController } from './page-markers-controller.js';
 import {
   PAGE_MARKERS_PORT_NAME,
@@ -1352,7 +1352,7 @@ async function buildDefaultRuntime(chromeApi, options) {
         pageMarkerOriginCache?.register({
           auditId: input.auditId, tabId: source.tabId, windowId: source.windowId,
           documentId: source.documentId, urlSessionDigest: source.urlSessionDigest,
-          createdAt: registeredAt, expiresAt: registeredAt + 1_800_000,
+          createdAt: registeredAt, expiresAt: registeredAt + PAGE_MARKER_ORIGIN_TTL_MS,
         });
       } catch { /* Losing optional provenance does not invalidate the prepared copy. */ }
       return freeze({
@@ -1780,6 +1780,17 @@ async function buildDefaultRuntime(chromeApi, options) {
     pixelCommitClock,
     epochNow, modelNow, createAbortController: () => new AbortController(),
     prepareAttachedCopyPlan,
+    recordPageMarkerOrigin: value => {
+      if (!pageMarkerOriginCache) return false;
+      const createdAt = epochNow();
+      try {
+        return pageMarkerOriginCache.register({
+          auditId: value.auditId, tabId: value.tabId, windowId: value.windowId,
+          documentId: value.documentId, urlSessionDigest: value.urlSessionDigest,
+          createdAt, expiresAt: createdAt + PAGE_MARKER_ORIGIN_TTL_MS,
+        }) === true;
+      } catch { return false; }
+    },
     pixelState,
     probeDocumentIdentity: tabId => chromeAdapter.probeDocumentIdentity(tabId),
     probeSensitiveCaptureSignals,
