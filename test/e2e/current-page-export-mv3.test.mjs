@@ -89,6 +89,23 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
   // The source page must not have been navigated by the export.
   assert.equal(await evaluate(extension.startPage.page, 'location.href'), sourceUrl);
 
+  // Exportar de novo é caminho que a pessoa usuária alcança: o botão da aba de revisão nunca é
+  // desabilitado (`review.js` só desabilita o "Refazer auditoria"). Este passo existe porque eu
+  // havia afirmado que o descasamento validador/renderizador de `persistExportSuccess` também
+  // atingia a segunda exportação — e a medição **refutou** a afirmação: como a exportação da
+  // revisão imutável preserva o modelo guardado (`export-controller.js:182-184`), o segundo pedido
+  // encontra `review-ready` + `artifact: pending` e percorre o mesmo caminho do primeiro. Fica como
+  // cobertura de "exportar duas vezes funciona", que é o que a medição sustenta.
+  await extension.click(report, 'button[data-report-export]');
+  const second = await waitForFourDownloads(extension, { auditId, timeoutMs: 120_000, intervalMs: 250 });
+  assert.deepEqual(second.map(record => record.format), ['html', 'pdf', 'csv', 'json'],
+    'a segunda exportação precisa entregar os quatro formatos');
+  for (const record of second) {
+    assert.equal(record.state, 'complete', record.format);
+    assert.ok(record.byteLength > 0, record.format);
+    assert.match(record.sha256, /^[a-f0-9]{64}$/u, record.format);
+  }
+
   // Opaque audit secrets stay confined to the session area. The capability ids and any ownership
   // id are the nonces of this product: they bind one audit to one user event, and the meta requires
   // that they never reach the DOM, the reducer, the model, the report, a URL or the logs. Unit tests
