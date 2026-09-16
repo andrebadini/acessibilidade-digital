@@ -27,7 +27,7 @@ relatório entregue a proveniência que só existia no modelo. A **1.1.23** acre
 - **O radical de senha engolia dado do próprio produto.** `pass(?:word|wd)?` casava `passed`,
   `passes`, `bypass` e `passive` — resultado de item, contagem `passes` do JSON, 2.4.1 Bypass Blocks e
   observação passiva. Um dado cru com essas chaves era tarjado e sumia. Agora
-  `(?<!by)pass(?:word|wd)?(?!es|ed|ive|o|ing)` preserva as quatro e continua tarjando `password`,
+  `pass[-_ ]?(?:word|wd|code|phrase|key)|(?<!by)pass(?![-_a-z])|pwd` preserva as quatro e continua tarjando `password`,
   `userPassword`, `passcode` e `senha`.
 - **`listedLimitations` falhava aberto:** entrada fora de lista devolvia `[]`, o que faria o relatório
   afirmar "Limitações registradas (0)" e esconder limitações reais. Entrada inválida agora falha alto.

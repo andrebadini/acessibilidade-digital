@@ -2260,3 +2260,14 @@ Nenhuma revisão independente olhou `store-assets/` até aqui: as revisões medi
 | Quatro formatos, sem código remoto, sem vínculo institucional | `EXPORT_FORMATS_V1`; pacote MV3 verificado pelas revisões; material diz "ferramenta independente" |
 
 Nada disso toca bytes de produto: o digest da 1.1.24 continua o fixado (`978fa19e…665c01`) e `release-package` segue verde.
+
+## Rodada 60 — a fase serial completa rodou, pela primeira vez numa versão recente
+
+Com o Chrome livre (a revisão da 1.1.25 estava na fase de análise), rodei os **35 arquivos** da fase serial sobre os **bytes empacotados** da 1.1.25, um arquivo por vez, com o runner `/private/tmp/serial-run.sh`.
+
+**Resultado: 34 arquivos verdes, 1 com falhas — e as falhas estão todas no arquivo do outro incremento** (`test/e2e/sidepanel-flow-mv3.test.mjs`), como a triagem vinha prevendo. Isso fecha a lacuna que as duas últimas revisões declararam: a fase serial nunca havia sido executada inteira numa versão recente.
+
+**Uma armadilha do harness, que vale registrar para ninguém rediagnosticar:** `axe-mv3-csp.test.mjs` **falhou primeiro** com `ERR_MODULE_NOT_FOUND` para `scripts/axe-e2e-decision.mjs`. Não é defeito do produto: o pacote tem só `manifest.json`, `src/`, `vendor/` e ícones, e esse E2E importa um módulo de `scripts/`. Rodando a fase serial a partir da raiz extraída, é preciso copiar **`test/`, `fixtures/` e `scripts/`** — copiei `scripts/` e o arquivo passou. Sem esse detalhe, o resultado seria "2 arquivos com falha" e uma acusação falsa ao produto.
+
+**Correção ao que eu havia registrado sobre as falhas do arquivo alheio.** A rodada 57 apontou a espera impossível por registro de posse (`assertPausedAttempt`) como causa. A execução completa mostra que **as falhas não são só essa**: o arquivo falha em
+`original-page ABNT markers remain usable across idle…` e `…visual review and verified exports` (WAIT_TIMEOUT, ~32 s cada), em `passive current-page observes memory-only elements…` (element-only e full-evidence, AssertionError), em `full-evidence can be cancelled at the privacy pause…` (WAIT_TIMEOUT) e em `current-page audits run in one inactive copy…`. Ou seja: **a posse explica parte, não o conjunto**, e o ponteiro da rodada 57 vale para os casos de pausa/consentimento — os demais precisam da mesma análise caso a caso quando o dono do arquivo retomar. Nenhuma dessas falhas é do produto: todas estão num arquivo sob edição de outro incremento.
