@@ -96,6 +96,26 @@ test('publishes a complete privacy policy in Markdown and standalone HTML', asyn
   }
 });
 
+test('o guia do usuário só manda clicar em rótulo que existe no produto', async () => {
+  // Mesma classe do achado que o roteiro da loja teve ("Várias páginas" quando o botão é "Lote de
+  // páginas"): o guia do usuário não tinha guarda nenhuma de correspondência, então um rótulo podia
+  // envelhecer sem que nada falhasse. Aqui os rótulos clicáveis precisam existir em src/.
+  const guide = (await read('docs/COMO-USAR.md')).toString('utf8');
+  const productUi = [
+    await read('src/panel/panel-view.js'),
+    await read('src/review/report-view.js'),
+    await read('src/review/index.html'),
+  ].map(buffer => buffer.toString('utf8')).join('\n');
+  for (const label of [
+    'Auditar a página atual', 'Outra URL', 'Lote de páginas', 'Evidência completa',
+    'Somente elementos', 'Sem imagens', 'Destacar elemento', 'Mostrar sinais na página',
+    'Abrir relatório completo', 'Refazer auditoria', 'Imprimir resumo / salvar PDF',
+  ]) {
+    assert.match(guide, new RegExp(label, 'iu'), `o guia precisa citar ${label}`);
+    assert.ok(productUi.includes(label), `o rótulo ${label} citado no guia não existe no produto`);
+  }
+});
+
 test('ships beta test instructions for the complete current-page journey and declares deferred controls', async () => {
   const instructions = (await read('store-assets/TEST-INSTRUCTIONS.md')).toString('utf8');
   for (const phrase of [
