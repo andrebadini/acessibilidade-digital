@@ -2156,3 +2156,17 @@ Depois de corrigir o título das limitações que contava 8 para 6 frases, fui a
 - Os **3** elementos `data-checklist-question` que sobram no documento estão no **sumário executivo**: são as 3 suspeitas, renderizadas com o mesmo marcador. Somados aos 109 dão 112 — e os 112 "Verificar o item" do documento se explicam como 109 no bloco do checklist mais 1 em cada uma das 3 fichas de suspeita.
 
 **Conclusão:** a incoerência que eu tinha acabado de corrigir **não se repete** nesses dois títulos, e os números que pareciam divergir têm explicação medida, não presumida. Fica registrado porque um resultado negativo medido também é resultado — e porque o marcador `data-checklist-question` ser reutilizado no sumário para suspeitas é uma armadilha para quem for contar por atributo em vez de por seção.
+
+### Os três artefatos entregues concordam entre si — medido, com a aritmética explicada
+
+O passo do checklist "verificar falsos positivos, falsos negativos e separação entre ocorrência e checklist" tem uma parte que eu ainda não tinha medido **cruzando os formatos**: se o HTML, o JSON e o CSV contam a mesma história. Medi na fixture de quatro defeitos injetados, no relatório entregue da 1.1.20:
+
+| artefato | unidade | falhas confirmadas | itens |
+|---|---|---|---|
+| HTML | frase legal, por item | 4 frases | 5.8.2, 5.8.3, 5.9.3, 5.13.10 |
+| JSON | asserção EARL, por item | 4 `failed` | os mesmos 4 |
+| CSV | linha, por ocorrência | 5 linhas `failed` | 4 distintos |
+
+**Não é divergência: é a distinção entre item e ocorrência, e ela fecha.** O JSON tem 146 asserções (uma por item ABNT) e marca 4 `failed`; o CSV tem 116 linhas de ocorrência e marca 5 `failed`; o HTML imprime 4 frases legais, uma por item. A diferença 5 − 4 tem nome e sobrenome: **5.13.10 aparece duas vezes** (`accessible-component-name`, ocorrências `…000013` e `…000014`), porque na fixture o botão sem nome acessível **e** a imagem sem `alt` caem no mesmo item — enquanto os outros três itens têm uma ocorrência cada. Somando: 1 + 1 + 2 + 1 = 5 ocorrências em 4 itens, que é exatamente o que o título do relatório diz ("4 falhas confirmadas (5 ocorrências)").
+
+**Por que isso vale registro:** a meta exige separação rigorosa entre problema detectado, suspeita e checklist, e exige rastreabilidade. Aqui os três formatos entregues — um para ler, um para auditar e um para planilha — concordam **no item** e diferem **na unidade** de contagem de forma coerente, sem nenhum item confirmado a mais em um formato e a menos em outro. Também é o teste negativo da minha própria desconfiança: eu esperava achar divergência e medi que não há.
