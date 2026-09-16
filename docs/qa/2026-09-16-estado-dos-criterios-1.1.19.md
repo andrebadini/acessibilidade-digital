@@ -1,5 +1,17 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.25, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.25.zip` (`499e1de3…d6a23`), **sem revisão independente ainda**.
+> Fecha o veredito da 1.1.24 inteiro (A1 a A6) mais os Minors herdados V6, V7 e V9. Para os critérios:
+> **5** melhora em dois pontos medidos — o radical de senha voltou a tarjar `bypasscode` e companhia
+> (regressão que eu havia introduzido) e o tarjador de valores passou a conhecer rótulos em português;
+> **11** fica com o backlog de Minors **vazio**; **2** e **12** foram medidos nos bytes empacotados
+> (paralela 4.145/4.144/0 com 1 pulado, `release-package` + `extension-shell` + `release-assets` 19/19
+> com o digest fixado, seis E2E do escopo 6/6, E2E de consentimento de pixels 10/10 com a asserção nova
+> da manchete, auditoria real do Google com 0 falhas, 9 positivos, 109 no checklist, 18 páginas e quatro
+> exportações completas, artefato entregue com notas 5/5 nos dois formatos e proveniência presente);
+> **10** segue pendente até a revisão da 1.1.25; **8** continua **Parcial**.
+
 > **Incremento 1.1.24, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.24.zip` (`978fa19e…665c01`), **sem revisão independente ainda**.
 > Ele carrega o que o veredito da 1.1.22 pediu — a cláusula e a lista derivando da mesma fonte, a regra

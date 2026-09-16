@@ -4,7 +4,16 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.24 preparada — sem revisão independente ainda.** A revisão da **1.1.22** saiu e é favorável (**0 Critical, 0 Important**, 4 Minor + 3 observações, nada bloqueante): os três Minors que aquele incremento se propôs a fechar foram reproduzidos nos bytes empacotados e a guarda de impressão foi julgada **mais forte que a alegação** — ela falha também quando a regra está presente mas ineficaz. A **1.1.24** traz o que aquele veredito pediu: as cinco frases de documentação que a medição não sustentava, a cláusula e a lista derivando da **mesma fonte** (um diagnóstico só na página não pode gerar cláusula sem entrada na lista), a regra de impressão chegando também ao **Ctrl+P da aba interativa** — que partia 198 palavras na matriz —, o oráculo de largura do E2E derivado do **`@page`** da própria folha em vez de uma constante, o import morto removido e `node_modules/` no `.gitignore`. A
+**Versão 1.1.25 preparada — sem revisão independente ainda.** A revisão da **1.1.24** saiu favorável
+(**0 Critical, 0 Important**, 4 Minor + 2 observações) e aprovou aquele artefato como candidato. A 1.1.25
+fecha o que ela achou: o **A2**, uma regressão de privacidade que eu introduzi na 1.1.23 — o lookbehind de
+dois caracteres deixava escapar `bypasscode`, `bypass_code`, `bypasswd`, `bypass_key` e `bypassword`, que
+**era tarjado antes** (o radical agora exige cauda de credencial); o **A1**, o tarjador de valores que só
+conhecia rótulos em inglês (`senha: …` passava intacto); o **A3**, `node_modules/` com barra que não ignorava
+o symlink; o **A4**, uma frase do README que o próprio delta contradisse; e o **A5**, um total de testes que
+eu citava sem declarar a seleção. Traz também os Minors herdados **V6** (códigos com a mesma frase viram uma
+entrada), **V7** (a deduplicação não depende mais da forma do código) e **V9** (o build recusa pacote com
+hash de CSP divergente do CSS estagiado). A revisão da **1.1.22** saiu e é favorável (**0 Critical, 0 Important**, 4 Minor + 3 observações, nada bloqueante): os três Minors que aquele incremento se propôs a fechar foram reproduzidos nos bytes empacotados e a guarda de impressão foi julgada **mais forte que a alegação** — ela falha também quando a regra está presente mas ineficaz. A **1.1.24** traz o que aquele veredito pediu: as cinco frases de documentação que a medição não sustentava, a cláusula e a lista derivando da **mesma fonte** (um diagnóstico só na página não pode gerar cláusula sem entrada na lista), a regra de impressão chegando também ao **Ctrl+P da aba interativa** — que partia 198 palavras na matriz —, o oráculo de largura do E2E derivado do **`@page`** da própria folha em vez de uma constante, o import morto removido e `node_modules/` no `.gitignore`. A
 1.1.22 fechou os três Minors que a revisão da 1.1.21 apontou (cláusula em linguagem simples chegando ao
 PDF, cabeçalho de anexo inteiro, guarda automatizada do comportamento de impressão) e levou ao
 relatório entregue a proveniência que só existia no modelo. A **1.1.23** acrescenta duas correções de
@@ -23,9 +32,10 @@ relatório entregue a proveniência que só existia no modelo. A **1.1.23** acre
 - **`listedLimitations` falhava aberto:** entrada fora de lista devolvia `[]`, o que faria o relatório
   afirmar "Limitações registradas (0)" e esconder limitações reais. Entrada inválida agora falha alto.
 
-Verificação: **236/236** nos consumidores do sanitizador e da política de texto, e os dois patches
-aplicados juntos num clone limpo do HEAD anterior. E2E de Chrome e a revisão independente da 1.1.23
-ficam para quando o Chrome estiver livre — a revisão da 1.1.22 está em curso.
+Verificação: os consumidores do sanitizador e da política de texto fecharam verdes, e os dois patches
+aplicados juntos num clone limpo do HEAD anterior. Os seis E2E de Chrome real e a auditoria empacotada
+da 1.1.23 **já foram executados** (6/6 e 0 falhas / 9 positivos / 109 no checklist / 18 páginas); o que
+falta da 1.1.23 é apenas a revisão independente, que ficou coberta pela revisão da 1.1.24.
 
 A revisão da
 1.1.21 deu **0 Critical, 0 Important e 5 Minor** e aprovou aquele artefato como candidato: a regressão

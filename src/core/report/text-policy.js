@@ -216,12 +216,38 @@ export function listedLimitations(limitations) {
   if (!Array.isArray(limitations)) {
     throw new TypeError('Limitações do relatório precisam ser lista.');
   }
+  // O corpo é extraído por posição, não por forma do código: a heurística antiga exigia código em
+  // maiúsculas com 4+ caracteres e deixava a frase repetida na lista quando o código era curto, tinha
+  // hífen, vinha em minúsculas, com espaço duplo, quebra no fim ou códigos encadeados (tabela de
+  // lacunas da revisão da 1.1.21, Minor 3 / V7). Cadeias do tipo `A: B: frase.` entram inteiras.
   const codedMessages = new Set();
+  const bodyOf = value => {
+    if (typeof value !== 'string') return null;
+    let rest = value;
+    let body = null;
+    for (let separator = rest.indexOf(': '); separator > 0; separator = rest.indexOf(': ')) {
+      if (rest.slice(0, separator).includes(' ')) break;
+      rest = rest.slice(separator + 2);
+      body = rest.trim();
+    }
+    return body;
+  };
   for (const value of limitations) {
-    const match = /^[A-Z][A-Z0-9_]{3,}: ([\s\S]+)$/u.exec(typeof value === 'string' ? value : '');
-    if (match) codedMessages.add(match[1]);
+    const body = bodyOf(value);
+    if (body !== null) codedMessages.add(body);
   }
-  return limitations.filter(value => !codedMessages.has(value));
+  // Duas regras: a frase simples que repete um corpo codificado sai (a forma codificada é a que
+  // carrega rastreabilidade) e códigos diferentes com a MESMA frase viram uma entrada só — os 12
+  // `ANNOTATION_MAP_*` de falha compartilham `fact` e mensagem, e a lista mostrava uma frase repetida
+  // (Minor 2 da 1.1.20 / V6). Os códigos específicos continuam no diagnóstico técnico do modelo.
+  const seenBodies = new Set();
+  return limitations.filter(value => {
+    const body = bodyOf(value);
+    if (body === null) return !codedMessages.has(typeof value === 'string' ? value.trim() : value);
+    if (seenBodies.has(body)) return false;
+    seenBodies.add(body);
+    return true;
+  });
 }
 
 export function derivePageLimitations(model, page) {

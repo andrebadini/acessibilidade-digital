@@ -1,9 +1,16 @@
+// Fronteira do radical de senha: ele exige cauda de credencial (word/wd/code/phrase/key, com ou sem
+// separador) ou a palavra inteira `pass` — e `pass` sozinho não pode vir precedido de "by", senão
+// "bypass" (WCAG 2.4.1) seria tarjado. O lookbehind de dois caracteres da 1.1.23 deixava escapar
+// `bypasscode`, `bypass_code`, `bypasswd`, `bypass_key` e `bypassword`, que ERA tarjado antes (achado
+// A2 da revisão da 1.1.24). `passed`, `passes`, `passive`, `passing`, `passage` e `passport` ficam
+// preservados.
+//
 // Vocabulário sensível, em inglês e em português: uma página brasileira pode expor a credencial em
 // `?senha=` ou `?cpf=`, e o produto afirma que a URL entregue é sanitizada. A expansão é sempre para
 // o lado seguro (tarjar a mais), mas os radicais curtos ficam de fora de propósito: "conta" pegaria
 // "contato", "pix" pegaria "pixelRatio" e "rg" pegaria "cargo" — perder esses campos seria corromper
 // o relatório, não protegê-lo.
-export const SENSITIVE_KEY = /(?:(?<!by)pass(?:word|wd)?(?!es|ed|ive|o|ing)|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)/iu;
+export const SENSITIVE_KEY = /(?:pass[-_ ]?(?:word|wd|code|phrase|key)|(?<!by)pass(?![-_a-z])|pwd|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)/iu;
 export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
 // Public storage failures stay independent from browser/IndexedDB error details,
@@ -151,7 +158,7 @@ export function backgroundImageKind(value) {
 export function redactSensitiveText(value) {
   return String(value ?? '')
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
-    .replace(/\b(authorization|password|passwd|token|secret|api[-_ ]?key|csrf|xsrf|otp|session|cookie)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s<]+)/giu, '$1$2[redacted]')
+    .replace(/\b(authorization|password|passwd|token|secret|api[-_ ]?key|csrf|xsrf|otp|session|cookie|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s<]+)/giu, '$1$2[redacted]')
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@');
 }
 

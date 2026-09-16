@@ -270,11 +270,17 @@ async function openAndProveReport(extension, panel, auditId, rawUrl, expected, r
   const state = await extension.waitForValue(report, `(() => ({
     ready:Boolean(document.querySelector('button[data-report-export]')),
     issues:document.querySelectorAll('[data-report-issue]').length,
-    text:document.body?.textContent??''
+    text:document.body?.textContent??'',
+    limitationHeadline:document.querySelector('[data-report-limitations] summary')?.textContent??''
   }))()`, value => value?.ready === true && value?.issues > 0, { timeoutMs: 30_000, intervalMs: 50 });
   assert.match(state.text, /WCAG 2\.2:/u);
   assert.match(state.text, /ABNT NBR 17225:/u);
   if (expected.limitation) assert.match(state.text, expected.limitation);
+  // A alternância acima é satisfeita pela ENTRADA CODIFICADA, que sempre existe na lista: por isso
+  // ela não provava que a cláusula em linguagem simples chegou ao artefato entregue — o Minor 5 da
+  // revisão da 1.1.21 e o achado N2 da 1.1.22 vêm exatamente dessa diferença. Aqui a exigência é a
+  // manchete (`[data-report-limitations] summary`), onde a pessoa lê antes de abrir os detalhes.
+  if (expected.limitationHeadline) assert.match(state.limitationHeadline, expected.limitationHeadline);
   const leak = await extension.evaluate(report, publicLeakExpression(rawUrl));
   assert.deepEqual(leak.forbidden, []);
   assert.ok(leak.evidenceImages >= expected.minimumImages);
@@ -719,6 +725,7 @@ test('URL pixel modes pause, survive worker restart, remain one-shot and clean o
       await openAndProveReport(extension, panel, auditId, rawUrl, {
         minimumImages: 1,
         limitation: /captura integral.*omitida|FULL_PAGE_CAPTURE_OMITTED/iu,
+        limitationHeadline: /Captura integral omitida/u,
       }, resources);
     } finally {
       await finishCleanup(resources);

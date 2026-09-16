@@ -9,7 +9,7 @@ import test from 'node:test';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const releaseDirectory = fileURLToPath(new URL('../release/', import.meta.url));
-const packageName = 'audita-acessibilidade-1.1.24.zip';
+const packageName = 'audita-acessibilidade-1.1.25.zip';
 // The digest of the artifact that is actually delivered. It is recorded here so a source change
 // that was not followed by a rebuild fails the suite: the test builds from the current tree, so a
 // stale release/audita-acessibilidade-1.1.15.zip and a drifted source cannot both stay green.
@@ -17,7 +17,7 @@ const packageName = 'audita-acessibilidade-1.1.24.zip';
 // fresh build alone was not enough: an independent review replaced release/audita-acessibilidade-1.1.19.zip
 // with garbage bytes and the suite stayed green, because the digest never touched the delivered
 // file. That is the same hole that let the 1.1.15 artifact be overwritten unnoticed.
-const deliveredPackageSha256 = '978fa19e21de87111ef42f8047d877783776cf1e3aa3ba147216469056665c01';
+const deliveredPackageSha256 = '499e1de38af007dac8696b071564ce8c8ddf9a486bd688d0897468f1c3dd6a23';
 // The artifact the independent review approved, kept in release/ so the evidence of what was
 // reviewed survives even though the source has moved past it and it is no longer reproducible from
 // HEAD. It stays reconstructible from its own commit, 49d70ca, which was verified by rebuilding.
@@ -49,6 +49,9 @@ async function createIsolatedBuilder(t, version) {
   await mkdir(join(project, 'vendor'));
   await mkdir(join(project, 'assets', 'icons'), { recursive: true });
   await cp(join(root, 'scripts', 'build-release.mjs'), join(project, 'scripts', 'build-release.mjs'));
+  await cp(join(root, 'scripts', 'report-css-hash.mjs'), join(project, 'scripts', 'report-css-hash.mjs'));
+  await mkdir(join(project, 'src', 'core', 'report'), { recursive: true });
+  await writeFixtureReportCss(join(project, 'src', 'core', 'report', 'report.css.js'));
   await writeFile(join(project, 'src', 'runtime.js'), 'globalThis.__fixture = true;\n');
   await writeFile(join(project, 'vendor', 'LICENSE'), 'fixture license\n');
   for (const size of [16, 32, 48, 128]) {
@@ -56,6 +59,15 @@ async function createIsolatedBuilder(t, version) {
   }
   await writeIsolatedManifest(project, version);
   return { project, isolatedRelease };
+}
+
+// CSS de fixture com par declarado consistente: o build recusa hash divergente, então a fixture
+// precisa nascer coerente para exercitar o caminho feliz.
+async function writeFixtureReportCss(path, { css = 'body{color:#000}', declared } = {}) {
+  const { computeReportCssHash } = await import('../scripts/report-css-hash.mjs');
+  const hash = declared ?? computeReportCssHash(css);
+  await writeFile(path, `export const REPORT_CSS = ${JSON.stringify(css)};\n`
+    + `export const REPORT_CSS_CSP_HASH = ${JSON.stringify(hash)};\n`);
 }
 
 function runIsolatedBuild(project, isolatedRelease) {
@@ -330,4 +342,24 @@ test('rejects a traversal version before removing an escaped output path', async
   assert.notEqual(result.status, 0, 'versão com traversal não pode alcançar o output');
   assert.equal(await readFile(sentinel, 'utf8'), 'preserve escaped sentinel');
   assert.deepEqual(await snapshotRelease(), releaseBefore, 'traversal rejeitado não pode tocar em release/');
+});
+
+test('o build recusa pacote cujo hash de CSP não corresponde ao CSS empacotado', async t => {
+  const { computeReportCssHash, assertReportCssHashConsistent } = await import('../scripts/report-css-hash.mjs');
+  const { REPORT_CSS, REPORT_CSS_CSP_HASH } = await import('../src/core/report/report.css.js');
+  // O par real passa; um par trocado é recusado com mensagem que diz o que fazer.
+  assert.equal(computeReportCssHash(REPORT_CSS), REPORT_CSS_CSP_HASH);
+  assert.equal(assertReportCssHashConsistent(REPORT_CSS, REPORT_CSS_CSP_HASH), REPORT_CSS_CSP_HASH);
+  assert.throws(() => assertReportCssHashConsistent(REPORT_CSS, 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='),
+    /REPORT_CSS_CSP_HASH divergente/u);
+
+  // E o portão vale para o BUILD, não só para a função: com o CSS de fixture e um hash trocado, o
+  // pacote não é produzido e o diretório de release fica vazio.
+  const { project, isolatedRelease } = await createIsolatedBuilder(t, '1.0.11');
+  await writeFixtureReportCss(join(project, 'src', 'core', 'report', 'report.css.js'),
+    { css: 'body{color:#111}', declared: 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' });
+  const result = runIsolatedBuild(project, isolatedRelease);
+  assert.notEqual(result.status, 0, 'o build precisa falhar com hash divergente');
+  assert.match(`${result.stderr}${result.stdout}`, /REPORT_CSS_CSP_HASH/u);
+  assert.deepEqual(await readdir(isolatedRelease), [], 'nenhum pacote pode ser produzido');
 });

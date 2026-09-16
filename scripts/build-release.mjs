@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { cp, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { assertReportCssHashConsistent } from './report-css-hash.mjs';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -21,6 +22,10 @@ const releaseTimestamp = new Date('2026-08-27T00:00:00.000Z');
 try {
   await cp(join(root, 'manifest.json'), join(staging, 'manifest.json'));
   await cp(join(root, 'src'), join(staging, 'src'), { recursive: true });
+  // O CSS que vai no pacote precisa bater com o hash declarado: com hash obsoleto o navegador bloqueia
+  // o <style> pela CSP e o relatório entregue sai sem estilo, em silêncio (Minor 6 / V9).
+  const stagedCss = await import(pathToFileURL(join(staging, 'src/core/report/report.css.js')).href);
+  assertReportCssHashConsistent(stagedCss.REPORT_CSS, stagedCss.REPORT_CSS_CSP_HASH);
   await cp(join(root, 'vendor'), join(staging, 'vendor'), { recursive: true });
   await mkdir(join(staging, 'assets', 'icons'), { recursive: true });
   for (const size of [16, 32, 48, 128]) {

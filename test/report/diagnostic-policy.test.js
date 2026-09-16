@@ -62,3 +62,38 @@ test('lista de limitações nunca some em silêncio quando a entrada não é lis
       `entrada ${JSON.stringify(invalid) ?? 'undefined'} precisa ser recusada`);
   }
 });
+
+test('a deduplicação não depende da forma do código (tabela de lacunas da revisão)', () => {
+  // A revisão da 1.1.21 reproduziu seis formas em que a heurística antiga falhava e a frase simples
+  // repetida ficava na lista. Todas passam a ser reconhecidas pelo CORPO da entrada, não pela forma.
+  const casos = [
+    ['OTP: frase curta.', 'frase curta.'],                       // código com menos de 4 caracteres
+    ['otp: frase minúscula.', 'frase minúscula.'],               // código em minúsculas
+    ['REPORT-PDF: frase com hífen.', 'frase com hífen.'],        // hífen no código
+    ['XYZ:  frase com espaço duplo.', 'frase com espaço duplo.'], // espaço duplo depois dos dois pontos
+    ['ABC: frase com quebra.\n', 'frase com quebra.'],           // quebra de linha no fim
+    ['A: B: frase encadeada.', 'frase encadeada.'],              // códigos encadeados
+  ];
+  for (const [codificada, simples] of casos) {
+    assert.deepEqual(listedLimitations([codificada, simples]), [codificada],
+      `a frase simples repetida precisa sair ao lado de ${JSON.stringify(codificada)}`);
+    assert.deepEqual(listedLimitations([simples]), [simples], 'frase simples sozinha permanece');
+  }
+  // Uma frase simples que não é corpo de código nenhum continua intocada.
+  assert.deepEqual(listedLimitations(['O relatório cobre somente uma página e o estado observado.', 'Outra frase.']),
+    ['O relatório cobre somente uma página e o estado observado.', 'Outra frase.']);
+});
+
+test('dois códigos com a mesma frase produzem UMA entrada na lista (o código específico fica no JSON)', () => {
+  // Os 12 códigos ANNOTATION_MAP_* de falha compartilham o mesmo `fact` e a mesma mensagem: sem
+  // colapsar, a lista de limitações mostrava duas (ou mais) entradas para uma única frase distinta
+  // (Minor 2 da revisão da 1.1.20 / V6). O primeiro código representa o fato; os demais continuam
+  // registrados no diagnóstico técnico do modelo.
+  const corpo = 'O mapa visual derivado não pôde ser gerado localmente; a captura original foi preservada.';
+  const primeira = `ANNOTATION_MAP_TIMEOUT: ${corpo}`;
+  const segunda = `ANNOTATION_MAP_GEOMETRY_INVALID: ${corpo}`;
+  assert.deepEqual(listedLimitations([primeira, segunda, corpo]), [primeira]);
+  // Frases diferentes continuam sendo entradas diferentes.
+  const outra = 'ANNOTATION_MAP_PARTIAL: O mapa visual foi gerado com cobertura parcial e limitações explícitas.';
+  assert.deepEqual(listedLimitations([primeira, segunda, outra, corpo]), [primeira, outra]);
+});

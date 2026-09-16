@@ -247,3 +247,45 @@ test('o radical de senha não engole palavras legítimas do próprio produto', (
     assert.equal(json[credencial], '[redacted]', `${credencial} continua sendo tarjado`);
   }
 });
+
+test('a fronteira de senha não pode deixar credencial escapar (achado A2 da revisão da 1.1.24)', () => {
+  // A revisão mediu que o lookbehind `(?<!by)` da 1.1.23 deixou passar bypasscode, bypass_code,
+  // bypasswd, bypass_key e bypassword — e `bypasscode` ERA tarjado antes daquela mudança. O radical
+  // agora exige cauda de credencial (word/wd/code/phrase/key, com separador opcional) ou a palavra
+  // inteira `pass`, e só a palavra inteira `pass` é que não pode vir precedida de "by".
+  const json = sanitizeJsonData({
+    password: 'x', passwd: 'x', pass: 'x', userPassword: 'x', passcode: 'x', passphrase: 'x',
+    bypasscode: 'x', bypass_code: 'x', bypasswd: 'x', bypass_key: 'x', bypassword: 'x',
+    'pass-word': 'x', 'pass word': 'x', pwdField: 'x',
+    passed: 3, passes: 1, bypass: true, passive: 'p', passing: 'ok', passo: 'ok',
+    contato: 'ok', pixelRatio: 2, cargo: 'ok',
+  });
+  for (const credencial of ['password', 'passwd', 'pass', 'userPassword', 'passcode', 'passphrase',
+    'bypasscode', 'bypass_code', 'bypasswd', 'bypass_key', 'bypassword', 'pass-word', 'pass word', 'pwdField']) {
+    assert.equal(json[credencial], '[redacted]', `${credencial} precisa ser tarjado`);
+  }
+  for (const legitimo of ['passed', 'passes', 'bypass', 'passive', 'passing', 'passo', 'contato', 'pixelRatio', 'cargo']) {
+    assert.notEqual(json[legitimo], '[redacted]', `${legitimo} não é credencial e não pode ser perdido`);
+  }
+});
+
+test('valores com rótulo em português também são tarjados no texto (achado A1 da revisão da 1.1.24)', () => {
+  // A revisão mediu que o tarjador de VALORES continuava só em inglês: `senha: S3GR3D0` passava
+  // intacto enquanto `password: S3GR3D0` era tarjado. O rigor de privacidade não pode depender do
+  // idioma do rótulo.
+  const casos = [
+    ['senha: S3GR3D0', 'S3GR3D0'], ['Senha = S3GR3D0', 'S3GR3D0'],
+    ['segredo: ABC-123', 'ABC-123'], ['credencial: XYZ', 'XYZ'],
+    ['sessão: 9f3a', '9f3a'], ['autenticação: token-vivo', 'token-vivo'],
+    ['autorização: permitido-9', 'permitido-9'], ['chave: CHAVE-SECRETA', 'CHAVE-SECRETA'],
+    ['cpf: 123.456.789-00', '123.456.789-00'], ['cartão: 4111 1111 1111 1111', '4111 1111 1111 1111'],
+  ];
+  for (const [texto, vazamento] of casos) {
+    const saida = sanitizeJsonData({ texto });
+    assert.ok(!saida.texto.includes(vazamento), `"${texto}" não pode sair com ${vazamento}`);
+    assert.match(saida.texto, /\[redacted\]/u, `"${texto}" precisa registrar o tarjamento`);
+  }
+  // Controle negativo: prosa sem rótulo de credencial continua intacta.
+  const prosa = 'A sessão de perguntas discutiu o cartão de crédito como tema e a chave do problema.';
+  assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
+});
