@@ -463,3 +463,24 @@ A asserção procura a raiz no documento inteiro, e não em `body`, exatamente p
 Verificação: 4/4 nos E2E de destaque, exportação da página atual e auditoria por URL.
 
 Isto confirma de forma independente o que a rodada 11 já tinha corrigido no registro: o destaque corresponde ao elemento correto e funciona. O que continua sem cobertura é o caminho dos **sinais** na página, que segue quebrado por causa raiz medida e é a pendência obrigatória restante deste critério.
+
+## Rodada 18 — a sonda estava errada, não o helper
+
+Investiguei a limitação que atribuí ao helper de avaliação nas rodadas 13 e 14, quando duas leituras assíncronas voltaram `{}` e eu tratei isso como "problema de serialização do helper", sem prova.
+
+Medição direta, seis casos no contexto da página do painel, cada um comparando o helper com um `Runtime.evaluate` cru:
+
+```
+literal        | helper ok:number:2
+promise-string | helper ok:string:"ok"
+promise-object | helper ok:object:{"a":1}
+then-object    | helper ok:number:4
+async-iife     | helper ok:number:3
+async-json     | helper ok:string:"[...chaves da sessão...]"
+```
+
+Todos os seis passam, inclusive `chrome.storage.session.get(null).then(...)` e IIFE assíncrona. **O helper não tem o defeito que eu lhe atribuí.** A leitura que voltou `{}` naquelas rodadas vinha de outro lugar — provavelmente do meu próprio encadeamento de sondas, com um contexto já substituído ou uma expressão que devolvia objeto vazio por construção — e eu devia ter investigado isso antes de culpar a ferramenta.
+
+Fica registrado porque duas rodadas foram gastas contornando uma limitação inexistente, e porque a conclusão certa naquele momento teria sido "minha sonda não mede o que eu penso", não "o helper não serve".
+
+Nenhuma alteração de código: o comportamento medido é o correto.
