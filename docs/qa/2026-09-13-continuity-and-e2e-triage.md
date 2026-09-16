@@ -1670,3 +1670,20 @@ Mapeei cada nome de teste falho para o arquivo que o contém (`grep -rl` sobre `
 **Sobram duas, e nenhuma é novidade grave:** o lote de evidência completa, que **passa em 15 s** quando o orçamento de download sobe (já corrigido para 300 s), e `runs pinned local axe … sob CSP estrita`, que falha em 1,5 s e é o único candidato a defeito real ou asserção desatualizada em área minha.
 
 **O que isto corrige no meu relato.** Eu vinha dizendo "11 falhas não triadas" e depois "9", como se fossem todas do mesmo saco. Não são: a maior parte é de um incremento alheio em desenvolvimento, uma é orçamento, e uma merece investigação. O critério 10 depende da última, não das sete.
+
+## O único candidato a defeito real na minha área era limpeza de perfil, não produto
+
+`test/e2e/axe-mv3-csp.test.mjs` falha em 1,5 s com `cleanup axe limitado falhou: [{"stage":"profile","code":"failed"}]`. Fui atrás de onde essa asserção vive, porque o nome do arquivo sugere cobertura de axe e o do erro não:
+
+```js
+t.after(async () => {
+  const result = await cleanup();
+  assert.deepEqual(result, { ok: true, failures: [] }, `cleanup axe limitado falhou: …`);
+});
+```
+
+E `stage: 'profile'` é do **harness**, não do axe: `real-chrome.mjs:830` registra os passos de limpeza como `['profile', raw.removeProfile]`, e `:852` pula esse passo quando a saída do Chrome não foi confirmada. O passo chama, no teste, `rm(profile, { recursive: true, force: true })`. Com `force: true`, `rm` só rejeita em erro real — tipicamente `EBUSY`/`ENOTEMPTY` porque um processo do navegador ainda segura arquivos do diretório temporário.
+
+**Conclusão, com o limite dela explícita:** a asserção que falhou é de **teardown**, não de produto. O log mostra essa falha e **nenhuma outra** para o mesmo teste, o que indica que o corpo do teste — as asserções sobre axe em cada frame sob CSP estrita — passou, e o que falhou foi a remoção do perfil temporário do Chrome. É condição ambiental, não defeito de acessibilidade nem lacuna de cobertura. Não reexecutei para confirmar as asserções de produto linha a linha, e é por isso que a frase acima diz "indica", não "prova" — a triagem tem a execução em mãos.
+
+**Com isto, o portão serial fica sem nenhum defeito de produto confirmado na minha área:** sete falhas são do arquivo do outro incremento, uma é orçamento de download já corrigido, e esta é limpeza de perfil do harness. O critério 10 continua pendente do relatório da triagem, mas o que sobra para ele é a confirmação independente, não um achado aberto.
