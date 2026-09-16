@@ -1439,3 +1439,25 @@ O passo "inspecionar visualmente o relatório HTML e PDF" continuava pendente, e
 **O que continua faltando, e fica registrado.** A frase específica do motivo por ocorrência ("Nenhuma marcação de obrigatoriedade foi observada junto a este campo…") **não** é renderizada: para ocorrências de regra do núcleo, o modelo guarda `justification` como o resumo canônico (regra + desfecho), e o motivo por alvo vive em `ruleResults[].targets[].data.reason`, que o relatório não imprime. O usuário identifica o campo pelo nome acessível, pela evidência e pelo destaque, e a rastreabilidade está no JSON — mas a frase por campo exigiria um campo novo no modelo, com validação e compatibilidade. Não é uma correção de uma linha, e entra no backlog com esta descrição.
 
 **Um erro meu de leitura, corrigido por medição.** Na primeira passada eu li na imagem que o cabeçalho dizia "1 não conformidade" enquanto o cartão dizia "2" — pareceu uma incoerência de contagem no relatório. Medi o DOM: o cabeçalho diz *"2 verificações com falha confirmada (4 ocorrências)"*, igual ao painel. A incoerência era da minha leitura da imagem em baixa resolução, não do produto.
+
+## Rodada 49 — página real do Google com os bytes empacotados da 1.1.18
+
+O passo "testar página simples, como Google" também estava pendente para esta versão. Rodei pelo mesmo caminho das rodadas anteriores — pacote extraído, `diff` conferido antes de executar — e medi no Chrome 152.0.7977.64.
+
+**Contagens do painel e do relatório, idênticas entre si:** *"0 verificações com falha confirmada (0 ocorrências); 1 Recomendação/alerta (1 ocorrência); 3 Suspeitas a confirmar (4 ocorrências); 9 Resultados positivos. Checklist separado: 109 verificações ainda sem conclusão."* Treze grupos de item no relatório.
+
+**Comparação com a medição histórica da mesma página: 0 / 1 / 3 / 9 — exatamente os mesmos números.** Era o que eu queria verificar: a mudança de 5.9.7 (que removeu a reprovação do item e reencaminhou a suspeita) **não alterou o resultado na página real**, e nenhuma falha confirmada apareceu onde antes não havia. Como o Google não tem campo obrigatório, o item 5.9.7 nem entra; o que a medição prova é ausência de efeito colateral, não cobertura.
+
+**Disciplina do relatório entregue, lida do HTML exportado:**
+
+- **Zero ocorrências de "Inconformidade ao item … da ABNT NBR 17225:2025"** — com zero falhas confirmadas, nenhuma frase legal é impressa. É a verificação de critério 7 no extremo: o produto não inventa não conformidade em página real.
+- **108 itens com "Verificar o item …"**, a linguagem de revisão pendente, coerente com o checklist de 109.
+- **Fórmula, denominador e limites explícitos**: *"não é nota, certificação ou declaração de conformidade"*, *"Sem denominador, não há nota"*, *"O gráfico usa verificações agrupadas, não quantidade de elementos"*, e a explicação de que o denominador do índice difere do denominador dos grupos consolidados porque inclui requisitos e recomendações dos níveis avaliados.
+- **Cobertura declarada à parte**: *"Cobertura automática: 29,2%. Mede os testes do motor próprio com conclusão automática (passed, failed ou inapplicable), divididos pelo inventário desse motor nas páginas tentadas"*.
+- **Índice com numerador e denominador**: *"Índice técnico automático — motor próprio 9,0 / 10 — 9 verificações atendidas entre 10 com conclusão automática"*.
+- **Limitações registradas**: auditoria "concluída parcialmente", *"não representa conformidade AA"*, *"Mesmo 10 não comprova acessibilidade integral"*.
+- **Versão da extensão 1.1.18** no bloco de metodologia.
+
+**Exportações**: HTML 325.195 B, PDF 957.686 B com **17 páginas**, CSV 82.886 B, JSON 358.717 B, os quatro com estado `complete`. Dezessete páginas para 0 falhas, 1 alerta, 3 suspeitas, 9 positivos e 109 pendências de checklist é paginação razoável, e está a duas ordens de grandeza do defeito de 700 páginas registrado na meta.
+
+**Uma nota de infraestrutura:** a primeira tentativa de exportar estourou o tempo de espera (`DOWNLOAD_PROOF_TIMEOUT`) com 240 s; com 420 s os quatro arquivos saíram íntegros. A exportação desta página leva mais de quatro minutos, o que é útil saber antes de rodar o percurso completo em página grande.
