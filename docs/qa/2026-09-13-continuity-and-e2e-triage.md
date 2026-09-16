@@ -1408,3 +1408,5 @@ SHA-256 c76d49ce5996679ac419f26b2439ecca526bfc9a3dff9edfe9630e715a4f80c6
 ```
 
 Os artefatos 1.1.15 (`5619e27d…`, aprovado), 1.1.16 (`c175a224…`, reprovado) e 1.1.17 (`c0cc4118…`, três Important) permanecem em `release/`; o teste fixa os quatro hashes.
+
+**Testes desta revisão, medidos.** `forms` 21/21; `finding-kind` 6/6 (o caso novo fixa os três motivos de 5.9.7 como suspeitas e exige alvo correlacionado); painel+relatório+revisão 640/640; `release-package` + `extension-shell` 12/12; E2E de 5.9.7 no Chrome real 1/1; `verify-project` GREEN. Suíte completa: **4185 testes, 4176 passam, 9 falham** — as mesmas 8 pré-existentes de `service-worker` mais a instabilidade conhecida de `annotation-map` ("times out a stalled bitmap allocation"), que passa **26/26** isolada. Nenhuma falha nova veio desta mudança.
