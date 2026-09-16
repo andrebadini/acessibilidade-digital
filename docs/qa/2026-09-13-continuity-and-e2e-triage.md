@@ -1561,3 +1561,14 @@ O quarto é o caso de orçamento já diagnosticado: com o mesmo arquivo e o orç
 **Por que isto vale para a 1.1.19.** `git diff --stat 75e2717..dad1cda -- src/` mostra que entre a 1.1.18 e a 1.1.19 mudaram **apenas** `src/core/report/html.js` e `src/core/rules/forms.js`. Todo o caminho de captura, overlay, personas e consentimento de pixels é byte a byte o mesmo que executou esses testes — então a medição acima vale para a revisão atual, e digo isso com a razão, não por suposição.
 
 **Critério 4, metade do redimensionamento.** A exigência é que a auditoria não faça o usuário assistir a rolagens, mudanças de foco, redimensionamentos ou navegação. O E2E do percurso compara rolagem, foco e a marcação do autor antes e depois, e passa; e `capture-visible-element` exige explicitamente que a captura de um elemento totalmente visível **preserve a viewport** — que é exatamente o ponto onde o Chrome 152 com `captureBeyondViewport=true` já havia mostrado `clientWidth 1265 → 1280`. A limitação conhecida continua sendo o recorte de regiões fora da viewport, registrada desde a rodada de captura.
+
+## Entrega corrigida: o aviso de escopo da comparação com avaliadores externos
+
+O documento do usuário `entregas/comparacao-avaliadores-externos.md` (fora do repositório versionado) afirmava **"a versão continua 1.1.14"** — o que deixou de ser verdade há cinco versões — e listava as mudanças posteriores sem mencionar a mais relevante para quem compara números: a retirada da reprovação do item 5.9.7. Corrigi o aviso de escopo, e o que ficou dito é:
+
+- o parecer lado a lado é **histórico** (Audita 1.1.14, 12/09/2026) e **não descreve o código atual**;
+- desde então o produto **confirma menos não conformidades e declara mais suspeitas**, e isso não significa que a página melhorou — é mudança de classificação, com o 5.9.7 nomeado como a causa principal;
+- **uma comparação lado a lado desta versão não foi executada** — nenhuma URL foi submetida à AMAWeb nem ao AccessMonitor para a versão atual, e a coluna do Audita no parecer continua sendo a 1.1.14;
+- o número atual que existe é o da página do Google medido sobre os bytes empacotados (0 falhas, 1 alerta, 3 suspeitas com 4 ocorrências, 9 positivos, cobertura 29,2%, índice 9,0/10, PDF de 17 páginas), com ponteiro para o registro de método nesta trilha.
+
+As conclusões técnicas do documento (natureza local do processamento, ABNT contra WCAG, tratamento da incerteza, unidades de contagem e ausência de nota única) continuam corretas para a versão atual — e a terceira ficou **mais** verdadeira depois das correções: "não converte suspeita em infração" agora vale também para 5.9.7.
