@@ -4,7 +4,7 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.23 preparada — a revisão independente deste artefato e a da 1.1.22 ainda não saíram.** A
+**Versão 1.1.24 preparada — sem revisão independente ainda.** A revisão da **1.1.22** saiu e é favorável (**0 Critical, 0 Important**, 4 Minor + 3 observações, nada bloqueante): os três Minors que aquele incremento se propôs a fechar foram reproduzidos nos bytes empacotados e a guarda de impressão foi julgada **mais forte que a alegação** — ela falha também quando a regra está presente mas ineficaz. A **1.1.24** traz o que aquele veredito pediu: as cinco frases de documentação que a medição não sustentava, a cláusula e a lista derivando da **mesma fonte** (um diagnóstico só na página não pode gerar cláusula sem entrada na lista), a regra de impressão chegando também ao **Ctrl+P da aba interativa** — que partia 198 palavras na matriz —, o oráculo de largura do E2E derivado do **`@page`** da própria folha em vez de uma constante, o import morto removido e `node_modules/` no `.gitignore`. A
 1.1.22 fechou os três Minors que a revisão da 1.1.21 apontou (cláusula em linguagem simples chegando ao
 PDF, cabeçalho de anexo inteiro, guarda automatizada do comportamento de impressão) e levou ao
 relatório entregue a proveniência que só existia no modelo. A **1.1.23** acrescenta duas correções de
@@ -48,7 +48,9 @@ não parte mais palavra (`thead th{overflow-wrap:normal}`), zerando as 3 quebras
 entregue passa a trazer a proveniência que já estava no modelo (método, regras, **viewport observado**,
 **ledger normativo com arquivo e SHA-256** e as **cinco notas de integridade normativa**); e um E2E
 novo mede a folha de impressão na largura real da página, com controles positivos que **falham na CSS
-da 1.1.20 (50 quebras) e passam na atual**. O teste do baseline `78ba813` deixou de depender do
+da 1.1.20 (50 quebras **sob compressão de coluna injetada pelo teste**, que é o que reproduz a pressão do
+conteúdo real; sem ela a fixture não quebra, porque 126 dos 146 itens são "Não aplicável" — por isso a asserção
+é `> 0`, não "50") e passam na atual**. O teste do baseline `78ba813` deixou de depender do
 diretório de invocação — era ele que fazia uma cópia sem `.git` registrar 1 falha que não era do
 produto.
 

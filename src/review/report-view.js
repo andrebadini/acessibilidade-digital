@@ -7,7 +7,7 @@ import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
-import { ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE } from '../core/report/diagnostic-policy.js';
+import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { listedLimitations, viewportSummary } from '../core/report/text-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
@@ -291,9 +291,11 @@ export function collectFilterOptions(model, summary) {
  * revisão da 1.1.20 foi corrigido só na aba e não chegava ao PDF justamente por haver duas lógicas.
  */
 export function projectLimitationClauses(model, technicalEvidence) {
+  // Só `session.diagnostics`, que é a mesma fonte de `projectExecutive.limitations`: ler também
+  // `pages[].diagnostics` permitia uma cláusula na manchete sem entrada correspondente na lista
+  // (achado N1 da revisão da 1.1.22). Nos caminhos do produto as duas fontes já são unificadas.
   const codes = new Set();
   for (const entry of model.session?.diagnostics ?? []) if (entry?.code) codes.add(entry.code);
-  for (const page of model.pages ?? []) for (const entry of page.diagnostics ?? []) if (entry?.code) codes.add(entry.code);
   const clauses = [];
   if (codes.has('PIXEL_CAPTURE_OMITTED')) clauses.push('Modo sem imagens: nenhuma captura raster.');
   else if (codes.has('FULL_PAGE_CAPTURE_OMITTED') &&

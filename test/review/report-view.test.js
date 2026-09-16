@@ -995,9 +995,10 @@ test('cláusula em linguagem simples segue o CÓDIGO do diagnóstico e chega à 
     ['Observação passiva: sem testes interativos de teclado, redimensionamento e movimento.']);
   assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [{ code: 'DYNAMIC_PROBES_INCOMPLETE' }] }, pages: [] }, []), []);
   assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [] }, pages: [] }, []), []);
-  // O código pode estar só nos diagnósticos da página.
-  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [] }, pages: [{ diagnostics: [{ code: 'PIXEL_CAPTURE_OMITTED' }] }] }, []),
-    ['Modo sem imagens: nenhuma captura raster.']);
+  // A cláusula lê a MESMA fonte que a lista (`projectExecutive.limitations` usa só
+  // `model.session.diagnostics`): um diagnóstico que existe apenas na página não pode produzir uma
+  // cláusula na manchete sem entrada correspondente na lista (achado N1 da revisão da 1.1.22).
+  assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [] }, pages: [{ diagnostics: [{ code: 'PIXEL_CAPTURE_OMITTED' }] }] }, []), []);
   // Captura integral omitida distingue miniatura disponível de evidência estrutural.
   assert.deepEqual(projectLimitationClauses({ session: { diagnostics: [{ code: 'FULL_PAGE_CAPTURE_OMITTED' }] }, pages: [] },
     [{ kind: 'element', dataUrl: 'data:image/png;base64,AAAA' }]),

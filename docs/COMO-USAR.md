@@ -1,13 +1,13 @@
 # Audita Acessibilidade — instalar e usar
 
-Guia da versão 1.1.23. A disponibilidade do pacote depende do registro de entrega; este guia não constitui publicação na loja.
+Guia da versão 1.1.24. A disponibilidade do pacote depende do registro de entrega; este guia não constitui publicação na loja.
 
 ## Instalar ou atualizar, sem login
 
 1. Descompacte o ZIP entregue em uma pasta permanente.
 2. No Chrome, abra `chrome://extensions` e ative **Modo do desenvolvedor**.
 3. Escolha **Carregar sem compactação** e selecione a pasta que contém `manifest.json`.
-4. Confira a versão **1.1.23** e fixe Audita Acessibilidade na barra, se desejar.
+4. Confira a versão **1.1.24** e fixe Audita Acessibilidade na barra, se desejar.
 
 Não é preciso instalar bibliotecas, Node.js, axe-core ou criar conta. O motor já está incluído. O Modo do desenvolvedor é necessário para esta distribuição local; não implica programação pelo usuário.
 

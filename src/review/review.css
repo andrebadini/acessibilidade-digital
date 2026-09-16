@@ -120,6 +120,10 @@ dialog:not([open]) { display: none; }
 @media (min-width: 48rem) { .report-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } [data-report-evidence-preview] { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 32rem) { main { padding: .75rem; } .dialog-actions { flex-direction: column; } .report-filters { grid-template-columns: 1fr; } .report-identity, .report-view > section { padding: .85rem; } .section-nav { align-items: flex-start; flex-direction: column; } .section-nav ul { width: 100%; } }
 @media print {
+  /* A aba imprime por esta folha, não pela do relatório entregue: sem estas duas regras o Ctrl+P da
+     aba parte palavra no meio (medido: 198 na matriz e 2 no cabeçalho), que é a mesma classe de
+     defeito fechada no PDF entregue. `overflow-wrap: normal` obriga a coluna a respeitar a palavra. */
+  .matrix-scroll td, .matrix-scroll th, thead th { overflow-wrap: normal; }
   [data-report-checklist] > [data-checklist-question] { display: none !important; }
   [data-review-history], [data-review-record], [data-review-record] dl, [data-review-record] dd { break-inside: auto; }
   [data-review-record] dt, [data-review-record] h3 { break-after: avoid; }

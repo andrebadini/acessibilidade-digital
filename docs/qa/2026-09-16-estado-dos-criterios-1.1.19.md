@@ -1,5 +1,16 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.24, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.24.zip` (`978fa19e…665c01`), **sem revisão independente ainda**.
+> Ele carrega o que o veredito da 1.1.22 pediu — a cláusula e a lista derivando da mesma fonte, a regra
+> de impressão chegando ao Ctrl+P da aba interativa, o oráculo de largura do E2E derivado do `@page`,
+> as cinco frases de documentação corrigidas, o import morto e o `node_modules/` no `.gitignore` — mais
+> o que a 1.1.23 trouxe em privacidade. Para os critérios: **2** e **12** medidos nos bytes empacotados
+> (fase paralela 4.140/4.139/0 com 1 pulado, `release-package` + `extension-shell` 12/12 com o digest
+> fixado, seis E2E de Chrome real 6/6, auditoria real do Google com 0 falhas, 9 positivos, 109 no
+> checklist, 18 páginas e quatro exportações completas, CSP do HTML entregue batendo com o `<style>`);
+> **10** segue pendente até a revisão da 1.1.24; **8** continua **Parcial**.
+
 > **Incremento 1.1.23, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.23.zip` (`7e816d7b…12068`), **sem revisão independente ainda**.
 > Três correções, todas com defeito medido antes: o vocabulário sensível passa a cobrir português
@@ -33,7 +44,10 @@
 > `release/audita-acessibilidade-1.1.20.zip` (`140e30bb…6e1b1`), com duas correções de apresentação
 > medidas no artefato entregue da página real: a limitação deixou de ser dita duas vezes no sumário
 > executivo (8 → 6 entradas, 2 → 0 repetições, título coerente com a lista) e o rótulo do item deixou
-> de quebrar no meio na matriz impressa (**56 → 0**), com a **mesma paginação de 18 páginas**. Nada
+> de quebrar no meio na matriz impressa (**56 → 0**). **A paginação não ficou igual:** em A/B controlado
+> sobre o mesmo modelo e o mesmo HTML, a regra da 1.1.21 imprime **uma página a menos** (no HTML da
+> 1.1.21, 15 → 14; no HTML da 1.1.22, que acrescenta a proveniência, 16 → 15), e a 1.1.20 tinha trocado
+> as 56 quebras de rótulo por **50 palavras partidas** (`Recomendaçã`/`o ABNT`), corrigidas na 1.1.21. Nada
 > disso altera contagem, classificação, frase legal ou conclusão. Para os critérios: **2 e 12** foram
 > re-verificados com o artefato novo (fase paralela 4180/4179/0, `release-package` 7/7, quatro E2E de
 > relatório, impressão e exportação verdes, e `verify-project` **estático** verde com os testes

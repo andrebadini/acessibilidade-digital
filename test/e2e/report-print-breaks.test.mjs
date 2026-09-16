@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
+import { REPORT_CSS } from '../../src/core/report/report.css.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
@@ -13,12 +14,27 @@ import { buildCompleteReportSummary } from '../../src/panel/panel-summary.js';
 import { buildReportView } from '../../src/review/report-view.js';
 import { createCdpPipeTransport, resolveRealChromeTestBinary, startFixtureServer, terminateChromeProcess } from './support/real-chrome.mjs';
 
-// A4 retrato com margens laterais de 15 mm: 180 mm de área imprimível.
-const PRINT_CONTENT_WIDTH_PX = Math.round((180 / 25.4) * 96);
 // A folha de impressão dá 8.5 pt à matriz; em px de CSS, 8.5 pt = 11,3333 px.
 const PRINT_MATRIX_FONT_PX = 11.3333;
-const MATRIX_RULE = '.matrix-scroll td,.matrix-scroll th{overflow-wrap:normal;word-break:normal}';
-const HEAD_RULE = 'thead th{overflow-wrap:normal;word-break:normal}';
+const MATRIX_RULE = '.matrix-scroll td,.matrix-scroll th{overflow-wrap:normal}';
+const HEAD_RULE = 'thead th{overflow-wrap:normal}';
+
+// A largura útil NÃO é constante do teste: ela vem do `@page` da própria folha entregue. Fixá-la em
+// 680 px fazia o portão medir a emulação, não a caixa de impressão — uma mudança de margem que
+// jogasse o conteúdo para fora do papel passaria despercebida (achado N3 da revisão da 1.1.22).
+function printContentWidthPx(css) {
+  const page = /@page\{([^}]*)\}/u.exec(css);
+  assert.ok(page, 'a folha entregue precisa declarar @page');
+  const declarations = Object.fromEntries(page[1].split(';').filter(Boolean).map(part => {
+    const separator = part.indexOf(':');
+    return [part.slice(0, separator).trim(), part.slice(separator + 1).trim()];
+  }));
+  assert.match(declarations.size ?? '', /^A4 portrait$/u, 'o oráculo só sabe medir A4 retrato');
+  const parts = String(declarations.margin ?? '').split(/\s+/u).filter(Boolean);
+  const sides = parts.length === 1 ? parts[0] : parts[1];
+  assert.ok(/^[\d.]+mm$/u.test(sides ?? ''), `margem lateral precisa estar em mm, veio ${sides}`);
+  return Math.round((210 - 2 * Number.parseFloat(sides)) / 25.4 * 96);
+}
 // Compressão determinística: fixa o layout e estreita a coluna da classificação (3ª) para menos que
 // a palavra "Recomendação", como o conteúdo real de uma auditoria faz na tabela automática.
 // A largura precisa valer também para a primeira linha da tabela: em table-layout:fixed é ela que
@@ -113,13 +129,30 @@ test('printed matrix keeps item labels and words whole at the real page width', 
   assert.ok(shipped.includes(MATRIX_RULE) && shipped.includes(HEAD_RULE),
     'as duas regras de impressão precisam existir na folha entregue');
   const htmlHeaders = { 'content-type': 'text/html;charset=utf-8' };
-  const server = await startFixtureServer(t, new Map([
+  // A aba interativa imprime pela PRÓPRIA folha (review.css), não pela do relatório entregue. Ela é
+  // medida aqui, na mesma largura de papel e na mesma mídia, porque só este harness discrimina: um
+  // E2E de viewport largo passa com e sem a regra — a primeira versão desta guarda era vacuosa
+  // (mutação removendo a regra e o teste continuou verde). Achado N2 da revisão da 1.1.22.
+  const tabHtml = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">`
+    + `<link rel="stylesheet" href="/src/review/review.css"></head><body><main><h1>Relatório de auditoria de acessibilidade</h1>`
+    + `<div id="report-root"></div></main><script type="module">import {renderReportView} from '/src/review/report-view.js';`
+    + `document.querySelector('#report-root').append(renderReportView({view:${JSON.stringify(view).replace(/</gu, '\\u003c')},document,onExport(){throw Error('EXPORT_NOT_ALLOWED')}}));`
+    + `</script></body></html>`;
+  const routes = new Map([
+    ['/aba', { status: 200, headers: htmlHeaders, body: tabHtml }],
     ['/entregue', { status: 200, headers: htmlHeaders, body: shipped }],
     ['/forcado-com-regra', { status: 200, headers: htmlHeaders, body: withCss(shipped, css => css + SQUEEZE_MATRIX) }],
     ['/forcado-sem-regra', { status: 200, headers: htmlHeaders, body: withCss(shipped, css => css.replace(MATRIX_RULE, '') + SQUEEZE_MATRIX) }],
     ['/cabecalho-comprimido', { status: 200, headers: htmlHeaders,
       body: withCss(shipped, css => css.replace(HEAD_RULE, '') + SQUEEZE_HEADER) }],
-  ]));
+  ]);
+  for (const path of await readdir(new URL('../../src/', import.meta.url), { recursive: true })) {
+    if (!/\.(?:js|css)$/u.test(path)) continue;
+    routes.set(`/src/${path}`, { status: 200,
+      headers: { 'content-type': path.endsWith('.js') ? 'text/javascript' : 'text/css' },
+      body: await readFile(new URL(`../../src/${path}`, import.meta.url), 'utf8') });
+  }
+  const server = await startFixtureServer(t, routes);
 
   const directory = await mkdtemp(join(tmpdir(), 'audita-print-breaks-'));
   const child = spawn(binary, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
@@ -136,10 +169,13 @@ test('printed matrix keeps item labels and words whole at the real page width', 
     assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  const printContentWidth = printContentWidthPx(REPORT_CSS);
   await command('Emulation.setDeviceMetricsOverride', {
-    width: PRINT_CONTENT_WIDTH_PX, height: 1200, deviceScaleFactor: 1, mobile: false,
+    width: printContentWidth, height: 1200, deviceScaleFactor: 1, mobile: false,
   });
-  const measure = async path => {
+  // `expectedMatrixFont` só existe na folha entregue (8,5 pt); a aba usa a fonte da própria folha,
+  // então lá o discriminante de mídia é `printMedia`, não o tamanho da fonte.
+  const measure = async (path, { expectedMatrixFont = PRINT_MATRIX_FONT_PX } = {}) => {
     await command('Page.navigate', { url: `${server.origin}${path}` });
     await evaluate(`new Promise((resolve, reject) => { let tries = 0; const check = () => {
       if (document.querySelectorAll('.matrix-scroll tbody tr').length === 146) resolve(true);
@@ -150,8 +186,10 @@ test('printed matrix keeps item labels and words whole at the real page width', 
     await evaluate('document.fonts.ready.then(() => true)');
     const result = await evaluate(MEASURE);
     assert.equal(result.printMedia, true, `${path}: a folha precisa estar em mídia de impressão`);
-    assert.ok(Math.abs(parseFloat(result.matrixFont) - PRINT_MATRIX_FONT_PX) < 0.1,
-      `${path}: as regras de impressão precisam estar ativas (matriz em 8.5 pt), veio ${result.matrixFont}`);
+    if (expectedMatrixFont !== null) {
+      assert.ok(Math.abs(parseFloat(result.matrixFont) - expectedMatrixFont) < 0.1,
+        `${path}: as regras de impressão precisam estar ativas (matriz em 8.5 pt), veio ${result.matrixFont}`);
+    }
     assert.equal(result.rows, 146, `${path}: matriz com as 146 linhas`);
     return result;
   };
@@ -161,6 +199,12 @@ test('printed matrix keeps item labels and words whole at the real page width', 
   assert.deepEqual(shippedResult.headBroken, [], 'nenhuma palavra pode ser partida no meio em cabeçalho de tabela');
   assert.ok(shippedResult.tableWidth <= shippedResult.contentWidth + 1,
     `a matriz precisa caber na área imprimível: tabela ${shippedResult.tableWidth}px em ${shippedResult.contentWidth}px`);
+
+  // A aba interativa: mesma largura de papel, mesma mídia, mesma asserção.
+  const tabResult = await measure('/aba', { expectedMatrixFont: null });
+  assert.equal(tabResult.rows, 146, 'a matriz da aba precisa das 146 linhas');
+  assert.deepEqual(tabResult.matrixBroken, [], 'a aba impressa não pode partir palavra na matriz');
+  assert.deepEqual(tabResult.headBroken, [], 'a aba impressa não pode partir palavra em cabeçalho');
 
   // Controles positivos. A fixture não reproduz sozinha a pressão de largura de uma auditoria real
   // (nela 126 dos 146 itens são "Não aplicável", curto, enquanto no relatório real 109 são "Requer
@@ -180,7 +224,7 @@ test('printed matrix keeps item labels and words whole at the real page width', 
 
   t.diagnostic(`print-breaks: matriz=${shippedResult.matrixBroken.length} quebras, cabeçalhos=${shippedResult.headBroken.length}, `
     + `anexo=${shippedResult.annexBroken} (tokens longos quebram de propósito), documento=${shippedResult.documentBroken}; `
-    + `tabela=${shippedResult.tableWidth}px em ${shippedResult.contentWidth}px; `
+    + `tabela=${shippedResult.tableWidth}px em ${shippedResult.contentWidth}px (@page=${printContentWidth}px); `
     + `forçado com regra=${squeezed.matrixBroken.length}; forçado sem regra=${squeezedWithoutRule.matrixBroken.length}; `
-    + `cabeçalho comprimido=${headControl.headBroken.length}`);
+    + `cabeçalho comprimido=${headControl.headBroken.length}; aba=${tabResult.matrixBroken.length}/${tabResult.headBroken.length}`);
 });
