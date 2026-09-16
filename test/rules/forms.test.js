@@ -439,7 +439,11 @@ test('related radio and checkbox fields require an observable named group', asyn
 });
 
 test('required field rule checks both programmatic state and observable identification', async () => {
-  const failed = await evaluate('required-field-identification', snapshot([
+  // Um campo com declaração incoerente e um campo sem marcação observada aparecem **os dois** no
+  // mesmo resultado. A versão anterior devolvia `failed` só com o primeiro e descartava o segundo
+  // em silêncio; a revisão independente mediu esse silêncio no relatório exportado, onde o campo
+  // sem marcação alguma não aparecia em lugar nenhum.
+  const combined = await evaluate('required-field-identification', snapshot([
     record('state', 'input', {
       attributes: { type: 'text', required: '' },
       required: false,
@@ -453,16 +457,28 @@ test('required field rule checks both programmatic state and observable identifi
       accessibleName: 'E-mail'
     })
   ]));
-  assert.equal(failed.outcome, 'failed');
-  assert.deepEqual(failed.targets.map(target => target.nodeId), ['state']);
-  assert.deepEqual(failed.targets.map(target => target.data.reason), ['required-state-mismatch']);
+  assert.equal(combined.outcome, 'cantTell');
+  assert.deepEqual(combined.targets.map(target => target.nodeId), ['state', 'indicator']);
+  assert.deepEqual(combined.targets.map(target => target.data.reason), [
+    'required-state-mismatch', 'missing-required-identification'
+  ]);
+  assert.doesNotMatch(combined.summary, /infração|inconformidade ao item/iu);
 
-  // Uma marcação observada não aprova e uma marcação ausente não reprova: o item pede percepção,
-  // e percepção depende de contraste, tamanho, posição e do recurso que apresenta a marcação, que
-  // esta medição não cobre. Os dois casos ficam em revisão. A versão anterior devolvia `passed`
-  // para o primeiro e `failed` para o segundo, e o `failed` chegava ao relatório como
-  // "Inconformidade ao item 5.9.7" — a revisão independente mediu no Chrome uma página que marca a
-  // obrigatoriedade por `label::after` recebendo esse veredito, e ele foi retirado.
+  // Este item não produz `failed`. A norma pede que todos possam perceber a obrigatoriedade, e
+  // nada do que se mede aqui prova percepção: uma marcação ausente nas fontes observadas pode
+  // existir fora delas, e uma declaração ARIA malformada é defeito de estado do componente — 4.1.2,
+  // que este item não reivindica. A versão anterior reprovava os dois casos, e a revisão
+  // independente mediu a frase "Inconformidade ao item 5.9.7 da ABNT NBR 17225:2025" sendo impressa
+  // para um campo que a própria árvore de acessibilidade do Chrome expõe como obrigatório.
+  const invalidToken = await evaluate('required-field-identification', snapshot([
+    record('invalid-token', 'input', {
+      attributes: { type: 'text', 'aria-required': 'sometimes' }, required: false
+    })
+  ]));
+  assert.equal(invalidToken.outcome, 'cantTell');
+  assert.deepEqual(invalidToken.targets.map(target => target.nodeId), ['invalid-token']);
+  assert.deepEqual(invalidToken.targets.map(target => target.data.reason), ['invalid-required-state']);
+
   const marked = await evaluate('required-field-identification', snapshot([
     record('ok', 'input', {
       attributes: { type: 'text', required: '' },
@@ -499,11 +515,6 @@ test('required field rule checks both programmatic state and observable identifi
       attributes: { type: 'text', 'aria-required': 'false' }, required: false
     })
   ]))).outcome, 'inapplicable');
-  assert.equal((await evaluate('required-field-identification', snapshot([
-    record('invalid-token', 'input', {
-      attributes: { type: 'text', 'aria-required': 'sometimes' }, required: false
-    })
-  ]))).outcome, 'failed');
 });
 
 test('input purpose judges only the declaration the field itself exposes', async () => {

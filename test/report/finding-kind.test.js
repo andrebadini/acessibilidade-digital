@@ -18,6 +18,18 @@ test('concrete incomplete observations remain suspicions only for their correlat
   assert.equal(findingKind({ ...occurrence, nodeId: 'other' }, rule('generic-link-purpose')), 'checklist');
 });
 
+test('the per-field requiredness suspicions of ABNT 5.9.7 are suspicions, not a generic checklist', () => {
+  // An independent review measured every one of these reasons being rendered as a generic "not yet
+  // evaluated" question, with the field message and the selector dropped from the exported HTML and
+  // the print output reduced to a count. The rule calls them concrete suspicions, so they must not
+  // fall back to the checklist group.
+  for (const reason of ['missing-required-identification', 'invalid-required-state', 'required-state-mismatch']) {
+    assert.equal(findingKind(occurrence, rule(reason)), 'suspected');
+    assert.equal(findingKind({ ...occurrence, nodeId: 'other' }, rule(reason)), 'checklist',
+      'a suspicion still needs its own correlated target, never the whole page');
+  }
+});
+
 test('recommendations do not masquerade as requirement failures; human conclusions remain explicit', () => {
   assert.equal(findingKind({ ...occurrence, outcome: 'failed' }), 'detected');
   assert.equal(findingKind({ ...occurrence, outcome: 'failed', classification: 'recommendation' }), 'advisory');

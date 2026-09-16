@@ -4,12 +4,23 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão de produção 1.1.17 preparada:** a revisão independente da 1.1.16 encontrou um achado
+**Versão de produção 1.1.18 preparada:** a revisão independente da 1.1.17 confirmou que os quatro
+achados anteriores estavam fechados, mas mediu três achados Important no mesmo item: a suspeita por
+campo de 5.9.7 era classificada como *checklist* genérico — a mensagem do campo e o seletor não
+chegavam ao HTML nem ao PDF —, os campos sem marcação eram descartados em silêncio quando algum
+campo tinha declaração inválida, e a branch sobrevivente de reprovação ainda imprimia a frase legal
+para um campo que a própria árvore de acessibilidade do Chrome expõe como obrigatório. As três
+foram corrigidas: 5.9.7 não reprova mais (o item é sobre percepção, e declaração inválida é
+território de 4.1.2), as suspeitas por campo aparecem no grupo de revisão humana, e nenhum campo é
+descartado. Como isso muda o que o relatório decide e apresenta, o pacote passa a se identificar
+como 1.1.18. Os registros da 1.1.17, 1.1.16 e 1.1.15 ficam abaixo.
+
+**Versão de produção 1.1.17:** a revisão independente da 1.1.16 encontrou um achado
 **Critical** no produtor de obrigatoriedade de 5.9.7 — ele convertia marcações legítimas
 (`label::after`, `aria-labelledby`, `placeholder`, rótulo longo) em infração confirmada e imprimia
 a frase legal de não conformidade — e um achado Important no teste de pacote, que conferia apenas
-a reconstrução e nunca o arquivo entregue. A fronteira foi corrigida: 5.9.7 volta a ficar em
-revisão nos dois sentidos e só reprova contradição programática demonstrável. Como isso muda o que
+a reconstrução e nunca o arquivo entregue. A fronteira foi corrigida: 5.9.7 voltou a ficar em
+revisão nos dois sentidos. Como isso muda o que
 o relatório decide, o pacote passou a se identificar como 1.1.17. Os registros da 1.1.16 e da 1.1.15
 ficam abaixo.
 

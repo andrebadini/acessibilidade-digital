@@ -117,7 +117,7 @@ const MESSAGE = Object.freeze({
   'missing-related-fields-group': 'Agrupe e nomeie programaticamente estes campos relacionados.',
   'invalid-required-state': 'Use um valor válido para o estado obrigatório.',
   'required-state-mismatch': 'Mantenha o estado obrigatório programático consistente.',
-  'missing-required-identification': 'Identifique de modo perceptível que este campo é obrigatório.',
+  'missing-required-identification': 'Ofereça uma marcação de obrigatoriedade que todos possam perceber, ou confirme que o campo já a identifica por outro meio.',
   'invalid-or-missing-autocomplete': 'Use autocomplete válido e compatível com a finalidade deste campo.',
   'missing-status-role': 'Exponha esta mensagem com uma função de status adequada.',
   'focus-indicator-not-visible': 'Forneça um indicador de foco visível.',

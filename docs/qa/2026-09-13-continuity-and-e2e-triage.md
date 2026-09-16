@@ -1385,3 +1385,26 @@ Com os bytes conferidos **antes** da execução, rodei do diretório extraído, 
 **O que ficou de fora, e por quê.** A execução dos 34 arquivos de Chrome real de uma vez falhou com `CDP_COMMAND_TIMEOUT` em parte deles, porque a revisão independente da 1.1.17 estava rodando Chrome ao mesmo tempo — é contenção, não produto: os seis acima, executados logo depois, passaram. A bateria completa a partir do pacote fica para quando não houver outra instância ativa, e o resultado será registrado aqui.
 
 **Identidade de bytes conferida por completo, além do `src/`:** `vendor/` idêntico, `assets/` idêntico exceto as duas fontes de desenho (`icon-1024.png` e `icon-source.svg`), que a distribuição exclui e que o manifesto **não** referencia — os quatro ícones declarados (16/32/48/128) estão os quatro no pacote. `manifest.json` idêntico. Contagem: 199 arquivos no zip e 199 no diretório extraído. Nada no pacote está faltando em relação ao que o manifesto usa.
+
+## Rodada 47 — revisão independente da 1.1.17: 0 Critical, 3 Important, e a correção que eles exigiram
+
+A revisão da 1.1.17 (diff congelado `3cacadd..c64221d`, artefato `c0cc4118…`, worktree separado) voltou com **0 Critical, 3 Important, 5 Minor**, e confirmou por medição que **C1, I1, I2 e M1 estavam genuinamente fechados**: com o `src/` pré-correção a mesma fixture produzia `failed` + 21 alvos + frase legal, e com o `src/` corrigido produz `cantTell` + 10 alvos + **0 frases legais**; 0 de 120 estados sintéticos devolvem `passed`; lixo no zip entregue agora falha o teste (e no commit anterior continuava 7/7 verde); os três hashes conferem e os 199 arquivos do zip foram comparados um a um por ela, com descompactação própria.
+
+Mas ela mediu três achados Important, todos no mesmo item, e todos introduzidos por mim:
+
+**I-1 — a suspeita nova não chegava ao relatório.** `missing-required-identification` não estava em `CONCRETE_REASONS` (`src/core/report/finding-kind.js`), então toda ocorrência `cantTell` de 5.9.7 era classificada como **checklist genérico**: o cartão mostrava só orientação por item e ids opacos de ocorrência, a mensagem do campo e o seletor **não apareciam no HTML exportado**, e no PDF sobrava apenas uma contagem. O comentário da própria regra a chamava de "suspeita concreta", e o produto promete suspeitas e checklist como grupos distintos. **Corrigido**: os três motivos de 5.9.7 entraram em `CONCRETE_REASONS`; a ocorrência passa a cair no grupo de revisão humana (`groupForOccurrences`: `cantTell` → `humanReview`), com cartão próprio.
+
+**I-2 — a suspeita era descartada em silêncio.** A regra devolvia `failed` só com os problemas de declaração e **descartava os campos sem marcação** sempre que algum campo tinha declaração inválida. Ela confirmou num relatório exportado de verdade: `#bare` (obrigatório, sem marcação nenhuma) não aparecia no HTML, no JSON nem no PDF. **Corrigido**: um único resultado `cantTell` lista os dois grupos, um alvo por campo; teste unitário fixa o caso combinado.
+
+**I-3 — a branch sobrevivente imprimia a frase legal.** Ela mediu com `Accessibility.getPartialAXTree` que `<input aria-required="maybe">` e `<input required aria-required="false">` são expostos pelo Chrome como `required: true` — e o relatório imprimia "Inconformidade ao item 5.9.7 da ABNT NBR 17225:2025" para eles. O item mapeia só 3.3.2 (rótulos/instruções), e token ARIA malformado é território de 4.1.2, que 5.9.7 não reivindica. **Corrigido**: 5.9.7 deixou de produzir `failed` — o item é sobre percepção, e nada do que se mede ali prova percepção. Os dois grupos viram suspeita com alvo por campo. O texto de remediação de `missing-required-identification` passou a ser orientação de revisão, não ordem de correção.
+
+**Minor corrigido de passagem:** o comentário do E2E afirmava que a marcação é observada "de toda fonte que a página associa ao campo" — a revisão refutou com sete mecanismos ainda não observados (irmão, `title`, `legend`, `img alt`, elemento pai, nome acessível, pseudo de filho). O comentário passou a enumerar as quatro fontes realmente observadas. Os demais Minor ficam registrados: alvo de `aria-labelledby` dentro de shadow root não é observado (direção segura: suspeita), e M2 segue **não corrigido** — a revisão mostrou que o caminho de exportação por modelo gerado alcança o renderizador frouxo, o que a minha rodada anterior tinha dado como inalcançável.
+
+**Bump para 1.1.18**, porque isto muda o que o relatório decide e apresenta — e a 1.1.17 tem veredito com três Important, então também não substitui o candidato aprovado. Artefato novo:
+
+```
+audita-acessibilidade-1.1.18.zip
+SHA-256 c76d49ce5996679ac419f26b2439ecca526bfc9a3dff9edfe9630e715a4f80c6
+```
+
+Os artefatos 1.1.15 (`5619e27d…`, aprovado), 1.1.16 (`c175a224…`, reprovado) e 1.1.17 (`c0cc4118…`, três Important) permanecem em `release/`; o teste fixa os quatro hashes.

@@ -348,44 +348,42 @@ function requiredFieldIdentification(snapshot) {
       return !declaration.valid || declaration.required || node?.required === true;
     });
     if (declared.length === 0) return result('inapplicable', 'Não há campos obrigatórios observáveis.');
-    const failures = [];
-    const unmarked = [];
+    const problems = [];
     let incomplete = false;
     for (const field of declared) {
       const declaration = requiredDeclaration(field);
       if (!declaration.valid) {
-        failures.push(target(field, 'Use um valor válido para o estado obrigatório.', {
+        problems.push(target(field, 'Use um valor válido para o estado obrigatório.', {
           reason: 'invalid-required-state'
         }));
       } else if (!hasOwn(field, 'required')) {
         incomplete = true;
       } else if (declaration.required !== field.required) {
-        failures.push(target(field, 'Mantenha o estado obrigatório programático consistente.', {
+        problems.push(target(field, 'Mantenha o estado obrigatório programático consistente.', {
           reason: 'required-state-mismatch'
         }));
       } else if (!hasOwn(field, 'requiredIndicator')) {
         incomplete = true;
       } else if (!normalizeText(field.requiredIndicator)) {
-        unmarked.push(field);
+        problems.push(target(field, 'Nenhuma marcação de obrigatoriedade foi observada junto a este campo. Confirme se a obrigatoriedade é perceptível por outro meio antes de concluir.', {
+          reason: 'missing-required-identification'
+        }));
       }
     }
-    // Só a declaração programática incoerente é contradição demonstrável, e é isso que ainda
-    // produz `failed`. A marcação, em qualquer dos dois sentidos, não é: o item 5.9.7 pede que
-    // todos possam perceber a obrigatoriedade, e percepção depende de contraste, tamanho, posição
-    // e de recursos assistivos que esta medição não cobre. Uma marcação ausente nas fontes
-    // observadas é suspeita concreta — não "nada foi declarado", porque a observação enxerga o
-    // texto do rótulo, o conteúdo gerado por CSS, o placeholder e o aria-labelledby, e uma
-    // marcação fora daí existe sem ser vista aqui. A versão anterior convertia essa ausência em
-    // infração confirmada e chegava a imprimir a referência legal de não conformidade para páginas
-    // que marcam a obrigatoriedade por `label::after`, placeholder ou aria-labelledby; a revisão
-    // independente mediu isso no Chrome e o veredito foi retirado.
-    if (failures.length > 0) {
-      return result('failed', 'Há campos com estado obrigatório programático inválido ou incoerente.', failures);
-    }
+    // Este item não produz `failed`. A norma pede que todos possam perceber a obrigatoriedade, e
+    // nada do que se mede aqui prova percepção: uma marcação ausente nas fontes observadas pode
+    // existir fora delas, e uma declaração ARIA malformada ou contraditória é defeito de estado do
+    // componente — território de 4.1.2, que este item não reivindica —, não prova de que a
+    // identificação visual falte. A versão anterior reprovava os dois casos, e a revisão
+    // independente mediu a frase "Inconformidade ao item 5.9.7 da ABNT NBR 17225:2025" sendo
+    // impressa para um campo que a própria árvore de acessibilidade do Chrome expõe como
+    // obrigatório. Os dois grupos viram suspeita concreta por campo, no mesmo resultado: a versão
+    // que só reportava `failures` descartava em silêncio os campos sem marcação sempre que algum
+    // campo tinha declaração inválida, e a revisão mediu esse silêncio no relatório exportado.
     if (incomplete) return result('cantTell', 'Faltam dados do estado ou da identificação de campo obrigatório.', [], [
       'Colete o estado calculado e o indicador associado de cada campo obrigatório.'
     ]);
-    if (unmarked.length === 0) {
+    if (problems.length === 0) {
       return result('cantTell',
         'A marcação de obrigatoriedade foi observada nos campos obrigatórios, mas a percepção dela não é medida automaticamente.',
         [], [
@@ -393,13 +391,17 @@ function requiredFieldIdentification(snapshot) {
           'Confirme visualmente que a marcação de cada campo obrigatório é perceptível antes de concluir.'
         ]);
     }
+    const unmarked = problems.filter(problem => problem.data.reason === 'missing-required-identification').length;
+    const declarations = problems.length - unmarked;
+    const described = [
+      ...(unmarked > 0 ? [`${unmarked} campo(s) sem marcação de obrigatoriedade observada`] : []),
+      ...(declarations > 0 ? [`${declarations} campo(s) com declaração de obrigatoriedade inválida ou incoerente`] : [])
+    ].join(' e ');
     return result('cantTell',
-      `Em ${unmarked.length} campo(s) obrigatório(s) nenhuma marcação de obrigatoriedade foi observada nas fontes verificadas. Isso não confirma falha do item 5.9.7: a marcação pode estar em outro ponto da página ou ser percebida por outro meio.`,
-      unmarked.map(field => target(field,
-        'Nenhuma marcação de obrigatoriedade foi observada junto a este campo. Confirme se a obrigatoriedade é perceptível antes de concluir.',
-        { reason: 'missing-required-identification' })),
+      `Há ${described}. Isso não confirma falha do item 5.9.7: a marcação pode estar em outro ponto da página ou ser percebida por outro meio, e a declaração não é a percepção.`,
+      problems,
       ['Foram observados o texto dos rótulos associados, o conteúdo gerado por CSS, o placeholder e os elementos referenciados por aria-labelledby. Uma marcação declarada fora dessas fontes não é vista por esta medição.',
-        'A ausência de marcação observada é suspeita que exige confirmação humana, não infração confirmada.']);
+        'Cada item desta lista é suspeita que exige confirmação humana, não infração confirmada.']);
   });
 }
 
