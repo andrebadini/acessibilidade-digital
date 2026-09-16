@@ -1,5 +1,16 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.23, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.23.zip` (`7e816d7b…12068`), **sem revisão independente ainda**.
+> Três correções, todas com defeito medido antes: o vocabulário sensível passa a cobrir português
+> (`?senha=`, `?cpf=` sobreviviam à URL anunciada como sanitizada), o radical de senha deixa de tarjar
+> `passed`/`passes`/`bypass`/`passive` (vocabulário do próprio produto) e `listedLimitations` deixa de
+> falhar aberto. Para os critérios: **12** está medido nos bytes empacotados desta versão — seis E2E de
+> Chrome real **6/6**, auditoria real do Google com 0 falhas, 9 positivos, 109 no checklist, 18 páginas,
+> quatro exportações completas e artefato entregue conferido (notas 5/5, proveniência presente, 0
+> palavras partidas); **5** e **6** ganham a verificação de que a expansão do vocabulário não alterou o
+> relatório entregue; **10** segue pendente até a revisão da 1.1.23; **8** continua **Parcial**.
+
 > **Incremento 1.1.22, e o que ele muda aqui.** O artefato corrente é
 > `release/audita-acessibilidade-1.1.22.zip` (`c2d6c44d…5951b5`), ainda **sem revisão independente**.
 > Ele fecha três Minors da revisão da 1.1.21: a cláusula em linguagem simples passa a chegar ao
