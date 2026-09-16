@@ -1648,3 +1648,25 @@ Ou seja: evidência completa com consentimento, reinício do trabalhador, confir
 Cinco caem a poucos milissegundos de **30 s**, que é o `DEFAULT_COMMAND_TIMEOUT_MS` do harness. E, diferente do que eu supus, **não é só efeito de carga**: os dois de marcadores falham **igualmente isolados**, com o mesmo ~32 s. Então o que existe é um conjunto de fluxos que **estoura o teto de comando do próprio harness de forma reprodutível**, e um (`current-page audits run in one inactive copy`, 121 s) que é lento por outro motivo.
 
 **A consequência é metodológica e vale para a conclusão:** enquanto o teto for 30 s, esses testes não conseguem distinguir "o produto travou" de "o comando demorou mais que o teto". O experimento decisivo é **elevar o teto numa cópia de rascunho e repetir** — se passarem, o problema é o harness e a correção não toca asserção nenhuma; se continuarem falhando, é produto e vira achado. É exatamente o que a triagem tem condições de fazer e eu não, porque qualquer execução minha agora competiria com a dela pela mesma máquina.
+
+## As 9 falhas seriais, mapeadas por arquivo: sete são do incremento de outro autor
+
+Mapeei cada nome de teste falho para o arquivo que o contém (`grep -rl` sobre `test/e2e/*.mjs`), porque "9 falhas" não diz nada sobre de quem é o problema. O resultado muda o quadro:
+
+| Teste que falha | Arquivo | Dono |
+|---|---|---|
+| current-page audits run in one inactive copy and leave the original page intact | `sidepanel-flow-mv3.test.mjs` | **outro incremento** |
+| element-only confirms once and keeps the full-page capture omitted | `sidepanel-flow-mv3.test.mjs` | **outro incremento** |
+| full-evidence can be cancelled at the privacy pause without touching the source | `sidepanel-flow-mv3.test.mjs` | **outro incremento** |
+| full-evidence rehydrates after worker restart and exports all four formats | `sidepanel-flow-mv3.test.mjs` | **outro incremento** |
+| no-pixels shows progress, completes in the copy and exposes a view-only report | `sidepanel-flow-mv3.test.mjs` | **outro incremento** |
+| original-page ABNT markers remain usable across idle and preserve the report | `sidepanel-flow-mv3.test.mjs` | **outro incremento** |
+| original-page ABNT markers visual review and verified exports | `sidepanel-flow-mv3.test.mjs` | **outro incremento** |
+| full-evidence batch resumes after restart … and exports their report | `batch-pixel-consent-mv3.test.mjs` | meu, **orçamento já diagnosticado** |
+| runs pinned local axe in every isolated frame under real MV3 and strict page CSP | `axe-mv3-csp.test.mjs` | meu, **candidato real** |
+
+**Sete das nove estão no arquivo do outro incremento** — o mesmo que está modificado no worktree e que a meta manda preservar sem incluir nos meus commits. Isso é coerente com o que já estava registrado sobre ele: os cenários dependem de uma chave `audita:owned-tab:v2:*` que o trabalho do outro autor ainda não produz. O harness roda a árvore inteira, então o E2E dele aparece no meu portão — mas o defeito não é do meu produto nem dos meus testes.
+
+**Sobram duas, e nenhuma é novidade grave:** o lote de evidência completa, que **passa em 15 s** quando o orçamento de download sobe (já corrigido para 300 s), e `runs pinned local axe … sob CSP estrita`, que falha em 1,5 s e é o único candidato a defeito real ou asserção desatualizada em área minha.
+
+**O que isto corrige no meu relato.** Eu vinha dizendo "11 falhas não triadas" e depois "9", como se fossem todas do mesmo saco. Não são: a maior parte é de um incremento alheio em desenvolvimento, uma é orçamento, e uma merece investigação. O critério 10 depende da última, não das sete.
