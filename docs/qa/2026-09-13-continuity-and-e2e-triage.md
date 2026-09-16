@@ -1156,3 +1156,40 @@ Na rodada 40 registrei que o pacote não pode ser executado pelo harness, porque
 **O que fiz então, em vez de declarar o critério impossível:** um teste que confere o pacote **byte a byte** contra a árvore revisada, nos dois sentidos. Ele constrói o ZIP num diretório temporário, extrai, e compara o SHA-256 de cada entrada com o arquivo correspondente do repositório; depois verifica a direção inversa, que nenhum arquivo de `src/` ou `vendor/` ficou de fora. Resultado: `pacote conferido byte a byte: 199 arquivos idênticos à árvore revisada`.
 
 Isso fecha o critério 12 **no que ele pode ser fechado por este caminho**, e o teste diz isso no próprio comentário: o artefato é exatamente o subconjunto embarcado desta árvore, então os resultados de Chrome real que descrevem esta árvore descrevem o artefato. **Não substitui executar o artefato**, e não cobre uma build feita a partir de outra árvore. A lacuna que resta é de natureza, não de esforço: executar um pacote de loja exigiria embarcar o harness de teste dentro dele, o que é a coisa errada a fazer.
+
+## Rodada 41 — revisão independente do 1.1.15: aprovado, e uma inconsistência que era minha
+
+A revisão independente do pacote 1.1.15 foi concluída. **Veredito: o 1.1.15 pode substituir o candidato revisado. Nenhum achado Critical ou Important** no diff `607fc02..HEAD -- src/` (38 commits). Isso fecha o critério 10 para este número: ele deixa de ser "empacotado e verde" e passa a ser "revisado, sem achado bloqueante".
+
+### O que a revisão refutou, e são os dois pontos que eu havia pedido para atacar
+
+- **Detecção de recorte marcando campo visível.** Dez declarações testadas em Chrome real pelo caminho de produção: nenhum falso positivo. Dois casos que pareciam perigosos revelaram-se acertos — um rótulo com `width:0; overflow:visible; clip-path:inset(0% 50%)` é marcado corretamente (o texto ocupa 213 px fora da caixa de 0 px e é de fato invisível), e um rótulo legível dentro de invólucro colapsado **não** é marcado, porque `clip-path` não é herdado.
+- **Limpeza de query removendo informação de conclusão.** Nenhuma regra lê `src`, `poster` ou `currentSrc`; o único atributo de URL lido por regra é `href`, deliberadamente preservado.
+- **Frase de inconformidade em recomendação.** `main-heading` (5.3.3, recomendação) retorna `failed` legitimamente, mas a frase existe em dois pontos do código e ambos têm portão `requirement`.
+- **Pacote.** As 199 entradas conferidas byte a byte contra a árvore: zero diferenças, zero ausentes. SHA-256 confere, manifesto declara 1.1.15 nos dois campos.
+
+### O achado Minor, e por que a inconsistência era minha
+
+A revisão apontou `report-view.js:675` tratando decisão humana "não conforme" como falha sem exigir nota, enquanto o portão normativo e o tratamento de evidência a exigiam, e classificou como Minor com alcançabilidade não confirmada. Medi: **é alcançável** — construí a decisão sem nota sobre ocorrência `cantTell` e o RED confirmou que a verificação ia para "Não conformidades". Mas ao corrigir, o fix não pegou, e isso foi informativo: o agrupamento é decidido em `summary.groups`, antes de `itemCheckPresentation`.
+
+Ao investigar, contei o padrão no produto inteiro: `answer === 'não conforme'` aparece em **14 pontos**, e **12 deles tratam a decisão humana como veredito sem exigir nota**. Só dois exigiam nota: a emissão da referência normativa — onde a exigência é legítima, porque a frase é uma afirmação jurídica, não de apresentação — e o tratamento de evidência, **que eu mesmo havia mudado na rodada 33**.
+
+Ou seja: a inconsistência não estava no produto, estava na minha correção. A fronteira correta é **o veredito é a decisão humana; a nota é exigida apenas para emitir a referência curta de inconformidade**. Alinhei `evidence-treatment.js` ao padrão dos outros doze pontos e realinhei os dois testes que eu havia ajustado. Nada mais mudou.
+
+Isto é o inverso do que eu esperava encontrar, e vale registrar como método: quando um achado de revisão aponta inconsistência entre superfícies, contar quantas superfícies seguem cada regra antes de "corrigir" a minoria. Aqui a minoria era uma linha que eu havia escrito.
+
+### Estado
+
+- Revisão do 1.1.15: **aprovada, sem Critical/Important**; um Minor fechado por decisão de fronteira.
+- Suíte: **4184 testes, 4176 passam, 8 falham** — as mesmas 8 pré-existentes.
+- Pacote 1.1.15 conferido byte a byte contra a árvore, por teste permanente.
+- Sondas temporárias do revisor removidas por ele; a minha (`tmp-trace`) também.
+
+### O que continua aberto, e é o que falta para a entrega
+
+1. **O artefato não é executado.** O harness não roda contra o pacote porque a distribuição não leva `test/`, e isso é correto. A verificação do pacote é estrutural e byte a byte; executar o artefato exigiria embarcar o harness de teste dentro dele. Decisão de escopo pendente.
+2. **Perceptibilidade de 5.9.7**: desenho de três passos registrado, não implementado.
+3. **Automação visual de 5.9.1**: cobre só recorte declarado; faltam fora-da-tela, cobertura, contraste, `font-size: 0`, `opacity` baixa e o caso mais comum, campo sem rótulo nenhum.
+4. **9 cenários de `sidepanel-flow`**: causa diagnosticada (sessão pausada não tem registro de aba própria), pertence a outro incremento.
+5. **Vocabulário português no filtro de privacidade**: `SENSITIVE_KEY` não pega "senha".
+6. **Apresentação da fórmula**: o bloco da metodologia fica recolhido na aba e no exportado.

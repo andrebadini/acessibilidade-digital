@@ -1309,9 +1309,10 @@ test('one consolidated issue marks every correlated element and keeps one full-p
 });
 
 test('shared evidence keeps one explicit derivation for each occurrence-specific treatment', () => {
-  // A human "não conforme" confirms the failure only when it carries the note the normative gate
-  // requires. Without the note the report refuses to emit the reference, so the capture must not
-  // claim a confirmed failure the report itself declines to qualify: it stays in review.
+  // The human verdict decides, and it decides in twelve places across the product; the note is
+  // required only where the report emits the short nonconformity reference, which is a legal
+  // statement rather than a presentation one. So a decision without a note is still a confirmed
+  // failure here, and the unanswered third occurrence is the one that stays in review.
   const evidence = [{ evidenceId: 'ev-shared', kind: 'element' }];
   const occurrences = [
     {
@@ -1327,9 +1328,8 @@ test('shared evidence keeps one explicit derivation for each occurrence-specific
       decision: null, evidenceRefs: ['ev-shared'],
     },
   ];
-  // One derivation per distinct tone, in the declared order: the same capture carries the
-  // confirmed treatment of the noted decision and the pending treatment of the other two, and the
-  // two unnoted answers must not add a second pending derivation.
+  // One derivation per distinct tone, in the declared order: the same capture carries the confirmed
+  // treatment of both decisions and the pending treatment of the unanswered one.
   assert.deepEqual(projectOccurrenceEvidencePreviews({ evidence, occurrences }).map(entry => ({
     evidenceId: entry.artifact.evidenceId, tone: entry.tone,
   })), [
