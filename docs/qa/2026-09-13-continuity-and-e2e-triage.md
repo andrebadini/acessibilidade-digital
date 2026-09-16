@@ -574,3 +574,27 @@ Medição que decide, para a próxima rodada, e que é pequena: registrar no wor
 3. `documentId` guardado é igual ao vivo → a hipótese cai, e o motivo real está em outro ponto do caminho.
 
 Não fiz essa medição nesta rodada. Registro-a como o passo único e decisivo em vez de seguir acumulando hipóteses, que já custou rodadas demais nesta sequência.
+
+## Rodada 21 — medição decisiva: injeção por tabId funciona
+
+Executei o passo único definido na rodada 20. Resultado:
+
+```
+DECISIVE { tabId: 35876936, tabUrl: "http://127.0.0.1:59918/current",
+           byTabId: "{\"title\":\"Fixture decisiva\",\"url\":\"http://127.0.0.1:59918/current\"}",
+           contexts: "[]" }
+```
+
+Leitura dos três dados:
+
+1. **Injeção por `tabId`, sem `documentIds`, funciona** na aba de origem ao fim da auditoria: devolveu o título e a URL corretos do documento vivo. Isso é o desfecho 1 do plano — o alvo fixo é a causa, não a autorização nem o estado do controlador.
+2. `getContexts` continua vazio para essa aba, o que **descarta definitivamente** a rodada 14 como explicação causal: a ausência de contexto de extensão é um sintoma da mesma situação, não o motivo da falha. A injeção não precisa desse contexto.
+3. A aba está de volta na URL `/current`.
+
+Conclusão sobre o mecanismo: `executeInDocument` mira `documentIds: [record.documentId]`, um identificador capturado antes de a aba ser levada para a cópia e trazida de volta. O documento vivo existe e é injetável — só não é o documento que o identificador guardado aponta. É exatamente o que a rodada 19 propôs, agora com o desfecho 1 confirmado por medição em vez de leitura.
+
+Correção, com fronteira explícita: resolver o documento no momento da instalação, mirando por `tabId` como o destaque faz, e então confirmar que o documento vivo é o esperado antes de injetar. `executeInDocument` hoje exige `wrapper.documentId === record.documentId`; a mudança precisa substituir essa igualdade por uma verificação do documento vivo, e **não** por sua remoção — é ela que impede marcar o documento errado, que é o risco máximo da meta. O caminho seguro já existe no repositório: o destaque prova o documento por CDP (`proveHighlightTargetsCore`) antes de instalar.
+
+Não implementei. A mudança é pequena em linhas e grande em consequência, e a sequência desta sessão mostrou duas vezes o custo de concluir antes de medir. O que faltava medir agora está medido: o alvo é o problema, e o caminho de correção já tem precedente interno testado.
+
+Nenhuma sonda deixada no repositório.
