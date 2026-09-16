@@ -1127,3 +1127,22 @@ Nada em `docs/qa/` nem em `docs/superpowers/` foi reescrito: são registro hist�
 ### O que isto não resolve
 
 O pacote 1.1.15 **não passou por revisão independente**. A revisão C=0/I=0 vale para `607fc02`, que é a 1.1.14. As correções pós-revisão têm teste e medição própria cada uma, mas a revisão integrada do conjunto, como artefato, não foi feita — e o critério "não há falha Critical/Important conhecida" depende dela para valer sobre este número. Registro isto explicitamente para que ninguém leia "1.1.15 empacotada e verde" como "1.1.15 revisada".
+
+## Rodada 40 — por que o percurso nunca foi testado contra o pacote extraído
+
+Tentei, nesta rodada, rodar o percurso obrigatório contra o **pacote 1.1.15 extraído** e falhou com `WAIT_TIMEOUT`. Investiguei em vez de supor, e a causa não é o pacote.
+
+**O que foi descartado por medição, um a um:**
+
+- Não é o conteúdo. `diff -r` entre o extraído e a árvore é idêntico em `manifest.json`, `src/` (191 arquivos) e `vendor/`; as únicas diferenças são `src/popup/`, `icon-1024.png` e `icon-source.svg`, que o construtor **deliberadamente** não empacota. O manifesto extraído declara 1.1.15 nos dois campos e é byte a byte igual ao da árvore.
+- Não é o local. Extraí para `/var/folders/...` e para `/Volumes/SSD1/.../.worktrees/audita-pkgcheck` — os dois falharam. E o teste decisivo: copiei **o conteúdo da própria árvore** para uma pasta `.pkgcheck` e apontei o teste para ela; **também falhou**. Ou seja, qualquer cópia falha, inclusive uma cópia fiel.
+- Não é o ID da extensão nem a descoberta do worker: `manifest.json` não tem `key`, o ID é derivado do caminho e portanto muda a cada cópia, mas `discoverProcessLoadedExtension` procura por serviço cujo caminho termine em `/src/background/service-worker.js` e aceita qualquer ID. A descoberta não é o gargalo.
+- Com o teste apontado para a **árvore**, o mesmo percurso passa integralmente: sinais ativos, quatro formatos, página intacta e **"Versão da extensão que realizou a auditoria: 1.1.15."**
+
+**A causa real.** O harness E2E abre uma página de fixture dentro da própria extensão: `openSidePanelFromAction` chama `openTabHarness`, que carrega `/test/e2e/fixtures/real-tab-harness.html`. Esse arquivo vive em `test/`, e o pacote de distribuição contém apenas `manifest.json`, `src/`, `vendor/` e os quatro ícones de runtime — corretamente, porque um pacote de loja não deve levar a suíte de testes. Logo, **para uma extensão empacotada, o harness não tem onde rodar e a verificação falha antes de chegar ao produto.**
+
+**O que isto significa para o critério 12, e é o ponto honesto.** A frase "a versão efetivamente empacotada foi testada, inclusive em Chrome real" **não está satisfeita pelo caminho do harness**. O que existe é: (a) verificação estrutural do pacote — 199 arquivos, manifesto válido, conteúdo conferido contra a árvore; (b) o percurso completo verde contra a árvore, que é o mesmo código que o pacote contém; (c) a garantia de reprodutibilidade do construtor, coberta por teste que compara o ZIP byte a byte entre duas construções. Nada disso é a mesma coisa que executar o artefato.
+
+**Registro também o que descobri de quebra, e que corrige uma afirmação minha anterior.** Na rodada 35 eu escrevi que o percurso obrigatório "passou contra o pacote" com as quatro exportações. **Isso estava errado.** Naquela rodada o caminho do teste apontava para a árvore (`new URL('../../', import.meta.url)`), não para o extraído — eu tinha trocado o caminho para diagnosticar uma falha e não voltei. O que passou foi o código da árvore, que é a mesma coisa que os testes já faziam. Retiro a afirmação.
+
+**Opções para fechar isto de verdade, sem inventar caminho:** embutir um harness de verificação no pacote apenas numa build de teste; ou testar o artefato por um caminho que não dependa de fixture, abrindo `chrome-extension://<id>/src/panel/index.html` diretamente com a capability de lançamento; ou aceitar formalmente que a verificação do artefato é estrutural e declarar isso como limite do critério. Não escolhi nenhuma nesta rodada: a primeira muda o conteúdo do pacote, a segunda muda o harness e a terceira é decisão de escopo. A revisão independente do 1.1.15 está em andamento e pode ter opinião sobre qual é a certa.
