@@ -94,8 +94,15 @@ test('drops srcdoc and produces deterministic displayable text', () => {
 
 test('redacts credential-like values that appear in snippet text nodes', () => {
   const snippet = sanitizeHtmlSnippet('<p>authorization=fixture-auth token: fixture-token conteúdo público</p>');
-  assert.equal(snippet, '&lt;p&gt;authorization=[redacted] token: [redacted] conteúdo público&lt;/p&gt;');
-  assert.doesNotMatch(snippet, /fixture-auth|fixture-token/);
+  // O valor vai até o fim do FRAGMENTO de texto. Era `[^\s<]+` (um token só), que deixava a cauda de
+  // `cartão: 4111 1111 1111 1111` no trecho; a 1.1.26 tentou um teto de 120 caracteres e devolveu a
+  // cauda de valores longos. O preço do consumo até o fim é que o resto do MESMO fragmento depois de
+  // uma credencial também sai tarjado — fail-closed —, e este teste fixa o preço para que ele seja uma
+  // decisão visível. Texto em outro elemento continua preservado: o tarjamento não atravessa marcação.
+  assert.equal(snippet, '&lt;p&gt;authorization=[redacted]&lt;/p&gt;');
+  assert.doesNotMatch(snippet, /fixture-auth|fixture-token|conteúdo público/);
+  assert.equal(sanitizeHtmlSnippet('<p>authorization=fixture-auth</p><p>conteúdo público</p>'),
+    '&lt;p&gt;authorization=[redacted]&lt;/p&gt;&lt;p&gt;conteúdo público&lt;/p&gt;');
 });
 
 test('drops private marker attributes and credential-like values from otherwise structural attributes', () => {
@@ -108,6 +115,41 @@ test('drops private marker attributes and credential-like values from otherwise 
   assert.equal(source, '<button aria-label="Abrir">Abrir</button>');
   assert.equal(source.includes(marker), false);
   assert.equal(source.includes(privateMarker), false);
+});
+
+test('nenhum valor de credencial sobrevive ao trecho, nem em texto nem em atributo (Critical da revisão da 1.1.27)', () => {
+  // O sanitizador de trecho tinha o TERCEIRO vocabulário do produto: uma lista só em inglês
+  // (`authorization|password|passwd|token|...`) e o consumo de um único token, separada do
+  // `SENSITIVE_KEY` e do tarjador de valores. Medido numa auditoria real de Chrome: o parágrafo
+  // `senha: S3GR3D0XYZQ` chegava intacto ao modelo, ao relatório e aos artefatos HTML/JSON, e o
+  // atributo `data-note="cartão: 4111 1111 1111 1111"` era copiado literalmente porque a regra só
+  // olhava a palavra sensível no nome, nunca o valor. A métrica é a da classe: nenhum caractere que
+  // só exista no valor pode sobreviver, em nenhuma dessas formas.
+  const sentinela = /[Zq]/gu;
+  const marca = valor => `Zq${valor}`;
+  const casos = [
+    ['texto com rótulo em português', `<p>senha: ${marca('abc')}</p>`],
+    ['texto com cartão', `<p>cartão: ${marca('')} 1111 1111 1111</p>`],
+    ['texto com chave', `<p>chave: ${marca('abc')}</p>`],
+    ['texto com valor multi-token', `<p>senha: ${marca('')} R3D0 ${marca('')}</p>`],
+    ['texto com valor longo', `<p>token: ${marca('').repeat(40)}</p>`],
+    ['texto com aspas', `<p>senha: "${marca('abc')}"</p>`],
+    ['atributo de dado', `<div data-note="senha: ${marca('abc')}">x</div>`],
+    ['atributo de dado com cartão', `<div data-note="cartão: ${marca('')} 1111 1111 1111">x</div>`],
+    ['atributo de título', `<span title="mot de passe: ${marca('abc')}">x</span>`],
+    ['atributo com Bearer', `<div data-x="Bearer ${marca('abc')}">x</div>`],
+    ['URL com rótulo em português', `<a href="/p?senha=${marca('abc')}&formato=html">Abrir</a>`],
+  ];
+  for (const [nome, html] of casos) {
+    const trecho = sanitizeHtmlSnippetSource(html);
+    const sobreviventes = trecho.match(sentinela) ?? [];
+    assert.equal(sobreviventes.length, 0,
+      `"${nome}" não pode devolver o valor (sobreviveu ${JSON.stringify(trecho)})`);
+  }
+  // Controle negativo: o rótulo sem valor continua sendo evidência útil, e prosa comum passa intacta.
+  assert.match(sanitizeHtmlSnippetSource('<input aria-label="Senha" type="password">'), /aria-label="Senha"/u);
+  const prosa = '<p>A sessão discutiu o cartão de crédito como tema e a chave do problema.</p>';
+  assert.equal(sanitizeHtmlSnippetSource(prosa), prosa);
 });
 
 test('is inert under innerHTML and removes duplicate-password and active URL surfaces', () => {

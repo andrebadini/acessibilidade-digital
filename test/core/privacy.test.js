@@ -290,21 +290,30 @@ test('valores com rótulo em português também são tarjados no texto (achado A
   assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
 });
 
-test('o radical de senha não pode PERDER grafias que a versão anterior tarjava (achado N1 da 1.1.25)', () => {
+test('o radical de senha não pode PERDER grafias que a versão anterior tarjava (achados N1 da 1.1.25 e A4 da 1.1.26)', () => {
   // A revisão da 1.1.25 mediu que a minha troca de radical (A2) ganhou 13 formas e perdeu 8 que a
   // 1.1.24 tarjava. A lição é de método: cada troca de vocabulário tem de ser medida contra o
-  // vocabulário ANTERIOR, não só contra o alvo novo. Estas oito são as perdidas.
-  const perdidas = ['motdepasse', 'passwrd', 'passw0rd', 'palavra-passe', 'palavrapasse',
+  // vocabulário ANTERIOR, não só contra o alvo novo. Estas oito são as perdidas. A revisão da 1.1.26
+  // mediu a mesma classe de novo: o radical da 1.1.26 ainda perdia, contra a 1.1.24, caudas de
+  // credencial reais — `passkod`/`passkode`, `passfrase`, `passsatz` e `passpasse` — e o `compass`
+  // tarjado "de propósito" não era trade-off forçado, porque `(?<!com)pass` o preserva sem devolver
+  // `myPass`/`userPass`. As listas abaixo fixam os quatro grupos.
+  const perdidasNa125 = ['motdepasse', 'passwrd', 'passw0rd', 'palavra-passe', 'palavrapasse',
     'frase-passe', 'frasepasse', 'passwort'];
+  const recuperadasNa127 = ['passkod', 'passkode', 'pass-kode', 'pass_kode', 'passfrase', 'pass-frase',
+    'pass_satz', 'passsatz', 'passpasse', 'pass-passe', 'passwörter', 'passworter'];
   const ganhasNoA2 = ['bypasscode', 'bypass_code', 'bypasswd', 'bypass_key', 'bypassword'];
+  const plurais = ['passwords', 'passwds', 'passcodes', 'passphrases', 'passkeys'];
   const originais = ['password', 'passwd', 'pass', 'userPassword', 'passcode', 'passphrase',
     'pass-word', 'pass word', 'pwdField', 'senha', 'cpf', 'chaveAcesso'];
-  for (const chave of [...perdidas, ...ganhasNoA2, ...originais]) {
+  for (const chave of [...perdidasNa125, ...recuperadasNa127, ...ganhasNoA2, ...plurais, ...originais]) {
     assert.equal(sanitizeJsonData({ [chave]: 'x' })[chave], '[redacted]', `${chave} precisa ser tarjado`);
   }
-  // E o outro lado continua preservado — inclusive palavras que contêm "pass" sem serem credencial.
+  // E o outro lado continua preservado — inclusive palavras que contêm "pass" sem serem credencial, e
+  // agora também `compass`, que era o falso positivo declarado como inevitável.
   const inocentes = ['passed', 'passes', 'bypass', 'passive', 'passing', 'passo', 'passage',
-    'passport', 'bypasses', 'passer', 'passable', 'passepartout', 'passim', 'contato', 'pixelRatio', 'cargo'];
+    'passport', 'bypasses', 'passer', 'passable', 'passepartout', 'passim', 'contato', 'pixelRatio', 'cargo',
+    'compass', 'compassed', 'compassion', 'encompass'];
   for (const chave of inocentes) {
     assert.notEqual(sanitizeJsonData({ [chave]: 'x' })[chave], '[redacted]', `${chave} não pode ser perdido`);
   }
@@ -334,10 +343,71 @@ test('o valor tarjado é consumido por inteiro, não só o primeiro token (achad
     assert.ok(!/[0-9]/.test(depois), `"${texto}" não pode deixar dígito depois do rótulo (sobrou ${JSON.stringify(depois)})`);
     assert.ok(!depois.includes(rotulo), `"${texto}" não pode reexpor o rótulo`);
   }
-  // Controle negativo: prosa sem rótulo sensível continua intacta, e uma frase longa não é consumida.
+  // Controle negativo: prosa sem rótulo sensível continua intacta.
   const prosa = 'A sessão de perguntas discutiu o cartão de crédito como tema e a chave do problema.';
   assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
-  const longa = 'senha: ' + 'conteúdo longo '.repeat(20) + 'FIM-DA-LINHA';
-  const saida = sanitizeJsonData({ texto: longa }).texto;
-  assert.ok(saida.includes('FIM-DA-LINHA'), 'o consumo do valor é limitado e não engole a linha inteira');
+});
+
+test('a família `auth` tarja a credencial e preserva `author*` (achado A7 da revisão da 1.1.26)', () => {
+  // O `auth` nu do vocabulário casava `author`, `authority` e `authorized*`: 314 tokens do próprio
+  // produto, entre eles `authorityExpiresAt` e `firstAuthorization`. Toda expansão de vocabulário tem
+  // de ser medida nas DUAS direções — nenhuma forma de credencial pode sair e as inocentes entram.
+  const credenciais = ['auth', 'authorization', 'authorizations', 'authorisation', 'authentication',
+    'authToken', 'authKey', 'authHeader', 'authCode', 'authSecret', 'oauth', 'authorizationHeader'];
+  for (const chave of credenciais) {
+    assert.equal(sanitizeJsonData({ [chave]: 'x' })[chave], '[redacted]', `${chave} precisa ser tarjado`);
+  }
+  const inocentes = ['author', 'authors', 'authority', 'authorities', 'authorized', 'authorizedAt',
+    'authorizedDecision', 'authorityExpiresAt', 'authorize', 'authoring', 'authored', 'authorship',
+    'authoritative', 'coauthor', 'authoredBy'];
+  for (const chave of inocentes) {
+    assert.notEqual(sanitizeJsonData({ [chave]: 'x' })[chave], '[redacted]', `${chave} não pode ser perdido`);
+  }
+  // No texto, o rótulo inocente também não consome o valor.
+  const prosa = 'author: Maria Silva';
+  assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
+  assert.match(sanitizeJsonData({ texto: 'authorization: Bearer abc' }).texto, /\[redacted\]/u);
+});
+
+test('o valor tarjado é consumido até o fim, sem teto nem terminador que devolvam a cauda (Important da revisão da 1.1.26)', () => {
+  // O conserto do N2 trocou "primeiro token" por `[^\n<;]{1,120}`. Isso fechou o caso do cartão com
+  // espaços e ABRIU uma classe nova: o teto de 120 caracteres e o terminador `;` devolviam a CAUDA do
+  // valor, então um JWT de 300 caracteres saía com 180 intactos, uma chave de 200 saía com 120, e
+  // `senha: p4ss;word-secreto` saía com `;word-secreto`. A métrica tem de ser tão larga quanto a
+  // classe: nenhum caractere que só exista no valor pode sobreviver, em forma alguma.
+  const sentinela = /[Zq]/gu;
+  const marca = valor => `Zq${valor}`;
+  const formas = [
+    ['token curto', `token: ${marca('abc')}`],
+    ['JWT 300 caracteres', `token: ${'eyJ'.concat(marca('')).repeat(75)}`],
+    ['chave de API 200 caracteres', `api_key: ${'K'.concat(marca('')).repeat(100)}`],
+    ['authorization 200 caracteres', `authorization: ${marca('').repeat(100)}`],
+    ['senha com ponto e vírgula', `senha: p4ss;word-${marca('abc')}`],
+    ['senha com dois ponto e vírgula', `senha: abc;def;${marca('ab')}`],
+    ['chave longa', `chave: ${marca('').repeat(40)}`],
+    ['valor entre aspas duplas', `senha: "${marca('segredo')}"`],
+    ['valor entre aspas simples', `senha: '${marca('segredo')}'`],
+    ['separador =', `senha=${marca('').repeat(20)}`],
+    ['sem espaço depois dos dois pontos', `senha:${marca('').repeat(20)}`],
+    ['com tabulação', `senha:\t${marca('').repeat(20)}`],
+    ['com barra vertical', `senha: ${marca('').repeat(10)}|${marca('').repeat(10)}`],
+    ['com vírgula', `senha: ${marca('').repeat(10)},${marca('').repeat(10)}`],
+  ];
+  for (const [nome, texto] of formas) {
+    const saida = sanitizeJsonData({ texto }).texto;
+    assert.match(saida, /\[redacted\]/u, `"${nome}" precisa registrar o tarjamento`);
+    const sobreviventes = saida.match(sentinela) ?? [];
+    assert.equal(sobreviventes.length, 0,
+      `"${nome}" não pode devolver a cauda do valor (sobreviveu ${JSON.stringify(saida)})`);
+  }
+  // Os rótulos compostos que o radical de chave já conhece também precisam tarjar o VALOR: as duas
+  // listas divergiam, e um texto com `palavra-passe: …` não era tarjado por nenhuma das duas.
+  for (const rotulo of ['palavra-passe', 'palavrapasse', 'frase-passe', 'mot de passe', 'motdepasse',
+    'passkod', 'passkode', 'passfrase', 'passsatz', 'passpasse']) {
+    const texto = `${rotulo}: ${marca('segredo')}`;
+    const saida = sanitizeJsonData({ texto }).texto;
+    assert.match(saida, /\[redacted\]/u, `"${rotulo}" precisa ser reconhecido como rótulo de valor`);
+    assert.equal((saida.match(sentinela) ?? []).length, 0,
+      `"${rotulo}" não pode devolver o valor (sobreviveu ${JSON.stringify(saida)})`);
+  }
 });

@@ -264,7 +264,8 @@ test('re-sanitizes the technical snippet at the detail boundary without losing p
   model.evidence.find(value => value.evidenceId === 'ev-control').snippet = [
     '<a href="javascript:PRIVATE_SCHEME" onclick="PRIVATE_HANDLER">Abrir</a>',
     '<a href="https://user:pass@example.test/path?token=PRIVATE_TOKEN&lang=pt#authorization=Bearer_PRIVATE_AUTHORITY">Público</a>',
-    '<p>authorization=Bearer_PRIVATE_AUTHORITY token=PRIVATE_TEXT conteúdo público</p>',
+    '<p>authorization=Bearer_PRIVATE_AUTHORITY token=PRIVATE_TEXT</p>',
+    '<p>conteúdo público</p>',
   ].join('');
   const summary = await summaryFixture(model);
   const detail = buildPanelDetail({
@@ -273,9 +274,13 @@ test('re-sanitizes the technical snippet at the detail boundary without losing p
 
   assert.match(detail.technical.snippet, /<a>Abrir<\/a>/u);
   assert.match(detail.technical.snippet, /href="https:\/\/example\.test\/path\?lang=pt"/u);
-  assert.match(detail.technical.snippet, /authorization=\[redacted\] token=\[redacted\]/u);
+  // O fragmento que contém a credencial é tarjado até o fim dele — o valor vai até o fim porque
+  // qualquer teto devolve a cauda (medido na 1.1.26) e nenhuma forma de token distingue prosa de uma
+  // frase-senha. O que NÃO pode acontecer é o trecho público sumir: ele está em outro elemento e
+  // continua no detalhe.
+  assert.match(detail.technical.snippet, /authorization=\[redacted\]/u);
   assert.match(detail.technical.snippet, /conteúdo público/u);
-  assert.doesNotMatch(detail.technical.snippet, /PRIVATE_|javascript:|onclick|user:pass|Bearer_/iu);
+  assert.doesNotMatch(detail.technical.snippet, /PRIVATE_|javascript:|onclick|user:pass|Bearer_|token=/iu);
 });
 
 test('denies detail for a checkpoint-only pass and for an occurrence not represented by exactly one card', async () => {

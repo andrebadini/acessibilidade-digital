@@ -1,6 +1,22 @@
-const SENSITIVE = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
-const PRIVATE_ATTRIBUTE = /(?:^(?:data-(?:audita-)?private|data-nosnippet)$|pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
+import { redactSensitiveText, SENSITIVE_KEY } from '../privacy.js';
+
+// Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
+// eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
+// real: `senha: S3GR3D0XYZQ` chegava intacto ao modelo, ao relatório e aos artefatos, e
+// `data-note="cartão: 4111 1111 1111 1111"` era copiado literalmente, porque a regra de valor só
+// procurava a palavra sensível e nunca tarjava o que vinha depois do rótulo. As duas listas passam a
+// vir do mesmo radical de `privacy.js` — a divergência entre cópias foi a causa das três regressões
+// desta família (A1/N2 na 1.1.25, Important na 1.1.26, este vazamento) — e o texto usa o mesmo
+// tarjador de valores do resto do produto.
+const SENSITIVE = SENSITIVE_KEY;
+const PRIVATE_ATTRIBUTE = new RegExp(
+  String.raw`(?:^(?:data-(?:audita-)?private|data-nosnippet)$|${SENSITIVE_KEY.source})`, 'iu');
 const EXECUTABLE = new Set(['script', 'style', 'template']);
+// Atributos que carregam texto legível para pessoas: um valor como `aria-label="Senha"` é evidência
+// útil e não é segredo, então não pode ser descartado só por MENCIONAR a palavra. O tarjador de
+// valores continua agindo neles (`aria-label="senha: abc"` vira `senha: [redacted]`).
+const LABEL_ATTRIBUTES = new Set(['aria-label', 'aria-description', 'aria-placeholder', 'aria-roledescription',
+  'alt', 'placeholder', 'title']);
 const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src']);
 const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
@@ -78,9 +94,7 @@ function escapeAttribute(value) {
 }
 
 function sanitizeText(value) {
-  return value
-    .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
-    .replace(/\b(authorization|password|passwd|token|secret|api[-_ ]?key|csrf|xsrf|otp)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s<]+)/giu, '$1$2[redacted]');
+  return redactSensitiveText(value);
 }
 
 function contentEditableTag(parsed) {
@@ -143,7 +157,11 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
       value = sanitizeUrl(value);
       if (value === null) continue;
     }
-    if (value !== null && !['type', 'autocomplete'].includes(name) && SENSITIVE.test(value)) continue;
+    if (value !== null && !LABEL_ATTRIBUTES.has(name) && !['type', 'autocomplete'].includes(name) && SENSITIVE.test(value)) continue;
+    // O valor do atributo também passa pelo tarjador: a regra acima só descarta o atributo quando ele
+    // MENCIONA uma palavra sensível, e um valor como `Bearer …` ou `senha: …` sem a palavra no nome
+    // não era tarjado nem descartado.
+    if (value !== null) value = redactSensitiveText(value);
     output.push(value === null ? name : `${name}="${escapeAttribute(value)}"`);
   }
   return `<${parsed.name}${output.length ? ` ${output.join(' ')}` : ''}${parsed.selfClosing ? ' /' : ''}>`;

@@ -347,6 +347,115 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   assert.match(result.html, /@media print\{[\s\S]*details:not\(\[open\]\)>\*:not\(summary\)\{display:block!important\}/u);
 });
 
+test('accepts an honest partial delivery from a review-ready revision and persists it as partial', async () => {
+  // The stored model of a current-page audit is review-ready with a pending artifact, so its
+  // export always takes the immutable revision path, and there the delivery receipt is the only
+  // authority on what was delivered. This gate once demanded a complete receipt and rejected
+  // every honest partial delivery with "Recibo completo da revisão imutável inválido.", closing
+  // the export tab without downloading anything. The shape below is that delivery: the four
+  // artifacts land, one declared limitation makes the receipt partial, and nothing is deleted.
+  const model = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), {
+    now: () => '2026-08-26T15:00:00.000Z', timezone: SAMPLE_AUDIT.timezone,
+    manifestVersion: SAMPLE_AUDIT.versions.manifest, rulesVersion: SAMPLE_AUDIT.versions.rules,
+    browserVersion: SAMPLE_AUDIT.environment.chromeVersion,
+  });
+  const inventory = await createInstalledCoreRuleInventory();
+  const store = createInMemoryAuditStore();
+  assert.equal(model.report.status, 'review-ready');
+  assert.equal(model.report.artifact.status, 'pending');
+  const checkpoint = {
+    version: 1, auditId: model.auditId,
+    pages: model.pages.map(page => ({
+      pageId: page.pageId, attempted: page.attempted,
+      startedAt: page.attempted ? page.timestamps.startedAt : null,
+      rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion,
+      inventoryHash: inventory.sha256, outcomes: [
+        { ruleId: 'focus-fully-visible', outcome: 'passed' },
+        { ruleId: 'keyboard-focus-trap', outcome: 'untested' },
+      ],
+    })),
+  };
+  await store.commitAuditWithCheckpointIfAbsent(model.auditId, model, checkpoint, {
+    version: 1, auditId: model.auditId, status: model.session.status, percent: 100,
+    message: 'Avaliação concluída com limitações.', failureCode: null, modelRevision: 1,
+    updatedAt: '2026-08-26T15:00:00.000Z',
+  }, { now: '2026-08-26T15:00:00.000Z', deleteAfterCompleteExport: false });
+  const snapshot = await store.getAuditSnapshot(model.auditId);
+  const summary = await buildPanelSummary({ model, executionCheckpoint: checkpoint, inventory });
+  const reportView = buildReportView({
+    model, summary, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
+  });
+  // The synthetic delivery timeline stays close to the controller's trusted wall clock so the
+  // two-minute lease cannot expire before persistExportSuccess() finalizes it.
+  const leaseBaseMs = Date.now() - 10_000;
+  const leaseNow = offsetMs => new Date(leaseBaseMs + offsetMs).toISOString();
+  const acquired = await store.acquireExportLease(model.auditId, snapshot.capability, {
+    ownerId: `export:${model.auditId}:pending`, now: leaseNow(1_000),
+  });
+  const deliveryOwnerId = `export:${model.auditId}:${acquired.exportAttempt}`;
+  await store.claimExportLease(model.auditId, snapshot.capability, {
+    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: leaseNow(2_000),
+  });
+  await store.beginExportDelivery(model.auditId, snapshot.capability, {
+    ownerId: deliveryOwnerId, exportAttempt: acquired.exportAttempt, now: leaseNow(3_000),
+  });
+  const result = await runReportExport({
+    auditSnapshotCapability: snapshot.capability, exportLeaseOwnerId: deliveryOwnerId,
+    exportAttempt: acquired.exportAttempt,
+  }, {
+    reportView,
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    // A print tab whose physical cleanup cannot be confirmed is the product's own honest partial
+    // delivery: every artifact is delivered and the receipt declares the limitation.
+    tabAdapter: { ...successfulTabAdapter(), async removeTab() { throw new Error('PRIVATE_CLEANUP_SENTINEL'); } },
+    async pdfRenderer() { return { bytes: PDF, usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads([]),
+    assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
+      return store.assertExportLease(model.auditId, snapshotCapability, {
+        ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
+        now: leaseNow(4_000), phase: 'delivering',
+      });
+    },
+    recordDelivery({ snapshotCapability, exportLeaseOwnerId, ...entry }) {
+      return store.recordExportDelivery(model.auditId, snapshotCapability, {
+        ownerId: exportLeaseOwnerId, exportAttempt: acquired.exportAttempt,
+        now: leaseNow(4_000), ...entry,
+      });
+    },
+  });
+  // Non-vacuity: the delivery really is partial, and partial for a measured reason.
+  assert.equal(result.deliveryReceipt.status, 'partial');
+  assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.format), EXPORT_FORMATS_V1);
+  assert.deepEqual(result.deliveryReceipt.formats.map(entry => entry.status),
+    ['complete', 'complete', 'complete', 'complete']);
+  assert.ok(result.deliveryReceipt.limitations.includes(
+    'A limpeza de um recurso temporário de impressão não pôde ser confirmada.'),
+  JSON.stringify(result.deliveryReceipt.limitations));
+  const persisted = await persistExportSuccess(
+    createExportSuccessRequest({ auditId: model.auditId, result, latest: { auditId: model.auditId } }), store);
+  assert.equal(persisted.latest.exportStatus, 'partial');
+  assert.equal(persisted.latest.message, 'Relatório gerado com limitações.');
+  assert.equal(persisted.deleted, false, 'a partial delivery never authorizes deletion');
+  // The stored revision keeps its own honest claim: a partial delivery does not retroactively
+  // complete the artifact that is still pending.
+  assert.equal(persisted.model.report.status, 'review-ready');
+  assert.equal(persisted.model.report.artifact.status, 'pending');
+  const durableLatest = await store.getLatest();
+  const durableReceipt = await store.getExportReceipt(model.auditId);
+  assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision + 1);
+  assert.equal(durableLatest.exportStatus, 'partial');
+  assert.equal(durableLatest.exportRevision, snapshot.revision + 1);
+  assert.equal(durableReceipt.status, 'partial');
+  assert.deepEqual(durableReceipt.formats.map(row => row.format), EXPORT_FORMATS_V1);
+  // A projeção durável guarda os quatro arquivos entregues com o estado `complete` e mantém o
+  // `status: partial` do recibo como a informação que sobrevive à limpeza declarada.
+  assert.deepEqual(durableReceipt.formats.map(row => row.state),
+    ['complete', 'complete', 'complete', 'complete']);
+  assert.deepEqual(durableReceipt.formats.map(row => row.sha256),
+    result.deliveryReceipt.formats.map(row => row.sha256));
+  assert.equal(result.deliveryReceipt.limitations.length > 0, true);
+});
+
 test('rejects noncanonical export issues and never invokes issue or request accessors', async () => {
   const marker = 'PRIVATE_EXPORT_ISSUE_MARKER_7Q9Z';
   await assert.rejects(

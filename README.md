@@ -4,17 +4,33 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.26 preparada — sem revisão independente ainda.** A revisão da **1.1.25** saiu favorável
-(**0 Critical, 0 Important**, 4 Minor + 4 observações) e aprovou aquele artefato como candidato. A 1.1.26
-fecha o que ela achou, e a lição de método está no primeiro item: **N1**, oito grafias de credencial
-(`motdepasse`, `passwrd`, `passw0rd`, `palavra-passe`, `palavrapasse`, `frase-passe`, `frasepasse`,
-`passwort`) que a 1.1.24 tarjava e a minha troca de radical perdeu — cada troca de vocabulário passa a ser
-medida contra o vocabulário anterior, não só contra o alvo novo; **N2**, o valor tarjado passa a ser
-consumido por inteiro (antes `cartão: 4111 1111 1111 1111` deixava 12 dos 16 dígitos) e o teste passou a
-afirmar que nenhum dígito sobra; **N3**, a deduplicação aceita qualquer espaço depois dos dois pontos; e
-**O2**, o tarjador de valores passou a conhecer `pwd`, `passcode`, `passphrase`, `pass` e `auth`.
-Os seis E2E de escopo citados nas versões anteriores são curto-circuito, exportação da página atual,
-impressão executiva, layout de impressão, quebras de impressão e proveniência de versão. A revisão da **1.1.24** saiu favorável
+**Versão 1.1.27 preparada — sem revisão independente ainda.** A revisão da **1.1.26** saiu com
+**0 Critical, 1 Important e 5 Minor**: o **Important** é meu, do conserto do N2 — o valor tarjado
+passou a `[^\n<;]{1,120}` e o teto de 120 caracteres devolvia a **cauda** do valor (`token: <JWT de
+300>` saía com 180 intactos, `senha: p4ss;word-secreto` saía com `;word-secreto`), e o teste que eu
+escrevi para o N2 cristalizava o defeito ao afirmar que `FIM-DA-LINHA` sobrevivia. A 1.1.27 fecha isso
+com o valor consumido **até o fim do fragmento**, sem teto e sem `;` como terminador, e com uma
+métrica da largura da classe: nenhum caractere que só exista no valor pode sobreviver, em 28 formas
+diferentes, junto com o **A4** (o `compass` tarjado "de propósito" não era trade-off forçado:
+`(?<!com)pass` o preserva e mantém `myPass`/`userPass` tarjados), o **A7** (`auth` nu casava
+`author`/`authority`/`authorized*` — 314 tokens do produto; `authoriz(?:ations?)|auth(?!or)` preserva
+a família e não perde nenhuma forma de credencial) e o **N1 da 1.1.26** (o radical ainda perdia
+`passkod`, `passkode`, `passfrase`, `passsatz` e `passpasse` contra a 1.1.24).
+
+A revisão também mediu que a minha **varredura de credencial do artefato era vacuamente verde** (zero
+rótulos com valor nos quatro formatos: qualquer lista, inclusive vazia, passaria). Medir sem vacuidade
+— uma fixture que **contém** credencial — encontrou um defeito **Critical** que estava no produto desde
+antes: o sanitizador de trecho (`src/core/evidence/snippet.js`) tinha o **terceiro e o quarto**
+vocabulário, só em inglês, e copiava valor de atributo literalmente, então `senha: S3GR3D0XYZQ` e
+`cartão: 4111 1111 1111 1111` chegavam ao modelo, ao relatório e aos artefatos **HTML e JSON
+entregues**. A 1.1.27 faz as quatro listas virem do mesmo radical e aplica o mesmo tarjador de valores
+ao texto e aos atributos; o E2E de exportação agora audita uma página com credencial e **falha** se ela
+chegar a qualquer superfície entregue (provado por mutação: com o sanitizador anterior ele reprova
+nomeando `relatório, modelo e revisão guardados, artefato html, artefato json`).
+
+Os seis E2E de escopo citados nas versões anteriores são **percurso obrigatório**
+(`mandatory-journey-mv3`), exportação da página atual, impressão executiva, layout de impressão,
+quebras de impressão e proveniência de versão. A revisão da **1.1.24** saiu favorável
 (**0 Critical, 0 Important**, 4 Minor + 2 observações) e aprovou aquele artefato como candidato. A 1.1.25
 fecha o que ela achou: o **A2**, uma regressão de privacidade que eu introduzi na 1.1.23 — o lookbehind de
 dois caracteres deixava escapar `bypasscode`, `bypass_code`, `bypasswd`, `bypass_key` e `bypassword`, que
@@ -36,9 +52,10 @@ relatório entregue a proveniência que só existia no modelo. A **1.1.23** acre
   palavra legítima ("conta" pegaria "contato", "pix" pegaria "pixelRatio", "rg" pegaria "cargo").
 - **O radical de senha engolia dado do próprio produto.** `pass(?:word|wd)?` casava `passed`,
   `passes`, `bypass` e `passive` — resultado de item, contagem `passes` do JSON, 2.4.1 Bypass Blocks e
-  observação passiva. Um dado cru com essas chaves era tarjado e sumia. Agora
-  `pass[-_ ]?(?:word|wd|code|phrase|key)|(?<!by)pass(?![-_a-z])|pwd` preserva as quatro e continua tarjando `password`,
-  `userPassword`, `passcode` e `senha`.
+  observação passiva. Um dado cru com essas chaves era tarjado e sumia. O radical daquele incremento
+  (histórico, **não** o vigente) era `pass[-_ ]?(?:word|wd|code|phrase|key)|(?<!by)pass(?![-_a-z])|pwd`;
+  o vigente na 1.1.27 é o de `src/core/privacy.js`, com as caudas estrangeiras, as formas compostas e o
+  `(?<!by)(?<!com)pass`.
 - **`listedLimitations` falhava aberto:** entrada fora de lista devolvia `[]`, o que faria o relatório
   afirmar "Limitações registradas (0)" e esconder limitações reais. Entrada inválida agora falha alto.
 

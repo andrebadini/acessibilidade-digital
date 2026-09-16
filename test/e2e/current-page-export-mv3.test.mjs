@@ -8,8 +8,19 @@ import { startFixtureServer, launchUnpackedExtension, resolveRealChromeTestBinar
 // export takes the immutable revision path. That path must accept an honest partial receipt
 // and deliver the four artifacts for real: this is the exact journey that used to fail with
 // "Recibo completo da revisão imutável inválido." while closing the export tab silently.
+//
+// The page also carries credential-shaped content of its own, in text, in an attribute value and in
+// the URL. The sweep at the end of this test is only worth something if the material it sweeps
+// exists, so the fixture makes it exist: without it the label scan was vacuously green (any list,
+// including an empty one, cleared the homepage), and measuring non-vacuously is what found the
+// snippet sanitizer shipping `senha: …` and `cartão: 4111 1111 1111 1111` into the delivered HTML
+// and JSON.
+const CREDENTIAL = 'S3GR3D0XYZQ';
 const DOCUMENT = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Exportação da página atual</title></head>
 <body><main><h1>Página avaliada</h1>
+<p id="credential-text">senha: ${CREDENTIAL}</p>
+<p id="credential-multi">cartão: 4111 1111 1111 1111</p>
+<div id="credential-attribute" data-note="chave: ${CREDENTIAL}">Nota do autor</div>
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
 <button id="missing-name"></button><input id="missing-label" type="text">
 <a href="/current">clique aqui</a></main></body></html>`;
@@ -20,7 +31,7 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
   ]));
   const extension = await launchUnpackedExtension(t, {
     extensionPath: await realpath(fileURLToPath(new URL('../../', import.meta.url))),
-    startUrl: `${fixture.origin}/current`, chromeBinary: resolveRealChromeTestBinary(), expectedMajor: 152,
+    startUrl: `${fixture.origin}/current?senha=${CREDENTIAL}&cpf=12345678900&id=7`, chromeBinary: resolveRealChromeTestBinary(), expectedMajor: 152,
     viewport: { width: 1280, height: 900 }, downloadMode: 'profile',
   });
   const panel = await extension.openSidePanelFromAction();
@@ -141,7 +152,8 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
     painel: await evaluate(panel, 'document.documentElement.outerHTML'),
     relatório: await evaluate(report, 'document.documentElement.outerHTML'),
     'URLs de abas': (await evaluate(extension.harnessPage,
-      `chrome.tabs.query({}).then(rows => rows.map(row => String(row.url ?? '')).join('\\n'))`,
+      `chrome.tabs.query({}).then(rows => rows.map(row => String(row.url ?? '')).filter(url =>
+        url.startsWith('chrome-extension://') || url !== ${JSON.stringify(sourceUrl)}).join('\\n'))`,
       { awaitPromise: true })) ?? '',
     'armazenamento durável': JSON.stringify(await evaluate(extension.harnessPage,
       `chrome.storage.local.get(null)`, { awaitPromise: true })),
@@ -170,5 +182,32 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
   }
   assert.deepEqual(collected.durableLeaks, [], 'segredo de sessão não pode estar no armazenamento durável');
   t.diagnostic(`segredos varridos=${collected.secrets.length}; superfícies=${Object.keys(surfaces).length}`);
+
+  // A varredura de credencial da PÁGINA, com a fonte provada antes: a página auditada contém o valor
+  // (medido abaixo), então uma varredura verde significa que o produto o retirou — não que não havia
+  // o que varrer.
+  const rawPage = await evaluate(extension.startPage.page, 'document.documentElement.outerHTML');
+  assert.ok(rawPage.includes(CREDENTIAL) && rawPage.includes('4111 1111 1111 1111'),
+    'a fixture precisa conter credencial de verdade, senão a varredura abaixo passa por vacuidade');
+  const leaked = [];
+  for (const [surface, text] of Object.entries(surfaces)) {
+    // A página auditada é a FONTE e a URL dela é a que a pessoa já tinha aberta: nenhuma das duas é
+    // entregável do produto. Todo o resto — inclusive as URLs que a extensão cria — precisa estar limpo.
+    if (surface === 'página auditada') continue;
+    if (surface === 'URL da aba auditada') continue;
+    if (text.includes(CREDENTIAL) || text.includes('4111 1111 1111 1111')) leaked.push(surface);
+  }
+  assert.deepEqual(leaked, [], `credencial da página chegou ao entregável em: ${leaked.join(', ')}`);
+  // E o outro lado: a URL do escopo continua útil e sanitizada nos artefatos entregues.
+  const deliveredHtml = surfaces['artefato html'] ?? '';
+  const deliveredJson = surfaces['artefato json'] ?? '';
+  assert.equal(deliveredHtml.length > 0 && deliveredJson.length > 0, true, 'os dois artefatos de texto precisam existir');
+  assert.doesNotMatch(deliveredJson, /[?&](?:senha|cpf)=/iu,
+    'a URL do escopo entregue não pode carregar parâmetro de credencial');
+  // Medido: `sanitizeEvidenceUrlV1` descarta a consulta INTEIRA quando qualquer parâmetro é sensível
+  // (`queryIncluded: false`), então nem o `id=7` inofensivo sobrevive — fail-closed, e é isso que este
+  // teste fixa em vez de afirmar uma filtragem por parâmetro que o produto não faz.
+  assert.doesNotMatch(deliveredJson, /id=7/u,
+    'a consulta inteira é descartada quando algum parâmetro é sensível');
   await extension.close();
 });

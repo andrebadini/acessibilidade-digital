@@ -1,21 +1,51 @@
-// Radical de senha: LISTA de caudas de credencial (word/wd/wrd/w0rd/wort/code/phrase/key, com ou sem
-// separador), a palavra inteira `pass` (desde que não venha de "by" nem seja sufixo de palavra
-// inocente) e as formas compostas de outros idiomas (`palavra-passe`, `frase-passe`, `mot de passe`).
-// Duas lições medidas, nesta ordem: o lookbehind de dois caracteres da 1.1.23 deixava escapar
-// `bypasscode` e companhia (A2, 1.1.24); e o radical fechado que corrigiu o A2 PERDEU oito grafias
+// Radical de senha: LISTA de caudas de credencial (word/wd/wrd/w0rd/wort/code/phrase/key e as
+// estrangeiras kod/kode/frase/satz/passe, com ou sem separador), a palavra inteira `pass` (desde que
+// não venha de "by", nem de "com", nem seja sufixo de palavra inocente) e as formas compostas de
+// outros idiomas (`palavra-passe`, `frase-passe`, `mot de passe`).
+//
+// Três lições medidas, nesta ordem. (1) O lookbehind de dois caracteres da 1.1.23 deixava escapar
+// `bypasscode` e companhia (A2, 1.1.24). (2) O radical fechado que corrigiu o A2 PERDEU oito grafias
 // que a versão anterior tarjava — `motdepasse`, `passwrd`, `passw0rd`, `palavra-passe`,
-// `palavrapasse`, `frase-passe`, `frasepasse`, `passwort` (N1, 1.1.25). Por isso o teste fixa os três
-// conjuntos: o que precisa ser tarjado, o que precisa ser preservado e o que a versão anterior já
-// tarjava. `passed`, `passes`, `passive`, `passing`, `passo`, `passage`, `passport`, `passer`,
-// `passable`, `passepartout` e `passim` ficam preservados; `compass` continua sendo tarjado de
-// propósito, porque excluí-lo exigiria abrir mão de `myPass`/`userPass`.
+// `palavrapasse`, `frase-passe`, `frasepasse`, `passwort` (N1, 1.1.25). (3) A revisão da 1.1.26
+// mediu que o radical fechado ainda perdia caudas de credencial reais contra a 1.1.24 — `passkod` e
+// `passkode` (dinamarquês/norueguês), `passfrase`, `passsatz` (alemão) e `passpasse` — e que o
+// `compass` tarjado "de propósito" não era um trade-off forçado: `(?<!com)pass` o preserva e mantém
+// `myPass`/`userPass`/`newPassword` tarjados, a custo zero.
+//
+// Por isso as DUAS listas que decidem tarjamento — a de chaves (SENSITIVE_KEY) e a de rótulos de
+// valor (VALUE_LABEL_SOURCE) — passam a ser construídas do MESMO radical. Elas divergiram na 1.1.26:
+// o radical de chave conhecia `palavra-passe` e a lista de rótulos não, então `palavra-passe: X` num
+// texto visível não era tarjado por nenhuma das duas. O teste fixa os três conjuntos: o que precisa
+// ser tarjado, o que precisa ser preservado e o que a versão anterior já tarjava. `passed`, `passes`,
+// `passive`, `passing`, `passo`, `passage`, `passport`, `passer`, `passable`, `passepartout`,
+// `passim`, `compass`, `compassion` e `encompass` ficam preservados.
 //
 // Vocabulário sensível, em inglês e em português: uma página brasileira pode expor a credencial em
 // `?senha=` ou `?cpf=`, e o produto afirma que a URL entregue é sanitizada. A expansão é sempre para
 // o lado seguro (tarjar a mais), mas os radicais curtos ficam de fora de propósito: "conta" pegaria
 // "contato", "pix" pegaria "pixelRatio" e "rg" pegaria "cargo" — perder esses campos seria corromper
 // o relatório, não protegê-lo.
-export const SENSITIVE_KEY = /(?:pass[-_ ]?(?:word|wd|wrd|w0rd|wort|code|phrase|key)|(?<!by)pass(?!ed|es|ive|ing|o|age|port|[-_a-z])|palavra[-_ ]?passe|frase[-_ ]?passe|mot[-_ ]?de[-_ ]?passe|pwd|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)/iu;
+const CREDENTIAL_RADICAL_SOURCE = String.raw`pass[-_ ]?(?:word|wd|wrd|w0rd|wort|w[öo]rter|code|phrase|key|kod(?:e)?|frase|satz|passe)(?:s|es|er|en)?`;
+const COMPOUND_CREDENTIAL_SOURCE = String.raw`palavra[-_ ]?passe|frase[-_ ]?passe|mot[-_ ]?de[-_ ]?passe`;
+const BARE_PASS_SOURCE = String.raw`(?<!by)(?<!com)pass(?!ed|es|ive|ing|o|age|port|[-_a-z])`;
+// `auth` nu casava a família inteira `author*`/`authority*` — 314 tokens do próprio produto, entre
+// eles `authorityExpiresAt`, `authorizedAt` e `firstAuthorization` (A7 da revisão da 1.1.26). As
+// formas de credencial continuam tarjadas (`auth`, `authorization`, `authentication`, `authToken`,
+// `oauth`) e as inocentes passam a ser preservadas: medido nas duas direções, zero credencial perdida
+// e dezesseis palavras legítimas recuperadas.
+const SENSITIVE_WORD_SOURCE = String.raw`pwd|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o`;
+export const SENSITIVE_KEY = new RegExp(
+  `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
+
+// Um rótulo de valor não exige fronteira à esquerda: `myPass: 1234` e `userPassword: 1234` são a
+// mesma credencial que `pass: 1234`, e o `\b` deixava as duas passarem. A fronteira à direita
+// continua, porque o rótulo precisa terminar antes do separador.
+const VALUE_LABEL_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|password|authorization|${SENSITIVE_WORD_SOURCE})`;
+// O valor vai até o fim da linha: qualquer teto ou terminador devolve a cauda do valor, que foi
+// exatamente a regressão Important medida na 1.1.26 (`[^\n<;]{1,120}` deixava 180 de 300 caracteres
+// de um JWT). `<` permanece como parada porque delimita marcação, e a forma entre aspas é consumida
+// inteira para não depender de onde a aspa fecha.
+const VALUE_SOURCE = String.raw`(?:"[^"]*"|'[^']*'|[^\n<]+)`;
 export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
 // Public storage failures stay independent from browser/IndexedDB error details,
@@ -166,7 +196,7 @@ export function backgroundImageKind(value) {
 export function redactSensitiveText(value) {
   return String(value ?? '')
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
-    .replace(/\b(authorization|password|passwd|pwd|passcode|passphrase|pass|token|secret|auth|api[-_ ]?key|csrf|xsrf|otp|session|cookie|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)\b(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\n<;]{1,120})/giu, '$1$2[redacted]')
+    .replace(new RegExp(`(${VALUE_LABEL_SOURCE})(\\s*[:=]\\s*)${VALUE_SOURCE}`, 'giu'), '$1$2[redacted]')
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@');
 }
 
