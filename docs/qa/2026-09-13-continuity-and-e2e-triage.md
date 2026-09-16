@@ -1687,3 +1687,11 @@ E `stage: 'profile'` é do **harness**, não do axe: `real-chrome.mjs:830` regis
 **Conclusão, com o limite dela explícita:** a asserção que falhou é de **teardown**, não de produto. O log mostra essa falha e **nenhuma outra** para o mesmo teste, o que indica que o corpo do teste — as asserções sobre axe em cada frame sob CSP estrita — passou, e o que falhou foi a remoção do perfil temporário do Chrome. É condição ambiental, não defeito de acessibilidade nem lacuna de cobertura. Não reexecutei para confirmar as asserções de produto linha a linha, e é por isso que a frase acima diz "indica", não "prova" — a triagem tem a execução em mãos.
 
 **Com isto, o portão serial fica sem nenhum defeito de produto confirmado na minha área:** sete falhas são do arquivo do outro incremento, uma é orçamento de download já corrigido, e esta é limpeza de perfil do harness. O critério 10 continua pendente do relatório da triagem, mas o que sobra para ele é a confirmação independente, não um achado aberto.
+
+## Hipótese minha refutada: o arquivo alheio não está "à frente do produto"
+
+Levantei a hipótese de que as sete falhas do arquivo do outro incremento fossem teste adiantado em relação ao produto — o diff não commitado dele troca a limitação de cópia anexada por `assert.match(html, /sem alterar foco/)` no modo passivo, e eu supus que o `src/` ainda não produzisse isso. **Medi e está errado:** `src/core/report/diagnostic-policy.js:9` contém exatamente *"A página foi observada sem alterar foco, rolagem ou layout…"*, o `src/` está limpo (nenhuma alteração não commitada), e só **um** cenário usa `observationMode: 'passive'` — não sete.
+
+Então a hipótese cai, e o que sobra é o que já estava medido: as sete falham concentradas no teto de comando de 30 s do harness (quatro a 30 005–30 720 ms) ou em ~32 s, exatamente como os dois de marcadores que falham também isolados. A causa não está estabelecida por mim — quem tem a execução e o instrumento para elevar o teto é a triagem.
+
+Registro a refutação porque uma hipótese errada escrita e não corrigida vira premissa para quem ler depois.
