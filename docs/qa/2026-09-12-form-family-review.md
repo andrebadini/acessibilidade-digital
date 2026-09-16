@@ -156,3 +156,20 @@ A mensagem do achado fala de identificação ("Identifique de modo perceptível 
 **O que continua fora de alcance, e é honesto dizer.** Isto é a **declaração**, não a percepção. Um marcador presente pode ser ilegível por contraste, tamanho ou posição, e a regra não mede nada disso — ela agora sabe que algo foi declarado, não que alguém consegue ver. A exigência da ABNT é "de forma que todos possam perceber", então o item permanece parcialmente coberto: o estado `cantTell` para dados ausentes deixou de acontecer, e a reprovação passou a ter fundamento, mas uma aprovação ainda não é prova de percepção e o relatório não a apresenta como tal.
 
 **Testes.** `test/e2e/required-field-observation.test.mjs` cobre os quatro casos acima no Chrome real, exige a forma observada do marcador, o alvo correto e a ausência de linguagem de infração. Suíte: 4184 testes, 4176 passam, as mesmas 8 falhas pré-existentes; `verify-project` GREEN.
+
+### 5.9.1 — segunda técnica de ocultação: rótulo fora da tela
+
+O produtor de 5.9.1 cobria só recorte declarado. Acrescentei a outra técnica clássica de esconder um rótulo de quem enxerga: posicioná-lo fora da área visível.
+
+**O que foi medido antes de implementar.** O `getBoundingClientRect` do Chrome **não** recorta as coordenadas ao viewport, ao contrário do que eu supunha: um rótulo em `left:-9999px` chega com `x: -9999` e um em `top:9000px` com `y: 9000`, crus. Isso torna a geometria um sinal utilizável.
+
+**O que a regra passou a detectar.** Duas condições, ambas decisivas e nenhuma dependente do tamanho do viewport:
+
+- o rótulo está **inteiramente à esquerda da origem da página** (`x + largura ≤ 0`), que é exatamente o padrão `left:-9999px`;
+- o rótulo está **mais de 2000 px abaixo do último elemento desenhado**, o que nenhuma rolagem alcança.
+
+A margem de 2000 px separa "escondido de propósito" de "apenas longe", e o limite inferior do conteúdo é calculado **excluindo o próprio rótulo avaliado** — sem isso ele seria o item mais baixo, definiria a própria referência e nunca seria detectado. Esse erro apareceu na primeira execução dos testes e está registrado no comentário do caso.
+
+**O que continua fora.** O caso vertical sozinho, sem conteúdo acima, não é detectado; e rótulos escondidos por `opacity` baixa, `font-size: 0`, cobertura por outro elemento ou contraste insuficiente continuam fora de alcance.
+
+**Resultado no Chrome real**, com os dois rótulos na mesma página: `#name` (recortado) e `#code` (fora da tela) produzem dois alvos, com `reason` `clipped-label` e `offscreen-label`, e o teste confirma que o rótulo fora da tela chega ao consumidor com a coordenada crua. A conclusão continua `cantTell`, nunca `failed`: nem recorte nem posicionamento provam ausência de percepção, porque a norma admite propósito visualmente evidente.

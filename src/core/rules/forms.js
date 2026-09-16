@@ -76,6 +76,33 @@ function clippedAway(node) {
   return /^rect\(\s*(?:0(?:px)?[\s,]+){3}0(?:px)?\s*\)$/iu.test(normalizeText(styles.clip));
 }
 
+/** A margem que separa "escondido de propósito" de "apenas longe". Medida em Chrome: o padrão
+ *  clássico de rótulo só para leitor de tela usa left:-9999px, e o retângulo chega cru, sem
+ *  recorte do viewport. */
+const OFFSCREEN_MARGIN = 2000;
+
+/** Fora da tela de forma decisiva, sem depender do tamanho do viewport: o rótulo está inteiramente
+ *  à esquerda da origem da página, ou tão abaixo da última coisa desenhada que nenhum conteúdo o
+ *  alcança rolando. Deliberadamente não cobre o caso vertical sozinho, que exigiria a altura do
+ *  documento e arriscaria falso positivo em página longa. */
+function offscreenAway(node, contentBottom) {
+  const rect = node?.documentRect;
+  if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.width) || !Number.isFinite(rect.y)) return false;
+  if (rect.x + rect.width <= 0) return true;
+  return Number.isFinite(contentBottom) && rect.y > contentBottom + OFFSCREEN_MARGIN;
+}
+
+/** O ponto mais baixo que a coleta viu desenhado, usado como limite do conteúdo. */
+function contentBottomOf(nodes, exclude) {
+  let bottom = Number.NEGATIVE_INFINITY;
+  for (const node of nodes) {
+    if (node === exclude) continue;
+    const rect = node?.documentRect;
+    if (rect && Number.isFinite(rect.y) && Number.isFinite(rect.height)) bottom = Math.max(bottom, rect.y + rect.height);
+  }
+  return Number.isFinite(bottom) ? bottom : null;
+}
+
 function labelsForField(field, nodes, ids, index) {
   const own = normalizeText(attribute(field, 'id'));
   return nodes.filter(node => labelAssociatedWithField(node, field, ids, index) ||
@@ -93,25 +120,33 @@ function formFieldLabel(snapshot) {
       return native || inputRoles.has(normalizeText(node.axRole).toLowerCase() || roleOf(node));
     });
     if (fields.length === 0) return result('inapplicable', 'Não há campos de formulário aplicáveis.');
-    // Um rótulo que existe e está recortado não identifica visualmente nada. Isso é observável,
-    // então vira alvo por campo em vez de pendência agregada — mas continua em revisão, porque a
-    // norma admite propósito visualmente evidente e o recorte não prova ausência de percepção.
+    // Um rótulo que existe e não pode ser visto não identifica visualmente nada. Isso é observável
+    // de duas formas: recorte declarado, e posicionamento que coloca o rótulo fora da tela. As duas
+    // viram alvo por campo em vez de pendência agregada — mas continuam em revisão, porque a norma
+    // admite propósito visualmente evidente e nem recorte nem posição provam ausência de percepção.
     const index = nodeIndex(nodes);
     const ids = domIdIndex(nodes);
-    const clippedFields = fields.filter(field =>
-      labelsForField(field, nodes, ids, index).some(clippedAway));
-    if (clippedFields.length === 0) {
+    const contentBottom = label => contentBottomOf(nodes, label);
+    const hidden = [];
+    for (const field of fields) {
+      const labels = labelsForField(field, nodes, ids, index);
+      if (labels.some(clippedAway)) hidden.push({ field, reason: 'clipped-label' });
+      else if (labels.some(label => offscreenAway(label, contentBottom(label)))) hidden.push({ field, reason: 'offscreen-label' });
+    }
+    if (hidden.length === 0) {
       return result('cantTell', 'Há campos cuja identificação visual precisa ser confirmada. O nome acessível, sozinho, não demonstra atendimento nem falha do item 5.9.1.', [], [
         'Confirme um rótulo que identifique cada campo ou, como alternativa, um propósito visualmente evidente acompanhado de nome acessível. Caixa e texto no DOM não provam percepção visual: podem estar recortados ou ocultos. Esta pendência é agregada, não uma ocorrência de erro para cada campo.',
         'Associação programática, nome acessível e descrição do propósito são verificados separadamente. Não conclua ausência de rótulo visual apenas porque o nome acessível está vazio ou não foi coletado.'
       ]);
     }
     return result('cantTell',
-      `Há ${clippedFields.length} campo(s) cujo rótulo associado está recortado e não pode ser visto. Isso não confirma falha do item 5.9.1: confirme se o campo tem propósito visualmente evidente ou outro rótulo visível antes de concluir.`,
-      clippedFields.map(field => target(field,
-        'O rótulo associado a este campo está recortado na página e não identifica o campo visualmente. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.',
-        { reason: 'clipped-label' })),
-      ['A revisão é necessária porque a norma admite propósito visualmente evidente com nome acessível: recorte não prova ausência de percepção.',
+      `Há ${hidden.length} campo(s) cujo rótulo associado não pode ser visto — recortado ou posicionado fora da tela. Isso não confirma falha do item 5.9.1: confirme se o campo tem propósito visualmente evidente ou outro rótulo visível antes de concluir.`,
+      hidden.map(({ field, reason }) => target(field,
+        reason === 'clipped-label'
+          ? 'O rótulo associado a este campo está recortado na página e não identifica o campo visualmente. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.'
+          : 'O rótulo associado a este campo está posicionado fora da área visível da página. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.',
+        { reason })),
+      ['A revisão é necessária porque a norma admite propósito visualmente evidente com nome acessível: nem recorte nem posicionamento provam ausência de percepção.',
         'O nome acessível e a associação programática são verificados separadamente neste mesmo relatório.']);
   });
 }

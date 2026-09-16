@@ -114,6 +114,40 @@ test('a clipped label becomes a per-field target and never a confirmed failure',
     assert.equal((await evaluate('form-field-label', style_)).targets.length, expected, `${style}`);
   }
 
+  // A label can also be hidden by being placed outside the page, which is the other classic
+  // read-it-but-do-not-show-it technique. Measured in Chrome: getBoundingClientRect reports those
+  // coordinates raw, x -9999 for the usual sr-only pattern and y 9000 for one pushed far below, so
+  // the geometry is a trustworthy signal when the rectangle is decisive.
+  const offscreen = (id, rect) => snapshot([
+    record(id, 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+      documentRect: rect, styles: { 'clip-path': 'none', clip: 'auto' } }),
+    record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+  ]);
+  const farLeft = await evaluate('form-field-label', offscreen('label', { x: -9999, y: 0, width: 120, height: 18 }));
+  assert.deepEqual(farLeft.targets.map(entry => entry.nodeId), ['field'], 'a label left of the origin is off screen');
+  assert.equal(farLeft.targets[0].data.reason, 'offscreen-label');
+  assert.equal(farLeft.outcome, 'cantTell', 'being off screen does not prove absence of perception');
+
+  // The vertical case needs real content above it: with only the label in the fixture the label
+  // would be the lowest thing drawn and therefore its own reference, which is what the first run of
+  // this test got wrong.
+  const belowContent = snapshot([
+    record('content', 'p', { text: 'Conteúdo', hasRenderedBox: true, documentRect: { x: 0, y: 0, width: 400, height: 600 } }),
+    record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+      documentRect: { x: 0, y: 9000, width: 120, height: 18 }, styles: { 'clip-path': 'none', clip: 'auto' } }),
+    record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+  ]);
+  const farBelow = await evaluate('form-field-label', belowContent);
+  assert.deepEqual(farBelow.targets.map(entry => entry.nodeId), ['field'], 'a label far past the content is off screen');
+
+  // Not decisive, so not a target: an ordinary label at the origin, one scrolled above the fold,
+  // and one just past the last drawn element.
+  for (const rect of [{ x: 16, y: 40, width: 120, height: 18 }, { x: 16, y: -200, width: 120, height: 18 },
+    { x: 0, y: 620, width: 120, height: 18 }]) {
+    const value = await evaluate('form-field-label', offscreen('label', rect));
+    assert.deepEqual(value.targets, [], `an ordinary label must not become a target: ${JSON.stringify(rect)}`);
+  }
+
   // The legacy clip:rect(0,0,0,0) technique counts as hidden too.
   const legacy = snapshot([
     record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,

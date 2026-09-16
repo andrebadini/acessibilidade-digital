@@ -12,6 +12,7 @@ test('visual field identification stays separate from names and includes a custo
   const fixture = await startFixtureServer(t, new Map([['/', {
     status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: `<!doctype html><html lang="pt-BR"><title>Rótulos</title>
     <label id="clipped" for="name" style="position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden">Nome</label><input id="name">
+    <label id="offscreen" for="code" style="position:absolute;left:-9999px">Código</label><input id="code">
     <input aria-label="Pesquisar"><label for="ordinary">Nome completo</label><input id="ordinary"></html>`,
   }]]));
   const extension = await launchUnpackedExtension(t, {
@@ -50,16 +51,18 @@ test('visual field identification stays separate from names and includes a custo
       assert.doesNotMatch(JSON.stringify(snapshot), /texto que o usuário digitou/u);
     }
     const result = (await runRules(snapshot, {}, [rule]))[0];
-    // O recorte do rótulo é observável, então vira alvo por campo; a conclusão continua em
-    // revisão, porque a norma admite propósito visualmente evidente e recorte não prova
-    // ausência de percepção.
+    // Um rótulo que não pode ser visto — recortado ou fora da tela — vira alvo por campo; a
+    // conclusão continua em revisão, porque a norma admite propósito visualmente evidente e nem
+    // recorte nem posicionamento provam ausência de percepção.
     assert.equal(result.outcome, 'cantTell');
     if (!custom) {
-      assert.equal(result.targets.length, 1, JSON.stringify(result.targets));
-      assert.equal(result.targets[0].data.reason, 'clipped-label');
-      assert.equal(result.targets[0].selectorHint, '#name');
+      assert.equal(result.targets.length, 2, JSON.stringify(result.targets));
+      assert.deepEqual(result.targets.map(target => target.selectorHint), ['#name', '#code']);
+      assert.deepEqual(result.targets.map(target => target.data.reason), ['clipped-label', 'offscreen-label']);
+      assert.ok(snapshot.nodes.find(node => node.attributes?.id === 'offscreen')?.documentRect.x < 0,
+        'o rótulo fora da tela precisa chegar com a coordenada crua, sem recorte do viewport');
     } else {
-      assert.deepEqual(result.targets, [], 'a custom field with a visible label reference is not clipped');
+      assert.deepEqual(result.targets, [], 'a custom field with a visible label reference is not hidden');
     }
     assert.deepEqual(await extension.evaluate(page, state), before);
   }

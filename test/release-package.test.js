@@ -13,7 +13,7 @@ const packageName = 'audita-acessibilidade-1.1.16.zip';
 // The digest of the artifact that is actually delivered. It is recorded here so a source change
 // that was not followed by a rebuild fails the suite: the test builds from the current tree, so a
 // stale release/audita-acessibilidade-1.1.15.zip and a drifted source cannot both stay green.
-const deliveredPackageSha256 = '5cedebc261e3b10c5bb1acf7e92ccf4bb6ac60697aec646dadf17ee7dc46da7a';
+const deliveredPackageSha256 = 'c175a224b4bf5685b512f786596bc839163c70bc2d43e920f689e21bd2663716';
 // The artifact the independent review approved, kept in release/ so the evidence of what was
 // reviewed survives even though the source has moved past it and it is no longer reproducible from
 // HEAD. It stays reconstructible from its own commit, 49d70ca, which was verified by rebuilding.
