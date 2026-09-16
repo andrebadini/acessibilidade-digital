@@ -1762,3 +1762,30 @@ Error: WAIT_TIMEOUT
 **O que isso decide.** A hipótese de "é só o teto de 30 s do harness" **não explica estes dois**: com orçamento de 150 s eles continuam falhando. A correção de uma linha que preparei ajuda o grupo de prontidão (os quatro de `BEGIN_ATTEMPT`), não estes. Estes são o registro de posse do outro incremento, e é exatamente o que a triagem está dumpando para decidir se é defeito de produto ou expectativa desatualizada do arquivo alheio.
 
 **Nota de método:** o `ADV119_OWNER_DUMP` saiu como `[object Object]` — o dump não foi serializado com `JSON.stringify`, então o conteúdo do dono não ficou legível nessa passagem. É problema do diagnóstico dela, não do produto, e não afeta o rastro de pilha acima.
+
+## O dump instrumentado da triagem responde os dois de marcadores: o produto pausa certo, o registro de posse é que está vazio
+
+O diagnóstico refinado dela produziu o estado real, e ele é legível:
+
+```json
+{"sessionKeys":["audita:active-audit-job:v1","audita:audit-session-capability:v1:IoXKhxsdN8u2PrwnQRHIpw",
+ "audita:execution-checkpoint:v1:e7f210e1-…","audita:panel-bootstrap:v1:…","audita:panel-launch:index:v1:…",
+ "audita:panel-launch:record:v1:…","audita:pixel-capture:v1:e7f210e1-…",
+ "audita:retention-preference:v1:e7f210e1-…","audita:session-hmac-key:v1","audita:target-capability:v1:…"],
+ "owned":[], "active":{"auditId":"e7f210e1-…","state":"privacy-paused","captureMode":null},
+ "wanted":"e7f210e1-…"}
+```
+
+**O que isso diz, linha por linha:**
+
+- `active.state === "privacy-paused"` e o `auditId` bate com o `wanted` — **o produto fez exatamente o que devia**: a tentativa de auditoria chegou ao estado de pausa por privacidade, correlacionada ao auditor certo.
+- **`owned: []`** — não há aba própria registrada. E a lista de chaves de sessão confirma: existem `pixel-capture`, `execution-checkpoint`, `retention-preference`, `session-hmac-key`, `target-capability` e o `active-audit-job` do auditor, mas **nenhuma chave `audita:owned-tab:v2:*`**.
+- O teste falha em `waitForOwner`, que exige **exatamente uma** aba própria em `retained-for-consent`.
+
+**A leitura que se sustenta:** numa auditoria da **página atual**, a aba é a do próprio usuário — não há cópia a possuir. O registro de posse é do desenho de cópia/URL, que `1c9b296` removeu deste caminho. Então o que existe aqui é uma **expectativa do teste**, herdada do desenho antigo, e não uma falha do produto: o produto pausa, correlaciona e não deixa posse órfã — que é o comportamento conservador correto.
+
+**Duas leituras independentes, e a segunda é a que decide.** Eu havia localizado a morte em `waitForOwner` lendo o rastro de pilha; o dump dela mostra *por que*: o registro está vazio porque este fluxo não cria posse. É a diferença entre "o teste não encontra o que espera" e "o produto não faz o que promete" — e aqui é a primeira.
+
+**Também confirma a leitura dos dois relógios:** nesta passagem o teste falhou em **31,9 s**, contra 151,9 s na execução anterior dos mesmos casos. Mesma causa, orçamentos diferentes.
+
+**O que falta:** a conclusão da triagem sobre de quem é a expectativa. Se ela confirmar que o registro de posse não pertence a este fluxo, estes dois deixam de ser falha e passam a ser teste a corrigir — no arquivo do outro incremento, que eu não altero.
