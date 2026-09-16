@@ -1801,3 +1801,27 @@ Somei à medição da triagem uma leitura do código, para não depender só do 
 **Conclusão, com o limite explícito do que li:** a escrita no registro de posse está amarrada à criação de uma aba descartável, e o fluxo da página atual não cria nenhuma. Um registro de posse **vazio** nesse fluxo é o comportamento esperado, não um registro que o produto esqueceu de gravar — e isso é coerente, ponto a ponto, com o dump da triagem (`owned: []`, nenhuma chave `audita:owned-tab:v2:*`, e mesmo assim `state: "privacy-paused"` alcançado e correlacionado).
 
 Não afirmei que li o fluxo anexado inteiro; afirmei o que li, e o que li sustenta a mesma leitura que a medição dela produziu por outro caminho.
+
+## O terceiro dump fecha a questão dos marcadores: a sessão anexada não tem dono por construção
+
+O diagnóstico 3 da triagem traz os registros internos do próprio produto, e eles encerram a discussão:
+
+```json
+"sessionCapabilities":[{"auditId":"5bca8d9d-…","mode":"attached","state":"privacy-paused",
+  "targetBinding":{"kind":"attached","ownershipId":false,"state":null}, …}],
+"targetCapabilities":[{"state":"claimed","targetBinding":null, …}],
+"owned":[], "active":{"auditId":"5bca8d9d-…","state":"privacy-paused"}, "wanted":"5bca8d9d-…"
+```
+
+Lendo o que o produto gravou sobre si mesmo:
+
+- a capacidade de sessão diz **`mode: "attached"`** e **`state: "privacy-paused"`** — o modo e o estado corretos;
+- o vínculo de alvo dessa sessão é **`{"kind":"attached","ownershipId":false,"state":null}`** — ou seja, **não existe `ownershipId`** numa sessão anexada, por desenho, e o estado de posse é nulo;
+- a capacidade de alvo está `claimed` com `targetBinding: null`;
+- `owned: []`, e nenhuma chave `audita:owned-tab:v2:*` entre as dez de sessão.
+
+**A conclusão deixa de ser leitura e passa a ser registro do produto:** o teste `waitForOwner` exige **exatamente um dono em `retained-for-consent`**, e o modo anexado — auditoria da página atual, onde a aba é a do próprio usuário — **nunca tem dono**. Não é registro que o produto esqueceu de gravar; é um conceito que não pertence a este modo. Expectativa herdada do desenho de cópia que `1c9b296` removeu deste caminho, no arquivo do outro incremento.
+
+**As três rotas convergentes, agora completas:** (1) o rastro de pilha localiza a morte em `waitForOwner`; (2) o dump 2 mostra `owned: []` com `privacy-paused` alcançado; (3) o dump 3 mostra que a própria sessão se declara `mode: "attached"` com `ownershipId: false`. Nenhuma delas é interpretação minha — as três são medição.
+
+**O que isso muda no critério 10:** os dois de marcadores **não são falha de produto**. Sobram no portão serial: quatro de prontidão (teto de 30 s do harness, com correção de uma linha mapeada), um de orçamento de download e um de limpeza de perfil no teardown — nenhum deles em asserção sobre resultado de auditoria.
