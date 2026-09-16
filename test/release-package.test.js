@@ -14,6 +14,13 @@ const packageName = 'audita-acessibilidade-1.1.16.zip';
 // that was not followed by a rebuild fails the suite: the test builds from the current tree, so a
 // stale release/audita-acessibilidade-1.1.15.zip and a drifted source cannot both stay green.
 const deliveredPackageSha256 = '5cedebc261e3b10c5bb1acf7e92ccf4bb6ac60697aec646dadf17ee7dc46da7a';
+// The artifact the independent review approved, kept in release/ so the evidence of what was
+// reviewed survives even though the source has moved past it and it is no longer reproducible from
+// HEAD. It stays reconstructible from its own commit, 49d70ca, which was verified by rebuilding.
+const reviewedPackage = Object.freeze({
+  name: 'audita-acessibilidade-1.1.15.zip',
+  sha256: '5619e27d4002620fa61d57d24b06279dbc5a7ace1ec50a3e9b9df0b775b6b03b',
+});
 
 function runBuild(args) {
   return spawnSync(process.execPath, ['scripts/build-release.mjs', ...args], {
@@ -113,6 +120,9 @@ test('builds the public ZIP reproducibly in an isolated temporary directory', as
   assert.equal(second, first);
   assert.deepEqual(await snapshotRelease(), releaseBefore, 'o teste não pode tocar em release/');
 
+  const reviewedPath = join(releaseDirectory, reviewedPackage.name);
+  assert.equal(await digest(reviewedPath), reviewedPackage.sha256,
+    'o artefato revisado precisa permanecer em release/ exatamente como foi aprovado');
   assert.equal(await digest(output), deliveredPackageSha256,
     'o pacote construído a partir desta árvore precisa ser o artefato entregue; se o fonte mudou, reconstrua e atualize o hash registrado');
 

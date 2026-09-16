@@ -1264,3 +1264,15 @@ Note-se o tamanho: 1.044.772 bytes contra 1.044.773 do 1.1.15. A diferença de u
 ### Suíte
 
 4184 testes, 4176 passam, 8 falham — as mesmas pré-existentes. `verify-project` GREEN.
+
+### Correção: o artefato revisado havia sido sobrescrito, e foi restaurado
+
+Ao verificar os hashes depois do bump, encontrei um erro meu com consequência real. Eu havia escrito que o `1.1.15.zip` estava "preservado exatamente como aprovado", mas o arquivo em `release/` tinha hash **`df02b7bc…`** — o rebuild que fiz **depois** do commit `8d8509b`, não o `5619e27d…` que a revisão aprovou. Ou seja: eu havia sobrescrito o artefato revisado ao reconstruir o pacote, e a prova material do que foi revisado não estava mais no repositório.
+
+**Restaurado por reconstrução, com verificação de hash.** Criei um worktree destacado no commit `49d70ca` — o estado exato que a revisão cobriu —, construí com o próprio `build-release.mjs` e obtive **`5619e27d4002620fa61d57d24b06279dbc5a7ace1ec50a3e9b9df0b775b6b03b`**, idêntico ao aprovado. Copiei para `release/audita-acessibilidade-1.1.15.zip`, confirmei o hash no lugar e removi o worktree temporário.
+
+Também registrei isso em teste: `test/release-package.test.js` agora fixa **os dois** hashes — o do artefato entregue (1.1.16, reconstruído do HEAD) e o do artefato revisado (1.1.15, preservado em `release/`). Se alguém sobrescrever o 1.1.15 de novo, a suíte falha; foi exatamente o que aconteceu comigo e nada reclamou.
+
+**A lição, e é a terceira vez nesta sessão que o mesmo tipo de falha aparece:** eu tinha um mecanismo que pegava pacote obsoleto — o hash fixado do entregue — e ele funcionou duas vezes. O que faltava era o mesmo mecanismo para o artefato **histórico**: um pacote antigo que foi aprovado precisa ser imutável, e nada no repositório garantia isso. Agora garante.
+
+De passagem, o tamanho de cada um confirma a diferença: 1.1.15 tem 1.044.162 bytes e 1.1.16 tem 1.044.772 — 610 bytes de código novo, o produtor de 5.9.7.
