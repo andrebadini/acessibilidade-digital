@@ -9,11 +9,11 @@ import test from 'node:test';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const releaseDirectory = fileURLToPath(new URL('../release/', import.meta.url));
-const packageName = 'audita-acessibilidade-1.1.15.zip';
+const packageName = 'audita-acessibilidade-1.1.16.zip';
 // The digest of the artifact that is actually delivered. It is recorded here so a source change
 // that was not followed by a rebuild fails the suite: the test builds from the current tree, so a
 // stale release/audita-acessibilidade-1.1.15.zip and a drifted source cannot both stay green.
-const deliveredPackageSha256 = 'df02b7bc6bcac30f265b3c0abf0027f3148653eb3426fab9e6f617a73d3b1be5';
+const deliveredPackageSha256 = '5cedebc261e3b10c5bb1acf7e92ccf4bb6ac60697aec646dadf17ee7dc46da7a';
 
 function runBuild(args) {
   return spawnSync(process.execPath, ['scripts/build-release.mjs', ...args], {

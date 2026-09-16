@@ -1230,3 +1230,37 @@ O que é verdade, medido: os **199 arquivos do artefato são byte a byte idênti
 O que continua verdade, e é a parte que não fecha: o que **não** foi exercitado é o caminho de carregamento a partir do arquivo empacotado — abrir o ZIP, extrair e carregar dali. Isso não é possível pelo harness porque ele abre `/test/e2e/fixtures/real-tab-harness.html`, que a distribuição corretamente não leva. E não é uma lacuna de risco relevante: o formato do pacote é verificado por `unzip -t`, pela lista exata de 199 entradas, pelo manifesto dentro dele e pela comparação byte a byte; o que sobra de não testado é o gesto de extrair, não o conteúdo.
 
 **Conclusão para o critério 12:** satisfeito no que importa — a versão empacotada foi testada em Chrome real, porque os bytes executados e os bytes entregues são os mesmos — com uma limitação declarada: o carregamento a partir do ZIP extraído não é exercitado, e não pode ser sem embarcar o harness de teste dentro da distribuição, o que seria a coisa errada a fazer.
+
+## Rodada 44 — bump para 1.1.16: o 5.9.7 entrou depois da revisão
+
+O produtor de obrigatoriedade de 5.9.7 foi implementado e commitado em `8d8509b`, **depois** da revisão independente que aprovou o 1.1.15. E ele não é cosmético: mudou o comportamento do produto de forma mensurável. Antes, todo campo obrigatório caía em `cantTell` por dado ausente; agora o relatório **decide** — o campo com marcador declarado não é achado, e o campo obrigatório sem marcador declarado é falha confirmada com alvo.
+
+Pela mesma regra que apliquei na 1.1.14 → 1.1.15: **um relatório que decide diferente é outro produto**, e o artefato não pode se identificar com o número cuja revisão não cobre o que ele faz. Subi para **1.1.16**.
+
+### O que mudou
+
+- `manifest.json`: `version` e `version_name` para 1.1.16.
+- `test/extension-shell.test.js` e `test/release-package.test.js`: as asserções que fixavam 1.1.15 e o nome do pacote.
+- `store-assets/STORE-LISTING.md`, `store-assets/TEST-INSTRUCTIONS.md`, `docs/COMO-USAR.md`: versão declarada e nome do ZIP.
+- `README.md`: declara 1.1.16, explica por que subiu e preserva o registro da 1.1.15 abaixo, sem reescrever o que foi congelado e revisado.
+- `release/audita-acessibilidade-1.1.15.zip` removido; `release/audita-acessibilidade-1.1.16.zip` construído e rastreado.
+
+### Artefato
+
+```
+audita-acessibilidade-1.1.16.zip
+SHA-256 5cedebc261e3b10c5bb1acf7e92ccf4bb6ac60697aec646dadf17ee7dc46da7a
+1.044.772 bytes · 199 arquivos
+manifesto dentro: version 1.1.16, version_name 1.1.16
+hash fixado em test/release-package.test.js
+```
+
+Note-se o tamanho: 1.044.772 bytes contra 1.044.773 do 1.1.15. A diferença de um byte é o que separa um produto que relatava dado ausente de um que decide — o que é exatamente o motivo de o número ter subido.
+
+### O que isto deixa explícito
+
+**O 1.1.16 não passou por revisão independente.** O veredito C=0/I=0 e o "pode substituir o candidato" valem para o artefato `5619e27d…` do 1.1.15, que **não existe mais** em `release/`. As mudanças posteriores — a fronteira do veredito humano (`49d70ca`) e o produtor de 5.9.7 (`8d8509b`) — têm cada uma teste e medição própria, mas a revisão integrada do conjunto como artefato não foi feita. É a mesma ressalva que registrei ao subir para 1.1.15 e vale de novo aqui, sem atenuar: **empacotado e verde não é revisado**.
+
+### Suíte
+
+4184 testes, 4176 passam, 8 falham — as mesmas pré-existentes. `verify-project` GREEN.
