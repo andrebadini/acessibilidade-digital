@@ -1842,3 +1842,21 @@ AUDITA_E2E_CHROME="…/Google Chrome for Testing" \
 **O que conta como confirmação:** as cinco saírem de falha para verde (ou para uma falha *diferente*, que seria produto e não teto). **O que conta como refutação:** continuarem falhando no mesmo ponto. E o teste decisivo de que a correção é do harness e não um mascaramento é simples: um comando que trave de verdade continua falhando, só depois de 120 s em vez de 30 — nenhuma asserção muda, porque a constante governa apenas quanto tempo se espera por uma resposta de CDP.
 
 **Ordem:** aplicar **depois** do relatório da triagem, para que a fotografia que ela descreve (9 falhas, com a assinatura de 30 s) continue sendo a fotografia da árvore naquele momento, e a mudança apareça como o que é — uma correção posterior, com a medição antes e depois.
+
+## Pré-validação da correção do teto, feita sem Chrome
+
+Antes de tocar na árvore, validei a mudança num worktree de rascunho no HEAD atual:
+
+```
+# rascunho: /private/tmp/audita-ceil (worktree destacado em 66a206a)
+-const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
++const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+
+node --test test/e2e/support/real-chrome.test.mjs   →  39 testes, 39 passam, 0 falham
+```
+
+**O que isso prova:** nenhum teste do próprio harness fixa o valor de 30 s nem depende dele — a constante é livre para mudar, e a suíte de contrato do harness continua verde. Ou seja, a correção é **inerte para o contrato** e só altera quanto tempo se espera por uma resposta de CDP.
+
+**O que isso não prova:** se os quatro testes de prontidão passam com o teto maior. Isso exige Chrome, e o Chrome está com a triagem. A verificação de comportamento continua sendo o comando único que registrei, com confirmação e refutação definidas de antemão.
+
+O rascunho foi removido depois da medição (`git worktree remove`), para não deixar árvore registrada no repositório nem lixo em `/private/tmp`.
