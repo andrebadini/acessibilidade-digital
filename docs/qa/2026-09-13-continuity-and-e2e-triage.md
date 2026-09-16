@@ -2,6 +2,22 @@
 
 Ponto de partida confirmado no worktree `feature/audita-mt`: HEAD `c213a27`, incremento 5.9.1 sem commit, suíte completa impossível de planejar. Este documento registra o que foi executado, o que foi corrigido e o que permanece aberto. Não é aprovação de produção.
 
+## Leia isto primeiro — estado de agora
+
+Esta trilha é **cronológica e passa de 2.100 linhas**; ela registra o caminho, incluindo hipóteses minhas que caíram. Para o **estado de agora**, leia estes três, nesta ordem:
+
+| Documento | Para que serve |
+|---|---|
+| `docs/qa/2026-09-16-estado-dos-criterios-1.1.19.md` | Os 12 critérios de conclusão, um por linha, com a evidência de cada um e o que falta. O cabeçalho diz o que o incremento 1.1.20 mudou neles. |
+| `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` | Todo achado das revisões da 1.1.16 à 1.1.19, com desfecho e a medição que o sustenta, mais o backlog aberto. |
+| `docs/qa/revisoes/` | Os relatórios integrais das revisões independentes. `REVIEW-1.1.19.md` é o último concluído; o da 1.1.20 ainda não existe. |
+
+**Artefato corrente:** `release/audita-acessibilidade-1.1.20.zip`, SHA-256 `140e30bb8884d27799e4df9252ea79186fd553471d9e46a54a3c6c0a56c6e1b1`. Ele corrige dois defeitos **de apresentação** medidos no PDF entregue da 1.1.19 (limitação dita duas vezes no sumário executivo; 56 de 146 rótulos de item quebrados na matriz impressa).
+
+**Números que valem hoje, e não os das rodadas antigas:** fase paralela da suíte **verde na 1.1.20** (4180 testes, 4179 passam, 0 falham); `release-package` 7/7 com o pacote reconstruído e conferido; `verify-project` estático verde. Na fase serial, a última medição completa (1.1.19) deu **9 falhas, todas em `test/e2e/sidepanel-flow-mv3.test.mjs`**, arquivo de outro incremento — a 1.1.20 foi verificada nos quatro E2E de relatório, impressão e exportação, mas a fase serial completa **ainda não foi re-executada nela**.
+
+**O que está aberto:** (1) o veredito da revisão independente **da 1.1.20**, que é o portão do critério 10 e está em curso; (2) as 9 falhas do arquivo do outro incremento, cujo conserto está especificado mas não é meu para editar; (3) o critério 8, que segue **Parcial** por falta de teste com pessoa leiga; (4) uma decisão de produto sobre auditoria com handoff falho ser exportável. **A 1.1.20 não é candidata enquanto (1) não fechar.**
+
 ## Entregas desta rodada
 
 | Commit | Escopo |
@@ -1714,19 +1730,9 @@ Confirmei o encanamento antes de propor: `:127` recebe `commandTimeoutMs = DEFAU
 
 **Não apliquei**, e a ordem importa: aplicar antes do veredito transformaria a hipótese em premissa e apagaria a evidência que a triagem está produzindo. Ela tem a cópia congelada e o instrumento; quando ela disser o que é, isto entra — ou vira achado de produto, se as falhas persistirem com o teto maior.
 
-## Índice do estado atual (leia isto primeiro)
+## Índice do estado atual — movido para o topo
 
-Esta trilha é cronológica e tem mais de 1.300 linhas; ela registra o caminho, incluindo hipóteses minhas que caíram. Para o **estado de agora**, os três documentos que valem são:
-
-| Documento | Para que serve |
-|---|---|
-| `docs/qa/2026-09-16-estado-dos-criterios-1.1.19.md` | Os 12 critérios de conclusão, um por linha, com a evidência de cada um e o que falta |
-| `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` | Todo achado das revisões da 1.1.16, 1.1.17 e 1.1.18, com desfecho e a medição que o sustenta |
-| este arquivo, das rodadas 45–58 em diante | Como se chegou aqui: as correções, as medições e as retratações |
-
-**Números que valem hoje, e não os das rodadas antigas:** fase paralela da suíte **verde** (4179 testes, 4178 passam, 1 pulado, 0 falham) — as "8 falhas pré-existentes" foram aposentadas com motivo na rodada 58; fase serial com **9 falhas mapeadas por dono** (7 no arquivo de outro incremento, 1 orçamento já corrigido, 1 limpeza de perfil no teardown do harness), nenhuma delas defeito de produto confirmado na minha área.
-
-**O que ainda não está fechado:** o critério 10 depende do relatório da triagem da 1.1.19, e o critério 1 depende de estabelecer se a intermitência do painel é do produto ou do tempo do teste. A 1.1.19 **não** é candidata enquanto os dois estiverem abertos.
+Este bloco ficava aqui, na altura da linha 1.700, dizendo "leia isto primeiro" num lugar onde ninguém leria primeiro. Pior: ele descrevia um estado que **já não valia** — dizia que o critério 1 dependia de estabelecer a causa da intermitência do painel e que o critério 10 dependia do relatório da triagem da 1.1.19, e os dois fecharam depois. O conteúdo atualizado está no topo do documento, na seção **"Leia isto primeiro — estado de agora"**. O que fica registrado aqui é a lição: um índice de estado que não é atualizado vira a primeira coisa que engana quem chega.
 
 ## Onde exatamente cada falha serial morre (lido do log, não inferido)
 
