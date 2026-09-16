@@ -630,3 +630,24 @@ A medição que falta na rodada 22 é comparar o `urlSessionDigest` guardado com
 - **Risco que a correção não pode criar**: aceitar o documento vivo sem provar que é o esperado. É o que permite marcar o documento errado, o ponto de rigor máximo da meta. Nenhuma comparação pode ser removida, apenas trocada por outra igualmente verificada ao vivo.
 - **Onde mexer**: `executeInDocument` e o comparador de prova em `src/background/page-markers-controller.js`; o precedente interno seguro é o caminho do destaque (`proveHighlightTargetsCore`) e o `probeDocumentIdentity`.
 - **Teste que faltaria depois**: um E2E que exija a raiz `data-audita-page-markers-root` na página após o pedido, no mesmo espírito do teste de destaque criado em `22ea7f8` — hoje nenhum teste cobre a marcação dos sinais, só a oferta.
+
+## Rodada 24 — contradição encontrada ao implementar: parte do meu diagnóstico cai
+
+Fui implementar a correção e encontrei uma contradição no meu próprio diagnóstico anterior. Registro-a porque ela muda o ponto de partida de quem retomar, e porque ignorá-la seria repetir o erro que já cometi duas vezes nesta sessão.
+
+O guard de instalação, antes de injetar, faz exatamente o que eu propus como correção:
+
+```js
+proof = validProof(await probeDocumentIdentity(origin.tabId));
+if (!sameProof(proof, origin)) return failure('PAGE_MARKERS_DOCUMENT_CHANGED');
+```
+
+Ou seja, o controlador **já prova a identidade do documento vivo imediatamente antes de instalar** e **já exige** `tabId`, `windowId`, `documentId` e `urlSessionDigest` iguais aos da origem. Se o `documentId` vivo diferisse do guardado, o desfecho seria `PAGE_MARKERS_DOCUMENT_CHANGED`, não a falha genérica que medi.
+
+Consequência: se esse guard passa — e a falha observada é `PAGE_MARKERS_UNAVAILABLE`, não `DOCUMENT_CHANGED` —, então o `documentId` vivo **é igual** ao guardado, e o `executeInDocument` com `documentIds: [record.documentId]` deveria funcionar. Isso contradiz a conclusão da rodada 21, em que eu atribuí a falha ao alvo fixo. Não posso confirmar de qual dos dois códigos de falha veio a mensagem que vi: em nenhuma medição minha o código exato foi capturado no momento do clique. Eu o inferi do comportamento da interface, e a interface traduz **dois** códigos de falha para a mesma mensagem.
+
+Portanto, o que eu tratei como causa confirmada na rodada 21 é, no máximo, uma hipótese que a leitura do próprio guard enfraquece. O que continua medido e verdadeiro: injeção por `tabId` funciona na aba ao fim da auditoria; `getContexts` não vê a aba; a interface mostra a mensagem de indisponibilidade. O que não sei é **qual** dos dois códigos o worker devolveu.
+
+Medição que faltava desde a rodada 12 e continua faltando, agora por motivo mais forte: capturar o **código de falha** devolvido pelo worker no pedido de sinais, não a mensagem da interface. Com `PAGE_MARKERS_UNAVAILABLE` a suspeita é o próprio controle (documento, plano, portas); com `PAGE_MARKERS_DOCUMENT_CHANGED` a suspeita é identidade. São caminhos de correção diferentes, e eu vinha tratando os dois como um só.
+
+Não implementei nada. Implementar sobre uma causa enfraquecida seria pior do que não implementar: eu teria mudado o caminho de prova de documento para consertar algo que talvez não esteja ali.
