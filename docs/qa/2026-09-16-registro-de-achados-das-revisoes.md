@@ -63,9 +63,35 @@ A revisão da 1.1.19 julgou duas coisas ao mesmo tempo: a correção do campo ob
 
 **Hipótese minha, refutada pela triagem.** Eu havia pré-validado subir o teto de comando do harness (`DEFAULT_COMMAND_TIMEOUT_MS`) de 30 s para 120 s — 39/39 no arquivo de contrato do próprio harness, ou seja, a constante é livre para mudar — e estava a um passo de aplicá-la. A triagem refuta a necessidade: os dois `CDP_COMMAND_TIMEOUT` (subtests 8 e 9) **têm causa** no painel deixado em `privacy-paused` pelo primeiro subteste, não em teto insuficiente. Com o teto maior, 30 s de falha virariam 120 s de falha. **Não aplicada**, e a hipótese fica retirada com o motivo escrito: mudança pré-validada não é mudança justificada.
 
+## Achado aberto que a revisão deixou como suspeita, e que eu levei até o código
+
+A revisão da 1.1.19 registrou, na seção "não verificado", uma suspeita sobre `persistExportSuccess` e escreveu que não a mediu. Fui atrás dela, porque suspeita não medida em caminho de erro é dívida. **O mecanismo está confirmado por leitura; o alcance é inferido, e eu não o executei.**
+
+O que o código mostra, em três pontos independentes:
+
+1. **Quem escolhe o validador** é o modelo, não o caminho da exportação — `export-controller.js:185`:
+   `immutableRevision = report.status === 'review-ready' && report.artifact.status === 'pending'`, e é isso que decide entre `validateImmutableRevisionCorrelation` (`:197`) e `validateArtifactCorrelation` (`:198`).
+2. **Quem escolhe o renderizador** é a presença de `reportView` — `report-export.js:88` usa o caminho com `reportView` quando `snapshotCapability !== null && dependencies.reportView !== undefined`, e `src/export/index.js:91` **sempre** constrói e passa um `reportView`. Nesse caminho o HTML sai de `renderHtmlReport(model, { reportView, deliveryIdentity })` (`report-export.js:291`).
+3. **O validador legado exige o outro render**, e sem identidade — `export-controller.js:507` compara com `renderHtmlReport(model)` e `renderTechnicalJson(model)`, enquanto o validador imutável (`:384`) compara com `renderTechnicalJson(model, { deliveryIdentity })`. Ou seja, os dois validadores esperam artefatos **diferentes**, e o critério de escolha não é o mesmo que decidiu o render.
+
+**A condição de alcance, tal como o código a descreve:** um modelo com `report.status === 'pending'` que chegue à aba de exportação. Esse estado existe: quando o handoff do relatório falha, `run-audit.js:1111-1115` registra `REPORT_HANDOFF_FAILED` e faz `state.status = 'partial'` **sem** executar a atribuição de `review-ready` (`:1106-1110`), deixando `report.status = 'pending'`. E a autorização para abrir o relatório não olha o estado do relatório, e sim o da sessão do painel (`side-panel-intent-router.js:776`, `['result','view-only']`). A projeção da interface, por sua vez, trata `pending` como exportável (`report-view.js:378`).
+
+**O que eu não fiz, e por isso não afirmo:** não induzi a falha de handoff em Chrome real para ver o erro acontecer. Não medi se o painel chega a `'result'` nesse cenário, nem se a revisão é gravada. Enquanto isso não for medido, isto é **mecanismo confirmado, alcance inferido** — não "defeito confirmado", e não vai para o relatório de usuário como se fosse.
+
+**Por que não abri revisão por causa disto:** é caminho de erro, não o percurso principal; não há perda de dado nem impacto de privacidade (a exportação falha com mensagem, não entrega artefato errado); e é **anterior** à 1.1.19 — a assimetria entre os dois validadores não foi introduzida por este delta. Fica no backlog com a análise pronta, que é o tratamento que a meta pede para achado menor.
+
 ## O que continua aberto, e não é achado de revisão
 
 - **Critério 1** — a intermitência da asserção de tamanho do painel tem **causa estabelecida e confirmada pelo próprio diff da falha** (`expected {w:0,h:0}` contra `actual {w:360,h:765}`). Corrigido na captura da linha de base, com a asserção intacta; **3 de 3 execuções passam** depois, e a falsificação foi feita: forçando uma mudança real de caixa (321×654 contra a linha de base real de 360×765), a asserção **reprova** com a mensagem certa — os dentes continuam lá.
 - **Fase paralela é instável sob carga — pré-existente, não desta mudança.** A mesma fase, no checkout **limpo** em `dad1cda`, falha **9** testes (`4187 testes, 4178 passam, 9 falham`), incluindo `times out a stalled bitmap allocation, closes the late bitmap and avoids a render canvas` e a família de cache de bitmap (`cache-reject`, `cache-throw`, `factory-throw`, `source-failure`, `vault-failure`, `vault-invalid`, `stored`). Na minha árvore a mesma fase falha **1** — exatamente o mesmo teste de bitmap — e esse teste passa **3 de 3** quando roda sozinho. Ou seja: é flake de tempo sob 179 arquivos em paralelo, e a minha árvore está **melhor** que a revisada, não pior. Fica registrado como fragilidade conhecida da suíte paralela, sem correção por enquanto: corrigir exigiria medir por que a alocação estagnada não estoura o prazo sob carga.
 - **Triagem da fase serial** — concluída, e as duas falhas que sobravam têm desfecho medido: a de exportação era a taxa de consulta do teste, e a de tamanho do painel era a linha de base. As 7 restantes são do arquivo do outro incremento (expectativas obsoletas de posse + cascata) e não são minhas para editar.
-- **Backlog documentado com análise pronta**: remediação por ocorrência no cartão; vocabulário português do `SENSITIVE_KEY` (decisão do usuário); reescrita do cenário aposentado sobre `beginAuthorizedUrlAudit`; técnicas restantes de ocultação em 5.9.1; `inputPurpose` de 5.9.8; verificação com leitor de tela real.
+- **Backlog documentado com análise pronta**: remediação por ocorrência no cartão; vocabulário português do `SENSITIVE_KEY` (decisão do usuário); reescrita do cenário aposentado sobre `beginAuthorizedUrlAudit`; técnicas restantes de ocultação em 5.9.1; `inputPurpose` de 5.9.8; verificação com leitor de tela real; e a assimetria validador/renderizador de `persistExportSuccess` (seção acima), cujo primeiro passo é medir se o painel chega a `'result'` com `report.status === 'pending'`.
+
+## Estado final medido da suíte, depois destas correções
+
+```
+fase paralela (179 arquivos):  4187 testes · 4178 passam · 9 falham   ← mesmo resultado do checkout limpo
+fase serial  (34 arquivos):      65 testes ·   56 passam · 9 falham   ← as 9 são todas do arquivo do outro incremento
+```
+
+Na fase paralela, as 9 falhas do checkout **limpo** em `dad1cda` são flakes de tempo sob carga (família de cache de bitmap e o teste de alocação estagnada, que passa 3 de 3 sozinho). Na minha árvore a fase paralela falhou **1** na medição anterior — o mesmo teste de bitmap —, e o checkout limpo falhou as **9** nas mesmas condições, o que localiza a fragilidade na suíte, não nas mudanças. Na fase serial, `axe-mv3-csp` e `batch-pixel-consent-mv3` deixaram de falhar, e **todas as 9 restantes estão em `test/e2e/sidepanel-flow-mv3.test.mjs`** — o arquivo que pertence ao outro incremento e que está sendo editado por ele neste mesmo worktree.
