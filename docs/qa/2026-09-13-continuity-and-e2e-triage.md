@@ -1860,3 +1860,24 @@ node --test test/e2e/support/real-chrome.test.mjs   →  39 testes, 39 passam, 0
 **O que isso não prova:** se os quatro testes de prontidão passam com o teto maior. Isso exige Chrome, e o Chrome está com a triagem. A verificação de comportamento continua sendo o comando único que registrei, com confirmação e refutação definidas de antemão.
 
 O rascunho foi removido depois da medição (`git worktree remove`), para não deixar árvore registrada no repositório nem lixo em `/private/tmp`.
+
+## A sonda própria da triagem confirma o fluxo anexado — e é o indício mais forte da classificação
+
+Em vez de repetir o teste que falha, a triagem escreveu uma **sonda própria** do fluxo anexado, e ela passou:
+
+```
+✔ ADV119: attached current-page audit — copy tab, binding and cancel cleanup (2 735 ms)
+ℹ tests 1 · pass 1 · fail 0
+```
+
+E o inventário de abas que ela levantou mostra, no mesmo cenário, **três** abas e nenhuma a mais:
+
+```
+about:blank · chrome-extension://…/test/e2e/fixtures/real-tab-harness.html · http://127.0.0.1:54553/current (ativa)
+```
+
+**Por que isso é o indício mais forte até aqui.** Ela não perguntou ao produto "o teste esperava um dono?"; ela mediu **vínculo, aba de cópia e limpeza no cancelamento** de uma auditoria da página atual, com instrumento próprio e independente do teste que falha — e o resultado é que o fluxo se comporta corretamente, sem aba órfã. É exatamente o que os três dumps anteriores indicavam: `owned: []`, `mode: "attached"`, `ownershipId: false`, e nenhuma aba extra criada.
+
+**Somando as quatro rotas independentes** — meu rastro de pilha, o dump 2, o dump 3 e agora a sonda dela —, a conclusão sobre os dois testes de marcadores está sustentada por medição em quatro frentes: **o produto faz o certo; a expectativa de posse é que não pertence a este modo**, no arquivo do outro incremento.
+
+Isso não substitui o relatório dela, mas estabelece que, quando ele vier, a classificação terá quatro medições convergentes por trás — e não uma opinião.
