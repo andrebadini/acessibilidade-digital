@@ -27,7 +27,8 @@ test('observed required state reaches the ABNT 5.9.7 consumer without inventing 
     <input id="aria-labelled" aria-labelledby="referenced-label" required>
     <input id="placeholder-marker" placeholder="Ramal *" required>
     <label class="sr-only" for="invisible-marker">Código *</label>
-    <input id="invisible-marker" required></html>`,
+    <input id="invisible-marker" required>
+    <input id="native-malformed" required aria-required="maybe"></html>`,
   }]]));
   const extension = await launchUnpackedExtension(t, {
     extensionPath: await realpath(fileURLToPath(new URL('../../', import.meta.url))),
@@ -87,10 +88,18 @@ test('observed required state reaches the ABNT 5.9.7 consumer without inventing 
   // confirmed failure and never the legal nonconformity reference. The earlier version returned
   // `passed` for the first group and `failed` for the second; the independent review measured the
   // `failed` reaching the exported report as a legal infraction, and both verdicts were withdrawn.
+  //
+  // `#native-malformed` carries the native attribute *and* a malformed ARIA token, which is the
+  // path an independent review measured: the collector leaves `required` unobserved, the rule sees
+  // missing data, and the early return used to discard **every** target of the item — the suspicion
+  // for `#aria-required` disappeared with it. Missing data is a limitation to declare, not a reason
+  // to silence what was observed.
   const result = (await runRules(snapshot, {}, FORM_RULES.filter(rule => rule.id === 'required-field-identification')))[0];
   assert.equal(result.outcome, 'cantTell');
   assert.deepEqual(result.targets.map(target => target.selectorHint), ['#aria-required']);
   assert.equal(result.targets[0].data.reason, 'missing-required-identification');
+  assert.ok(result.limitations.some(text => /sem estado calculado ou sem indicador observado/u.test(text)),
+    `a falta de dado precisa ser declarada: ${JSON.stringify(result.limitations)}`);
   assert.doesNotMatch(result.summary, /infração|inconformidade ao item/iu);
   assert.doesNotMatch(JSON.stringify(result), /inconformidade ao item/iu);
   assert.deepEqual(await extension.evaluate(page, state), before);

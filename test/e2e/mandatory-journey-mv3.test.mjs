@@ -158,7 +158,7 @@ test('the mandatory journey runs end to end in one session', { timeout: 420_000 
   await waitForValue(report, `Boolean(document.querySelector('button[data-report-export]'))`, value => value === true,
     { timeoutMs: 30_000 });
   await extension.click(report, 'button[data-report-export]');
-  const downloads = await extension.waitForFourDownloads({ auditId: summary.auditId, timeoutMs: 120_000, intervalMs: 250 });
+  const downloads = await extension.waitForFourDownloads({ auditId: summary.auditId, timeoutMs: 300_000, intervalMs: 250 });
   assert.deepEqual(downloads.map(record => record.format), ['html', 'pdf', 'csv', 'json'],
     'the export must deliver all four formats');
   for (const record of downloads) {

@@ -122,7 +122,7 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   })()`);
   await extension.captureJourney('friendly-report-occurrence', report, { captureBeyondViewport: false });
   await extension.click(report, 'button[data-report-export]');
-  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 60_000, intervalMs: 50 });
+  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 50 });
   assert.deepEqual(downloads.map(value => value.format), ['html', 'pdf', 'csv', 'json']);
   const jsonRecord = downloads.find(value => value.format === 'json');
   const htmlRecord = downloads.find(value => value.format === 'html');

@@ -4,16 +4,16 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão de produção 1.1.18 preparada:** a revisão independente da 1.1.17 confirmou que os quatro
-achados anteriores estavam fechados, mas mediu três achados Important no mesmo item: a suspeita por
-campo de 5.9.7 era classificada como *checklist* genérico — a mensagem do campo e o seletor não
-chegavam ao HTML nem ao PDF —, os campos sem marcação eram descartados em silêncio quando algum
-campo tinha declaração inválida, e a branch sobrevivente de reprovação ainda imprimia a frase legal
-para um campo que a própria árvore de acessibilidade do Chrome expõe como obrigatório. As três
-foram corrigidas: 5.9.7 não reprova mais (o item é sobre percepção, e declaração inválida é
-território de 4.1.2), as suspeitas por campo aparecem no grupo de revisão humana, e nenhum campo é
-descartado. Como isso muda o que o relatório decide e apresenta, o pacote passa a se identificar
-como 1.1.18. Os registros da 1.1.17, 1.1.16 e 1.1.15 ficam abaixo.
+**Versão de produção 1.1.19 preparada:** a revisão independente da 1.1.18 confirmou que os três
+achados Important anteriores estavam fechados, mas mediu um quarto, da mesma classe: quando um campo
+tem o atributo nativo `required` **e** um token ARIA malformado, o coletor deixa o estado sem
+observação e a devolução antecipada de "faltam dados" **descartava todos os alvos do item** — um
+campo obrigatório sem marcação nenhuma na mesma página sumia do HTML, do JSON e do PDF, e o item
+caía no checklist genérico. Corrigido: a falta de dado passou a ser limitação declarada, não motivo
+para silenciar o que foi observado. Na mesma revisão, o terceiro sítio que pode imprimir a
+referência legal passou a exigir nota, autor e data como os outros dois. Como isso muda o que o
+relatório decide e apresenta, o pacote passa a se identificar como 1.1.19. Os registros da 1.1.18,
+1.1.17, 1.1.16 e 1.1.15 ficam abaixo.
 
 **Versão de produção 1.1.17:** a revisão independente da 1.1.16 encontrou um achado
 **Critical** no produtor de obrigatoriedade de 5.9.7 — ele convertia marcações legítimas
@@ -40,7 +40,7 @@ passou a se identificar como 1.1.15, para não se confundir com o candidato revi
 
 **Versão de produção 1.1.14 entregue:** confira o [registro de validação e pacote](docs/qa/2026-09-12-production1114-release.md). A meta foi retomada em 12/09 e encerrada após correções, revisões independentes, testes no Chrome e avaliação do Google com esta versão. Distribuição local, sem publicação em loja.
 
-A versão **1.1.17** tem [guia de instalação e uso](docs/COMO-USAR.md). Acrescenta a identificação visível da versão de origem na metodologia do relatório e de sua impressão e corrige o sinal de cancelamento na retomada de lotes. Novas auditorias registram a versão instalada; antigas mantêm a versão de origem. Guias didáticos, grupos ABNT, sinais e evidências permanecem disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
+A versão **1.1.19** tem [guia de instalação e uso](docs/COMO-USAR.md). Acrescenta a identificação visível da versão de origem na metodologia do relatório e de sua impressão e corrige o sinal de cancelamento na retomada de lotes. Novas auditorias registram a versão instalada; antigas mantêm a versão de origem. Guias didáticos, grupos ABNT, sinais e evidências permanecem disponíveis. Checklist geral, suspeitas concretas e falhas são separados; a revisão automática não certifica conformidade integral. Resultados de versões anteriores são históricos, não comprovação de execução desta versão.
 
 Google na **1.1.14**, em 12/09: 0 falhas de requisitos confirmadas, 1 recomendação não atendida e 2 verificações com suspeitas (3 ocorrências); PDF de 24 páginas e quatro formatos exportados. Histórico preservado: [validação e Google da 1.1.13](docs/qa/2026-09-08-beta1113-release.md). Não são testes simultâneos ou de estados idênticos da página.
 

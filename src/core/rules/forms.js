@@ -380,15 +380,26 @@ function requiredFieldIdentification(snapshot) {
     // obrigatório. Os dois grupos viram suspeita concreta por campo, no mesmo resultado: a versão
     // que só reportava `failures` descartava em silêncio os campos sem marcação sempre que algum
     // campo tinha declaração inválida, e a revisão mediu esse silêncio no relatório exportado.
-    if (incomplete) return result('cantTell', 'Faltam dados do estado ou da identificação de campo obrigatório.', [], [
-      'Colete o estado calculado e o indicador associado de cada campo obrigatório.'
-    ]);
+    // Dados ausentes num campo deixam de descartar os outros. A revisão independente mediu o
+    // caminho: um campo com o atributo nativo `required` **e** um token ARIA malformado
+    // (`aria-required="maybe"`) faz o coletor deixar `required` sem observação, o que liga
+    // `incomplete`; a devolução antecipada descartava **todos** os alvos do item, e um campo
+    // obrigatório sem marcação nenhum na mesma página sumia do HTML, do JSON e do PDF, com o item
+    // caindo no checklist genérico. A falta de dado é uma limitação a declarar, não um motivo para
+    // silenciar o que já foi observado.
+    const gaps = incomplete
+      ? ['Há campo(s) obrigatório(s) sem estado calculado ou sem indicador observado; a conclusão sobre esses campos depende de nova coleta.']
+      : [];
     if (problems.length === 0) {
       return result('cantTell',
-        'A marcação de obrigatoriedade foi observada nos campos obrigatórios, mas a percepção dela não é medida automaticamente.',
+        incomplete
+          ? 'Faltam dados do estado ou da identificação de campo obrigatório.'
+          : 'A marcação de obrigatoriedade foi observada nos campos obrigatórios, mas a percepção dela não é medida automaticamente.',
         [], [
-          'A obrigatoriedade precisa ser percebida por todos. Contraste, tamanho, posição e o recurso que apresenta a marcação não são verificados automaticamente neste item.',
-          'Confirme visualmente que a marcação de cada campo obrigatório é perceptível antes de concluir.'
+          ...(incomplete
+            ? ['Colete o estado calculado e o indicador associado de cada campo obrigatório.']
+            : ['A obrigatoriedade precisa ser percebida por todos. Contraste, tamanho, posição e o recurso que apresenta a marcação não são verificados automaticamente neste item.',
+              'Confirme visualmente que a marcação de cada campo obrigatório é perceptível antes de concluir.'])
         ]);
     }
     const unmarked = problems.filter(problem => problem.data.reason === 'missing-required-identification').length;
@@ -401,7 +412,8 @@ function requiredFieldIdentification(snapshot) {
       `Há ${described}. Isso não confirma falha do item 5.9.7: a marcação pode estar em outro ponto da página ou ser percebida por outro meio, e a declaração não é a percepção.`,
       problems,
       ['Foram observados o texto dos rótulos associados, o conteúdo gerado por CSS, o placeholder e os elementos referenciados por aria-labelledby. Uma marcação declarada fora dessas fontes não é vista por esta medição.',
-        'Cada item desta lista é suspeita que exige confirmação humana, não infração confirmada.']);
+        'Cada item desta lista é suspeita que exige confirmação humana, não infração confirmada.',
+        ...gaps]);
   });
 }
 

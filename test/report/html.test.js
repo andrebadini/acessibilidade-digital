@@ -80,6 +80,10 @@ function reviewDecision(occurrenceId, itemId, answer, mode) {
     answer,
     evaluator: 'Fiscal de teste',
     decidedAt: '2026-08-26T15:00:00.000Z',
+    // A nota passou a ser exigida pelos três sítios que podem imprimir a referência curta de não
+    // conformidade. Estes testes verificam que uma não conformidade revisada **com** nota carrega a
+    // referência; o caso sem nota tem teste próprio.
+    note: 'Decisão registrada no teste.',
     mode,
   });
 }
@@ -513,6 +517,26 @@ test('reserves the short nonconformity reference for requirements, never for rec
   assert.doesNotMatch(humanReview, /Base consumerista padronizada para análise/u);
   assert.equal((html.match(/class="legal-analysis"/gu) || []).length, 1,
     'only the requirement may carry the short nonconformity reference');
+});
+
+test('a reviewed nonconformity without a note does not print the legal reference here either', () => {
+  // O renderizador de modelo aceitava `cantTell` + "não conforme" sem exigir nota, autor e data,
+  // enquanto `consumer-basis.js` e `panel-detail.js` exigem os três: o mesmo veredito humano
+  // produzia a frase legal num sítio e nenhuma nos outros dois. A revisão independente mediu a
+  // divergência e não encontrou fluxo de produto que alcance este ramo hoje — a aba de exportação
+  // sempre passa `reportView` —, mas um portão de redação jurídica não pode depender de o caminho
+  // ser improvável. Os três sítios exigem o mesmo, e este teste fixa o sítio que estava frouxo.
+  const incomplete = createReviewDecision({
+    auditId: SAMPLE_AUDIT.auditId, itemId: '5.1.4', occurrenceId: 'occ-focus-review',
+    answer: 'não conforme', evaluator: 'Fiscal de teste', decidedAt: '2026-08-26T15:00:00.000Z',
+    mode: 'assisted',
+  });
+  const card = occurrenceCard(renderHtmlReport(applyReviewDecisions(SAMPLE_AUDIT, [incomplete])), 'occ-focus-review');
+  assert.ok(!incomplete.note, 'a decisão do teste não tem nota');
+  assert.doesNotMatch(card, /Inconformidade ao item 5\.1\.4/u,
+    'sem nota, autor e data não há referência de não conformidade');
+  assert.doesNotMatch(card, /class="legal-analysis"/u);
+  assert.match(card, /data-display-outcome="failed"/u, 'o desfecho revisado continua visível como não atendido');
 });
 
 test('keeps engine result, human decision and derived display state visibly separate', () => {

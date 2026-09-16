@@ -634,7 +634,7 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
   assert.equal(proof.abnt, true, 'P5B_REPORT_ABNT_REFERENCE_MISSING');
   assert.deepEqual(proof.forbidden, [], 'P5B_REPORT_PRIVATE_DATA_LEAK');
   await extension.click(report, 'button[data-report-export]');
-  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 90_000, intervalMs: 50 });
+  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 50 });
   assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json'],
     'P5B_REPORT_EXPORT_FORMATS_MISSING');
   assert.equal(downloads.every(row => row.state === 'complete' && row.byteLength > 0 &&
@@ -642,7 +642,7 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
 }
 
 test('full-evidence batch resumes after restart, separately confirms both sensitive hidden pages, and exports their report', {
-  timeout: 360_000,
+  timeout: 600_000,
 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real de lote com pixels.');
   await access(chromeBinary, fsConstants.X_OK);

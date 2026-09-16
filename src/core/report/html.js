@@ -510,7 +510,17 @@ function legalAnalysis(occurrence, item, anchor, displayOutcome, decision) {
   // neither demonstrates a breach of the minimum nor determines a fine.
   if (displayOutcome !== 'failed' || !item || item.classification !== 'requirement') return '';
   const automaticBasis = consumerBasisForOccurrence(occurrence);
-  const reviewedFailure = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme';
+  // Um desfecho revisado só carrega a referência quando a decisão humana está completa. A versão
+  // anterior aceitava `cantTell` + "não conforme" sem exigir nota, autor e data, enquanto
+  // `consumer-basis.js` e `panel-detail.js` exigem os três — o mesmo veredito humano produzia a
+  // frase legal neste renderizador e nenhuma no painel. A revisão independente mediu a divergência;
+  // ela não encontrou fluxo de produto que alcance este ramo hoje (a aba de exportação sempre passa
+  // `reportView`, que usa o renderizador do relatório), mas um portão de redação jurídica não pode
+  // depender de o caminho ser improvável — os três sítios passam a exigir o mesmo.
+  const reviewedFailure = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme' &&
+    typeof decision.evaluator === 'string' && decision.evaluator.length > 0 &&
+    typeof decision.decidedAt === 'string' && decision.decidedAt.length > 0 &&
+    typeof decision.note === 'string' && decision.note.length > 0;
   if ((!automaticBasis && !reviewedFailure) || (automaticBasis && occurrence.legalAnalysis?.basisRef !== automaticBasis.id)) return '';
   return `<section class="legal-analysis" aria-labelledby="${anchor}-juridico"><h4 id="${anchor}-juridico">Referência normativa</h4><p>Inconformidade ao item ${escapeHtml(item.id)} da ABNT NBR 17225:2025</p></section>`;
 }

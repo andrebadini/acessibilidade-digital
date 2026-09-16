@@ -1487,3 +1487,26 @@ Corrigido: as duas fases sempre executam e o pior resultado é o que sai. `scrip
 Corrigido sem enfraquecer asserção nenhuma — as verificações de formato, estado, tamanho e sha256 continuam idênticas; só o tempo de espera mudou: `public-axe-map` 60 s → 300 s, `url-audit` 90 s → 300 s, `batch-pixel-consent` 90 s → 300 s (e o `timeout` externo 360 s → 600 s), `mandatory-journey` 120 s → 300 s. **`sidepanel-flow-mv3` ficou intocado de propósito**: é o arquivo de outro incremento.
 
 **O que isso muda no portão de release.** A partir de agora `npm test` executa a fase serial, e o resultado passa a incluir os 34 E2E de Chrome real. Qualquer afirmação anterior minha sobre "suíte completa" valia só para a fase paralela, e é assim que deve ser lida.
+
+## Rodada 51 — revisão da 1.1.18: o quarto Important, e o E2E serial que nunca rodava
+
+A revisão independente da 1.1.18 devolveu **0 Critical, 1 Important, 3 Minor**, e disse explicitamente que a 1.1.18 **não** pode substituir o candidato ainda. Os três Important da rodada anterior estão fechados por medição (com controle positivo: as frases legais continuam saindo para falhas reais), mas ela achou um **quarto caso da mesma classe de descarte silencioso**:
+
+**O achado.** `src/core/rules/forms.js` devolvia "faltam dados" **antes** de devolver os alvos já coletados. O gatilho é um campo com o atributo nativo `required` **e** um token ARIA malformado (`aria-required="maybe"`, `""` ou `"required"`): a regra lê o atributo nativo primeiro e considera a declaração válida, enquanto o coletor deixa `required` **sem observação** para não inventar booleano a partir de um token inválido — então `!hasOwn(field,'required')` liga a incompletude. Efeito medido por ela no produto real: `targets=2 → 0`, o item cai no checklist genérico, e um campo obrigatório **sem marcação nenhuma** na mesma página aparece **zero vezes** no HTML, no JSON e no PDF. Idêntico em `c64221d`, ou seja, herdado — mas a minha afirmação da rodada anterior, "nenhum campo é descartado", estava falsa.
+
+**Correção.** A falta de dado virou **limitação declarada**, não devolução antecipada: os alvos observados sempre saem, e a limitação diz que há campo sem estado calculado ou sem indicador observado. Unidade: `test/rules/forms.test.js` ganhou o caso exato do gatilho, e ele **falha contra o `src/` anterior** (`actual: []`, `expected: ['unmarked']`). E2E: a fixture de 5.9.7 ganhou o campo `#native-malformed` e a asserção de que o alvo de `#aria-required` sobrevive — o E2E, que era cego a esta mudança, **agora falha contra os bytes anteriores** (`actual: []`) e passa depois.
+
+**M2 corrigido.** O terceiro sítio que pode imprimir a referência legal (`src/core/report/html.js`, ramo de modelo) passou a exigir `evaluator`, `decidedAt` e `note` como `consumer-basis.js` e `panel-detail.js`. A revisão não encontrou fluxo de produto que alcance esse ramo hoje (a aba de exportação sempre passa `reportView`), mas um portão de redação jurídica não deve depender de o caminho ser improvável. Teste novo em `test/report/html.test.js` fixa o caso sem nota; os testes existentes que verificavam a referência revisada ganharam a nota que os outros dois sítios já exigiam.
+
+### O E2E serial nunca rodava — e agora roda, com 11 falhas não triadas
+
+Corrigi o runner (`scripts/run-tests.mjs`) para executar as duas fases e devolver o pior resultado. A suíte passou a rodar os 34 arquivos de Chrome real pela primeira vez como portão, e o resultado honesto é:
+
+```
+fase paralela:  4187 testes, 4179 passam, 8 falham  (as mesmas de service-worker)
+fase serial:      65 testes,   54 passam, 11 falham
+```
+
+**As 11 falhas do E2E serial não estão triadas**, e não vou apresentá-las como instabilidade genérica. O que já medi: `mandatory-journey-mv3` falhou numa execução com *"the side panel must not resize itself during the journey"* e **passou nas duas seguintes** e também a partir do pacote extraído — é intermitente, e é exatamente o critério 1 ("sem instabilidade") que precisa de atenção. `batch-pixel-consent-mv3` falhava por orçamento de download curto (com 420 s passa em 15 s). As outras nove precisam de triagem uma a uma, distinguindo intermitência, orçamento e defeito real. Fica como o próximo incremento obrigatório antes do candidato.
+
+**Correção de relato:** todas as vezes que registrei "suíte completa: 4185 testes, 4176 passam, 8 falham" eu estava descrevendo **apenas a fase paralela**, sem nenhum E2E de Chrome. O número não estava errado; o rótulo estava.

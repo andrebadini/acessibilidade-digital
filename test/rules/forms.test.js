@@ -517,6 +517,33 @@ test('required field rule checks both programmatic state and observable identifi
   ]))).outcome, 'inapplicable');
 });
 
+test('a field with unobserved state does not discard the other requiredness suspicions', async () => {
+  // Caminho medido pela revisão independente no Chrome real: um campo com o atributo nativo
+  // `required` **e** um token ARIA malformado (`aria-required="maybe"`) faz o coletor deixar
+  // `required` sem observação. A devolução antecipada de "faltam dados" descartava **todos** os
+  // alvos do item, e um campo obrigatório sem marcação nenhuma na mesma página sumia do HTML, do
+  // JSON e do PDF — o item caía no checklist genérico e o usuário não conseguia identificar o
+  // campo. A falta de dado é limitação a declarar, não motivo para silenciar o que foi observado.
+  const mixed = await evaluate('required-field-identification', snapshot([
+    record('malformed-native', 'input', {
+      attributes: { type: 'text', required: '', 'aria-required': 'maybe' }
+    }),
+    record('unmarked', 'input', {
+      attributes: { type: 'text', required: '' },
+      required: true,
+      requiredIndicator: '',
+      accessibleName: 'Bairro'
+    })
+  ]));
+  assert.equal(mixed.outcome, 'cantTell');
+  assert.deepEqual(mixed.targets.map(target => target.nodeId), ['unmarked'],
+    'o campo sem marcação continua sendo suspeita mesmo com outro campo sem dado observado');
+  assert.deepEqual(mixed.targets.map(target => target.data.reason), ['missing-required-identification']);
+  assert.ok(mixed.limitations.some(text => /sem estado calculado ou sem indicador observado/u.test(text)),
+    `a falta de dado precisa ser declarada: ${JSON.stringify(mixed.limitations)}`);
+  assert.doesNotMatch(mixed.summary, /infração|inconformidade ao item/iu);
+});
+
 test('input purpose judges only the declaration the field itself exposes', async () => {
   const failed = await evaluate('input-purpose', snapshot([
     record('plain', 'input', { attributes: { type: 'email' } }),

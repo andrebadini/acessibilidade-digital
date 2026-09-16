@@ -355,7 +355,7 @@ test(name, { timeout: 300_000 }, async t => {
   await extension.click(report, 'button[data-report-export]');
   let downloads;
   try {
-    downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 90_000, intervalMs: 50 });
+    downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 50 });
   } catch (error) {
     const exportDiagnostic = await extension.evaluate(extension.harnessPage, `(async()=>{
       const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
