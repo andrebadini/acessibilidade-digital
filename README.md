@@ -4,29 +4,27 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.27 preparada — sem revisão independente ainda.** A revisão da **1.1.26** saiu com
-**0 Critical, 1 Important e 5 Minor**: o **Important** é meu, do conserto do N2 — o valor tarjado
-passou a `[^\n<;]{1,120}` e o teto de 120 caracteres devolvia a **cauda** do valor (`token: <JWT de
-300>` saía com 180 intactos, `senha: p4ss;word-secreto` saía com `;word-secreto`), e o teste que eu
-escrevi para o N2 cristalizava o defeito ao afirmar que `FIM-DA-LINHA` sobrevivia. A 1.1.27 fecha isso
-com o valor consumido **até o fim do fragmento**, sem teto e sem `;` como terminador, e com uma
-métrica da largura da classe: nenhum caractere que só exista no valor pode sobreviver, em 28 formas
-diferentes, junto com o **A4** (o `compass` tarjado "de propósito" não era trade-off forçado:
-`(?<!com)pass` o preserva e mantém `myPass`/`userPass` tarjados), o **A7** (`auth` nu casava
-`author`/`authority`/`authorized*` — 314 tokens do produto; `authoriz(?:ations?)|auth(?!or)` preserva
-a família e não perde nenhuma forma de credencial) e o **N1 da 1.1.26** (o radical ainda perdia
-`passkod`, `passkode`, `passfrase`, `passsatz` e `passpasse` contra a 1.1.24).
+**Versão 1.1.28 preparada — sem revisão independente ainda.** A revisão da **1.1.27** saiu com
+**1 Critical, 0 Important, 4 Minor e 5 observações**: ela confirmou tudo o que a 1.1.27 declarava ter
+fechado (o Important da 1.1.26, o `compass`, os nomes dos seis E2E, as formas de credencial que a 1.1.24
+tarjava) e mediu **zero perdas** de vocabulário em 95 formas × 3 gerações —, mas mostrou que o **Critical
+C1 continuava aberto** quando rótulo e valor estão em **nós diferentes**: `<p>senha: <code>X</code></p>`,
+`<th>chave:</th><td>X</td>` e `<pre>{"senha": "X"}</pre>` entregavam a credencial inteira ao modelo, ao
+relatório e aos artefatos HTML/JSON. A causa raiz era o padrão do valor: `[^\n<]+` é obrigatório e não
+pode começar em `<`, então o motor fazia backtracking do separador e escrevia `[redacted]` **ao lado** do
+valor intacto; a alternativa entre aspas devolvia a cauda; e a aspa de fechamento da chave JSON ficava
+entre o rótulo e o separador.
 
-A revisão também mediu que a minha **varredura de credencial do artefato era vacuamente verde** (zero
-rótulos com valor nos quatro formatos: qualquer lista, inclusive vazia, passaria). Medir sem vacuidade
-— uma fixture que **contém** credencial — encontrou um defeito **Critical** que estava no produto desde
-antes: o sanitizador de trecho (`src/core/evidence/snippet.js`) tinha o **terceiro e o quarto**
-vocabulário, só em inglês, e copiava valor de atributo literalmente, então `senha: S3GR3D0XYZQ` e
-`cartão: 4111 1111 1111 1111` chegavam ao modelo, ao relatório e aos artefatos **HTML e JSON
-entregues**. A 1.1.27 faz as quatro listas virem do mesmo radical e aplica o mesmo tarjador de valores
-ao texto e aos atributos; o E2E de exportação agora audita uma página com credencial e **falha** se ela
-chegar a qualquer superfície entregue (provado por mutação: com o sanitizador anterior ele reprova
-nomeando `relatório, modelo e revisão guardados, artefato html, artefato json`).
+A 1.1.28 fecha isso nas duas camadas: o valor passa a ser qualquer coisa até a quebra de linha
+(`\S[^\n]*`, sem teto, sem `;` e sem alternativa entre aspas), o separador aceita aspa e as setas de
+quem escreve credencial em código (`->`, `=>`, `→`), e o sanitizador de trecho passa a tratar o **nó
+seguinte** como valor — tarjando o fragmento e removendo os atributos do próximo elemento, com a
+subárvore como raiz privada e o elemento vazio apenas sem atributos, para não encerrar o trecho. A prova
+é por mutação composta: com os sanitizadores exatos da 1.1.27, o E2E do produto reprova nomeando
+`relatório, modelo e revisão guardados, artefato html, artefato json`; com a correção, passa. Fecha
+também os três Minors: o fragmento de URL com `code` (que a 1.1.26 apagava por acidente e o A7 deixou
+passar), os **plurais em português** (`credenciais`, `sessões`, `cartões`, `autorizações`,
+`autenticações`) e os meus números sem escopo.
 
 Os seis E2E de escopo citados nas versões anteriores são **percurso obrigatório**
 (`mandatory-journey-mv3`), exportação da página atual, impressão executiva, layout de impressão,

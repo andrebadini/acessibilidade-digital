@@ -33,19 +33,32 @@ const BARE_PASS_SOURCE = String.raw`(?<!by)(?<!com)pass(?!ed|es|ive|ing|o|age|po
 // formas de credencial continuam tarjadas (`auth`, `authorization`, `authentication`, `authToken`,
 // `oauth`) e as inocentes passam a ser preservadas: medido nas duas direções, zero credencial perdida
 // e dezesseis palavras legítimas recuperadas.
-const SENSITIVE_WORD_SOURCE = String.raw`pwd|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o`;
+const SENSITIVE_WORD_SOURCE = String.raw`pwd|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)`;
 export const SENSITIVE_KEY = new RegExp(
   `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
 
-// Um rótulo de valor não exige fronteira à esquerda: `myPass: 1234` e `userPassword: 1234` são a
-// mesma credencial que `pass: 1234`, e o `\b` deixava as duas passarem. A fronteira à direita
-// continua, porque o rótulo precisa terminar antes do separador.
+// Um rótulo de valor não exige fronteira de palavra de nenhum lado — nem `\b` à esquerda, nem `\b` à
+// direita: `myPass: 1234` e `userPassword: 1234` são a mesma credencial que `pass: 1234`, e o `\b`
+// deixava as duas passarem. Quem faz a fronteira é o próprio separador, que precisa vir logo depois do
+// rótulo; o preço são falsos positivos estreitos como `surpass:` e `obsessão:`, que precisam do
+// separador para morder — e esse preço é aceito na direção segura.
 const VALUE_LABEL_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|password|authorization|${SENSITIVE_WORD_SOURCE})`;
-// O valor vai até o fim da linha: qualquer teto ou terminador devolve a cauda do valor, que foi
-// exatamente a regressão Important medida na 1.1.26 (`[^\n<;]{1,120}` deixava 180 de 300 caracteres
-// de um JWT). `<` permanece como parada porque delimita marcação, e a forma entre aspas é consumida
-// inteira para não depender de onde a aspa fecha.
-const VALUE_SOURCE = String.raw`(?:"[^"]*"|'[^']*'|[^\n<]+)`;
+// O valor vai até o fim da linha, sem teto, sem terminador e sem alternativa entre aspas. Duas
+// revisões seguidas mediram a mesma classe por caminhos diferentes: a 1.1.26 tinha o teto de 120
+// caracteres e o `;` devolvendo a cauda; a 1.1.27 tirou o teto mas manteve `<` como parada e a
+// alternativa entre aspas, e as duas coisas devolviam o valor — `senha: <SEGREDO>` casava só o espaço
+// (o `[^\n<]+` é obrigatório e não pode começar em `<`, então o motor fazia backtracking do separador
+// e escrevia `[redacted]` AO LADO do valor intacto), `senha: ""SEGREDO` casava a string vazia, e
+// `{"senha": "SEGREDO"}` nem casava, porque a aspa de fechamento da chave ficava entre o rótulo e o
+// separador. Agora o valor é qualquer coisa até a quebra de linha, e o separador aceita a aspa e as
+// setas de quem escreve credencial em código.
+const VALUE_SOURCE = String.raw`\S[^\n]*`;
+const VALUE_SEPARATOR_SOURCE = String.raw`(\s*['"]?\s*(?:[:=]|->|=>|→)\s*)`;
+// Um fragmento de texto que TERMINA no rótulo com o separador está esperando o valor no nó
+// seguinte (`<p>senha: <code>…</code></p>`, `<th>chave:</th><td>…</td>`). O sanitizador de trecho
+// usa este predicado para tratar o que vem depois como valor, em vez de confiar que rótulo e valor
+// moram no mesmo nó de texto — que era a forma exata que continuava vazando na 1.1.27.
+const DANGLING_VALUE_LABEL = new RegExp(`(?:${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}$`, 'iu');
 export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
 // Public storage failures stay independent from browser/IndexedDB error details,
@@ -193,10 +206,15 @@ export function backgroundImageKind(value) {
 // O valor é consumido por INTEIRO (até 120 caracteres, parando em quebra de linha, `<` ou `;`), não
 // só o primeiro token: `cartão: 4111 1111 1111 1111` deixava 12 dos 16 dígitos no texto (achado N2 da
 // revisão da 1.1.25). O limite evita engolir uma linha inteira de prosa legítima.
+/** Verdadeiro quando o texto termina em rótulo de credencial com o separador, sem o valor. */
+export function endsWithCredentialLabel(value) {
+  return DANGLING_VALUE_LABEL.test(String(value ?? ''));
+}
+
 export function redactSensitiveText(value) {
   return String(value ?? '')
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
-    .replace(new RegExp(`(${VALUE_LABEL_SOURCE})(\\s*[:=]\\s*)${VALUE_SOURCE}`, 'giu'), '$1$2[redacted]')
+    .replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}${VALUE_SOURCE}`, 'giu'), '$1$2[redacted]')
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@');
 }
 

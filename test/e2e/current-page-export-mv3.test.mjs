@@ -9,8 +9,8 @@ import { startFixtureServer, launchUnpackedExtension, resolveRealChromeTestBinar
 // and deliver the four artifacts for real: this is the exact journey that used to fail with
 // "Recibo completo da revisão imutável inválido." while closing the export tab silently.
 //
-// The page also carries credential-shaped content of its own, in text, in an attribute value and in
-// the URL. The sweep at the end of this test is only worth something if the material it sweeps
+// The page also carries credential-shaped content of its own, in text, in a value in ANOTHER node
+// (inline element, table cell, JSON inside pre), in an attribute value and in the URL. The sweep at the end of this test is only worth something if the material it sweeps
 // exists, so the fixture makes it exist: without it the label scan was vacuously green (any list,
 // including an empty one, cleared the homepage), and measuring non-vacuously is what found the
 // snippet sanitizer shipping `senha: …` and `cartão: 4111 1111 1111 1111` into the delivered HTML
@@ -19,6 +19,9 @@ const CREDENTIAL = 'S3GR3D0XYZQ';
 const DOCUMENT = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Exportação da página atual</title></head>
 <body><main><h1>Página avaliada</h1>
 <p id="credential-text">senha: ${CREDENTIAL}</p>
+<p id="credential-nested">token: <code>${CREDENTIAL}</code></p>
+<table><tbody><tr><th scope="row">chave:</th><td>${CREDENTIAL}</td></tr></tbody></table>
+<pre id="credential-json">{"senha": "${CREDENTIAL}"}</pre>
 <p id="credential-multi">cartão: 4111 1111 1111 1111</p>
 <div id="credential-attribute" data-note="chave: ${CREDENTIAL}">Nota do autor</div>
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
@@ -56,6 +59,12 @@ test('current-page audit exports four verified artifacts', { timeout: 420_000 },
   // Ask for one live marking before exporting. Besides being part of the required journey, this is
   // what makes the audit mint the highlight nonce — the value that binds one marking to one document.
   // Without it the nonce sweep below would have nothing to sweep and would pass vacuously.
+  // A tela de resultado aparece antes de os cartões serem renderizados: ler a lista uma única vez já
+  // falhou por corrida numa execução sob carga. A espera não afrouxa a asserção — ela continua exigindo
+  // ao menos um achado confirmado —, só não confunde renderização com ausência.
+  await waitForValue(panel,
+    `document.querySelectorAll('[data-result-card][data-classification="failed"] button[data-intent="SELECT_OCCURRENCE"]').length`,
+    value => typeof value === 'number' && value > 0, { timeoutMs: 30_000, intervalMs: 50 });
   const candidates = await evaluate(panel,
     `Array.from(document.querySelectorAll('[data-result-card][data-classification="failed"] button[data-intent="SELECT_OCCURRENCE"]'), element => element.dataset.focusId)`);
   assert.ok(candidates.length > 0, 'a fixture precisa produzir um achado confirmado para o destaque');

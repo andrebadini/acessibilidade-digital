@@ -1,4 +1,4 @@
-import { redactSensitiveText, SENSITIVE_KEY } from '../privacy.js';
+import { endsWithCredentialLabel, redactSensitiveText, SENSITIVE_KEY } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -17,6 +17,17 @@ const EXECUTABLE = new Set(['script', 'style', 'template']);
 // valores continua agindo neles (`aria-label="senha: abc"` vira `senha: [redacted]`).
 const LABEL_ATTRIBUTES = new Set(['aria-label', 'aria-description', 'aria-placeholder', 'aria-roledescription',
   'alt', 'placeholder', 'title']);
+// Um atributo de rótulo sobrevive quando o valor é SÓ o rótulo da credencial (`aria-label="Senha"`),
+// que é evidência útil e não segredo; qualquer conteúdo depois da palavra volta à regra conservadora de
+// descartar o atributo inteiro. A primeira versão do conserto dispensava a regra para rótulos e com isso
+// `title="token abc123"` passou a sobreviver, quando na 1.1.26 ele era descartado — enfraquecer uma
+// proteção existente para preservar evidência não é conserto.
+const SENSITIVE_LABEL_ONLY = new RegExp(`^(?:${SENSITIVE_KEY.source})$`, 'iu');
+// Fragmento de URL pode carregar credencial de fluxo OAuth (`#/authorize?code=…`). A 1.1.26 apagava o
+// fragmento por acidente — o `auth` nu casava `authorize` —, e o A7 (correto) tirou esse acidente e
+// deixou o `code` passar. A regra passa a ser explícita: chave de credencial dentro do fragmento apaga o
+// fragmento inteiro.
+const FRAGMENT_CREDENTIAL_KEY = /(?:^|[?&;])(?:code|access[-_]?token|refresh[-_]?token|id[-_]?token|token|assertion|saml[-_]?response|password|senha|chave|secret)=/iu;
 const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src']);
 const VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
@@ -81,7 +92,7 @@ function sanitizeUrl(value) {
     url.username = '';
     url.password = '';
     for (const key of [...url.searchParams.keys()]) if (SENSITIVE.test(key)) url.searchParams.delete(key);
-    if (SENSITIVE.test(url.hash)) url.hash = '';
+    if (SENSITIVE.test(url.hash) || FRAGMENT_CREDENTIAL_KEY.test(url.hash)) url.hash = '';
     if (absolute) return url.href;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
@@ -157,7 +168,8 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
       value = sanitizeUrl(value);
       if (value === null) continue;
     }
-    if (value !== null && !LABEL_ATTRIBUTES.has(name) && !['type', 'autocomplete'].includes(name) && SENSITIVE.test(value)) continue;
+    if (value !== null && !['type', 'autocomplete'].includes(name) && SENSITIVE.test(value) &&
+      !(LABEL_ATTRIBUTES.has(name) && SENSITIVE_LABEL_ONLY.test(value.trim()))) continue;
     // O valor do atributo também passa pelo tarjador: a regra acima só descarta o atributo quando ele
     // MENCIONA uma palavra sensível, e um valor como `Bearer …` ou `senha: …` sem a palavra no nome
     // não era tarjado nem descartado.
@@ -182,13 +194,35 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
   const privateStructure = [];
   let pendingPrivateRoot = privateTextDescendant === true;
   const privateOnly = pendingPrivateRoot;
+  // Rótulo e valor podem estar em nós diferentes: quando um fragmento de texto termina no rótulo com o
+  // separador, o que vier depois é o valor — o próximo fragmento é tarjado e o próximo elemento vira
+  // raiz privada, com os atributos removidos e o texto descartado, reaproveitando o maquinário que já
+  // existia para campo editável. Sem isto, `<p>senha: <code>X</code></p>` e `<th>chave:</th><td>X</td>`
+  // entregavam a credencial inteira (Critical medido na revisão da 1.1.27).
+  let pendingValueRedaction = false;
+  const emitText = fragment => {
+    if (privateStructure.length || pendingPrivateRoot) return;
+    // Fragmento só de espaço não decide nada: entre `<th>chave:</th>` e `<td>` existe um fragmento
+    // vazio, e usá-lo para recalcular a espera apagava a decisão e devolvia o valor do `<td>`.
+    if (fragment.trim().length === 0) {
+      output += fragment;
+      return;
+    }
+    if (pendingValueRedaction) {
+      pendingValueRedaction = false;
+      output += '[redacted]';
+      return;
+    }
+    output += sanitizeText(fragment);
+    pendingValueRedaction = endsWithCredentialLabel(fragment);
+  };
   while (position < html.length) {
     const opening = html.indexOf('<', position);
     if (opening < 0) {
-      if (!privateStructure.length && !pendingPrivateRoot) output += sanitizeText(html.slice(position));
+      emitText(html.slice(position));
       break;
     }
-    if (!privateStructure.length && !pendingPrivateRoot) output += sanitizeText(html.slice(position, opening));
+    emitText(html.slice(position, opening));
     if (html.startsWith('<!--', opening)) {
       const end = html.indexOf('-->', opening + 4);
       position = end < 0 ? html.length : end + 3;
@@ -238,11 +272,23 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       position = token.end;
       continue;
     }
+    // O valor esperado pode estar no ELEMENTO seguinte: os atributos dele também são candidatos a
+    // carregar a credencial, então o próximo elemento perde os atributos. Se ele tiver subárvore, ela
+    // vira raiz privada (atributos removidos em qualquer profundidade e texto descartado); se for vazio
+    // (`<img alt="…">`), só os atributos caem e o trecho continua — tratar um vazio como raiz privada
+    // encerraria o trecho inteiro por causa do `break` que existe para o campo editável.
+    let stripValueAttributes = false;
+    if (pendingValueRedaction && !parsed.closing) {
+      pendingValueRedaction = false;
+      if (parsed.selfClosing || VOID_ELEMENTS.has(parsed.name)) stripValueAttributes = true;
+      else pendingPrivateRoot = true;
+    }
     const forcedPrivateRoot = pendingPrivateRoot;
     output += sanitizeTag(parsed, {
       contentEditableRoot: contentEditableTag(parsed),
-      stripAttributes: forcedPrivateRoot,
+      stripAttributes: forcedPrivateRoot || stripValueAttributes,
     });
+    stripValueAttributes = false;
     if (forcedPrivateRoot) pendingPrivateRoot = false;
     if (!parsed.closing && !parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
       const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));

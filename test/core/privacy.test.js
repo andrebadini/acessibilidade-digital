@@ -348,6 +348,18 @@ test('o valor tarjado é consumido por inteiro, não só o primeiro token (achad
   assert.equal(sanitizeJsonData({ texto: prosa }).texto, prosa);
 });
 
+test('os plurais em português são a mesma credencial (Minor da revisão da 1.1.27)', () => {
+  // `credenciais`, `sessões`, `cartões`, `autorizações` e `autenticações` passavam intactos enquanto o
+  // singular era tarjado, em chave, em rótulo de valor e em URL — o plural não muda o que a palavra é.
+  const plurais = ['credenciais', 'sessões', 'cartões', 'autorizações', 'autenticações',
+    'senhas', 'chaves', 'segredos', 'sessoes', 'cartoes', 'autorizacoes', 'autenticacoes'];
+  for (const chave of plurais) {
+    assert.equal(sanitizeJsonData({ [chave]: 'x' })[chave], '[redacted]', `${chave} precisa ser tarjado na chave`);
+    const texto = `${chave}: S3GR3D0`;
+    assert.doesNotMatch(sanitizeJsonData({ texto }).texto, /S3GR3D0/u, `${chave} precisa tarjar o valor`);
+  }
+});
+
 test('a família `auth` tarja a credencial e preserva `author*` (achado A7 da revisão da 1.1.26)', () => {
   // O `auth` nu do vocabulário casava `author`, `authority` e `authorized*`: 314 tokens do próprio
   // produto, entre eles `authorityExpiresAt` e `firstAuthorization`. Toda expansão de vocabulário tem
@@ -392,6 +404,20 @@ test('o valor tarjado é consumido até o fim, sem teto nem terminador que devol
     ['com tabulação', `senha:\t${marca('').repeat(20)}`],
     ['com barra vertical', `senha: ${marca('').repeat(10)}|${marca('').repeat(10)}`],
     ['com vírgula', `senha: ${marca('').repeat(10)},${marca('').repeat(10)}`],
+    // Formas que a revisão da 1.1.27 mediu sobrevivendo: o `[^\n<]+` obrigatório não podia começar em
+    // `<`, então o motor fazia backtracking do separador e escrevia `[redacted]` AO LADO do valor; a
+    // alternativa entre aspas consumia só até a aspa de fechamento e devolvia a cauda; e a aspa de
+    // fechamento da chave JSON ficava entre o rótulo e o separador.
+    ['valor entre sinais de menor e maior', `senha: <${marca('')}>`],
+    ['valor longo entre sinais de menor e maior', `token: <${'Zq'.repeat(150)}>`],
+    ['chave JSON na mesma linha', `{"senha": "${marca('segredo')}"}`],
+    ['aspas vazias antes do valor', `senha: ""${marca('')}`],
+    ['aspas com cauda depois', `senha: "${marca('a')}" cauda-${marca('b')}`],
+    ['menor-que colado ao valor', `senha: p4<${marca('')}`],
+    ['seta', `senha -> ${marca('')}`],
+    ['seta dupla', `senha => ${marca('')}`],
+    ['seta unicode', `senha → ${marca('')}`],
+    ['aspa antes dos dois pontos', `senha": ${marca('')}`],
   ];
   for (const [nome, texto] of formas) {
     const saida = sanitizeJsonData({ texto }).texto;

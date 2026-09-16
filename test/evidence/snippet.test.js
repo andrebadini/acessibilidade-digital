@@ -139,6 +139,18 @@ test('nenhum valor de credencial sobrevive ao trecho, nem em texto nem em atribu
     ['atributo de título', `<span title="mot de passe: ${marca('abc')}">x</span>`],
     ['atributo com Bearer', `<div data-x="Bearer ${marca('abc')}">x</div>`],
     ['URL com rótulo em português', `<a href="/p?senha=${marca('abc')}&formato=html">Abrir</a>`],
+    // Rótulo e valor em NÓS DIFERENTES: era aqui que a classe continuava aberta depois do primeiro
+    // conserto, medido ponta a ponta pela revisão da 1.1.27 — o valor do nó seguinte era entregue
+    // inteiro, com um `[redacted]` ao lado que ainda fazia um instrumento ingênuo ler "limpo".
+    ['valor no elemento seguinte', `<p>senha: <code>${marca('abc')}</code></p>`],
+    ['valor no irmão de tabela', `<table><tr><th>chave:</th><td>${marca('abc')}</td></tr></table>`],
+    ['JSON dentro de pre', `<pre>{"senha": "${marca('abc')}"}</pre>`],
+    ['subárvore aninhada depois do rótulo', `<div>token: <span><b>${marca('abc')}</b></span></div>`],
+    ['valor longo no nó seguinte', `<p>senha: <code>${marca('').repeat(40)}</code></p>`],
+    ['aspa antes dos dois pontos', `<pre>{"senha": ${marca('abc')}}</pre>`],
+    ['atributo do elemento seguinte', `<p>senha: <img alt="${marca('abc')}"></p>`],
+    ['atributo em subárvore', `<p>senha: <span data-x="${marca('abc')}">texto</span></p>`],
+    ['atributo aninhado fundo', `<div>token: <span><b title="${marca('abc')}">x</b></span></div>`],
   ];
   for (const [nome, html] of casos) {
     const trecho = sanitizeHtmlSnippetSource(html);
@@ -146,10 +158,39 @@ test('nenhum valor de credencial sobrevive ao trecho, nem em texto nem em atribu
     assert.equal(sobreviventes.length, 0,
       `"${nome}" não pode devolver o valor (sobreviveu ${JSON.stringify(trecho)})`);
   }
+  // O valor esperado no elemento seguinte não pode truncar o trecho: o texto público que vem DEPOIS
+  // continua sendo evidência.
+  for (const html of [`<p>senha: <img alt="${marca('abc')}"></p><p>texto público</p>`,
+    `<p>senha: <code>${marca('abc')}</code></p><p>texto público</p>`,
+    `<table><tr><th>chave:</th><td>${marca('abc')}</td></tr></table><p>texto público</p>`]) {
+    assert.match(sanitizeHtmlSnippetSource(html), /texto público/u,
+      `"${html}" não pode encerrar o trecho por causa do valor esperado`);
+  }
   // Controle negativo: o rótulo sem valor continua sendo evidência útil, e prosa comum passa intacta.
   assert.match(sanitizeHtmlSnippetSource('<input aria-label="Senha" type="password">'), /aria-label="Senha"/u);
   const prosa = '<p>A sessão discutiu o cartão de crédito como tema e a chave do problema.</p>';
   assert.equal(sanitizeHtmlSnippetSource(prosa), prosa);
+  // Atributo de rótulo: o valor que é SÓ o rótulo da credencial continua sendo evidência, mas qualquer
+  // conteúdo depois da palavra volta à regra conservadora de descartar o atributo inteiro — a primeira
+  // versão do conserto dispensava a regra para rótulos e com isso `title="token abc123"` passou a
+  // sobreviver, quando na 1.1.26 ele era descartado.
+  for (const rotulo of ['<div title="token abc123">x</div>', '<div aria-label="senha abc123">x</div>',
+    '<img alt="token abc123">', '<div aria-label="session abc">x</div>', '<div title="senha: abc123">x</div>']) {
+    assert.doesNotMatch(sanitizeHtmlSnippetSource(rotulo), /aria-label|title=|alt=/u,
+      `"${rotulo}" menciona credencial e não pode manter o atributo`);
+  }
+  for (const rotulo of ['<input aria-label="Senha" type="password">', '<input aria-label="Password" type="password">']) {
+    assert.match(sanitizeHtmlSnippetSource(rotulo), /aria-label="(?:Senha|Password)"/u,
+      `"${rotulo}" é o rótulo puro e continua sendo evidência`);
+  }
+  // Fragmento de URL com credencial de fluxo OAuth: a 1.1.26 apagava o fragmento por acidente (o `auth`
+  // nu casava `authorize`) e o A7 tirou o acidente; a regra passa a ser explícita.
+  for (const url of ['<a href="https://h/cb#/authorize?code=SEGREDO">Abrir</a>',
+    '<a href="https://exemplo.test/p#secao?token=SEGREDO">Abrir</a>']) {
+    assert.doesNotMatch(sanitizeHtmlSnippetSource(url), /#/u, `"${url}" não pode manter o fragmento`);
+  }
+  assert.match(sanitizeHtmlSnippetSource('<a href="https://exemplo.test/p?lang=pt#secao">Abrir</a>'),
+    /#secao/u, 'fragmento sem credencial continua sendo evidência');
 });
 
 test('is inert under innerHTML and removes duplicate-password and active URL surfaces', () => {
