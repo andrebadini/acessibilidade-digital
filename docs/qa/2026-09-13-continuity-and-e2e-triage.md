@@ -552,3 +552,25 @@ Correção delimitada, para o próximo incremento: resolver o documento no momen
 Também fica claro por que minha primeira explicação (rodada 12) estava incompleta: eu apontei o registro da origem como causa, quando o registro só é nocivo porque a injeção o usa como alvo fixo. Um documento guardado que não é usado para mirar injeção não causaria este defeito.
 
 Nenhuma alteração de código: a mudança é no caminho de prova e injeção, com RED próprio.
+
+## Rodada 20 — o que a leitura do código ainda não decide
+
+Fui atrás da prova que fecharia a hipótese da rodada 19 (injeção presa a `documentId` obsoleto) e preciso registrar com precisão onde ela parou, porque a leitura do código **não** decide sozinha.
+
+O que a leitura sustenta:
+
+- A origem é registrada no caminho de preparação da cópia com um `documentId` capturado naquele instante, e `register` **recusa atualizar** um registro existente para o mesmo `auditId` (devolve `false` se algum campo difere). Ou seja: se o documento mudar depois, o registro guardado continua sendo o antigo.
+- `executeInDocument` injeta por `documentIds: [record.documentId]`, um alvo fixo. Se esse documento não existir mais, a injeção não encontra nada e o controlador responde `PAGE_MARKERS_UNAVAILABLE`.
+
+O que a leitura **não** decide:
+
+- Se o `documentId` registrado corresponde ao documento que existe no momento do clique. Isso depende de quando a navegação da cópia acontece em relação ao registro, e a leitura do fluxo não é conclusiva: o registro acontece depois de `exchangeAttachedForNavigationCopy` e do `rawNavigationVault.put`, mas a navegação em si é disparada adiante, e não segui esse ponto até o fim.
+- Consequência prática: não posso afirmar que a hipótese está confirmada nem descartada. O que posso afirmar é que ela é a única que explica, ao mesmo tempo, os dois fatos medidos — ausência de contexto de extensão na aba e origem guardada apontando para o documento anterior — e que nenhuma das explicações anteriores sobreviveu à medição.
+
+Medição que decide, para a próxima rodada, e que é pequena: registrar no worker, no instante do `PANEL_SHOW_PAGE_MARKERS`, o `documentId` guardado e o resultado de uma injeção de teste por `tabId` sem `documentIds`. Três desfechos possíveis e distintos:
+
+1. Injeção por `tabId` funciona e o `documentId` guardado difere do vivo → hipótese confirmada; a correção é resolver o documento no momento da instalação.
+2. Injeção por `tabId` também falha → o problema não é o alvo fixo, e a investigação volta para autorização ou para o estado do controlador.
+3. `documentId` guardado é igual ao vivo → a hipótese cai, e o motivo real está em outro ponto do caminho.
+
+Não fiz essa medição nesta rodada. Registro-a como o passo único e decisivo em vez de seguir acumulando hipóteses, que já custou rodadas demais nesta sequência.
