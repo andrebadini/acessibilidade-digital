@@ -518,3 +518,37 @@ Não implementei nesta sequência porque é mudança de arquitetura no caminho d
 ### Lição de método que custou rodadas
 
 Três hipóteses minhas foram publicadas como diagnóstico antes de estarem provadas, e duas estavam erradas: o "defeito de destaque" que não existia (a raiz do overlay é filha de `documentElement`, e eu media `body`) e a "limitação do helper de avaliação" (medida depois, sem defeito algum). A terceira — o cache de origem — foi descartada por medição. O custo foi de várias rodadas. O que funcionou foi sempre o mesmo: medir o estado real, com clique nativo, procurando o nó pelo atributo em todo o documento, e desconfiar da própria sonda antes de culpar o produto.
+
+## Rodada 19 — o mecanismo exato: injeção presa a um documentId que já não existe
+
+Localizei no código o ponto que falha, e ele é mais preciso do que a explicação anterior.
+
+O controlador de sinais injeta por **`documentIds` fixo**:
+
+```js
+// src/background/page-markers-controller.js
+async function executeInDocument(record, func, argument) {
+  const results = denseArray(await Reflect.apply(executeScript, scripting, [{
+    target: { tabId: record.tabId, documentIds: [record.documentId] }, world: 'ISOLATED', func, args: [argument] }]), 1);
+  ...
+}
+```
+
+E `record.documentId` vem da origem em cache, registrada — como já registrado na rodada 12 — com o documento da aba **antes** da navegação para a cópia:
+
+```js
+pageMarkerOriginCache?.register({ auditId, tabId, windowId,
+  documentId: source.documentId, urlSessionDigest: source.urlSessionDigest, ... });
+```
+
+Ou seja: o pedido de sinais mira um `documentId` que deixou de existir quando a aba navegou para a cópia. A injeção não encontra o documento, `installed` fica nulo e o controlador devolve `PAGE_MARKERS_UNAVAILABLE`. Não é falta de porta viva nem worker reiniciado: é o alvo da injeção.
+
+Isso também reconcilia as medições que pareciam contraditórias: o contexto de extensão da aba de origem realmente não aparece em `getContexts` (rodada 14 — verdadeiro) e a origem em cache realmente aponta para o documento antigo (rodada 12 — verdadeiro). As duas coisas decorrem da mesma navegação, e a que **causa** a falha é o `documentIds` fixo.
+
+O destaque individual não sofre disso porque resolve o documento no momento da prova, por CDP: `proveHighlightTargetsCore` conecta em `input.tabId` e coleta provas por frame no documento vivo, sem depender de um identificador guardado. É a diferença de mecanismo, agora no nível da chamada, não da arquitetura em geral.
+
+Correção delimitada, para o próximo incremento: resolver o documento no momento da instalação em vez de usar o identificador guardado — anexar por `tabId` como o destaque faz —, e então confirmar que o documento vivo é o esperado antes de injetar, mantendo a mesma prova que já existe. O `executeInDocument` é o ponto de mudança, e a confirmação não pode ser afrouxada: é ela que impede marcar o documento errado.
+
+Também fica claro por que minha primeira explicação (rodada 12) estava incompleta: eu apontei o registro da origem como causa, quando o registro só é nocivo porque a injeção o usa como alvo fixo. Um documento guardado que não é usado para mirar injeção não causaria este defeito.
+
+Nenhuma alteração de código: a mudança é no caminho de prova e injeção, com RED próprio.
