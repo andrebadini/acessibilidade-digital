@@ -882,3 +882,35 @@ Conclusão sustentada pela medição: é disputa de recursos quando dezenas de n
 4183 testes, 4175 passam, 8 falham — as mesmas 8 pré-existentes de `PERSONA_CLEANUP_UNCONFIRMED`. `verify-project` GREEN.
 
 A revisão integrada independente do estado atual segue em andamento; nenhum achado dela foi recebido até aqui.
+
+## Rodada 32 — destacar um elemento fora da tela rola a página: medido, e é a promessa sendo cumprida
+
+Encontrei no worktree uma sonda que eu não havia escrito, `test/e2e/tmp-scroll-probe.test.mjs`, marcada como "READ-ONLY PROBE (reviewer)": o revisor independente estava testando se destacar um elemento fora da tela faz a página auditada rolar. Executei a sonda dele e reproduzi a medição, porque um achado de revisor precisa ser confirmado por mim antes de virar conclusão.
+
+**O que a sonda dele mediu.** A página não rolou (`scrollY` 0 → 0), mas também não houve oferta de destaque: `SEM OFERTA`. Investiguei o motivo em vez de aceitar o resultado como "sem defeito" — e o motivo é que **aquela fixture não produz nenhuma falha confirmada**. Despejei as fichas do resultado:
+
+```
+CARDS {"all":[{"cls":"manual-review","count":null,"selects":1},
+              {"cls":"passed",...}, ×6 ]}
+CANDIDATOS []
+```
+
+A fixture usa `img` sem `alt`, que o produto classifica como **revisão humana**, não como falha confirmada — posição coerente com a regra de não converter suspeita em infração. Sem falha confirmada de nível de elemento, não há candidato a destaque, e "sem oferta" é o comportamento correto. A sonda dele, portanto, não conseguiu testar a hipótese: media uma página onde a ação não se aplica.
+
+**A medição que decide.** Construí a fixture que faltava: o mesmo documento que o percurso obrigatório já prova produzir falhas confirmadas, com preenchimento que empurra o alvo para fora da tela. Resultado no Chrome real:
+
+```
+ANTES   scrollY=0    alvoTop=3140  viewport=649  visivel=false
+ACAO    occurrence-…-000012 -> highlight-occurrence
+DEPOIS  scrollY=2826 alvoTop=314   overlay=1  overlayBox=[130,314,153,21]
+        texto do overlay: "×12 — Falha confirmada"
+ROLAGEM_MUDOU=true (0 -> 2826)
+```
+
+**Leitura, e é o ponto que exige cuidado.** A página **rola**, e isso não é defeito: é a promessa sendo cumprida. O rótulo da ação é **"Ver e destacar na página"** (`src/panel/highlight-action.js`), e "Ver" anuncia que o elemento será mostrado. O código faz `target.scrollIntoView({ block: 'center', inline: 'nearest' })` (`src/browser/highlight-overlay.js`), sem `behavior: 'smooth'`, ou seja, **salto instantâneo e não animação**. Confirmado nos números: o alvo pousou em `top=314` numa viewport de 649, exatamente centralizado, com a marcação sobre ele, e a leitura seguinte devolveu o mesmo `scrollY` — a rolagem já havia terminado quando a caixa foi desenhada. O foco permaneceu onde estava.
+
+A distinção que importa: a exigência de "não fazer o usuário assistir a rolagens" vale para a **auditoria automática**, que não pode mexer na página enquanto trabalha. Aqui é o contrário — o usuário pediu, com um clique, para ver um elemento que está fora da tela. O produto também mantém a promessa oposta, que o percurso obrigatório verifica: ler o relatório e selecionar uma ocorrência **não** move a página (medido: 115 a 392 caracteres de rolagem e nenhuma mudança de posição antes do clique de destaque).
+
+**Cobertura nova.** `test/e2e/offscreen-highlight-scroll-mv3.test.mjs`, registrado em `scripts/run-tests.mjs`: exige que a leitura do relatório deixe a página onde estava, que a fixture coloque a falha confirmada abaixo da dobra, que a ação oferecida seja a que promete "Ver", que após o clique o elemento esteja dentro da viewport **sem encostar na borda**, que a marcação esteja sobre ele com tolerância de 2 px, que o foco não se mova e que a rolagem tenha parado — o que falharia se alguém trocasse por uma animação. Verde, 3,0 s, com o diagnóstico `scrollY 0 -> 2826; element top 314 of 649; mark on target; focus kept`.
+
+Também merece registro o método: o revisor deixou um arquivo temporário no worktree (`tmp-scroll-probe.test.mjs`). Removi depois de extrair o valor dele. O achado era bom — a hipótese era legítima e valia medir —, mas a sonda media a página errada, e só a reprodução com a fixture certa revelou isso.
