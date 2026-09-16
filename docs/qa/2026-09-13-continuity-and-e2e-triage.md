@@ -2120,3 +2120,11 @@ Os dois defeitos de apresentação da rodada 54 foram corrigidos, com RED antes 
 | frase simples legítima que comece com `TOKEN: ` | seria tratada como codificada |
 
 **Nenhum desses dois últimos é alcançável hoje, e isso foi medido:** varri as limitações canônicas que `deriveSystemLimitations` produz e **nenhuma** casa com o padrão `^[A-Z][A-Z0-9_]{3,}: ` (as que têm acento, como `ATENÇÃO:`, não casam porque `Ç`/`Ã` não pertencem a `[A-Z0-9_]`). E dois diagnósticos com a mesma mensagem e códigos diferentes não existem em `diagnostic-policy.js` — os dois `NAVIGATION_FAILED` têm mensagens diferentes de propósito. Ficam registrados como **arestas latentes**: se algum dia uma limitação canônica ganhar forma `CODIGO: …` ou dois códigos compartilharem a mesma frase, a lista volta a repetir, e é aí que esta função precisa ser revista.
+
+### Achado novo, da mesma classe do que acabei de corrigir, e por que ele não é da 1.1.20
+
+Medindo o efeito colateral da regra de impressão, encontrei **identificadores de evidência quebrados no meio** no anexo do PDF: no relatório da fixture, **6 de 12** aparecem como `element-` numa linha e o hash na seguinte. É a mesma classe do rótulo de item que a 1.1.20 corrigiu, numa tabela diferente.
+
+**Não é efeito da minha regra, e isso está medido no HTML entregue:** a região `.matrix-scroll` contém exatamente **146** células `th scope="row"` — os itens ABNT —, o anexo de evidências **não está dentro** dela, e **não existe** regra global de `th[scope="row"]` no CSS (procurado por expressão). A regra que escrevi é `.matrix-scroll th[scope="row"]` e só alcança a matriz.
+
+**Estado honesto da atribuição:** o *mecanismo* está excluído por medição (a regra não alcança o anexo), mas eu **não** medi um PDF da 1.1.19 com a mesma fixture para mostrar as mesmas 6 quebras — o que exigiria rodar os bytes da 1.1.19, e o Chrome está com a revisão. Então fica como "pré-existente por exclusão de mecanismo", não como "reproduzido nas duas versões", e entra no backlog como achado menor de apresentação: a coluna do anexo precisa da mesma proteção contra quebra, na mesma família de correção.
