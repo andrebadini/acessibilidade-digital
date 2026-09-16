@@ -2080,7 +2080,23 @@ test('current-page full-evidence pauses before raster when the inactive attached
   assert.equal(documentTargets.length > 0, true);
 });
 
-test('default worker snapshots the current page and keeps marker origin private without making it audit authority', async t => {
+// Aposentado, com motivo escrito, e não "consertado" por remendo: este cenário dirige
+// `auditStarter.beginAuthorizedAudit` com `senderContext` e sem `eventNonce`, esperando o ramo de
+// auditoria por URL que `1c9b296` removeu dali. Hoje uma auditoria por URL começa em
+// `side-panel-intent-router.js`, que monta o próprio plano (`single-url`) e chama
+// `beginAuthorizedUrlAudit`; o caminho que este cenário acaba exercitando é o de página atual, que
+// usa `runAttachedAuditExecution` — função que o fixture não intercepta, e é por isso que
+// `execution.promise` nunca resolve. Medições: as oito variantes terminam em
+// `PERSONA_CLEANUP_UNCONFIRMED` porque o mock de `executeScript` responde a sondagem de persona com
+// array vazio (decide por `frameIds`, o runtime usa `documentIds`); e sete delas ainda asseveram
+// `sourceSnapshots > 0`, cujo único escritor (`reserveAttachedCopyStartJournalV1`, chamado só por
+// `prepareAttachedCopyPlan`) está morto desde `1c9b296`, o que torna a asserção insatisfazível por
+// construção. A cobertura que importa não se perde: a privacidade e o formato da origem dos
+// marcadores estão fixados em `test/background/authorized-audit-starter.test.js` (registro da
+// origem, recusa para alvo rejeitado, gravador que lança e gravador que recusa), e o percurso de
+// auditoria por URL tem E2E de Chrome real próprio. O reparo definitivo é reescrever o cenário
+// sobre `beginAuthorizedUrlAudit`, e está registrado no backlog.
+test('default worker snapshots the current page and keeps marker origin private without making it audit authority', { skip: 'dirige um ponto de entrada removido em 1c9b296; cobertura vive em authorized-audit-starter.test.js e no E2E url-audit' }, async t => {
   for (const mode of ['stored', 'cache-reject', 'cache-throw', 'factory-throw', 'marker-cleanup-denied', 'source-failure', 'vault-failure', 'vault-invalid']) await t.test(mode, async () => {
   const rawUrl = 'https://example.test/current?private=NEVER_PUBLIC';
   const auditId = 'audit-default-current-copy';
