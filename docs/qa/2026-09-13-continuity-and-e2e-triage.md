@@ -1060,3 +1060,40 @@ Dois pontos que merecem registro, e um deles é o oposto do que a leitura apress
 ### Suíte
 
 Sem mudança de produto nesta rodada. 4183 testes, 4175 passam, as mesmas 8 pré-existentes; `src/` limpo.
+
+## Rodada 38 — os artefatos exportados, finalmente medidos por dentro
+
+A rodada 37 deixou uma lacuna declarada: eu não tinha conseguido inspecionar o HTML exportado e registrei que "não encontrei" a fórmula nele, sem afirmar defeito. **A lacuna está fechada, e a leitura anterior estava errada** — o arquivo é baixado no fim do teste e o diretório de perfil é removido logo depois; eu procurava no lugar errado. Lendo o conteúdo dentro do teste, antes da limpeza, os quatro artefatos dizem o seguinte.
+
+### HTML exportado (283.992 bytes)
+
+```
+denominador: true     formula ("Índice = 10"): true     cobertura: true
+"não é nota": true    matriz dos 146: true             detalhes da metodologia: true
+grupos presentes: "Não conformidades", "Revisões humanas", "Resultados positivos"
+"Inconformidade ao item": true     segredos da fixture no arquivo: false
+scripts: um <script> inline, com hash na CSP       handlers inline (on*=): 0
+CSP: default-src 'none'; img-src data:; style-src 'sha256-…'; script-src 'sha256-…'
+```
+
+Ou seja: **o relatório que sai da máquina traz a fórmula, o denominador, a cobertura, a ressalva de que não é nota e a matriz normativa completa**. O `<details>` da metodologia continua fechado por padrão também no exportado, mas o conteúdo está lá. E o arquivo é autocontido e travado: `default-src 'none'`, imagens só `data:`, estilo e script por hash, zero handler inline — o único script é o que dá interatividade ao próprio relatório.
+
+### CSV exportado (76.291 bytes, 107 linhas)
+
+Esquema declarado na primeira linha (`csv_schema_version`, `audit_id`, `occurrence_id`, `page_id`, `page_url`, `observed_at`, `outcome`, `classification`, `impact`, `confidence`, `source_engine`, …), uma linha por ocorrência. **Nenhum dos segredos da fixture aparece.**
+
+### JSON estruturado (329.832 bytes)
+
+Chaves de topo: `@context`, `assertions`, `audit`, `exportDeliveryIdentity`, `exportDeliveryIdentityType`, `identity`, `schemaVersion`. Contém a norma (`17225`) e as referências WCAG, contém marcação de suspeita (`cantTell`), e **não** contém a frase curta de inconformidade — coerente com a fixture, cujas falhas confirmadas são de itens cuja referência é emitida no HTML e no painel; o JSON preserva o vocabulário de máquina, não a frase de leitura humana.
+
+### Privacidade nos três artefatos
+
+Testei ativamente por padrões de vazamento nos três arquivos: query de recurso (`?q=`, `?nome=`, `?email=`, `?token=`), CPF formatado, e os marcadores textuais da fixture. **Todos negativos** — nenhum dos quatro formatos carrega o que a rodada 34 fechou no coletor.
+
+### O que isto muda no balanço
+
+Fecha a última lacuna de verificação das exportações e remove a divergência que eu havia registrado sobre a fórmula. O que **permanece** como divergência de apresentação é só isto: a metodologia — fórmula e denominador — está dentro de um bloco recolhido, tanto na aba quanto no HTML exportado, com o `<summary>` nomeando o que será revelado. Continua sendo decisão de desenho, não defeito medido: "explícito" pode significar visível sem clique, e eu não a tomei.
+
+### Suíte
+
+Sem mudança de produto nesta rodada. `src/` limpo; suíte e pacote nas condições verificadas nas rodadas 34 e 36.
