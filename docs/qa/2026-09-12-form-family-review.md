@@ -137,25 +137,27 @@ Cobertura: matriz de seis casos que fecham um eixo (incluindo as duas formas com
 
 O desenho de três passos registrado na rodada anterior foi executado, e com uma correção de rota importante.
 
-**O que mudou.** O coletor passou a observar o marcador que a página declara ao lado do campo obrigatório, usando `element.labels` — a associação que o próprio DOM resolve, incluindo `for`, rótulo envolvente e `aria-labelledby`. O marcador é lido do `innerText` do rótulo (que já reflete `display:none`) e a busca é limitada aos primeiros 120 caracteres, para que um asterisco em prosa distante não vire marcador deste campo. Três formas são reconhecidas: `*`, `(obrigatório)` e a palavra isolada `obrigatório` ou `required`. O campo passou a reportar `requiredIndicator` no nível do registro, e o normalizador o deixa passar junto dos demais observáveis.
+**O que mudou.** O coletor passou a observar o marcador que a página declara ao lado do campo obrigatório. Três formas são reconhecidas: `*`, `(obrigatório)` e a palavra isolada `obrigatório` ou `required`. O campo passou a reportar `requiredIndicator` no nível do registro, e o normalizador o deixa passar junto dos demais observáveis.
 
-**A correção de rota.** Eu havia escrito que o produtor "faria a regra devolver `passed`, tratando o atributo como prova de percepção", e que por isso não o implementaria. Ao medir, descobri que **estava errado**: o portão da regra é `!normalizeText(field.requiredIndicator)`, ou seja, ele reprova quando o indicador está vazio. Marcação vazia significa "nada foi declarado", e nada declarado é exatamente o caso em que ninguém pode perceber nada — então `failed` ali não é conversão indevida de atributo em prova, é reprovação com fundamento. O que eu temia era o caminho oposto, o `passed`, e esse continua exigindo que o indicador exista e não esteja vazio.
+**Duas afirmações desta seção foram refutadas por medição e estão corrigidas abaixo.** (1) `element.labels` **não** inclui elementos referenciados por `aria-labelledby` — a associação que o DOM resolve cobre `for` e rótulo envolvente; a referência ARIA é resolvida em separado desde a correção. (2) A busca **não** é mais limitada aos primeiros 120 caracteres: um rótulo legítimo de 148 caracteres com o marcador no fim era perdido, e o rótulo é a identificação do próprio campo, então o marcador no fim dele continua sendo o marcador dele. Também era falso o comentário de que "um rótulo escondido é ignorado": `innerText` devolve texto de rótulo fora da tela e de rótulo com `clip:rect(0,0,0,0)`.
 
-**Resultado medido no Chrome real, ponta a ponta:**
+**A correção de rota original, e por que ela estava errada.** Eu havia escrito que o produtor "faria a regra devolver `passed`" e que por isso não o implementaria. Ao medir, concluí que estava errado e implementei com `failed` para indicador vazio, raciocinando que "nada declarado é exatamente o caso em que ninguém pode perceber nada". **Essa premissa foi refutada pela revisão independente**: o produtor não observa "nada declarado", observa apenas algumas fontes, e uma página que marca a obrigatoriedade por `label::after { content: " *" }` — marcação que o Chrome reporta como renderizada — recebia `failed` e, como 5.9.7 é requisito, a frase legal "Inconformidade ao item 5.9.7 da ABNT NBR 17225:2025" no HTML e no PDF exportados. Isso é exatamente a confusão proibida entre suspeita e infração confirmada.
 
-```
-campo com rótulo "Nome completo *" e required  → requiredIndicator: "*"    → não é achado
-campo com aria-required e sem rótulo associado  → requiredIndicator: ""     → failed,
-                                                  target #aria-required, reason missing-required-identification
-campo opcional                                  → sem indicador (required:false já diz isso)
-campo customizado contenteditable               → segue sem a observação nativa
-```
+### 5.9.7 — a fronteira foi corrigida depois da revisão independente (achado Critical)
 
-A mensagem do achado fala de identificação ("Identifique de modo perceptível que este campo é obrigatório") e o teste exige que ela **não** contenha "infração" nem "inconformidade ao item", preservando a distinção entre achado técnico e afirmação jurídica.
+**O que a revisão mediu, e eu reproduzi** com o mesmo consumidor no Chrome 152.0.7977.64: `requiredIndicator` vazio e `outcome: failed` com alvo `missing-required-identification` para cinco campos legítimos — `label::after{content:" *"}`, `<span>*</span>` irmão, rótulo referenciado por `aria-labelledby`, `placeholder="Nome *"` e o rótulo de 148 caracteres. E `passed` quando o único marcador estava num rótulo que o produtor de 5.9.1 da mesma versão declara invisível (`left:-9999px`).
 
-**O que continua fora de alcance, e é honesto dizer.** Isto é a **declaração**, não a percepção. Um marcador presente pode ser ilegível por contraste, tamanho ou posição, e a regra não mede nada disso — ela agora sabe que algo foi declarado, não que alguém consegue ver. A exigência da ABNT é "de forma que todos possam perceber", então o item permanece parcialmente coberto: o estado `cantTell` para dados ausentes deixou de acontecer, e a reprovação passou a ter fundamento, mas uma aprovação ainda não é prova de percepção e o relatório não a apresenta como tal.
+**Correção.** `failed` ficou restrito às duas contradições demonstráveis: token ARIA inválido e divergência entre a declaração nativa e a ARIA. A marcação, nos dois sentidos, deixou de decidir:
 
-**Testes.** `test/e2e/required-field-observation.test.mjs` cobre os quatro casos acima no Chrome real, exige a forma observada do marcador, o alvo correto e a ausência de linguagem de infração. Suíte: 4184 testes, 4176 passam, as mesmas 8 falhas pré-existentes; `verify-project` GREEN.
+- **marcação observada** → `cantTell` agregado, sem alvo, porque contraste, tamanho, posição e o recurso que apresenta a marcação não são medidos;
+- **marcação não observada nas fontes verificadas** → `cantTell` com um alvo por campo (`missing-required-identification`), porque a marcação pode estar em outro ponto da página ou ser percebida por outro meio.
+
+Nenhum dos dois ramos conclui atendimento nem infração, e nenhum produz a referência legal de não conformidade. É o mesmo tratamento que 5.9.1 já recebia.
+
+**Fontes de observação ampliadas**, cada uma por um caso medido: texto dos rótulos associados (sem o corte de 120 caracteres), conteúdo gerado por `::before` e `::after` do rótulo, elementos nomeados por `aria-labelledby` e `placeholder` do campo.
+
+**Testes.** `test/e2e/required-field-observation.test.mjs` foi reescrito: exige a marcação observada nas quatro fontes, exige que o rótulo invisível **não** aprove, exige `cantTell` (nunca `failed` nem `passed`), exige alvo apenas para o campo sem marcação alguma e exige ausência de linguagem de infração no resultado inteiro. Verificação de não vacuidade: o mesmo teste, executado contra o commit anterior à correção, falha em "a marker rendered by a stylesheet is declared by the page and must be observed" (`actual: ''`, `expected: '*'`). Unidade: `test/rules/forms.test.js` fixa os dois ramos de revisão e a restrição de `failed`; 167/167 na família de regras.
+
 
 ### 5.9.1 — segunda técnica de ocultação: rótulo fora da tela
 
@@ -173,3 +175,5 @@ A margem de 2000 px separa "escondido de propósito" de "apenas longe", e o limi
 **O que continua fora.** O caso vertical sozinho, sem conteúdo acima, não é detectado; e rótulos escondidos por `opacity` baixa, `font-size: 0`, cobertura por outro elemento ou contraste insuficiente continuam fora de alcance.
 
 **Resultado no Chrome real**, com os dois rótulos na mesma página: `#name` (recortado) e `#code` (fora da tela) produzem dois alvos, com `reason` `clipped-label` e `offscreen-label`, e o teste confirma que o rótulo fora da tela chega ao consumidor com a coordenada crua. A conclusão continua `cantTell`, nunca `failed`: nem recorte nem posicionamento provam ausência de percepção, porque a norma admite propósito visualmente evidente.
+
+**Correção posterior (achado Minor da revisão independente de 1.1.16).** A justificativa acima estava incompleta: a medida é relativa ao documento, e por isso também dispara para um rótulo comum que está apenas **deslocado dentro de um contêiner com rolagem própria** — a revisão mediu `documentRect.x = -504` num `overflow-x:auto`, com o alvo afirmando que o rótulo estava "fora da área visível da página". O texto do alvo e o comentário do predicado foram corrigidos para descrever o que a medida realmente mostra ("deslocado para fora da área de conteúdo observada, à esquerda da origem do documento ou muito abaixo dela — o que também acontece com um rótulo dentro de um contêiner com rolagem própria"). O resultado já era `cantTell`, então a fronteira entre suspeita e infração não foi afetada; o que estava errado era a afirmação sobre a causa. Distinguir os dois casos exigiria observar a rolagem do contêiner, que a coleta ainda não registra — registrado como cobertura pendente.

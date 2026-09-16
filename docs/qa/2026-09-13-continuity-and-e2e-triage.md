@@ -1276,3 +1276,78 @@ Também registrei isso em teste: `test/release-package.test.js` agora fixa **os 
 **A lição, e é a terceira vez nesta sessão que o mesmo tipo de falha aparece:** eu tinha um mecanismo que pegava pacote obsoleto — o hash fixado do entregue — e ele funcionou duas vezes. O que faltava era o mesmo mecanismo para o artefato **histórico**: um pacote antigo que foi aprovado precisa ser imutável, e nada no repositório garantia isso. Agora garante.
 
 De passagem, o tamanho de cada um confirma a diferença: 1.1.15 tem 1.044.162 bytes e 1.1.16 tem 1.044.772 — 610 bytes de código novo, o produtor de 5.9.7.
+
+## Rodada 45 — revisão independente da 1.1.16: um Critical, e a correção que ele exigiu
+
+A revisão integrada independente da 1.1.16 finalmente foi executada, sobre o diff congelado `2d205c1..3cacadd` e o artefato `c175a224…`, num worktree destacado e separado da árvore de trabalho. Veredito: **1 Critical, 2 Important, 3 Minor.** O relatório completo está em `/private/tmp/adv116/REVIEW-1.1.16.md` (fora do repositório, porque é insumo de trabalho, não entrega). Ela também confirmou os dois pins (zip e PDF), conferiu os 199 arquivos do zip entregue contra a árvore por descompactação própria, e provou a não vacuidade dos testes revertendo `src/` para `2d205c1` numa cópia.
+
+### C1 — Critical: 5.9.7 convertia marcação legítima em infração confirmada
+
+**O que ela mediu, e eu reproduzi com o mesmo consumidor no Chrome 152.0.7977.64.** O produtor de obrigatoriedade lia apenas o `innerText` do `<label>` associado. Com isso, cinco campos legítimos ficavam com `requiredIndicator` vazio e recebiam `outcome: failed` com alvo `missing-required-identification`:
+
+```
+label::after { content: " *" }   Chrome reporta o conteúdo renderizado como " *"
+<label>Nome</label><span>*</span>
+<span id="l">Nome *</span> + aria-labelledby
+placeholder="Nome *"
+rótulo de 148 caracteres com " *" no fim
+```
+
+Como 5.9.7 é **requisito**, o consumidor anexa a base legal e **o HTML e o PDF exportados imprimiam "Inconformidade ao item 5.9.7 da ABNT NBR 17225:2025"** para uma página que marca a obrigatoriedade por CSS. Isto é exatamente a confusão que o produto proíbe: uma heurística que não consegue provar ausência de percepção apresentada como requisito não atendido, com redação jurídica.
+
+A premissa que eu havia registrado — "nada declarado é exatamente o caso em que ninguém pode perceber nada" — está refutada pela medição: o produtor não observa "nada declarado", observa **algumas fontes**, e uma marcação fora delas existe sem ser vista.
+
+**Correção.** `failed` ficou restrito às duas contradições demonstráveis: token ARIA inválido e divergência entre declaração nativa e ARIA. A marcação deixou de decidir nos dois sentidos:
+
+- **marcação observada** → `cantTell` agregado, sem alvo: contraste, tamanho, posição e o recurso que apresenta a marcação não são medidos;
+- **marcação não observada** → `cantTell` com um alvo por campo (`missing-required-identification`), porque ela pode estar em outro ponto da página ou ser percebida por outro meio.
+
+Nenhum ramo conclui atendimento nem infração. É o mesmo tratamento que 5.9.1 já recebia desde a rodada 30.
+
+**Fontes ampliadas**, cada uma por um caso medido: texto dos rótulos associados **sem** o corte de 120 caracteres, conteúdo gerado por `::before`/`::after` do rótulo, elementos nomeados por `aria-labelledby` (que `element.labels` **não** inclui — outra afirmação minha refutada) e `placeholder`.
+
+### I1 — Important: a mesma marcação invisível aprovava
+
+Com o rótulo só para leitor de tela (`left:-9999px`) contendo `*`, a 5.9.7 devolvia `passed` enquanto a 5.9.1 da mesma versão classificava o mesmo nó como `cantTell [offscreen-label]`. Corrigido estruturalmente: a regra não devolve mais `passed` em nenhum caminho, então não há como uma marcação invisível aprovar.
+
+### I2 — Important: o arquivo entregue nunca era conferido contra o hash fixado
+
+O achado é preciso e o teste provou: `test/release-package.test.js` calculava o hash apenas do zip **reconstruído num diretório temporário**. A revisão substituiu `release/audita-acessibilidade-1.1.16.zip` por bytes de lixo e a suíte continuou **7/7 verde**. O pin do artefato entregue não protegia o artefato entregue.
+
+**Correção:** o teste agora confere o hash **duas vezes** — contra `release/<pacote>.zip` e contra a reconstrução. Não vacuidade demonstrada pelo mesmo procedimento: com o arquivo entregue substituído por lixo, o teste falha em "o arquivo entregue em release/ precisa ser o artefato de hash fixado". Restaurado em seguida, hash conferido.
+
+### M1 e M3 — menores, corrigidos no texto
+
+- **M1:** `offscreenAway` também dispara para rótulo apenas deslocado dentro de um `overflow-x:auto` (`documentRect.x = -504`), e o alvo afirmava que ele estava "fora da área visível da página". O resultado já era `cantTell`, então a fronteira não mudou; o texto do alvo e o comentário do predicado passaram a descrever o que a medida mostra. Distinguir os dois casos exigiria observar a rolagem do contêiner, que a coleta não registra — cobertura pendente.
+- **M3:** corrigidas as três afirmações refutadas (`element.labels` incluir `aria-labelledby`; "rótulo escondido é ignorado"; e o comentário do teste que dizia "segue em revisão" enquanto a asserção exigia `failed`).
+
+### Bump para 1.1.17
+
+A correção muda **o que o relatório decide** em 5.9.7, pela mesma regra que me fez subir de 1.1.15 para 1.1.16. E a 1.1.16 tem um veredito de revisão **negativo** (1 Critical), então confundir as duas seria pior do que o habitual. `manifest.json`, os dois testes que fixam a versão, a listagem da loja, as instruções de teste, o guia de uso e o README passam a 1.1.17; o registro da 1.1.16 fica preservado acima, sem reescrita.
+
+Artefato construído e fixado:
+
+```
+audita-acessibilidade-1.1.17.zip
+SHA-256 c0cc411887548b46d0c425b7b8d144ee024f62e0945686ce7f5b7b9a9406dbdc
+```
+
+Os artefatos 1.1.15 (`5619e27d…`, o que foi aprovado) e 1.1.16 (`c175a224…`, o que a revisão reprovou) permanecem em `release/`, e o teste fixa os dois.
+
+### Não vacuidade e testes focados
+
+- `test/e2e/required-field-observation.test.mjs` reescrito: exige a marcação observada nas quatro fontes, exige que o rótulo invisível não aprove, exige `cantTell` (nunca `failed` nem `passed`), alvo apenas para o campo sem marcação alguma e ausência de linguagem de infração no resultado inteiro. **Contra o commit anterior à correção ele falha** em "a marker rendered by a stylesheet is declared by the page and must be observed" (`actual: ''`, `expected: '*'`), e passa depois.
+- 167/167 na família de regras; `field-label-review` 1/1 no Chrome real; `release-package` 7/7.
+
+### As 8 falhas pré-existentes: causa estabelecida, e duas afirmações anteriores corrigidas
+
+Aproveitei a rodada para finalmente instrumentar o que estava registrado como "não investigado". Medi com o próprio teste instrumentado, em worktree separado:
+
+- **Todas as oito** terminam em `PERSONA_CLEANUP_UNCONFIRMED` no início da auditoria, e não em códigos diferentes por rotas diferentes como eu havia escrito. A causa é do **fixture**, não do produto: o mock de `scripting.executeScript` daquele cenário responde toda injeção com `() => globalThis.location?.href`, e o runtime de persona injeta `applyAuditaPersonaCommand` com `documentIds` (o mock decide por `frameIds`). A barreira de limpeza pede uma confirmação exata `{ok:true, state:'absent'|'revoked'}` e o runtime devolve `result-mismatch`, então o início é recusado. Em Chrome real o percurso principal funciona — o E2E do percurso passa —, e é por isso que a falha não aparece no produto.
+- A asserção `sourceSnapshots > 0`, que decide três das oito, é **insatisfazível por construção**: o contador só incrementa quando existe `audita:start-journal:v1` na sessão, e o único escritor dessa chave (`reserveAttachedCopyStartJournalV1`) tem um único chamador — `prepareAttachedCopyPlan`, que está morto desde `1c9b296`. Medi: a chave está **ausente** nos oito modos, e `executeScript` é chamado 5 vezes em cada um. A expectativa ficou para trás quando o ramo de cópia anexada foi removido; ela mede um desenho que não existe mais.
+
+Correção fica para incremento próprio, porque a primeira tentativa de ensinar o fixture a responder a sondagem de persona fez o cenário **travar**, e um travamento precisa de causa estabelecida antes de qualquer ajuste. O que esta rodada entrega é a causa, não o conserto.
+
+### Uma nona falha apareceu, e é instabilidade sob carga
+
+Na primeira execução da suíte, `annotation-map` falhou em "times out a stalled bitmap allocation". Isolei: **26/26 passam** rodando o arquivo sozinho, e a segunda execução completa voltou a 8 falhas com esse teste verde. É teste sensível a tempo sob carga paralela, não regressão desta rodada — mas é uma nona fonte de ruído no portão de release e fica registrada como tal.

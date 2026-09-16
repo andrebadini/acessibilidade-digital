@@ -41,12 +41,21 @@ export function collectRuntimePageData() {
     const gradient = /(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/u.test(normalized);
     return url && gradient ? 'mixed' : url ? 'url' : gradient ? 'gradient' : 'mixed';
   };
-  // Reads the marker the page puts next to a required field, from the labels the DOM itself
-  // associates with it. innerText already reflects display:none, and a hidden label is skipped
-  // because a marker nobody sees is not a marker. The search is bounded to the first characters so
-  // an asterisk in unrelated prose further down does not become this field's marker.
+  // Reads the marker the page declares for a required field, from the sources the page itself
+  // binds to it: the labels `element.labels` resolves, the text a stylesheet renders through
+  // ::before and ::after, the placeholder, and the elements named by aria-labelledby. The last
+  // three were added after a measurement in Chrome: `label::after { content: " *" }` renders a
+  // perceptible asterisk, `innerText` cannot see it, and the earlier producer reported "nothing
+  // declared" for a page that does mark the field. `element.labels` does not include elements
+  // referenced by aria-labelledby, so that source is resolved explicitly.
+  //
+  // A label that is hidden still contributes its marker here, on purpose: this is an observation
+  // about what the page declares, and judging whether an unperceivable marker satisfies the item
+  // belongs to the consumer, which keeps the conclusion in review. The whole label text is
+  // searched: the label is the field's own identification, so a marker at its end is still its
+  // marker, even though the previous version stopped after 120 characters and lost it.
   const requiredMarker = text => {
-    const carried = String(text ?? '').replace(/\s+/gu, ' ').trim().slice(0, 120);
+    const carried = String(text ?? '').replace(/\s+/gu, ' ').trim();
     if (carried === '') return '';
     const parenthesised = /\(\s*(obrigat[óo]ri[ao]|required)\s*\)/iu.exec(carried);
     if (parenthesised) return `(${parenthesised[1]})`;
@@ -54,13 +63,44 @@ export function collectRuntimePageData() {
     const word = /(?:^|[\s\-–—])(obrigat[óo]ri[ao]|required)(?=$|[\s.,;:!?\-–—])/iu.exec(carried);
     return word ? word[1] : '';
   };
-  const requiredMarkerNear = element => {
+  const renderedContent = (element, pseudo) => {
+    try {
+      const content = getComputedStyle(element, pseudo)?.content;
+      if (typeof content !== 'string') return '';
+      const trimmed = content.trim();
+      if (trimmed === '' || trimmed === 'none' || trimmed === 'normal') return '';
+      return trimmed.replace(/^["']|["']$/gu, '');
+    } catch {
+      return '';
+    }
+  };
+  const elementText = element => {
+    const text = typeof element?.innerText === 'string' ? element.innerText : element?.textContent;
+    return typeof text === 'string' ? text : '';
+  };
+  const markerSources = element => {
+    const sources = [];
     const labels = element?.labels;
-    if (!labels || typeof labels.length !== 'number') return '';
-    for (const label of labels) {
-      const text = typeof label?.innerText === 'string' ? label.innerText
-        : typeof label?.textContent === 'string' ? label.textContent : '';
-      const marker = requiredMarker(text);
+    if (labels && typeof labels.length === 'number') {
+      for (const label of labels) {
+        sources.push(elementText(label), renderedContent(label, '::before'), renderedContent(label, '::after'));
+      }
+    }
+    const labelledBy = String(element?.getAttribute?.('aria-labelledby') || '').trim();
+    if (labelledBy !== '') {
+      for (const id of labelledBy.split(/\s+/u)) {
+        const referenced = id === '' ? null : document.getElementById(id);
+        if (!referenced) continue;
+        sources.push(elementText(referenced),
+          renderedContent(referenced, '::before'), renderedContent(referenced, '::after'));
+      }
+    }
+    if (typeof element?.placeholder === 'string') sources.push(element.placeholder);
+    return sources;
+  };
+  const requiredMarkerNear = element => {
+    for (const source of markerSources(element)) {
+      const marker = requiredMarker(source);
       if (marker !== '') return marker;
     }
     return '';

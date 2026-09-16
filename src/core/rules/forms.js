@@ -81,10 +81,14 @@ function clippedAway(node) {
  *  recorte do viewport. */
 const OFFSCREEN_MARGIN = 2000;
 
-/** Fora da tela de forma decisiva, sem depender do tamanho do viewport: o rótulo está inteiramente
- *  à esquerda da origem da página, ou tão abaixo da última coisa desenhada que nenhum conteúdo o
- *  alcança rolando. Deliberadamente não cobre o caso vertical sozinho, que exigiria a altura do
- *  documento e arriscaria falso positivo em página longa. */
+/** Decisivamente longe da origem do documento: o rótulo está inteiramente à esquerda dela, ou tão
+ *  abaixo da última coisa desenhada que nenhum conteúdo o alcança rolando a página. A medida é
+ *  relativa ao documento, então não depende do tamanho do viewport — mas também não distingue
+ *  "fora da página" de "dentro de um contêiner com rolagem própria deslocado para o lado", que a
+ *  revisão independente mediu (documentRect.x = -504 num overflow-x:auto). Por isso o resultado é
+ *  suspeita para revisão, e o texto do alvo não afirma que o rótulo está fora da página.
+ *  O caso vertical sozinho continua deliberadamente fora de alcance: exigiria a altura do documento
+ *  e arriscaria falso positivo em página longa. */
 function offscreenAway(node, contentBottom) {
   const rect = node?.documentRect;
   if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.width) || !Number.isFinite(rect.y)) return false;
@@ -140,11 +144,11 @@ function formFieldLabel(snapshot) {
       ]);
     }
     return result('cantTell',
-      `Há ${hidden.length} campo(s) cujo rótulo associado não pode ser visto — recortado ou posicionado fora da tela. Isso não confirma falha do item 5.9.1: confirme se o campo tem propósito visualmente evidente ou outro rótulo visível antes de concluir.`,
+      `Há ${hidden.length} campo(s) cujo rótulo associado não pode ser visto — recortado ou deslocado para fora da área de conteúdo. Isso não confirma falha do item 5.9.1: confirme se o campo tem propósito visualmente evidente ou outro rótulo visível antes de concluir.`,
       hidden.map(({ field, reason }) => target(field,
         reason === 'clipped-label'
           ? 'O rótulo associado a este campo está recortado na página e não identifica o campo visualmente. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.'
-          : 'O rótulo associado a este campo está posicionado fora da área visível da página. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.',
+          : 'O rótulo associado a este campo está deslocado para fora da área de conteúdo observada, à esquerda da origem do documento ou muito abaixo dela — o que também acontece com um rótulo dentro de um contêiner com rolagem própria. Confirme se ele pode ser visto antes de concluir.',
         { reason })),
       ['A revisão é necessária porque a norma admite propósito visualmente evidente com nome acessível: nem recorte nem posicionamento provam ausência de percepção.',
         'O nome acessível e a associação programática são verificados separadamente neste mesmo relatório.']);
@@ -345,6 +349,7 @@ function requiredFieldIdentification(snapshot) {
     });
     if (declared.length === 0) return result('inapplicable', 'Não há campos obrigatórios observáveis.');
     const failures = [];
+    const unmarked = [];
     let incomplete = false;
     for (const field of declared) {
       const declaration = requiredDeclaration(field);
@@ -361,16 +366,40 @@ function requiredFieldIdentification(snapshot) {
       } else if (!hasOwn(field, 'requiredIndicator')) {
         incomplete = true;
       } else if (!normalizeText(field.requiredIndicator)) {
-        failures.push(target(field, 'Identifique de modo perceptível que este campo é obrigatório.', {
-          reason: 'missing-required-identification'
-        }));
+        unmarked.push(field);
       }
     }
-    if (failures.length > 0) return result('failed', 'Há campos com identificação ou estado obrigatório inválido.', failures);
+    // Só a declaração programática incoerente é contradição demonstrável, e é isso que ainda
+    // produz `failed`. A marcação, em qualquer dos dois sentidos, não é: o item 5.9.7 pede que
+    // todos possam perceber a obrigatoriedade, e percepção depende de contraste, tamanho, posição
+    // e de recursos assistivos que esta medição não cobre. Uma marcação ausente nas fontes
+    // observadas é suspeita concreta — não "nada foi declarado", porque a observação enxerga o
+    // texto do rótulo, o conteúdo gerado por CSS, o placeholder e o aria-labelledby, e uma
+    // marcação fora daí existe sem ser vista aqui. A versão anterior convertia essa ausência em
+    // infração confirmada e chegava a imprimir a referência legal de não conformidade para páginas
+    // que marcam a obrigatoriedade por `label::after`, placeholder ou aria-labelledby; a revisão
+    // independente mediu isso no Chrome e o veredito foi retirado.
+    if (failures.length > 0) {
+      return result('failed', 'Há campos com estado obrigatório programático inválido ou incoerente.', failures);
+    }
     if (incomplete) return result('cantTell', 'Faltam dados do estado ou da identificação de campo obrigatório.', [], [
       'Colete o estado calculado e o indicador associado de cada campo obrigatório.'
     ]);
-    return result('passed', 'Os campos obrigatórios possuem estado e identificação observáveis.');
+    if (unmarked.length === 0) {
+      return result('cantTell',
+        'A marcação de obrigatoriedade foi observada nos campos obrigatórios, mas a percepção dela não é medida automaticamente.',
+        [], [
+          'A obrigatoriedade precisa ser percebida por todos. Contraste, tamanho, posição e o recurso que apresenta a marcação não são verificados automaticamente neste item.',
+          'Confirme visualmente que a marcação de cada campo obrigatório é perceptível antes de concluir.'
+        ]);
+    }
+    return result('cantTell',
+      `Em ${unmarked.length} campo(s) obrigatório(s) nenhuma marcação de obrigatoriedade foi observada nas fontes verificadas. Isso não confirma falha do item 5.9.7: a marcação pode estar em outro ponto da página ou ser percebida por outro meio.`,
+      unmarked.map(field => target(field,
+        'Nenhuma marcação de obrigatoriedade foi observada junto a este campo. Confirme se a obrigatoriedade é perceptível antes de concluir.',
+        { reason: 'missing-required-identification' })),
+      ['Foram observados o texto dos rótulos associados, o conteúdo gerado por CSS, o placeholder e os elementos referenciados por aria-labelledby. Uma marcação declarada fora dessas fontes não é vista por esta medição.',
+        'A ausência de marcação observada é suspeita que exige confirmação humana, não infração confirmada.']);
   });
 }
 

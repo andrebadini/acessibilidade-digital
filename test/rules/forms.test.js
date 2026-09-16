@@ -454,19 +454,39 @@ test('required field rule checks both programmatic state and observable identifi
     })
   ]));
   assert.equal(failed.outcome, 'failed');
-  assert.deepEqual(failed.targets.map(target => target.nodeId), ['state', 'indicator']);
-  assert.deepEqual(failed.targets.map(target => target.data.reason), [
-    'required-state-mismatch', 'missing-required-identification'
-  ]);
+  assert.deepEqual(failed.targets.map(target => target.nodeId), ['state']);
+  assert.deepEqual(failed.targets.map(target => target.data.reason), ['required-state-mismatch']);
 
-  assert.equal((await evaluate('required-field-identification', snapshot([
+  // Uma marcação observada não aprova e uma marcação ausente não reprova: o item pede percepção,
+  // e percepção depende de contraste, tamanho, posição e do recurso que apresenta a marcação, que
+  // esta medição não cobre. Os dois casos ficam em revisão. A versão anterior devolvia `passed`
+  // para o primeiro e `failed` para o segundo, e o `failed` chegava ao relatório como
+  // "Inconformidade ao item 5.9.7" — a revisão independente mediu no Chrome uma página que marca a
+  // obrigatoriedade por `label::after` recebendo esse veredito, e ele foi retirado.
+  const marked = await evaluate('required-field-identification', snapshot([
     record('ok', 'input', {
       attributes: { type: 'text', required: '' },
       required: true,
       requiredIndicator: 'obrigatório',
       accessibleName: 'Nome obrigatório'
     })
-  ]))).outcome, 'passed');
+  ]));
+  assert.equal(marked.outcome, 'cantTell');
+  assert.deepEqual(marked.targets, []);
+
+  const unmarked = await evaluate('required-field-identification', snapshot([
+    record('bare', 'input', {
+      attributes: { type: 'text', required: '' },
+      required: true,
+      requiredIndicator: '',
+      accessibleName: 'Nome'
+    })
+  ]));
+  assert.equal(unmarked.outcome, 'cantTell');
+  assert.deepEqual(unmarked.targets.map(target => target.nodeId), ['bare']);
+  assert.deepEqual(unmarked.targets.map(target => target.data.reason), ['missing-required-identification']);
+  assert.doesNotMatch(unmarked.summary, /infração|inconformidade ao item/iu);
+
   assert.equal((await evaluate('required-field-identification', snapshot())).outcome, 'inapplicable');
   const unknownState = record('unknown', 'input', {
     attributes: { type: 'text', required: '' }, requiredIndicator: 'obrigatório'
