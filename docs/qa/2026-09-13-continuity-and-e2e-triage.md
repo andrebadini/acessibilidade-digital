@@ -855,3 +855,30 @@ Deixei explícito no documento, e repito aqui, que o parecer com números (`entr
 ### Ainda pendente
 
 Os itens 3 a 6 da fila registrada na rodada anterior seguem abertos: campos customizados anônimos (fronteira de privacidade desenhada, não implementada), produtor de identificação visual (5.9.1), produtor de perceptibilidade da obrigatoriedade (5.9.7), e a decisão sobre os 9 cenários de `sidepanel-flow`. A revisão integrada independente do estado atual está em andamento.
+
+## Rodada 31 — o relatório medido, e uma falha intermitente que não é regressão
+
+### Extensão do relatório: o defeito das 700 páginas não está presente
+
+Medi o PDF real da versão atual em vez de confiar no número histórico. Duas fontes:
+
+- `entregas/teste-google-com-1.1.14/google-com-1.1.14.pdf`: **24 páginas, 1,28 MB**.
+- `test/e2e/report-executive-print.test.mjs`, que imprime o relatório completo e o resumo executivo em Chrome real: **baixado = 22 páginas completas / 9 de resumo; ao vivo = 34 completas / 10 de resumo**, com a matriz ABNT completa e sem evidência individual repetida por item.
+
+Ou seja: o produto atual entrega um relatório da ordem de dezenas de páginas para uma página como o Google, com a matriz normativa inteira, e não as mais de 700 páginas que caracterizaram a versão defeituosa. O teste também exige que o resumo seja menor que o completo, o que impede o resumo de voltar a inchar.
+
+### Uma falha intermitente, identificada e não escondida
+
+Na primeira execução da suíte completa depois do produtor de 5.9.1, apareceram **9** falhas em vez das 8 conhecidas, e a nona não era nenhuma das minhas: era `report-executive-print`. Investiguei antes de concluir qualquer coisa:
+
+- as 8 falhas conhecidas continuavam exatamente as mesmas, com os mesmos nomes;
+- `report-executive-print` **passa 3 de 3 vezes** quando executado sozinho, com os diagnósticos esperados (22/9 e 34/10 páginas);
+- a suíte seguinte voltou a **8** falhas, e uma terceira execução confirmou 8 com os mesmos oito nomes e a mesma contagem total (4183 testes, 4175 passando).
+
+Conclusão sustentada pela medição: é disputa de recursos quando dezenas de navegadores reais rodam em série, não regressão de lógica. **Não** "consertei" o teste para ele passar — mudar uma expectativa correta para acomodar uma falha intermitente de ambiente seria exatamente o tipo de enfraquecimento que não se deve fazer para obter verde. Registro o fato e a evidência de que ele passa isolado e de que a contagem voltou ao baseline.
+
+### Suíte
+
+4183 testes, 4175 passam, 8 falham — as mesmas 8 pré-existentes de `PERSONA_CLEANUP_UNCONFIRMED`. `verify-project` GREEN.
+
+A revisão integrada independente do estado atual segue em andamento; nenhum achado dela foi recebido até aqui.
