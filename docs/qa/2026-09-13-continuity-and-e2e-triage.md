@@ -963,3 +963,43 @@ A distinção que faltava é por **tipo de atributo**, não por todo atributo de
 Medido no Chrome real com as duas metades na mesma página: `src="/foto.png?q=<CPF>"`, `?nome=&email=`, `#fragmento`, `?token=` e `poster="/capa.png?v=2"` e `src="/filme.mp4?assinatura=CDN-123"` chegam todos reduzidos a origem e caminho; `href="/pagina?secao=contato"` **preserva** a query, e `href` com parâmetro refletido continua preservado, que é o contrato inalterado. Nenhum dos segredos aparece no instantâneo serializado.
 
 Suíte: 4183 testes, 4175 passam, as mesmas 8 pré-existentes — nenhum dos 63 testes que dependiam do contrato de URL de navegação foi tocado.
+
+## Rodada 35 — pacote gerado e conferido, e um defeito Critical encontrado pelo teste do pacote
+
+### O pacote, finalmente medido
+
+Gerei o ZIP com o próprio script do projeto e conferi o artefato, não a árvore: `audita-acessibilidade-1.1.14.zip`, **199 arquivos, 4.236.689 bytes**, SHA-256 `160e53d6…` antes das últimas correções e `da2d41fe…` depois. O diretório temporário exigido pelo script tem contrato estrito — nome `audita-release-test-` mais 6 caracteres, pai igual ao `realpath(tmpdir())`; usar `/private/tmp` falha porque o `realpath` diverge, e o caminho certo é o `tmpdir()` do Node.
+
+Conferi que o pacote contém as correções da sessão por leitura do extraído: `RESOURCE_ONLY_ATTRIBUTES`, `item.classification !== 'requirement'`, o tom de evidência com nota, o predicado de recorte e `recordPageMarkerOrigin` — todos presentes. O manifesto é idêntico ao da árvore, 191 arquivos em `src/`, 3 em `vendor/`, 4 ícones, e as 6 verificações do `verify-project` continuam GREEN.
+
+**O percurso obrigatório passou contra o pacote**, com as quatro exportações confirmadas (`html,pdf,csv,json`), sem popup e sem alterar a página auditada. Criterion 12 atendido para o percurso principal.
+
+### Defeito Critical encontrado ao testar o pacote: o destaque trava depois de mostrar os sinais
+
+Ao montar esse teste na ordem obrigatória — **mostrar os sinais e então destacar** — o destaque nunca é oferecido. O botão fica preso em "Verificando possibilidade de destaque", desabilitado, e não há como marcar o elemento. Isso quebra "Destacar elemento", que é percurso obrigatório, e a medição foi feita no Chrome real.
+
+Sonda verificada no painel (`__hlProbe`, com contagem conferida no arquivo antes de rodar) deu a sequência exata:
+
+```
+ENTER want=…000013 sel=…000013
+RESP  want=…000013 resp={"ok":true,"bindingStatus":{"state":"available"}} sel=…000013
+ENTER want=…000015 sel=…000015
+ENTER want=…000013 sel=…000013
+```
+
+Três pedidos entram e apenas um responde. Estado final observado: `actions: ["go-to-page-marker", "highlight-checking"]`, rótulo "Verificando possibilidade de destaque".
+
+Causa localizada no código, com dois elos:
+
+1. `refreshHighlightAvailability` (`panel.js`) descarta o próprio resultado quando a seleção mudou durante o pedido: `if (state.screen !== 'result' || state.auditId !== auditId || state.selectedOccurrenceId !== occurrenceId) return;`. O evento de disponibilidade que chega depois é ignorado, e o reducer `HIGHLIGHT_AVAILABLE` também exige `event.occurrenceId === current.selectedOccurrenceId`. Quem fica esperando não recebe nem `available` nem `unavailable`: fica em `checking` para sempre.
+2. `selectOccurrenceFromPage` (o clique no sinal da página) seleciona a ocorrência mas **não** pede a disponibilidade dela, ao contrário de `selectOccurrence` (o clique na ficha do painel), que pede. Então a ocorrência recém-selecionada não tem verificação própria.
+
+**Tentei a correção óbvia e ela está errada.** Acrescentar `void refreshHighlightAvailability(occurrenceId)` em `selectOccurrenceFromPage` faz o botão funcionar, mas viola um contrato que o produto fixa por teste: `test/panel/panel-runtime.test.js` exige que o clique num sinal **não** gere novo pedido `GET_HIGHLIGHT_AVAILABILITY` — a razão é que a seleção vinda da página não deve custar uma ida ao worker. Revertido, e a árvore de `src/` está limpa.
+
+O desenho correto, registrado para quem fechar isto: guardar a disponibilidade **por ocorrência** em vez de por seleção, para que a resposta possa ser aplicada quando chega, e só então decidir o que a seleção atual mostra. Isso resolve a corrida sem custo extra de pedido e sem violar o contrato. Não implementei porque a mudança toca reducer, `panel.js` e o contrato de estado, e uma tentativa apressada aqui já se mostrou errada uma vez.
+
+**Não é regressão desta sessão.** O caminho é o mesmo antes e depois das minhas mudanças; o que mudou foi eu ter passado a testar na ordem obrigatória. Registro como **Critical em aberto**: quebra um passo do percurso obrigatório, tem medição em Chrome real e tem a causa localizada.
+
+### Suíte
+
+4183 testes, 4175 passam, as 8 pré-existentes — com `src/` limpo depois da reversão. O nono nome que apareceu na execução de teste da minha tentativa era `panel-runtime`, exatamente o contrato que a tentativa violava, e voltou a passar com a reversão.
