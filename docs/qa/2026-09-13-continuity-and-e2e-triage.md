@@ -950,3 +950,16 @@ Do relatório do revisor, ficam no backlog sem bloquear: A4 (perda de conexão e
 ### Suíte
 
 4183 testes, 4175 passam, 8 falham — as mesmas 8 pré-existentes. `git diff --check` verde.
+
+## Rodada 34 — o vazamento residual do `src` foi fechado, com contraprova
+
+Na rodada anterior registrei como **aberto** que o atributo cru `src` preservava parâmetros de query não sensíveis, e expliquei por que não o fechei: `sanitizeResourceUrl` mantém a query porque os mesmos atributos servem a links de navegação, e mudar isso derruba o contrato de `href`. A tentativa larga tinha derrubado 63 testes.
+
+A distinção que faltava é por **tipo de atributo**, não por todo atributo de URL:
+
+- **Recurso buscado pela página** — `src` e `poster` em `img`, `video`, `audio`, `source`, `track`, `iframe`, `embed`, `object` e `input`. A query aqui é cache-busting, assinatura de CDN ou parâmetro que a página refletiu de entrada digitada. Nunca é o endereço sob teste. Passa a perder query e fragmento.
+- **Endereço de navegação** — `href`, `action`, `formaction`, `cite`. Aqui o endereço **é** o dado que a auditoria avalia, e a query fica.
+
+Medido no Chrome real com as duas metades na mesma página: `src="/foto.png?q=<CPF>"`, `?nome=&email=`, `#fragmento`, `?token=` e `poster="/capa.png?v=2"` e `src="/filme.mp4?assinatura=CDN-123"` chegam todos reduzidos a origem e caminho; `href="/pagina?secao=contato"` **preserva** a query, e `href` com parâmetro refletido continua preservado, que é o contrato inalterado. Nenhum dos segredos aparece no instantâneo serializado.
+
+Suíte: 4183 testes, 4175 passam, as mesmas 8 pré-existentes — nenhum dos 63 testes que dependiam do contrato de URL de navegação foi tocado.

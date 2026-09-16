@@ -10,6 +10,13 @@ import {
 
 const SENSITIVE = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const URL_ATTRIBUTES = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src']);
+// Media resources are fetched by the page, not navigated to by the reader, so their query string is
+// never the address under test: it is cache-busting, a CDN signature or a parameter the page
+// reflected from typed input. Measured in Chrome, `src="/foto.png?q=<CPF>"` reached the snapshot
+// intact because the name-based filter only knows English credential vocabulary. Navigation
+// attributes keep their query, because there the address is exactly what the audit evaluates.
+const RESOURCE_ONLY_ATTRIBUTES = new Set(['src', 'poster']);
+const RESOURCE_ONLY_TAGS = new Set(['img', 'image', 'video', 'audio', 'source', 'track', 'iframe', 'embed', 'object', 'input']);
 const EXECUTABLE_TEXT_PARENTS = new Set(['script', 'style', 'template']);
 const LINK_CONTEXT_STATES = new Set(['potential-context', 'missing-context', 'unknown-context']);
 const NEW_WINDOW_BEHAVIORS = new Set(['new-window', 'same-window', 'unknown']);
@@ -142,6 +149,22 @@ export function sanitizeResourceUrl(value, base) {
   return sanitizeEvidenceUrl(value, base);
 }
 
+// The shared sanitizer keeps non-sensitive query parameters, which is right for a navigation
+// address and wrong for a fetched resource. This resolves and cleans the URL, then drops the query
+// and the fragment, so the snapshot keeps the origin and the path that identify the file.
+function stripUrlQuery(value, base) {
+  const cleaned = sanitizeResourceUrl(value, base);
+  if (cleaned === '' || /^(?:data|blob):/iu.test(cleaned)) return cleaned;
+  try {
+    const url = new URL(cleaned);
+    url.search = '';
+    url.hash = '';
+    return url.href;
+  } catch {
+    return cleaned;
+  }
+}
+
 function editableElement(tagName, attributes) {
   if (['input', 'select', 'textarea'].includes(tagName)) return true;
   const contenteditable = cleanText(attributes.contenteditable).toLowerCase();
@@ -194,7 +217,8 @@ function sanitizeAttributes(input, tagName, base) {
     if (tagName === 'option' && name === 'value') continue;
     if (tagName === 'option' && (name === 'selected' || name === 'aria-selected')) continue;
     let value = typeof rawValue === 'string' ? rawValue : rawValue === true ? '' : String(rawValue ?? '');
-    if (URL_ATTRIBUTES.has(name)) value = sanitizeResourceUrl(value, base);
+    if (RESOURCE_ONLY_ATTRIBUTES.has(name) && RESOURCE_ONLY_TAGS.has(tagName)) value = stripUrlQuery(value, base);
+    else if (URL_ATTRIBUTES.has(name)) value = sanitizeResourceUrl(value, base);
     output[name] = value;
   }
   return output;

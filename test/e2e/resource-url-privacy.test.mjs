@@ -18,6 +18,9 @@ const DOCUMENT = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <img id="personal" src="/foto.png?nome=Maria&email=maria@exemplo.test" alt="Foto com dados">
 <img id="fragment" src="/foto.png#secao-privada" alt="Foto com fragmento">
 <img id="credential" src="/foto.png?token=NAO-PODE-VAZAR" alt="Foto com credencial">
+<video id="clip" poster="/capa.png?v=2" src="/filme.mp4?assinatura=CDN-123"></video>
+<a id="navigation" href="/pagina?secao=contato">Ir para o contato</a>
+<a id="navigation-reflected" href="/pagina?busca=MEU-CPF-123.456.789-00">Buscar</a>
 </main></body></html>`;
 
 test('a resource URL keeps its origin and path and never its query or fragment', { timeout: 60_000 }, async t => {
@@ -50,15 +53,32 @@ test('a resource URL keeps its origin and path and never its query or fragment',
     // The credential-shaped parameter was already removed by the name filter, and it still is.
     assert.equal(JSON.stringify(snapshot.nodes.map(node => node.media ?? null)).includes('NAO-PODE-VAZAR'), false);
 
-    // Remaining gap, recorded in docs/qa/2026-09-13-continuity-and-e2e-triage.md and asserted here
-    // so it cannot be forgotten: the raw URL attributes keep non-sensitive query parameters,
-    // because sanitizeResourceUrl preserves them for navigation links. The collector's cleanUrl
-    // drops the query for the media record, so the leak is bounded to the attribute value in the
-    // snapshot; closing it means changing the URL contract for href as well, which is a decision
-    // with its own blast radius and has not been taken.
-    const rawAttribute = snapshot.nodes.find(node => node.attributes?.id === 'reflected')?.attributes?.src ?? '';
-    assert.equal(rawAttribute.includes('?q='), true,
-      'documented open gap: the raw src attribute still carries a non-sensitive query parameter');
+    // The raw attribute is cleaned too, for every media element and for both resource attributes.
+    // Navigation attributes keep their query on purpose, because there the address is what the
+    // audit evaluates; the two rules live together in sanitizeAttributes.
+    const rawOf = id => snapshot.nodes.find(node => node.attributes?.id === id)?.attributes?.src ?? '';
+    for (const id of ['plain', 'reflected', 'personal', 'fragment', 'credential']) {
+      assert.equal(rawOf(id), `${fixture.origin}/foto.png`,
+        `the raw src attribute must keep only origin and path for ${id}`);
+    }
+    // The other resource attributes follow the same rule: poster and a media src.
+    assert.equal(snapshot.nodes.find(node => node.attributes?.id === 'clip')?.attributes?.poster,
+      `${fixture.origin}/capa.png`, 'poster must lose its query as well');
+    const clipSrc = snapshot.nodes.find(node => node.attributes?.id === 'clip')?.attributes?.src ?? '';
+    assert.equal(clipSrc.includes('assinatura'), false, 'a media src must lose its query');
+
+    // And the counter-proof: a navigation address is what the audit evaluates, so its query stays.
+    assert.equal(snapshot.nodes.find(node => node.attributes?.id === 'navigation')?.attributes?.href,
+      `${fixture.origin}/pagina?secao=contato`, 'a navigation link must keep its query');
+    const reflectedHref = snapshot.nodes.find(node => node.attributes?.id === 'navigation-reflected')?.attributes?.href ?? '';
+    assert.equal(reflectedHref.includes('busca='), true,
+      'the navigation contract is unchanged, including its query');
+
+    const serialized = JSON.stringify(snapshot);
+    for (const secret of ['maria@exemplo.test', 'secao-privada', 'NAO-PODE-VAZAR', 'nome=Maria', 'token=',
+      'assinatura=CDN-123']) {
+      assert.equal(serialized.includes(secret), false, `the snapshot must not carry ${secret}`);
+    }
     // Collecting must not touch the page.
     assert.deepEqual(await evaluate(page, state), before);
     assert.deepEqual(await evaluate(page, `location.search`), '', 'the audit must not navigate the page');
