@@ -1695,3 +1695,17 @@ Levantei a hipótese de que as sete falhas do arquivo do outro incremento fossem
 Então a hipótese cai, e o que sobra é o que já estava medido: as sete falham concentradas no teto de comando de 30 s do harness (quatro a 30 005–30 720 ms) ou em ~32 s, exatamente como os dois de marcadores que falham também isolados. A causa não está estabelecida por mim — quem tem a execução e o instrumento para elevar o teto é a triagem.
 
 Registro a refutação porque uma hipótese errada escrita e não corrigida vira premissa para quem ler depois.
+
+## Correção preparada para o teto de comando (aplicar só depois da triagem confirmar)
+
+Se a triagem concluir que as falhas de ~30 s são do harness, a correção é **uma linha** e não toca asserção nenhuma:
+
+```
+test/e2e/support/real-chrome.mjs:13
+-const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
++const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+```
+
+Confirmei o encanamento antes de propor: `:127` recebe `commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS`, e `:241` e `:267` resolvem cada comando como `options.timeoutMs ?? commandTimeoutMs`. Ou seja, **um único valor governa todos os comandos CDP que não passam timeout explícito** — exatamente a classe que falha em 30 005–30 720 ms —, enquanto as esperas menores (10 s, 5 s) têm os próprios padrões e não são afetadas. Nenhuma asserção muda: só muda quanto tempo o harness espera antes de desistir, e um comando que trave de verdade continua falhando, apenas mais tarde.
+
+**Não apliquei**, e a ordem importa: aplicar antes do veredito transformaria a hipótese em premissa e apagaria a evidência que a triagem está produzindo. Ela tem a cópia congelada e o instrumento; quando ela disser o que é, isto entra — ou vira achado de produto, se as falhas persistirem com o teto maior.
