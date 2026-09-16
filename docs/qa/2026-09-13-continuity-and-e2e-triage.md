@@ -651,3 +651,28 @@ Portanto, o que eu tratei como causa confirmada na rodada 21 é, no máximo, uma
 Medição que faltava desde a rodada 12 e continua faltando, agora por motivo mais forte: capturar o **código de falha** devolvido pelo worker no pedido de sinais, não a mensagem da interface. Com `PAGE_MARKERS_UNAVAILABLE` a suspeita é o próprio controle (documento, plano, portas); com `PAGE_MARKERS_DOCUMENT_CHANGED` a suspeita é identidade. São caminhos de correção diferentes, e eu vinha tratando os dois como um só.
 
 Não implementei nada. Implementar sobre uma causa enfraquecida seria pior do que não implementar: eu teria mudado o caminho de prova de documento para consertar algo que talvez não esteja ali.
+
+## Rodada 25 — os sinais são negados no painel, antes de qualquer pedido
+
+Fui capturar o código de falha do worker e a medição mostrou algo diferente e mais decisivo: **o pedido nunca sai do painel**.
+
+Três sondas, todas em código temporário e todas removidas depois:
+
+1. Buffer no controlador do worker nos pontos de prova e de instalação → `DIAG []`, ou seja, nenhum dos dois foi alcançado.
+2. Envolvimento de `port.postMessage`/`onMessage` no painel para registrar o tráfego de `PAGE_MARKERS` → `TRACE []`, nenhum evento.
+3. Sondas no cliente de porta do painel, no guard de revisão (`PORT-DIAG`) e no início de `requestIntent` (`PORT-HEAD`) → **ambas nulas**.
+
+A conclusão que os três dados sustentam: o `requestIntent` do cliente de sessão **não foi chamado**, e o worker **não foi consultado**. A mensagem de indisponibilidade que o usuário vê é decidida dentro do painel, em `show()` da sessão de marcadores, que publica `UNAVAILABLE` quando o pedido devolve algo falsy — e o pedido é falsy justamente porque não chegou a ser feito.
+
+Isso derruba todas as minhas hipóteses anteriores de causa, inclusive a que eu tinha registrado como confirmada: não é alvo de injeção, não é prova de documento, não é cache de origem, não é worker reiniciado. **É estado do painel.**
+
+O caminho de correção muda de lugar: em vez de mexer no controlador do worker, é preciso entender por que `show()` não chega a pedir. Duas possibilidades, e a leitura aponta para a primeira:
+
+- `context` nulo em `createPanelPageMarkersSession`, que é alimentado por `pageMarkers.setResult(value.result)` em `panel.js` — se `setResult` não rodou para esta auditoria, `show()` retorna `false` sem publicar nada.
+- `state.status` já em `active`, `showing` ou `hiding`, que também faz `show()` retornar cedo.
+
+Ressalva de método: a terceira sonda não cobriu o retorno antecipado de `show()` (`if (!context || ['active','showing','hiding'].includes(state.status)) return false;`), porque ele fica no arquivo da sessão e não no cliente de porta. Portanto o dado "requestIntent não foi chamado" está medido; a razão exata entre as duas acima ainda não.
+
+**Retratação registrada**: a conclusão da rodada 21, em que atribuí a falha ao alvo fixo da injeção, não se sustenta. A injeção por `tabId` funcionar continua verdadeiro e útil, mas não é a causa: o pedido nem chega lá. Também cai a hipótese da rodada 12 e a explicação por contexto de extensão como causa.
+
+Nada foi alterado no produto. As três sondas foram revertidas (`git checkout --`) e a árvore está sem alterações em `src/`.
