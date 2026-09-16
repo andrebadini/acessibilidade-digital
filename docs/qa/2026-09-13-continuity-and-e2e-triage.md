@@ -2218,3 +2218,22 @@ Eu tinha a suspeita de que as 9 falhas de `test/e2e/sidepanel-flow-mv3.test.mjs`
 - **O produto só cria registro de posse no fluxo de URL.** `createOwnedTabRegistry` é instanciado em `src/background/run-audit.js:263` (caminho que valida `URL_AUDIT_DENIED`, `policy.captureFullPage`, `captureElements`) e em `:1828` (lote). O fluxo **anexado** — "avaliar a página atual", o do percurso obrigatório — não cria aba própria, então não tem o que possuir, e por isso não grava registro. Isso é o comportamento correto e conservador: a auditoria anexada **não** deve registrar posse sobre uma aba que já era do usuário.
 
 **Conserto, para quem é dono do arquivo:** no percurso anexado, a espera não pode ser por registro de posse; deve esperar o estado da auditoria (o mesmo `data-screen="result"` / `data-audit-id` que os outros E2E usam) e, se o roteiro precisa mesmo de posse, exercitá-lo no fluxo de URL, que é onde ela existe. As falhas seguintes são cascata da primeira. **Nada disso é defeito do produto** — e por isso não mexo no arquivo: ele está sob edição de outro incremento.
+
+## Rodada 58 — reconciliação dos quatro formatos entregues (mesma revisão)
+
+Verificação larga e sem Chrome, sobre os bytes **empacotados** da 1.1.22 (auditoria real do Google, modo sem imagens), para o critério 6: os quatro formatos precisam falar da mesma revisão, com as mesmas contagens e a mesma identidade. A classe de defeito que isto procura é a de sempre nesta linha — consertar num artefato e esquecer o outro.
+
+| Verificação | Resultado |
+|---|---|
+| Desfechos por item no JSON (`itemResults`, 146) | 109 cantTell · 27 inapplicable · 1 failed · 9 passed |
+| Desfechos por item no EARL (146 asserções) | **idênticos** (109/27/1/9), com as mesmas grafias `earl#…` |
+| Desfechos por item na matriz do HTML (146 linhas) | **idênticos**, com os rótulos em português (109/27/1/9) |
+| Desfechos por ocorrência no JSON (`occurrences`, 118) | 117 cantTell · 1 failed |
+| Linhas do CSV (118, esquema `audita-occurrences-v2`) | **idênticos** (117 cantTell · 1 failed) |
+| Identidade: ids do JSON × ids da matriz do HTML | conjuntos **iguais** (146 distintos nos dois) |
+| Itens citados no CSV existem no JSON | **todos** (110 itens citados, nenhum estranho) |
+
+**Duas observações que não são defeito, e uma que fica como candidato a Minor:**
+
+1. `printedId` tem 145 valores distintos para 146 itens: o item **5.12.1** ("Espaçamento entre as linhas") imprime `5.1.12` porque é assim que o **Anexo C** o numera, e há **nota editorial** registrando exatamente isso (`field: printedId`, impresso `5.1.12 no Anexo C`, normalizado `5.12.1 conforme a Seção 5`). A identidade correta é `id` — e por `id` são 146 distintos. Minha primeira comparação usou `printedId` como identidade e acusou uma divergência que não existe: erro da métrica, não do artefato.
+2. A matriz do HTML é ordenada **lexicograficamente** (`.sort((l, r) => l.id.localeCompare(r.id))`, `project-view.js:423`), então a sequência é 5.1.1, 5.1.10, 5.1.11, …, 5.1.2; o JSON segue a ordem do catálogo (numérica). É **deliberado no código** e não confunde dado nenhum (cada linha carrega seu id), mas quem confere item a item contra a norma impressa lê fora da ordem dela. Fica como **candidato a Minor de apresentação** para o próximo incremento — não mexo agora porque o artefato 1.1.22 está congelado para revisão e a revisão está justamente comparando as linhas da matriz.
