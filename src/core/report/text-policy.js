@@ -211,7 +211,11 @@ export function viewportSummary(viewport) {
  * delivered 1.1.19 report: 8 entries for 6 distinct sentences on the first page of the PDF.
  */
 export function listedLimitations(limitations) {
-  if (!Array.isArray(limitations)) return [];
+  // Devolver [] para entrada inválida fazia o relatório afirmar "Limitações registradas (0)",
+  // escondendo limitações reais: entrada inválida falha alto em vez de encolher em silêncio.
+  if (!Array.isArray(limitations)) {
+    throw new TypeError('Limitações do relatório precisam ser lista.');
+  }
   const codedMessages = new Set();
   for (const value of limitations) {
     const match = /^[A-Z][A-Z0-9_]{3,}: ([\s\S]+)$/u.exec(typeof value === 'string' ? value : '');

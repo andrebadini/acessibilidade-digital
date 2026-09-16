@@ -5,7 +5,7 @@ import {
   ATTACHED_COPY_RELOADED_MESSAGE,
   diagnosticPolicyEntry,
 } from '../../src/core/report/diagnostic-policy.js';
-import { deriveSystemLimitations } from '../../src/core/report/text-policy.js';
+import { deriveSystemLimitations, listedLimitations } from '../../src/core/report/text-policy.js';
 
 test('passive observation omission reaches report limitations without claiming a technical failure', () => {
   const diagnostic = {
@@ -46,4 +46,19 @@ test('attached-copy reload is a non-partial page limitation with one canonical m
     pages: [{ finalUrlObserved: false, viewport: {}, diagnostics: [diagnostic] }],
     axe: { limitations: [] },
   }).filter(value => value === ATTACHED_COPY_RELOADED_MESSAGE), [ATTACHED_COPY_RELOADED_MESSAGE]);
+});
+
+test('lista de limitações nunca some em silêncio quando a entrada não é lista', () => {
+  const body = 'Nenhuma captura raster foi coletada no modo sem imagens.';
+  const coded = `PIXEL_CAPTURE_OMITTED: ${body}`;
+  // A forma codificada fica (rastreabilidade) e a frase simples repetida sai; uma frase simples
+  // que não é corpo de código nenhum permanece.
+  assert.deepEqual(listedLimitations([coded, body, 'Frase simples.']), [coded, 'Frase simples.']);
+  assert.deepEqual(listedLimitations([body]), [body]);
+  // Devolver [] para entrada inválida faria o relatório afirmar "Limitações registradas (0)",
+  // escondendo limitações reais: a entrada precisa falhar alto, não encolher em silêncio.
+  for (const invalid of [undefined, null, 'texto', {}, 7]) {
+    assert.throws(() => listedLimitations(invalid), { name: 'TypeError' },
+      `entrada ${JSON.stringify(invalid) ?? 'undefined'} precisa ser recusada`);
+  }
 });

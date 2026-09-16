@@ -1,4 +1,9 @@
-export const SENSITIVE_KEY = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
+// Vocabulário sensível, em inglês e em português: uma página brasileira pode expor a credencial em
+// `?senha=` ou `?cpf=`, e o produto afirma que a URL entregue é sanitizada. A expansão é sempre para
+// o lado seguro (tarjar a mais), mas os radicais curtos ficam de fora de propósito: "conta" pegaria
+// "contato", "pix" pegaria "pixelRatio" e "rg" pegaria "cargo" — perder esses campos seria corromper
+// o relatório, não protegê-lo.
+export const SENSITIVE_KEY = /(?:(?<!by)pass(?:word|wd)?(?!es|ed|ive|o|ing)|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senha|segredo|credencial|sess[ãa]o|autentica[çc][ãa]o|autoriza[çc][ãa]o|chave|cpf|cnpj|cart[ãa]o)/iu;
 export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
 // Public storage failures stay independent from browser/IndexedDB error details,

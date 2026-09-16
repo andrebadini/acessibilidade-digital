@@ -4,7 +4,30 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.22 preparada — a revisão independente deste artefato ainda não foi feita.** A revisão da
+**Versão 1.1.23 preparada — a revisão independente deste artefato e a da 1.1.22 ainda não saíram.** A
+1.1.22 fechou os três Minors que a revisão da 1.1.21 apontou (cláusula em linguagem simples chegando ao
+PDF, cabeçalho de anexo inteiro, guarda automatizada do comportamento de impressão) e levou ao
+relatório entregue a proveniência que só existia no modelo. A **1.1.23** acrescenta duas correções de
+**privacidade e integridade de dado**, ambas com defeito medido antes da correção:
+
+- **Vocabulário sensível só em inglês.** `sanitizeEvidenceUrl('…?senha=s3gredo&cpf=12345678900&id=7')`
+  devolvia a URL **com** `senha` e `cpf`; `sanitizeJsonData` deixava passar `senha`, `cpf` e
+  `chaveAcesso` enquanto tarjava `token`. Entraram `senha`, `segredo`, `credencial`, `sessão`,
+  `autenticação`, `autorização`, `chave`, `cpf`, `cnpj` e `cartão`, sem radicais curtos que pegariam
+  palavra legítima ("conta" pegaria "contato", "pix" pegaria "pixelRatio", "rg" pegaria "cargo").
+- **O radical de senha engolia dado do próprio produto.** `pass(?:word|wd)?` casava `passed`,
+  `passes`, `bypass` e `passive` — resultado de item, contagem `passes` do JSON, 2.4.1 Bypass Blocks e
+  observação passiva. Um dado cru com essas chaves era tarjado e sumia. Agora
+  `(?<!by)pass(?:word|wd)?(?!es|ed|ive|o|ing)` preserva as quatro e continua tarjando `password`,
+  `userPassword`, `passcode` e `senha`.
+- **`listedLimitations` falhava aberto:** entrada fora de lista devolvia `[]`, o que faria o relatório
+  afirmar "Limitações registradas (0)" e esconder limitações reais. Entrada inválida agora falha alto.
+
+Verificação: **236/236** nos consumidores do sanitizador e da política de texto, e os dois patches
+aplicados juntos num clone limpo do HEAD anterior. E2E de Chrome e a revisão independente da 1.1.23
+ficam para quando o Chrome estiver livre — a revisão da 1.1.22 está em curso.
+
+A revisão da
 1.1.21 deu **0 Critical, 0 Important e 5 Minor** e aprovou aquele artefato como candidato: a regressão
 Important da 1.1.20 está fechada e foi **reproduzida por detector independente** — na matriz do PDF
 entregue, **56 quebras de rótulo de item** na 1.1.19, **0 quebras de item e 50 palavras partidas** na

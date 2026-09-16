@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { redactNormalizedNode, sanitizeEvidenceUrl, sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
+import { redactNormalizedNode, sanitizeEvidenceUrl, sanitizeJsonData, sanitizeWarning, sanitizeWarnings } from '../../src/core/privacy.js';
 
 const FALLBACK_WARNING = {
   code: 'PROBE_FAILED',
@@ -209,4 +209,41 @@ test('an author-declared id is dropped when it cannot be an identifier or looks 
   // the spacing; recording it makes the actual behaviour explicit rather than assumed.
   const spaced = redactNormalizedNode(editableField({ id: 'campo a' }), { privateText: true, privateTextRoot: true });
   assert.equal(spaced.attributes.id, 'campo a');
+});
+
+test('credenciais e identificadores em português também são removidos da URL e tarjados no JSON', () => {
+  const url = sanitizeEvidenceUrl('https://exemplo.test/p?senha=s3gredo&cpf=12345678900&chaveAcesso=k&id=7&contato=ok');
+  for (const vazamento of ['s3gredo', '12345678900', 'chaveAcesso']) {
+    assert.ok(!url.includes(vazamento), `a URL sanitizada não pode carregar ${vazamento}`);
+  }
+  assert.ok(url.includes('id=7') && url.includes('contato=ok'), 'parâmetros legítimos permanecem na URL');
+  const json = sanitizeJsonData({
+    senha: 's3gredo', cpf: '12345678900', chaveAcesso: 'k', cnpj: 'x', sessao: 'y',
+    autenticacao: 'z', autorizacao: 'w', cartao: 'c', token: 't',
+    id: 1, contato: 'ok', pixelRatio: 2, cargo: 'ok',
+  });
+  for (const sensivel of ['senha', 'cpf', 'chaveAcesso', 'cnpj', 'sessao', 'autenticacao', 'autorizacao', 'cartao', 'token']) {
+    assert.equal(json[sensivel], '[redacted]', `${sensivel} precisa ser tarjado`);
+  }
+  // Fronteira deliberada: nada de radicais curtos que pegam palavra legítima ("conta" pegaria
+  // "contato", "pix" pegaria "pixelRatio", "rg" pegaria "cargo").
+  for (const legitimo of ['id', 'contato', 'pixelRatio', 'cargo']) {
+    assert.notEqual(json[legitimo], '[redacted]', `${legitimo} não é sensível e não pode ser perdido`);
+  }
+});
+
+test('o radical de senha não engole palavras legítimas do próprio produto', () => {
+  // Medido antes da correção: `pass(?:word|wd)?` casava "passed", "passes", "bypass" e "passive" —
+  // vocabulário do próprio produto (resultado `passed`, contagem `passes` em technicalSummary,
+  // 2.4.1 Bypass Blocks, observação passiva). Um dado cru com essas chaves era tarjado e sumia.
+  const json = sanitizeJsonData({
+    passed: 3, passes: { groups: 16 }, bypass: true, passive: 'observação',
+    password: 'x', passwd: 'x', pass: 'x', userPassword: 'x', passcode: 'x',
+  });
+  for (const legitimo of ['passed', 'passes', 'bypass', 'passive']) {
+    assert.notEqual(json[legitimo], '[redacted]', `${legitimo} não é credencial e não pode ser perdido`);
+  }
+  for (const credencial of ['password', 'passwd', 'pass', 'userPassword', 'passcode']) {
+    assert.equal(json[credencial], '[redacted]', `${credencial} continua sendo tarjado`);
+  }
 });
