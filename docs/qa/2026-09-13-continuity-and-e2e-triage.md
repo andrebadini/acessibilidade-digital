@@ -1003,3 +1003,24 @@ O desenho correto, registrado para quem fechar isto: guardar a disponibilidade *
 ### Suíte
 
 4183 testes, 4175 passam, as 8 pré-existentes — com `src/` limpo depois da reversão. O nono nome que apareceu na execução de teste da minha tentativa era `panel-runtime`, exatamente o contrato que a tentativa violava, e voltou a passar com a reversão.
+
+## Rodada 36 — retratação: o "Critical" da rodada 35 não existe, e o defeito era do meu teste
+
+Na rodada 35 eu registrei como **Critical** que o destaque ficava travado em "Verificando possibilidade de destaque" depois de mostrar os sinais, e que isso quebrava o percurso obrigatório. **A conclusão está errada, e a medição desta rodada a derruba.**
+
+**O erro do meu teste.** Eu procurava a ação em `[data-result-detail] .detail-actions [data-action]`, isto é, a ação **da ficha da ocorrência**. Só que, com os sinais ativos, essa ação é legitimamente **"Ir ao elemento do sinal N"** (`go-to-page-marker`), porque `markerNumberForOccurrence` resolve o número e o código escolhe o caminho do sinal — o `else if` só oferece a ação de destaque quando **não** há sinal localizado. O botão de destaque, nesse estado, vive no **card**, com a classe `direct-highlight`. Eu media o lugar errado e interpretei a ausência da ação esperada como travamento.
+
+**A medição que decide.** Levei o cenário completo ao Chrome real — avaliar, mostrar os sinais, selecionar as falhas confirmadas pelos cards, aguardar — e li os **quatro** botões de destaque dos cards:
+
+```
+COM a minha mudança:   4 botões, label "Destacar elemento na página", disabled=false, travados=0
+SEM a minha mudança:   4 botões, label "Destacar elemento na página", disabled=false, travados=0
+```
+
+Idênticos. Também confirmei o percurso real nesse estado: clicar em "Ir ao elemento do sinal 1" produz **anel visível no sinal 1** na página (`ANEL {"rings":1,"selectedNumbers":[1]}`), ou seja, a marcação acontece.
+
+**A mudança foi revertida.** Cheguei a implementar disponibilidade por ocorrência em `panel.js` — removendo o descarte do resultado quando a seleção muda durante o pedido e guardando a resposta por ocorrência — e ela **não altera nenhum comportamento observável** neste cenário. Como não consigo demonstrar defeito que ela corrija, e o produto está verificado e empacotado sem ela, mantê-la seria trocar código testado por código novo sem ganho medido. `src/` está limpo, exatamente como estava antes desta rodada. O desenho fica registrado acima caso um dia apareça medição de que a corrida importa.
+
+**Por que isto aconteceu, e é o que importa registrar.** É o **quarto** erro de conclusão meu nesta sessão por instrumentação ou leitura errada, e o segundo que eu quase converti em "correção" de produto. O padrão é sempre o mesmo: eu olho para a superfície errada, ou para uma sonda que não confirmei ativa, e transformo a ausência do que esperava em defeito do produto. A regra que já estava escrita — confirmar a sonda no arquivo carregado e que ela dispara — não bastou aqui, porque a sonda **disparou** e o que estava errado era **onde eu media**. A regra que falta é complementar: antes de declarar defeito, verificar que a superfície medida é a que o produto promete naquele estado, e não a que eu esperava encontrar.
+
+**Estado da entrega.** Nada mudou no produto nesta rodada. O pacote da rodada 35 continua sendo o artefato verificado: percurso obrigatório completo passando contra o extraído, quatro exportações confirmadas, `verify-project` GREEN. E a fila real continua a mesma, sem o item falso: campos customizados (fechado), produtor visual de 5.9.1 (parcial, com escopo declarado), produtor de perceptibilidade de 5.9.7 (desenho registrado), 9 cenários de `sidepanel-flow` (causa diagnosticada em outro incremento) e a lacuna de vocabulário português no filtro de privacidade.
