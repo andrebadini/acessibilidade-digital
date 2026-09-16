@@ -1542,3 +1542,22 @@ As duas revisões independentes desta sessão declararam explicitamente que **n�
 **Distinção que importa, para não confundir dois valores.** O nonce de consentimento é um token de 22 caracteres (`^[A-Za-z0-9_-]{22}$`, em `context-menu.js` e `chrome-adapter.js`). O que aparece na URL do painel é outro valor, de 43 caracteres, que existe por desenho para o painel poder se abrir. Tratar os dois como o mesmo item produziria uma conclusão falsa nos dois sentidos.
 
 **O que isto NÃO prova.** Não é uma varredura de runtime: eu não medi, num Chrome real, que nenhum atributo do DOM receba o nonce durante uma auditoria, nem que nenhuma mensagem trocada entre painel e trabalhador o carregue em claro. A contenção estática mostra que as camadas que persistem e exibem não o conhecem; a varredura de runtime continua pendente e assim registrada.
+
+## Verificação dos modos de evidência e da promessa de "sem redimensionamento" (critério 4)
+
+Rodei, **a partir dos bytes empacotados da 1.1.18** (pacote extraído + árvore de teste copiada, produto conferido por `diff` antes de executar), quatro E2E de Chrome real ligados a evidência e autorização:
+
+```
+capture-visible-element        1/1  "a fully visible element capture preserves viewport and
+                                     captures real pixels at both scroll positions"
+personas-mv3-csp               1/1  personas reversíveis no documento MV3 real sob CSP estrita
+url-pixel-consent-mv3          1/1  modos de pixel por URL pausam, sobrevivem a reinício do
+                                     trabalhador, continuam one-shot e limpam abas próprias
+batch-pixel-consent-mv3        0/1  DOWNLOAD_PROOF_TIMEOUT com orçamento de 90 s
+```
+
+O quarto é o caso de orçamento já diagnosticado: com o mesmo arquivo e o orçamento elevado para 420 s, **passa em 15 s de duração total** — a exportação de lote em evidência completa com confirmação de pixels funciona e entrega os quatro arquivos; o que existia era um tempo de espera apertado demais para página grande sob carga. O orçamento foi elevado para 300 s em `test/e2e/batch-pixel-consent-mv3.test.mjs` (e em `public-axe-map`, `url-audit` e `mandatory-journey`), sem tocar em nenhuma asserção de formato, estado, tamanho ou sha256.
+
+**Por que isto vale para a 1.1.19.** `git diff --stat 75e2717..dad1cda -- src/` mostra que entre a 1.1.18 e a 1.1.19 mudaram **apenas** `src/core/report/html.js` e `src/core/rules/forms.js`. Todo o caminho de captura, overlay, personas e consentimento de pixels é byte a byte o mesmo que executou esses testes — então a medição acima vale para a revisão atual, e digo isso com a razão, não por suposição.
+
+**Critério 4, metade do redimensionamento.** A exigência é que a auditoria não faça o usuário assistir a rolagens, mudanças de foco, redimensionamentos ou navegação. O E2E do percurso compara rolagem, foco e a marcação do autor antes e depois, e passa; e `capture-visible-element` exige explicitamente que a captura de um elemento totalmente visível **preserve a viewport** — que é exatamente o ponto onde o Chrome 152 com `captureBeyondViewport=true` já havia mostrado `clientWidth 1265 → 1280`. A limitação conhecida continua sendo o recorte de regiões fora da viewport, registrada desde a rodada de captura.
