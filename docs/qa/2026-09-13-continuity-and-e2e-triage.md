@@ -2215,7 +2215,13 @@ Eu tinha a suspeita de que as 9 falhas de `test/e2e/sidepanel-flow-mv3.test.mjs`
 - **O teste espera** um registro de posse: `waitForOwner` procura a chave `audita:owned-tab:v2:` com `value.auditId === auditId` (linhas 899-903) e, no caso do percurso da página atual, exige `state === 'retained-for-consent' && cleanupMode === 'always'` (linhas 1043-1044).
 - **O produto só cria registro de posse no fluxo de URL.** `createOwnedTabRegistry` é instanciado em `src/background/run-audit.js:263` (caminho que valida `URL_AUDIT_DENIED`, `policy.captureFullPage`, `captureElements`) e em `:1828` (lote). O fluxo **anexado** — "avaliar a página atual", o do percurso obrigatório — não cria aba própria, então não tem o que possuir, e por isso não grava registro. Isso é o comportamento correto e conservador: a auditoria anexada **não** deve registrar posse sobre uma aba que já era do usuário.
 
-**Conserto, para quem é dono do arquivo:** no percurso anexado, a espera não pode ser por registro de posse; deve esperar o estado da auditoria (o mesmo `data-screen="result"` / `data-audit-id` que os outros E2E usam) e, se o roteiro precisa mesmo de posse, exercitá-lo no fluxo de URL, que é onde ela existe. As falhas seguintes são cascata da primeira. **Nada disso é defeito do produto** — e por isso não mexo no arquivo: ele está sob edição de outro incremento.
+**Conserto, para quem é dono do arquivo (ponteiro exato):** a espera está em **`assertPausedAttempt`**
+(linha 1042), chamada pelos subtestes do laço `for (const mode of ['no-pixels', 'element-only',
+'full-evidence'])` que inicia pelo botão `START_ATTACHED` (linha 1727) — ou seja, o percurso **anexado**
+em modos que pausam para consentimento. Nele, a espera certa é o **estado de pausa de privacidade**
+(o mesmo `privacy-paused` / tentativa privada que `readPrivateAttempt` já lê logo abaixo), não um
+registro de posse; se o roteiro quiser exercitar posse, o fluxo de URL é onde ela existe. As falhas
+seguintes são cascata da primeira. **Nada disso é defeito do produto** — e por isso não mexo no arquivo: ele está sob edição de outro incremento.
 
 ## Rodada 58 — reconciliação dos quatro formatos entregues (mesma revisão)
 
