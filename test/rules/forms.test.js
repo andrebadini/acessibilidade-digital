@@ -39,6 +39,51 @@ test('field-label review separates accessible naming from visual identification 
   assert.equal((await evaluate('form-field-label', snapshot())).outcome, 'inapplicable');
 });
 
+test('a clipped label becomes a per-field target and never a confirmed failure', async () => {
+  // Measured in real Chrome: a label fully clipped by clip-path:inset(50%) keeps
+  // hasRenderedBox true and visibleText filled, so geometry and DOM text cannot prove the label
+  // is seen. The inverse is what is observable — the clip is applied, so the label is not
+  // visible — and that is what turns into a target. The outcome stays cantTell because the ABNT
+  // requirement also accepts a visually evident purpose.
+  const clipped = snapshot([
+    record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+      styles: { 'clip-path': 'inset(50%)', clip: 'auto' } }),
+    record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+  ]);
+  const found = await evaluate('form-field-label', clipped);
+  assert.equal(found.outcome, 'cantTell');
+  assert.deepEqual(found.targets.map(value => value.nodeId), ['field']);
+  assert.equal(found.targets[0].data.reason, 'clipped-label');
+  assert.doesNotMatch(found.summary, /falha confirmada|infração/iu);
+
+  // The same field with a label that is not clipped must not produce a target: the pending
+  // review stays aggregate, without multiplying one item per field.
+  const visible = snapshot([
+    record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+      styles: { 'clip-path': 'none', clip: 'auto' } }),
+    record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+  ]);
+  const pending = await evaluate('form-field-label', visible);
+  assert.equal(pending.outcome, 'cantTell');
+  assert.deepEqual(pending.targets, []);
+
+  // A partial inset (10%) still shows most of the label, so it is not treated as hidden.
+  const partial = snapshot([
+    record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+      styles: { 'clip-path': 'inset(10%)', clip: 'auto' } }),
+    record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+  ]);
+  assert.deepEqual((await evaluate('form-field-label', partial)).targets, []);
+
+  // The legacy clip:rect(0,0,0,0) technique counts as hidden too.
+  const legacy = snapshot([
+    record('label', 'label', { attributes: { for: 'field' }, text: 'Nome', hasRenderedBox: true,
+      styles: { 'clip-path': 'none', clip: 'rect(0px, 0px, 0px, 0px)' } }),
+    record('field', 'input', { attributes: { id: 'field' }, accessibleName: 'Nome' }),
+  ]);
+  assert.deepEqual((await evaluate('form-field-label', legacy)).targets.map(value => value.nodeId), ['field']);
+});
+
 test('a wrapping label with an explicit for cannot label a different nested field', async () => {
   const value = snapshot([
     record('label', 'label', { attributes: { for: 'other' }, children: ['nested'], text: 'Outro campo' }),

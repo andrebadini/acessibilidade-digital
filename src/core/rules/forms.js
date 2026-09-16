@@ -35,6 +35,37 @@ function isNativeLabelable(node) {
     (tag === 'input' && normalizeText(attribute(node, 'type')).toLowerCase() !== 'hidden');
 }
 
+// A geometria e o texto no DOM não provam percepção: o revisor demonstrou no Chrome que um
+// label totalmente recortado por clip-path:inset(50%) mantém hasRenderedBox=true e visibleText
+// preenchido. O que a medição pode afirmar com segurança é o inverso — quando o recorte está
+// aplicado, o rótulo não está visível —, e é isso que este predicado detecta. Ele é deliberadamente
+// conservador: só reconhece o recorte declarado nas folhas de estilo, nunca "parece escondido".
+function collapsedInsets(value) {
+  const match = /^inset\(\s*([^)]*)\)$/iu.exec(normalizeText(value));
+  if (!match) return false;
+  const parts = match[1].split(/\s+/u).filter(Boolean);
+  if (parts.length === 0 || parts.length > 4) return false;
+  const percents = parts.map(part => {
+    const number = /^(-?\d+(?:\.\d+)?)%$/u.exec(part);
+    return number ? Number(number[1]) : null;
+  });
+  return percents.every(percent => percent !== null && percent >= 49);
+}
+
+function clippedAway(node) {
+  const styles = node?.styles;
+  if (!styles || typeof styles !== 'object') return false;
+  const clipPath = normalizeText(styles['clip-path']);
+  if (/^inset\(/iu.test(clipPath)) return collapsedInsets(clipPath);
+  return /^rect\(\s*(?:0(?:px)?[\s,]+){3}0(?:px)?\s*\)$/iu.test(normalizeText(styles.clip));
+}
+
+function labelsForField(field, nodes, ids, index) {
+  const own = normalizeText(attribute(field, 'id'));
+  return nodes.filter(node => labelAssociatedWithField(node, field, ids, index) ||
+    (own !== '' && tagOf(node) === 'label' && normalizeText(attribute(node, 'for')) === own));
+}
+
 function formFieldLabel(snapshot) {
   return formResult(snapshot, ({ nodes }) => {
     const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton']);
@@ -46,10 +77,26 @@ function formFieldLabel(snapshot) {
       return native || inputRoles.has(normalizeText(node.axRole).toLowerCase() || roleOf(node));
     });
     if (fields.length === 0) return result('inapplicable', 'Não há campos de formulário aplicáveis.');
-    return result('cantTell', 'Há campos cuja identificação visual precisa ser confirmada. O nome acessível, sozinho, não demonstra atendimento nem falha do item 5.9.1.', [], [
-      'Confirme um rótulo que identifique cada campo ou, como alternativa, um propósito visualmente evidente acompanhado de nome acessível. Caixa e texto no DOM não provam percepção visual: podem estar recortados ou ocultos. Esta pendência é agregada, não uma ocorrência de erro para cada campo.',
-      'Associação programática, nome acessível e descrição do propósito são verificados separadamente. Não conclua ausência de rótulo visual apenas porque o nome acessível está vazio ou não foi coletado.'
-    ]);
+    // Um rótulo que existe e está recortado não identifica visualmente nada. Isso é observável,
+    // então vira alvo por campo em vez de pendência agregada — mas continua em revisão, porque a
+    // norma admite propósito visualmente evidente e o recorte não prova ausência de percepção.
+    const index = nodeIndex(nodes);
+    const ids = domIdIndex(nodes);
+    const clippedFields = fields.filter(field =>
+      labelsForField(field, nodes, ids, index).some(clippedAway));
+    if (clippedFields.length === 0) {
+      return result('cantTell', 'Há campos cuja identificação visual precisa ser confirmada. O nome acessível, sozinho, não demonstra atendimento nem falha do item 5.9.1.', [], [
+        'Confirme um rótulo que identifique cada campo ou, como alternativa, um propósito visualmente evidente acompanhado de nome acessível. Caixa e texto no DOM não provam percepção visual: podem estar recortados ou ocultos. Esta pendência é agregada, não uma ocorrência de erro para cada campo.',
+        'Associação programática, nome acessível e descrição do propósito são verificados separadamente. Não conclua ausência de rótulo visual apenas porque o nome acessível está vazio ou não foi coletado.'
+      ]);
+    }
+    return result('cantTell',
+      `Há ${clippedFields.length} campo(s) cujo rótulo associado está recortado e não pode ser visto. Isso não confirma falha do item 5.9.1: confirme se o campo tem propósito visualmente evidente ou outro rótulo visível antes de concluir.`,
+      clippedFields.map(field => target(field,
+        'O rótulo associado a este campo está recortado na página e não identifica o campo visualmente. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.',
+        { reason: 'clipped-label' })),
+      ['A revisão é necessária porque a norma admite propósito visualmente evidente com nome acessível: recorte não prova ausência de percepção.',
+        'O nome acessível e a associação programática são verificados separadamente neste mesmo relatório.']);
   });
 }
 

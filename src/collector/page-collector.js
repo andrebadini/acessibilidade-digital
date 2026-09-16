@@ -9,7 +9,7 @@ export function collectRuntimePageData() {
     'font-family', 'font-size', 'font-weight', 'line-height', 'text-align', 'direction',
     'letter-spacing', 'word-spacing', 'outline-color', 'outline-style',
     'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
-    'overflow-y', 'animation-duration', 'animation-iteration-count',
+    'overflow-y', 'clip', 'clip-path', 'animation-duration', 'animation-iteration-count',
     'transition-duration'
   ];
   const cleanUrl = (value) => {

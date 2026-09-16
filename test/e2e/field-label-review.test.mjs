@@ -50,8 +50,17 @@ test('visual field identification stays separate from names and includes a custo
       assert.doesNotMatch(JSON.stringify(snapshot), /texto que o usuário digitou/u);
     }
     const result = (await runRules(snapshot, {}, [rule]))[0];
+    // O recorte do rótulo é observável, então vira alvo por campo; a conclusão continua em
+    // revisão, porque a norma admite propósito visualmente evidente e recorte não prova
+    // ausência de percepção.
     assert.equal(result.outcome, 'cantTell');
-    assert.deepEqual(result.targets, []);
+    if (!custom) {
+      assert.equal(result.targets.length, 1, JSON.stringify(result.targets));
+      assert.equal(result.targets[0].data.reason, 'clipped-label');
+      assert.equal(result.targets[0].selectorHint, '#name');
+    } else {
+      assert.deepEqual(result.targets, [], 'a custom field with a visible label reference is not clipped');
+    }
     assert.deepEqual(await extension.evaluate(page, state), before);
   }
 });
