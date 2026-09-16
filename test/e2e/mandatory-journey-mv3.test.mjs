@@ -65,7 +65,15 @@ test('the mandatory journey runs end to end in one session', { timeout: 420_000 
   await waitForValue(panel, 'document.visibilityState', value => value === 'visible', { timeoutMs: 10_000 });
   assert.equal((await extension.runtimeContexts({ contextTypes: ['POPUP'] })).length, 0,
     'the journey must never depend on a popup');
-  const panelSize = await evaluate(panel, `({ w: innerWidth, h: innerHeight })`);
+  // A panel document can report itself visible before it has a layout box: measured at this
+  // exact point, `innerWidth/innerHeight` came back 0×0 while the same panel later measured
+  // 360×765. A 0×0 baseline would make the final comparison blame the panel for the browser's
+  // own layout, so wait for a definite box here. The assertion below is unchanged: a real
+  // resize during the journey still fails it.
+  const panelSize = await waitForValue(panel, `(() => {
+    const size = { w: innerWidth, h: innerHeight };
+    return size.w > 0 && size.h > 0 ? size : null;
+  })()`, value => value !== null, { timeoutMs: 10_000, intervalMs: 50 });
 
   // 2. Evaluate the current page, and 3. watch progress in plain language.
   const before = await evaluate(extension.startPage.page, pageState);

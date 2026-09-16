@@ -16,7 +16,7 @@ Audita Acessibilidade ajuda a examinar a acessibilidade de uma página web de fo
 
 Principais recursos:
 
-- auditoria da página HTTP ou HTTPS aberta no Chrome, em um clique e sem movimentar a página original: a coleta ocorre em uma cópia temporária e inativa;
+- auditoria da página HTTP ou HTTPS aberta no Chrome, em um clique e sem movimentar a página original: a coleta lê a própria página, sem criar aba, navegar, rolar ou mover o foco;
 - auditoria de outra URL informada pelo usuário nos três modos de evidência, sem login e sem servidor externo;
 - auditoria local de 2 a 20 URLs em lote nos três modos, com progresso por página e relatório consolidado, sempre em abas temporárias inativas;
 - três modos de evidência: Evidência completa, Somente elementos e Sem imagens;

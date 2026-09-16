@@ -1496,6 +1496,10 @@ A revisão independente da 1.1.18 devolveu **0 Critical, 1 Important, 3 Minor**,
 
 **Correção.** A falta de dado virou **limitação declarada**, não devolução antecipada: os alvos observados sempre saem, e a limitação diz que há campo sem estado calculado ou sem indicador observado. Unidade: `test/rules/forms.test.js` ganhou o caso exato do gatilho, e ele **falha contra o `src/` anterior** (`actual: []`, `expected: ['unmarked']`). E2E: a fixture de 5.9.7 ganhou o campo `#native-malformed` e a asserção de que o alvo de `#aria-required` sobrevive — o E2E, que era cego a esta mudança, **agora falha contra os bytes anteriores** (`actual: []`) e passa depois.
 
+**Correção da correção — em qual camada a limitação é declarada.** A revisão da 1.1.19 mediu que a frase dessa limitação **não chega a nenhum artefato entregue**: `canonicalCoreRuleLimitations()` (`src/core/report/audit-model.js:240`) troca toda limitação de regra pela frase canônica de revisão humana, e o `:326` ainda *valida* que a justificativa da ocorrência seja igual ao resumo canônico. Portanto "virou limitação declarada" vale **na camada do resultado da regra** — e nos dois testes novos, que leem essa camada —, não no painel, no HTML, no JSON, no CSV ou no PDF. Quem descreve o comportamento ao usuário tem de dizer isso na camada certa.
+
+**O que eu conferi por medição antes de aceitar a consequência mais forte.** A revisão escreveu que, sem a frase, "uma página cujos campos obrigatórios apenas carecem de dado observado fica indistinguível de uma cuja obrigatoriedade foi observada e estava correta". Isso é mais forte do que a medição sustenta. Examinei um JSON técnico realmente entregue (auditoria da página do Google, quatro formatos completos, mantido em disco): ele traz **146 asserções**, uma por item ABNT, **sempre** — 108 `cantTell`, 28 `inapplicable`, 9 `passed`, 1 `failed`. E o texto informativo separa os estados: `passed` → "Resultado agregado: passed." (sem ponteiro), `cantTell` → "conclusão dependente de revisão humana" (com ponteiro quando há ocorrência). O item não desaparece do relatório e "não consegui concluir" não se confunde com "está correto"; o que não é entregue é o **motivo** da inconclusão, não o estado. Por isso não abri revisão de produto por esse achado: a afirmação a corrigir era a minha.
+
 **M2 corrigido.** O terceiro sítio que pode imprimir a referência legal (`src/core/report/html.js`, ramo de modelo) passou a exigir `evaluator`, `decidedAt` e `note` como `consumer-basis.js` e `panel-detail.js`. A revisão não encontrou fluxo de produto que alcance esse ramo hoje (a aba de exportação sempre passa `reportView`), mas um portão de redação jurídica não deve depender de o caminho ser improvável. Teste novo em `test/report/html.test.js` fixa o caso sem nota; os testes existentes que verificavam a referência revisada ganharam a nota que os outros dois sítios já exigiam.
 
 ### O E2E serial nunca rodava — e agora roda, com 11 falhas não triadas
@@ -1881,3 +1885,127 @@ about:blank · chrome-extension://…/test/e2e/fixtures/real-tab-harness.html ·
 **Somando as quatro rotas independentes** — meu rastro de pilha, o dump 2, o dump 3 e agora a sonda dela —, a conclusão sobre os dois testes de marcadores está sustentada por medição em quatro frentes: **o produto faz o certo; a expectativa de posse é que não pertence a este modo**, no arquivo do outro incremento.
 
 Isso não substitui o relatório dela, mas estabelece que, quando ele vier, a classificação terá quatro medições convergentes por trás — e não uma opinião.
+
+## O inventário inteiro da sonda: não há dono nenhum no fluxo anexado, em momento nenhum
+
+A sonda grava o inventário de abas e a forma do armazenamento de sessão em quatro momentos. Lendo o arquivo inteiro (`tab-inventory.json`, medido sobre os bytes empacotados da 1.1.19), o resultado é mais forte do que "nenhuma aba órfã":
+
+| momento | abas | `ownedTabKeys` |
+| --- | --- | --- |
+| antes do painel | about:blank · harness · `/current` (ativa) | — |
+| depois do painel | about:blank · harness · `/current` (ativa) | — |
+| durante a pausa de privacidade | about:blank · harness · `/current` (ativa) | `[]` |
+| depois de cancelar | about:blank · harness · `/current` (ativa) | `[]` |
+
+E o resto da sessão conta a mesma história, em ambos os momentos:
+
+```
+audita:audit-session-capability:v1:…  mode "attached"  state privacy-paused → revoked
+   targetBinding { kind: "attached", tabId: …918, documentIdPresent: true }
+audita:target-capability:v1:…         kind "attached"  state claimed → invalidated
+audita:active-audit-job:v1            { auditId, state: "privacy-paused" } → null
+```
+
+**O que isso decide.** A expectativa do arquivo do outro incremento é
+
+```js
+waitForOwner(extension, auditId, value => value.state === 'retained-for-consent' && value.cleanupMode === 'always')
+```
+
+— ou seja, um registro `audita:owned-tab:v2:*` retido para consentimento. No modo anexado **não existe aba para possuir**: a auditoria roda na própria aba de origem, e o vínculo é declarado como `kind: "attached"` apontando para a aba 918. A espera não pode ser satisfeita em nenhum instante da vida da auditoria, e por isso ela estoura em ~32 s. Não é o produto que deixa de criar o dono: é o teste que pergunta por um dono que este modo não tem.
+
+**E por que quatro testes caem, não dois.** O primeiro subteste morre dentro de `assertPausedAttempt`, **antes** de chegar ao passo de cancelar. O painel fica em `running/privacy-paused`. O subteste seguinte chama `beginAttachedAttempt`, cuja primeira espera é `[data-screen] === 'initial'` — e o painel não está em `initial`, está no meio da tentativa anterior. Daí o `WAIT_TIMEOUT` em 30 064 ms. A sonda prova o sentido contrário: ela **cancela** e espera `initial` (linhas 92-94), e volta em 2 735 ms. Os subtestes 2 a 4 são, portanto, consequência do primeiro — não quatro defeitos independentes de produto.
+
+## A causa do critério 1 está estabelecida: a linha de base é lida antes de o painel ter tamanho
+
+O critério 1 era a falha intermitente de `the side panel must not resize itself during the journey`, em `mandatory-journey-mv3.test.mjs`. O ponto de medição é este:
+
+```js
+const panel = await extension.openSidePanelFromAction();   // :63
+await panel.command('Page.bringToFront');                  // :64
+await waitForValue(panel, 'document.visibilityState', value => value === 'visible', { timeoutMs: 10_000 });  // :65
+const panelSize = await evaluate(panel, `({ w: innerWidth, h: innerHeight })`);   // :68  ← linha de base
+...
+assert.deepEqual(await evaluate(panel, `({ w: innerWidth, h: innerHeight })`), panelSize, ...);  // :175
+```
+
+A sonda da triagem lê **exatamente esse ponto** — `Page.bringToFront`, espera `visibilityState === 'visible'`, lê o tamanho — e obteve:
+
+```
+panelBefore              → { "w": 0, "h": 0 }
+panel-size-during-pause  → { "w": 360, "h": 765 }
+panel-size-after-cancel  → { "w": 360, "h": 765 }
+```
+
+**`visibilityState === "visible"` não implica que o painel já tenha layout.** Quando o layout já aconteceu, a linha de base é 360×765 e a jornada passa; quando ainda não aconteceu, a linha de base é 0×0 e a comparação do fim da jornada falha — com uma mensagem que culpa o painel por um redimensionamento que ele não fez. É uma corrida, e é por isso que ela aparece em uma de três execuções, não em todas.
+
+**O que isso não autoriza.** Enfraquecer a asserção. Ela continua tendo de falhar quando houver redimensionamento real; o que falta é a linha de base ser um tamanho de verdade. A correção (depois do veredito da revisão) é esperar por uma caixa definida antes de capturar, e falsificá-la provocando um redimensionamento de verdade — se a asserção não falhar nesse caso, a correção está errada.
+
+## Primeira medição do varredor por arquivo: a falha de limpeza do `axe-mv3-csp` não se reproduz sozinha
+
+A triagem passou a rodar **cada arquivo E2E serial isoladamente** (`run-perfile.sh`, 34 arquivos, um Chrome por vez). Os dois primeiros resultados já contradizem a leitura de que seriam defeitos de produto:
+
+```
+0 test/e2e/axe-mv3-csp.test.mjs        → 1 teste, 1 passa, 0 falha, 1 055 ms
+0 test/e2e/batch-audit-mv3.test.mjs    → 1 teste, 1 passa, 0 falha, 8 552 ms
+```
+
+No lote serial, `axe-mv3-csp` falhou com `cleanup axe limitado falhou: [{"stage":"profile","code":"failed"}]` — um erro do **desmonte**, depois de o teste em si ter passado. Isolado, ele passa em pouco mais de um segundo. É a primeira confirmação por medição de que aquela falha é artefato de convivência entre arquivos, não comportamento do produto.
+
+### O varredor terminou: 32 dos 34 arquivos passam sozinhos
+
+```
+0  ×32 arquivos          (inclui axe-mv3-csp, mandatory-journey, url-audit, url-pixel-consent)
+1  test/e2e/batch-pixel-consent-mv3.test.mjs
+1  test/e2e/sidepanel-flow-mv3.test.mjs
+```
+
+**Só dois arquivos falham sozinhos**, e nenhum deles por interferência: o do outro incremento (contrato de posse obsoleto, 192 s, as mesmas 7 falhas do lote) e o de exportação de lote em evidência completa. O `axe-mv3-csp` passa isolado em 1,1 s, o que fecha a classificação daquela falha como artefato de desmonte sob carga. Nenhum dos 32 que passam sozinhos morre em asserção sobre resultado de auditoria — e nenhum deles depende do arquivo do outro incremento para passar.
+
+### A falha do critério 1 tem prova direta: a linha de base era `0×0`
+
+A triagem repetiu o percurso três vezes no checkout congelado e reproduziu a intermitência — **duas passaram, uma falhou** (`journey 1 exit=0`, `journey 2 exit=0`, `journey 3 exit=1`). A falha traz o diff inteiro:
+
+```
+AssertionError: the side panel must not resize itself during the journey
+  + actual   - expected
+    {            {
+  +   h: 765,  -   h: 0,
+  +   w: 360    -   w: 0
+    }            }
+```
+
+**O valor esperado é `{w:0,h:0}`.** Ou seja: não há medição nenhuma de que o painel tenha mudado de tamanho — o que há é uma linha de base capturada antes de o painel ter layout, comparada com o painel já disposto. A asserção estava certa e a linha de base é que era oca. É por isso que a falha aparece uma vez em três, e não em todas: depende de o layout do painel ter acontecido antes ou depois da leitura.
+
+Isso também explica por que o teste **passava** nas outras duas execuções sem que nada mudasse no produto. E é a razão de a correção ser na captura da linha de base — esperar por uma caixa definida —, nunca na asserção: um redimensionamento real durante o percurso continua tendo de falhar.
+
+### A nona falha não era orçamento: era a taxa de consulta do próprio teste
+
+A triagem classificou `batch-pixel-consent-mv3` como "orçamento/tempo limite (intermitente)" e escreveu que o efeito seria "nenhum se o orçamento for aumentado". **Essa classificação está errada, e a medição que a derruba é simples.** Eu também tinha uma medição antiga dizendo que o arquivo passava em 15 s com orçamento maior — e ela não se sustentou: o arquivo, **sem nenhuma alteração**, falhou três vezes seguidas, sozinho, sempre no mesmo ponto e sempre por volta de 311 s:
+
+```
+✖ full-evidence batch resumes after restart … (311817ms)   DOWNLOAD_PROOF_TIMEOUT
+real 311.90   user 5.24   sys 1.88
+```
+
+`user 5,24 s` em 311 s de parede: o processo estava **esperando**, não calculando. Um orçamento maior só faria esperar mais.
+
+**O que estava errado era o intervalo entre consultas.** Antes de acusar o produto, instrumentei o passo: em vez de uma única espera de 300 s, consultas curtas e repetidas, imprimindo o que existia a cada rodada — o recibo durável e os registros de download. Resultado:
+
+```
+DIAG probe 0 PROOF OK
+✔ full-evidence batch resumes … (14863ms)   downloads=4
+```
+
+**A prova foi satisfeita na primeira consulta, com 5 s de janela.** O recibo e os quatro arquivos estavam lá. Então montei o experimento de uma variável só, com controle no mesmo ambiente e nos mesmos minutos:
+
+| cópia | alteração | resultado |
+|---|---|---|
+| `site19-ctl` | **nenhuma** | ✖ `DOWNLOAD_PROOF_TIMEOUT` aos **312,02 s** |
+| `site19-i250` | **só** `intervalMs: 50` → `250` | ✔ **14,93 s**, `downloads=4` |
+
+Uma linha de diferença, 312 s de falha contra 14,9 s de aprovação. A asserção não foi tocada em nenhuma das duas: os quatro artefatos continuam tendo de existir, completos, com byte length e sha256 conferidos.
+
+**O mecanismo, como hipótese e não como conclusão.** `waitForFourDownloads` consulta o IndexedDB da própria extensão para ler o recibo durável; a 20 Hz, essa leitura compete com a exportação de lote em evidência completa — a mais pesada da suíte —, que grava blobs e o recibo no mesmo IndexedDB. `url-audit` e `public-axe-map` também consultam a 50 ms e passam, mas exportam muito menos. Não medi o mecanismo por dentro do trabalhador; medi o suficiente para saber que a taxa é a variável decisiva e que a cauda pesada é onde ela morde.
+
+**Correção aplicada:** `intervalMs: 250` no arquivo, alinhado ao `mandatory-journey`, com o motivo escrito no código. Verificado na árvore do produto: **14,9 s, 1/1**. Duas consequências para o registro: (a) o único item que eu mantinha como "medição em aberto" fecha; (b) a classificação da triagem para essa linha fica **corrigida por medição** — não era orçamento, não era intermitente, e aumentar o orçamento não resolveria.

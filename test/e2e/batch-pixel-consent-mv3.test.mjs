@@ -634,7 +634,13 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
   assert.equal(proof.abnt, true, 'P5B_REPORT_ABNT_REFERENCE_MISSING');
   assert.deepEqual(proof.forbidden, [], 'P5B_REPORT_PRIVATE_DATA_LEAK');
   await extension.click(report, 'button[data-report-export]');
-  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 50 });
+  // 250 ms, not 50 ms. Measured with a control: this file, unchanged, timed out at 312 s three
+  // times in a row (`DOWNLOAD_PROOF_TIMEOUT`, ~5 s of CPU — it was waiting, not computing), while
+  // changing *only* this interval to 250 ms made the very same assertion pass in 14,9 s. The proof
+  // polls the extension's own IndexedDB for the durable receipt, and at 20 Hz it starves the heavy
+  // full-evidence batch export it is waiting for. The assertion is untouched: the four artifacts
+  // still have to exist, complete, with matching byte length and sha256.
+  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 250 });
   assert.deepEqual(downloads.map(row => row.format), ['html', 'pdf', 'csv', 'json'],
     'P5B_REPORT_EXPORT_FORMATS_MISSING');
   assert.equal(downloads.every(row => row.state === 'complete' && row.byteLength > 0 &&

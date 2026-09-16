@@ -23,12 +23,12 @@ Para atualizar uma instalação existente, exporte os relatórios que deseja gua
 6. Use **Abrir relatório completo**. A exportação entrega **HTML, PDF, CSV e JSON**. O HTML oferece detalhes expansíveis; o PDF reúne orientações essenciais e evidências sem repetir o dossiê de cada ocorrência. **Imprimir resumo / salvar PDF** gera uma edição executiva separada, que não substitui o relatório completo.
 7. Para uma nova avaliação, use **Refazer auditoria** e confirme a página e o modo. O relatório anterior não é apagado por essa ação.
 
-A inspeção da página atual acontece em uma cópia temporária inativa. Não movimenta a página original, mas pode não reproduzir alterações não salvas, sessão de aplicações ou conteúdo mantido apenas em memória. Os sinais são uma ação posterior solicitada por você, não parte da varredura invisível.
+A inspeção da página atual acontece na própria página, somente para leitura: a extensão não cria aba, não navega, não rola e não move o foco, e a página permanece como você a deixou. Como o documento observado é o que está aberto, o estado atual — inclusive o que ainda não foi salvo — faz parte da avaliação. Os sinais são uma ação posterior solicitada por você, não parte da varredura invisível.
 
 ## Outros recursos
 
-- **Outra URL:** informe o endereço e escolha o modo de evidência.
-- **Lote de páginas:** informe de 2 a 20 URLs, uma por linha. O resultado é consolidado; não há descoberta ilimitada de links. Cada página sensível exige confirmação própria.
+- **Outra URL:** informe o endereço e escolha o modo de evidência. O endereço é aberto em uma aba temporária inativa, removida ao final.
+- **Lote de páginas:** informe de 2 a 20 URLs, uma por linha. O resultado é consolidado; não há descoberta ilimitada de links. Cada página é aberta em aba temporária inativa e cada página sensível exige confirmação própria.
 - **Personas:** leitor de tela com prévia falada/legenda, acromatopsia e navegação por teclado. São apoios de teste, não substitutos da experiência real de uma pessoa com deficiência. Use os controles de encerramento e Escape quando disponível.
 - **Revisão humana:** leia o guia e registre conclusão, nome, data e nota. Não transforme dúvida em falha confirmada. O histórico acompanha a revisão exportada.
 

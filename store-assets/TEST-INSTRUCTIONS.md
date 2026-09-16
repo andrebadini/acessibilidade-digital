@@ -18,7 +18,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 2. Clique no ícone da extensão. Confirme que o painel lateral abre sem popup e permanece ao lado da página.
 3. Escolha **Evidência completa**, **Somente elementos** ou **Sem imagens**.
 4. Selecione **Auditar a página atual**. Confira o progresso por etapa: a etapa atual deve ficar indicada e cada etapa terminada deve receber uma confirmação verde antes do resultado.
-   A página original deve permanecer visível e imóvel durante toda a coleta. A extensão faz a inspeção em uma cópia temporária e inativa, sem alternar a aba, rolar, mover foco ou exibir destaques na página original.
+   A página original deve permanecer visível e imóvel durante toda a coleta. A extensão inspeciona a própria página, somente para leitura, sem criar aba, alternar a aba, rolar, mover foco ou exibir destaques.
 5. Se a página contiver campo de senha, pagamento ou outro marcador sensível, confirme que a auditoria pausa antes dos pixels. Escolha **Continuar e capturar** somente depois de ocultar dados reais; também verifique que é possível cancelar.
 6. No sumário, confira os totais de falhas, alertas, revisão humana e resultados positivos, além dos filtros por impacto, WCAG e ABNT.
 7. Abra uma ocorrência. Confira a explicação, o impacto, a correção sugerida, o nome acessível, o anúncio estimado, WCAG 2.2, ABNT NBR 17225, fundamentação legal, seletor, código e evidências.

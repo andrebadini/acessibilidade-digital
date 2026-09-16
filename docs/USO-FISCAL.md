@@ -37,7 +37,7 @@ O processamento local não transmite o conteúdo coletado. URLs sensíveis são 
 
 As permissões `debugger`, `downloads`, `tabs`, `scripting`, `sidePanel`, `storage`, `alarms` e `contextMenus`, além do acesso às páginas HTTP e HTTPS, são necessárias para coleta local, painel lateral, atalhos, expiração de estados temporários, impressão, download e persistência.
 
-Depois de instalar, fixe o ícone do Audita Acessibilidade na barra do Chrome, se desejar. Um clique no ícone abre diretamente o painel lateral persistente; a auditoria só começa quando você escolhe **Auditar a página atual** dentro dele. A inspeção acontece em uma cópia temporária e inativa, mantendo a página original visível e sem interações da extensão durante a coleta. Também é possível informar **Outra URL** e usar os três modos de evidência. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
+Depois de instalar, fixe o ícone do Audita Acessibilidade na barra do Chrome, se desejar. Um clique no ícone abre diretamente o painel lateral persistente; a auditoria só começa quando você escolhe **Auditar a página atual** dentro dele. A inspeção acontece na própria página e somente para leitura, mantendo-a visível e sem interações da extensão durante a coleta: nenhuma aba é criada, e não há navegação, rolagem, mudança de foco ou destaque. Também é possível informar **Outra URL** — aberta em uma aba temporária inativa, removida ao final — e usar os três modos de evidência. A instalação sem compactação, por **Carregar sem compactação**, é reservada a desenvolvimento e testes controlados.
 
 ## Limitações operacionais
 

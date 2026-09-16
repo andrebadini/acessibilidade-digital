@@ -62,7 +62,11 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.match(listing, /Evidência completa[\s\S]*Somente elementos[\s\S]*Sem imagens/iu);
   assert.match(listing, /HTML, PDF, CSV e JSON-LD\/EARL/iu);
   assert.match(listing, /outra URL[\s\S]*três modos/iu);
-  assert.match(listing, /página original[\s\S]*cópia temporária e inativa/iu);
+  // The listing must describe the shipped mechanism, not the retired one: since `1c9b296` the
+  // current-page audit reads the open page itself. The old assertion demanded "cópia temporária
+  // e inativa" here, which is how a false claim survived five documents and three reviews.
+  assert.match(listing, /página original[\s\S]*coleta lê a própria página[\s\S]*sem criar aba/iu);
+  assert.doesNotMatch(listing, /cópia temporária e inativa/iu);
   assert.match(listing, /2 a 20 URLs[\s\S]*relatório consolidado/iu);
   assert.match(listing, /URLs em lote nos três modos/iu);
   assert.match(listing, /confirmação individual por página/iu);

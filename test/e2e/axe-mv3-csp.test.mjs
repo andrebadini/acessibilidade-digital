@@ -47,7 +47,11 @@ test('runs pinned local axe in every isolated frame under real MV3 and strict pa
     removeProfile() {
       return profile === null ? true : rm(profile, { recursive: true, force: true });
     },
-    stageTimeoutMs: 2_000,
+    // 2 000 ms was measured to be too tight for the recursive removal of a Chrome profile when
+    // the machine is loaded: the same file passes alone in ~1,1 s, but the batch run failed with
+    // `{"stage":"profile","code":"failed"}` while its assertions had already passed. This bounds
+    // a stuck removal, it does not excuse a failed one: `rm` still has to actually succeed.
+    stageTimeoutMs: 15_000,
   });
   t.after(async () => {
     const result = await cleanup();

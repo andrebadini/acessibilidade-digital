@@ -29,7 +29,14 @@ test('plain-language usage docs report the current verification boundary accurat
   assert.match(combined, /lote explícito de 2 a 20 URLs nos três modos/iu);
   assert.match(combined, /consentimento para capturas é individual por página/iu);
   assert.doesNotMatch(combined, /mapa numerado[^.]*permanece em desenvolvimento|mapa numerado[^.]*não faz parte/iu);
-  assert.match(combined, /cópia temporária e inativa[^.]*página original/iu);
+  // The current-page audit reads the open page itself; it has not used a temporary copy since
+  // 1c9b296 ("keep current-page audits bound to the observed document"). This assertion used to
+  // require the opposite sentence and so held a false claim in place — it now requires the true
+  // one, and refuses the copy wording in both documents.
+  assert.match(combined, /inspeção acontece na própria página[^.]*somente para leitura/iu);
+  assert.match(readme, /não cria aba/iu);
+  assert.match(guide, /nenhuma aba é criada/iu);
+  assert.doesNotMatch(combined, /cópia temporária e inativa/iu);
   assert.doesNotMatch(combined, /auditoria anexada atual[^.]*não captura pixels|fluxo anexado atual[^.]*modo sem pixels/iu);
 });
 
