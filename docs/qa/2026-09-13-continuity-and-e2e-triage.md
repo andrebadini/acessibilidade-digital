@@ -614,3 +614,19 @@ Isso mantém a garantia que interessa — não marcar o documento errado — e n
 **Por que não implementei nesta rodada.** É a mudança mais sensível que apareceu nesta sequência: mexe no caminho de prova de documento, tem dois casos (cópia ainda igual e cópia já entregue) e exige E2E em Chrome real para provar que não marca o documento errado. Com o orçamento desta sessão quase esgotado, implementar e não conseguir validar deixaria no repositório uma alteração de privacidade sem verificação — pior que a pendência aberta e documentada.
 
 **O que falta medir antes de codificar**, e é pouco: no instante do pedido de sinais, comparar o `documentId` guardado com o do `probeDocumentIdentity` e comparar os dois `urlSessionDigest`. Se os digests coincidirem, a variante por digest é a correta e a correção acima é a mínima necessária. Se não coincidirem, a página final não é a mesma que a origem registrou, e aí a correção precisa de outra decisão — possivelmente tratar como `PAGE_MARKERS_DOCUMENT_CHANGED`, que é o desfecho honesto.
+
+## Rodada 23 — handoff da correção dos sinais, com a dedução separada da medição
+
+A medição que falta na rodada 22 é comparar o `urlSessionDigest` guardado com o do documento vivo. Pelo que já medi, dá para deduzir o resultado: o digest é derivado de uma URL canônica (`digest = canonicalUrl => …`), e a aba terminou na mesma URL sanitizada `/current` que foi registrada como origem. Logo os digests devem coincidir, e a variante por digest seria a correta.
+
+**Classifico isso como dedução, não como medição.** Nesta mesma sessão eu publiquei como diagnóstico duas conclusões não medidas — um defeito de destaque inexistente e uma limitação de helper que não existia — e as duas estavam erradas. Repetir o padrão aqui seria incoerente com tudo que registrei. A medição continua sendo o primeiro passo antes de codificar: registrar os dois digests no instante do pedido.
+
+### Estado exato da pendência dos sinais, para quem retomar
+
+- **Sintoma medido**: com clique nativo, o painel responde que não foi possível mostrar os sinais; hoje a oferta é honesta e leva às evidências em vez de prometer retry (`6faf023`).
+- **Causa medida**: `executeInDocument` injeta com `documentIds: [record.documentId]`, um documento capturado antes de a aba ser levada à cópia e trazida de volta. A injeção por `tabId`, sem `documentIds`, **funciona** na mesma aba ao fim da auditoria, devolvendo o título e a URL corretos.
+- **O que já foi descartado por medição**: worker reiniciado, cache de origem vazio, ausência de contexto de extensão como causa. Os dois últimos são sintomas da mesma situação, não o motivo.
+- **Correção desenhada**: re-provar identidade com `probeDocumentIdentity(tabId)` antes de injetar; exigir `tabId`/`windowId` iguais aos da origem e `documentId` igual **ou** `urlSessionDigest` igual; injetar contra o `documentId` vivo; e passar o `documentId` vivo ao comparador quando a variante por digest valer. Sem prova, não injetar.
+- **Risco que a correção não pode criar**: aceitar o documento vivo sem provar que é o esperado. É o que permite marcar o documento errado, o ponto de rigor máximo da meta. Nenhuma comparação pode ser removida, apenas trocada por outra igualmente verificada ao vivo.
+- **Onde mexer**: `executeInDocument` e o comparador de prova em `src/background/page-markers-controller.js`; o precedente interno seguro é o caminho do destaque (`proveHighlightTargetsCore`) e o `probeDocumentIdentity`.
+- **Teste que faltaria depois**: um E2E que exija a raiz `data-audita-page-markers-root` na página após o pedido, no mesmo espírito do teste de destaque criado em `22ea7f8` — hoje nenhum teste cobre a marcação dos sinais, só a oferta.
