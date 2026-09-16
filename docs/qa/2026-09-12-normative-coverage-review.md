@@ -361,3 +361,24 @@ A lista de lacunas acima ("orientação, contrastes não textuais, espaçamentos
 **Como as linhas que faltavam fecharam, e o erro de atribuição que eu evitei.** Eu tinha registrado 5.10.4, 5.12.1, 5.8.6 e 5.8.7 como "não recuperado" e dito que a limitação era do meu método. Era mesmo, e o conserto teve duas partes: (a) a primeira ocorrência de um item no texto extraído é a **do índice**, com linhas pontilhadas, e eu estava lendo ali; (b) a janela de busca precisa ser **limitada pelo id do item seguinte**, senão a referência do vizinho entra na conta. O segundo ponto quase virou um erro grave: buscando 5.8.7 numa janela larga apareceram `3.2.1 A` e `3.2.2 A`, que são de **5.8.8** (Mudança de contexto previsível) — se eu tivesse aceitado, teria "reprovado" o catálogo por uma referência que não é daquele item. Limitando ao próximo id, 5.8.7 tem **exatamente 2.5.8 AA**, igual ao catálogo.
 
 **O que continua pendente nestas linhas da matriz** é a validação de **comportamento e cobertura** (o que a regra observa, com que dados e com que resultado), que é a maior parte da coluna "Validação independente" e não se resolve por conferência de texto normativo.
+
+## Verificação normativa dos 146 itens, feita por comparação automática com o PDF (16/09)
+
+Depois de acertar o método nos doze itens acima, apliquei-o ao catálogo inteiro: para cada um dos **146** itens, extraí do PDF a natureza, o título e as referências "C. S." com nível de conformidade, e comparei com `src/core/normative/nbr17225.js`. O confronto é automático, item a item, sem amostragem.
+
+**Resultado:**
+
+| campo | itens conferidos | divergências |
+|---|---|---|
+| natureza (Requisito/Recomendação) | 146 | **0** |
+| título do item | 146 | **0** |
+| referências WCAG e nível | 146 | **3**, todas explicadas abaixo |
+
+**As três divergências, investigadas uma a uma:**
+
+- **5.1.10** (Atalhos de teclado) e **5.13.11** (Elementos nativos): a extração não achou a linha "C. S." nesses dois. A causa é do meu método, não do catálogo: a **NOTA** desses itens cita o **id do item seguinte** ("cumpre-se também o requisito 5.1.11…", "…os requisitos 5.13.12… e 5.13.13…") **antes** da linha "C. S.", e a minha janela terminava no próximo id — cortava justamente a referência. Lendo a página crua, 5.1.10 traz `C.S. 2.1.4, Nível de conformidade A` e 5.13.11 traz `C. S. 1.3.1, Nível de conformidade A`, **exatamente o que o catálogo registra**. Nenhuma divergência real.
+- **5.9.4** (Rótulo de campo descritivo): a norma imprime **`C. S. 2.4.6, Nível de conformidade A`** e o catálogo registra **AA**. Não é descuido nem divergência silenciosa: o item no catálogo carrega `{ id: '2.4.6', level: 'AA', printedLevel: 'A' }` e existe nota editorial própria — `{"itemId":"5.9.4","field":"wcagLevel","printed":"2.4.6 nível A","normalized":"2.4.6 nível AA","rationale":"O nível oficial do critério…"}`. Ou seja: o produto **preserva o que a norma imprime, normaliza para o nível oficial do critério e declara a diferença**, que é o comportamento que a meta pede para errata de impressão.
+
+**O que isso muda na matriz.** As 146 linhas deixam de ter a parte **normativa** da coluna "Validação independente" em aberto: natureza e título conferem em todas, as referências conferem em 143 por igualdade exata e nas 3 restantes a explicação está medida e registrada. **O que continua pendente é a outra parte da coluna** — a validação de **comportamento e cobertura**: o que cada regra observa, com que dados, com que resultado, e onde a resposta correta é "não conclui". Isso não se resolve por conferência de texto normativo e é o trabalho que resta.
+
+**Nota de método, para quem repetir:** a extração precisa (a) descartar a entrada do **índice**, que tem o mesmo formato e linhas pontilhadas; (b) descartar **referências cruzadas**, que aparecem como `5.1.3, Título.` — com vírgula depois do id — e não como `5.1.3 Título – Requisito`; e (c) **não** limitar a janela pelo próximo id cego, porque NOTAs citam ids vizinhos antes da linha "C. S.". As três armadilhas produziram, cada uma, um falso alarme contra o catálogo antes de eu entendê-las.
