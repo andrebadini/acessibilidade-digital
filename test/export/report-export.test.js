@@ -454,6 +454,18 @@ test('accepts an honest partial delivery from a review-ready revision and persis
   assert.deepEqual(durableReceipt.formats.map(row => row.sha256),
     result.deliveryReceipt.formats.map(row => row.sha256));
   assert.equal(result.deliveryReceipt.limitations.length > 0, true);
+  // O outro lado do portão, para ele não virar "aceita qualquer coisa": um recibo que PERDEU um dos
+  // quatro artefatos não é entrega parcial honesta — a revisão imutável não gerou artefato nenhum para
+  // retrofitar, então um recibo sem o arquivo é recusado e a revisão não avança.
+  const originalReceipt = result.deliveryReceipt;
+  result.deliveryReceipt = { ...originalReceipt, formats: originalReceipt.formats.slice(0, 3) };
+  await assert.rejects(
+    persistExportSuccess(createExportSuccessRequest({ auditId: model.auditId, result, latest: {} }), store),
+    /recibo|artefatos|correspondem/iu);
+  result.deliveryReceipt = originalReceipt;
+  assert.equal((await store.getAuditSnapshot(model.auditId)).revision, snapshot.revision + 1,
+    'a tentativa recusada não pode avançar a revisão');
+  assert.equal((await store.getLatest()).exportStatus, 'partial');
 });
 
 test('rejects noncanonical export issues and never invokes issue or request accessors', async () => {
