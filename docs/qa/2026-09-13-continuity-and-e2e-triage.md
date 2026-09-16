@@ -1709,3 +1709,17 @@ test/e2e/support/real-chrome.mjs:13
 Confirmei o encanamento antes de propor: `:127` recebe `commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS`, e `:241` e `:267` resolvem cada comando como `options.timeoutMs ?? commandTimeoutMs`. Ou seja, **um único valor governa todos os comandos CDP que não passam timeout explícito** — exatamente a classe que falha em 30 005–30 720 ms —, enquanto as esperas menores (10 s, 5 s) têm os próprios padrões e não são afetadas. Nenhuma asserção muda: só muda quanto tempo o harness espera antes de desistir, e um comando que trave de verdade continua falhando, apenas mais tarde.
 
 **Não apliquei**, e a ordem importa: aplicar antes do veredito transformaria a hipótese em premissa e apagaria a evidência que a triagem está produzindo. Ela tem a cópia congelada e o instrumento; quando ela disser o que é, isto entra — ou vira achado de produto, se as falhas persistirem com o teto maior.
+
+## Índice do estado atual (leia isto primeiro)
+
+Esta trilha é cronológica e tem mais de 1.300 linhas; ela registra o caminho, incluindo hipóteses minhas que caíram. Para o **estado de agora**, os três documentos que valem são:
+
+| Documento | Para que serve |
+|---|---|
+| `docs/qa/2026-09-16-estado-dos-criterios-1.1.19.md` | Os 12 critérios de conclusão, um por linha, com a evidência de cada um e o que falta |
+| `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` | Todo achado das revisões da 1.1.16, 1.1.17 e 1.1.18, com desfecho e a medição que o sustenta |
+| este arquivo, das rodadas 45–58 em diante | Como se chegou aqui: as correções, as medições e as retratações |
+
+**Números que valem hoje, e não os das rodadas antigas:** fase paralela da suíte **verde** (4179 testes, 4178 passam, 1 pulado, 0 falham) — as "8 falhas pré-existentes" foram aposentadas com motivo na rodada 58; fase serial com **9 falhas mapeadas por dono** (7 no arquivo de outro incremento, 1 orçamento já corrigido, 1 limpeza de perfil no teardown do harness), nenhuma delas defeito de produto confirmado na minha área.
+
+**O que ainda não está fechado:** o critério 10 depende do relatório da triagem da 1.1.19, e o critério 1 depende de estabelecer se a intermitência do painel é do produto ou do tempo do teste. A 1.1.19 **não** é candidata enquanto os dois estiverem abertos.
