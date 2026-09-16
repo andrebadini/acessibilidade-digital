@@ -1024,3 +1024,39 @@ Idênticos. Também confirmei o percurso real nesse estado: clicar em "Ir ao ele
 **Por que isto aconteceu, e é o que importa registrar.** É o **quarto** erro de conclusão meu nesta sessão por instrumentação ou leitura errada, e o segundo que eu quase converti em "correção" de produto. O padrão é sempre o mesmo: eu olho para a superfície errada, ou para uma sonda que não confirmei ativa, e transformo a ausência do que esperava em defeito do produto. A regra que já estava escrita — confirmar a sonda no arquivo carregado e que ela dispara — não bastou aqui, porque a sonda **disparou** e o que estava errado era **onde eu media**. A regra que falta é complementar: antes de declarar defeito, verificar que a superfície medida é a que o produto promete naquele estado, e não a que eu esperava encontrar.
 
 **Estado da entrega.** Nada mudou no produto nesta rodada. O pacote da rodada 35 continua sendo o artefato verificado: percurso obrigatório completo passando contra o extraído, quatro exportações confirmadas, `verify-project` GREEN. E a fila real continua a mesma, sem o item falso: campos customizados (fechado), produtor visual de 5.9.1 (parcial, com escopo declarado), produtor de perceptibilidade de 5.9.7 (desenho registrado), 9 cenários de `sidepanel-flow` (causa diagnosticada em outro incremento) e a lacuna de vocabulário português no filtro de privacidade.
+
+## Rodada 37 — o relatório e o Google real, medidos
+
+### Estrutura do relatório gerado
+
+Auditei uma fixture com falhas confirmadas e li a forma do relatório na aba própria:
+
+- **Sumário executivo** ("Sumário executivo e limitações críticas") e a seção "Cobertura e quatro grupos de resultado".
+- **Os quatro grupos separados e nomeados**: "Não conformidades: 2", "Alertas: 0", "Revisões humanas pendentes: 5", "Resultados positivos: 6". É exatamente a separação que o produto promete — nenhuma suspeita somada sob "ocorrências".
+- **Gráfico**: um SVG de rosca com o total de verificações no centro, mais o índice técnico automático com a fórmula explícita ("Índice = 10 × testes atendidos ÷ (atendidos + falhos)… Sem denominador, não há nota") e a ressalva de que 10 não comprova acessibilidade integral e não é certificação.
+- **Agrupamentos por item ABNT** em blocos expansíveis, matriz com 146 linhas, filtros clicáveis, referências WCAG e ABNT presentes, `lang` e título corretos, zero `script` no relatório.
+
+### Google real, página atual, modo sem pixels
+
+Medição desta rodada, no Chrome real, em `https://www.google.com/`:
+
+```
+Resumo: 0 falhas confirmadas · 1 recomendação/alerta · 3 suspeitas a confirmar (4 ocorrências) · 9 positivos
+Relatório na aba: "Não conformidades: 0", "Alertas: 1", "Revisões humanas pendentes: 3",
+                  "Resultados positivos: 9", checklist com 146 linhas, cobertura "Cobertura automática: 28,5%"
+Exportação: html, pdf, csv, json — quatro formatos entregues
+Página: antes {"x":0,"y":0,"focus":"TEXTAREA","url":"https://www.google.com/"}
+        depois idêntico — a auditoria não rolou, não mudou o foco nem navegou
+```
+
+Dois pontos que merecem registro, e um deles é o oposto do que a leitura apressada sugere.
+
+**O Google não produziu nenhuma falha confirmada.** Zero. O que existe é 1 alerta, 3 suspeitas com 4 ocorrências e 9 verificações positivas, com cobertura automática de 28,5% — ou seja, 71,5% do catálogo não foi decidido automaticamente nesta página, e o relatório diz isso. Isto é coerente com o desenho: suspeita não vira infração. Também é o oposto do defeito histórico de 753 verificações humanas e 700+ páginas: aqui são 3 revisões humanas e um relatório de tamanho normal.
+
+**A metodologia está atrás de um clique.** O bloco "Como o gráfico e o índice são calculados", que contém a fórmula e o denominador, é um `<details>` **fechado** por padrão (`open: false`). A cobertura aparece como "Cobertura automática: 28,5%", sem a fórmula ao lado. O conteúdo está no DOM e é acessível por um clique, e o `<summary>` nomeia claramente o que será revelado — o que é defensável num relatório que precisa ser navegável. Mas a exigência do usuário é "com fórmula, denominador e limitações explícitos", e "explícito" sugere visível sem interação. **Registro como divergência de apresentação, não como defeito corrigido**: mudar isso é decisão de desenho (abrir por padrão, ou trazer a fórmula para fora do bloco recolhido), e não a tomei.
+
+**Lacuna de verificação, declarada como tal.** Tentei ler o **HTML exportado** para confirmar se ele traz a fórmula e a cobertura, e a leitura não encontrou nem "denominador" nem "Cobertura automática". Não consegui inspecionar o arquivo baixado — o diretório de downloads do perfil é removido ao fim do teste, e não reservei uma cópia. Portanto **não afirmo que o HTML exportado omite a fórmula**: afirmo que a minha leitura não a encontrou e que isso precisa ser medido de novo, guardando o arquivo. A diferença importa, porque o HTML exportado é o artefato que sai da máquina e vai para terceiros.
+
+### Suíte
+
+Sem mudança de produto nesta rodada. 4183 testes, 4175 passam, as mesmas 8 pré-existentes; `src/` limpo.
