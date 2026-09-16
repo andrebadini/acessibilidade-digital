@@ -183,3 +183,15 @@ test('same delivered result keeps current marks and failed hide remains retryabl
   assert.equal(f.session.read().status, 'active');
   assert.match(f.session.read().message, /remover/u);
 });
+
+test('the unavailable notice does not promise a recovery that cannot work', async () => {
+  const f = fixture(), pending = f.session.show(); await tick();
+  f.requests[0].resolve({ ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' }); await pending;
+  const state = f.session.read();
+  assert.equal(state.status, 'unavailable');
+  // The source page has no live extension surface, so repeating the audit cannot create one.
+  // A person reading this notice must not be told to redo the audit.
+  assert.doesNotMatch(state.message, /refaça a auditoria|tente novamente|repita/iu);
+  assert.match(state.message, /relatório/u);
+  assert.match(state.message, /sinais/u);
+});

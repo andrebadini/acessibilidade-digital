@@ -1,4 +1,7 @@
-const UNAVAILABLE = 'Não foi possível mostrar os sinais nesta página. Refaça a auditoria da página atual ou consulte as evidências do relatório.';
+// Once a current-page audit finishes, the source page has no live extension surface, so
+// repeating the audit cannot create one. The notice therefore stops promising a retry it
+// cannot deliver and points at what still works: the recorded evidence in the report.
+const UNAVAILABLE = 'Não foi possível mostrar os sinais nesta página. Esta página não tem mais um canal ativo da extensão, então repetir a auditoria não resolve; consulte as evidências e as capturas no relatório.';
 const REMOVE_FAILED = 'Não foi possível confirmar a remoção dos sinais. Tente remover novamente.';
 const empty = () => ({ status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, message: null });
 function freeze(value) {

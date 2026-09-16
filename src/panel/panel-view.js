@@ -731,12 +731,19 @@ function renderPageMarkerReview(document, markers, emit) {
     heading(document, 2, 'Conferir na página'),
   );
 
+  // When the page has no live extension surface the offer cannot succeed, so the primary
+  // action stops promising a retry and moves the person to the recorded evidence instead.
+  const unavailable = markers.status === 'unavailable';
   const action = ['active', 'hiding'].includes(markers.status)
     ? actionButton(document, markers.status === 'hiding' ? 'Removendo sinais' : 'Ocultar sinais na página',
       'HIDE_PAGE_MARKERS', 'page-marker-action', emit, 'secondary-action page-marker-action', {}, markers.status === 'hiding')
     : actionButton(document, markers.status === 'showing' ? 'Preparando sinais'
-      : markers.status === 'unavailable' ? 'Tentar mostrar sinais' : 'Mostrar sinais na página',
-    'SHOW_PAGE_MARKERS', 'page-marker-action', emit, 'primary-action page-marker-action', {}, markers.status === 'showing');
+      : unavailable ? 'Ver evidências no relatório' : 'Mostrar sinais na página',
+    unavailable ? 'OPEN_REPORT' : 'SHOW_PAGE_MARKERS', 'page-marker-action', emit,
+    unavailable ? 'secondary-action page-marker-action' : 'primary-action page-marker-action', {}, markers.status === 'showing');
+  if (unavailable) {
+    action.setAttribute('aria-label', 'Ver evidências no relatório: os sinais não podem ser mostrados nesta página');
+  }
   wrapper.append(action);
 
   const status = paragraph(document, markerStatusMessage(markers), 'page-marker-status');

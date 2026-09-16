@@ -303,8 +303,8 @@ test('active zero-location review remains hideable and preserves detail evidence
   assert.ok(root.querySelector('[data-detail-block="technical"]'));
 });
 
-test('idle and unavailable review states expose one keyboard-native show action', () => {
-  for (const [status, message] of [['idle', null], ['unavailable', 'Não foi possível mostrar os sinais. Tente novamente.']]) {
+test('idle and unavailable review states expose one keyboard-native action each', () => {
+  for (const [status, message] of [['idle', null], ['unavailable', 'Não foi possível mostrar os sinais nesta página. Esta página não tem mais um canal ativo da extensão, então repetir a auditoria não resolve; consulte as evidências e as capturas no relatório.']]) {
     const input = fixture();
     const intents = [];
     const root = renderPanelView({
@@ -313,13 +313,24 @@ test('idle and unavailable review states expose one keyboard-native show action'
       }) }),
       document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
     });
-    const show = root.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]');
-    assert.equal(show.tagName, 'BUTTON');
-    assert.equal(show.getAttribute('type'), 'button');
-    assert.equal(show.hasAttribute('aria-disabled'), false);
-    show.click();
-    assert.deepEqual(intents, [{ type: 'SHOW_PAGE_MARKERS' }]);
-    if (message) assert.match(root.textContent, /Não foi possível mostrar os sinais/u);
+    const expectedIntent = status === 'unavailable' ? 'OPEN_REPORT' : 'SHOW_PAGE_MARKERS';
+    // The report button also exists in the result actions, so scope the lookup to the
+    // "Conferir na página" region.
+    const region = root.querySelector('[data-page-marker-review]');
+    const action = region.querySelector(`button[data-intent="${expectedIntent}"]`);
+    assert.equal(action.tagName, 'BUTTON');
+    assert.equal(action.getAttribute('type'), 'button');
+    assert.equal(action.hasAttribute('aria-disabled'), false);
+    action.click();
+    assert.deepEqual(intents, [{ type: expectedIntent }]);
+    if (message) {
+      assert.match(root.textContent, /Não foi possível mostrar os sinais/u);
+      // The notice must not promise a retry that cannot work, and the action must lead to the
+      // recorded evidence instead of repeating the same denied request.
+      assert.doesNotMatch(root.textContent, /Refaça a auditoria|Tente novamente/iu);
+      assert.equal(region.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]'), null);
+      assert.match(action.textContent, /Ver evidências no relatório/u);
+    }
   }
 });
 
