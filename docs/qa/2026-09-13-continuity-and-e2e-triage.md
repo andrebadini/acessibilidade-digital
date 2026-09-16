@@ -598,3 +598,19 @@ Correção, com fronteira explícita: resolver o documento no momento da instala
 Não implementei. A mudança é pequena em linhas e grande em consequência, e a sequência desta sessão mostrou duas vezes o custo de concluir antes de medir. O que faltava medir agora está medido: o alvo é o problema, e o caminho de correção já tem precedente interno testado.
 
 Nenhuma sonda deixada no repositório.
+
+## Rodada 22 — a peça que faltava para a correção, e por que não a implementei
+
+Fui implementar a correção e encontrei uma dificuldade que muda o formato dela — registro em vez de escrever código pela metade.
+
+**A dificuldade.** `executeInDocument` mira `record.documentId`, que é o documento **da cópia** no instante da preparação. Depois disso, a cópia é entregue: a aba volta para a URL final, e o documento vivo passa a ser outro. Trocar o alvo por `tabId` resolve o alcance, mas cria um risco novo: sem filtro de documento, a injeção passa a aceitar o primeiro resultado do frame principal, e a verificação atual (`wrapper.documentId === record.documentId`) deixaria de valer. Aceitar o documento vivo **sem** provar que é o documento esperado é exatamente o que pode marcar o documento errado — o risco máximo desta meta.
+
+**A peça que existe no repositório.** O controlador já tem o primitivo certo: `probeDocumentIdentity(tabId)`, que devolve `{ tabId, windowId, documentId, urlSessionDigest }` do documento vivo. Ele já é usado na preparação, antes de instalar, e é o mesmo tipo de prova que o destaque usa antes de sobrepor.
+
+**Formato da correção, então.** Antes de injetar: re-provar a identidade pelo `probeDocumentIdentity`; exigir `tabId`/`windowId` iguais aos da origem e **ou** `documentId` igual (caso comum, comportamento atual preservado) **ou** `urlSessionDigest` igual (caso da cópia entregue, mesmo endereço, documento novo); usar o `documentId` **vivo** como alvo da injeção; e, quando a verificação exigir a variante por digest, fornecer o `documentId` vivo ao comparador em vez do guardado. Sem essa prova, não injetar.
+
+Isso mantém a garantia que interessa — não marcar o documento errado — e não depende de afrouxar nenhuma comparação: troca uma igualdade de documento por uma igualdade de identidade de endereço, verificada ao vivo.
+
+**Por que não implementei nesta rodada.** É a mudança mais sensível que apareceu nesta sequência: mexe no caminho de prova de documento, tem dois casos (cópia ainda igual e cópia já entregue) e exige E2E em Chrome real para provar que não marca o documento errado. Com o orçamento desta sessão quase esgotado, implementar e não conseguir validar deixaria no repositório uma alteração de privacidade sem verificação — pior que a pendência aberta e documentada.
+
+**O que falta medir antes de codificar**, e é pouco: no instante do pedido de sinais, comparar o `documentId` guardado com o do `probeDocumentIdentity` e comparar os dois `urlSessionDigest`. Se os digests coincidirem, a variante por digest é a correta e a correção acima é a mínima necessária. Se não coincidirem, a página final não é a mesma que a origem registrou, e aí a correção precisa de outra decisão — possivelmente tratar como `PAGE_MARKERS_DOCUMENT_CHANGED`, que é o desfecho honesto.
