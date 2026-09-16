@@ -2176,3 +2176,13 @@ O passo do checklist "verificar falsos positivos, falsos negativos e separação
 O entregável `entregas/comparacao-avaliadores-externos.md` fica fora deste worktree e não é versionado aqui, mas é entregável de usuário — e ele dizia que a medição do Google era "da **versão atual** (bytes empacotados da 1.1.19)". Com a 1.1.20 como artefato corrente, isso virou a mesma classe de erro que a meta proíbe: número de uma versão apresentado como o da versão que está em `release/`.
 
 Corrigido para o estado verdadeiro: os números são **da 1.1.19**; a 1.1.20 é incremento de apresentação e as contagens foram **re-medidas na árvore dela, idênticas** (0/1/3(4)/9, checklist 109, índice 9,0/10, cobertura 28,5%); a medição nos **bytes empacotados da 1.1.20** ainda será feita, e até lá o documento diz que aqueles números são da 1.1.19. A frase final, que mandava ler 28,5% como "o valor da versão atual", passou a dizer "o valor mais recente medido".
+
+### O mapa de anúncios e o aviso honesto estão no artefato entregue da 1.1.20
+
+O critério 9 tinha a evidência do módulo de leitor de tela e do mapa de anúncios medida **em código** (os cinco sítios do aviso) e em artefatos de versões anteriores. Conferi no HTML entregue da 1.1.20, página real do Google:
+
+- o marcador do mapa de anúncios está presente;
+- o aviso honesto está impresso ao usuário, literalmente: *"Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências."*;
+- há **13** menções de "Anúncio estimado" no documento, nas fichas que têm prévia.
+
+Ou seja, a exigência da meta — "explique honestamente que a simulação e o anúncio estimado não equivalem ao comportamento exato de todos os leitores de tela" — não é só uma string no código: ela **chega ao artefato que a pessoa usuária recebe**, na versão corrente.
