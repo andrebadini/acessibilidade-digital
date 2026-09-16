@@ -177,3 +177,24 @@ A margem de 2000 px separa "escondido de propósito" de "apenas longe", e o limi
 **Resultado no Chrome real**, com os dois rótulos na mesma página: `#name` (recortado) e `#code` (fora da tela) produzem dois alvos, com `reason` `clipped-label` e `offscreen-label`, e o teste confirma que o rótulo fora da tela chega ao consumidor com a coordenada crua. A conclusão continua `cantTell`, nunca `failed`: nem recorte nem posicionamento provam ausência de percepção, porque a norma admite propósito visualmente evidente.
 
 **Correção posterior (achado Minor da revisão independente de 1.1.16).** A justificativa acima estava incompleta: a medida é relativa ao documento, e por isso também dispara para um rótulo comum que está apenas **deslocado dentro de um contêiner com rolagem própria** — a revisão mediu `documentRect.x = -504` num `overflow-x:auto`, com o alvo afirmando que o rótulo estava "fora da área visível da página". O texto do alvo e o comentário do predicado foram corrigidos para descrever o que a medida realmente mostra ("deslocado para fora da área de conteúdo observada, à esquerda da origem do documento ou muito abaixo dela — o que também acontece com um rótulo dentro de um contêiner com rolagem própria"). O resultado já era `cantTell`, então a fronteira entre suspeita e infração não foi afetada; o que estava errado era a afirmação sobre a causa. Distinguir os dois casos exigiria observar a rolagem do contêiner, que a coleta ainda não registra — registrado como cobertura pendente.
+
+## Texto normativo conferido no PDF do usuário, para 5.9.1 e 5.9.7
+
+Li as impressas 22 e 23 direto do PDF fornecido (índice físico = impressa + 9), porque as duas regras modificadas decidem sobre elas e a revisão independente citou uma delas. O que está escrito:
+
+> **5.9.1 Rótulo de campo – Requisito**
+> — Todos os campos de formulário possuem um rótulo que os identifica; ou
+> — O campo de formulário possui propósito visualmente evidente e um nome acessível que o identifica.
+> C. S. 3.3.2, Nível de conformidade A / C. S. 4.1.2, Nível de conformidade A
+
+> **5.9.7 Campos obrigatórios – Requisito**
+> Todos os campos obrigatórios estão devidamente identificados, de forma que todos possam perceber.
+> C. S. 3.3.2, Nível de conformidade A
+
+**Por que isso confirma as duas fronteiras, e não apenas uma.**
+
+5.9.1 tem **duas alternativas** ligadas por "ou": rótulo que identifica, **ou** propósito visualmente evidente com nome acessível. Nenhuma medição de rótulo — recorte, posicionamento, marcação — pode provar que a segunda alternativa não vale, e é exatamente por isso que o resultado fica em `cantTell` com alvo, nunca em `failed`.
+
+5.9.7 é **requisito** e pede que **todos possam perceber**. Duas consequências: (a) como requisito, uma reprovação ali chega ao relatório com a frase legal de não conformidade — o que dá a dimensão exata do achado Critical da revisão da 1.1.16; (b) como o texto exige percepção, e percepção depende de contraste, tamanho, posição e do recurso que apresenta a marcação, nenhuma observação de texto pode **aprovar** o item. Foi por isso que os dois ramos passaram a `cantTell`, e não apenas o ramo da ausência.
+
+Isto é leitura direta da norma, não interpretação de segunda mão: as duas citações acima foram extraídas do PDF cujo SHA-256 é `1c3ee66b…`, o mesmo registrado na meta.
