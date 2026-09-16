@@ -704,3 +704,32 @@ Onde medir em seguida, e é uma linha: registrar `sessionPortClient === null` e 
 Registro a tensão em vez de escolher um lado: o relatório abrir indica cliente vivo; as sondas mudas indicam que `requestIntent` não foi executado. Uma das duas leituras está errada, e a medição de uma linha acima decide qual.
 
 Nada alterado no produto; as sondas foram revertidas e 82/82 testes das duas famílias do painel seguem verdes.
+
+## Rodada 27 — as sondas da rodada 26 não estavam no arquivo: duas conclusões caem
+
+Fui medir a pergunta binária que a rodada 26 deixou e encontrei um erro de método meu que invalida parte do que registrei.
+
+Medição desta rodada, no caminho real:
+
+```
+INTENT-LOG: [ … {"type":"PANEL_START_ATTACHED_AUDIT", hasClient:true, hasMethod:true},
+              {"type":"GET_HIGHLIGHT_STATE", …},
+              {"type":"GET_HIGHLIGHT_AVAILABILITY", …},
+              {"type":"PANEL_SHOW_PAGE_MARKERS", hasClient:true, hasMethod:true} ]
+```
+
+Ou seja: `requestPanelIntent` **é chamado** com `PANEL_SHOW_PAGE_MARKERS`, e o cliente de sessão existe com o método disponível. Nada de cliente nulo.
+
+O problema: a seguir verifiquei o arquivo e **as sondas que eu havia adicionado em `panel-session-port.js` não estavam mais lá** (`grep __portDiagHead` → 0 ocorrências). Foram perdidas na manipulação dos probes entre rodadas. Portanto a rodada 26 mediu um arquivo **sem** as sondas, e os dois `null` que registrei não significam "o cliente não foi chamado": significam que **a sonda não existia**.
+
+Consequências, e preciso ser explícito:
+
+1. **Cai a conclusão da rodada 25** de que "o worker nunca foi consultado e a negação é decidida no painel antes do pedido". O que tenho é: o pedido é montado e `requestPanelIntent` roda com cliente vivo. O que acontece depois — resposta negada pelo worker, ou resposta tratada como inválida pelo cliente — **não foi medido**.
+2. **Cai também a hipótese do cliente nulo** que eu apresentei como a mais provável na rodada 26. Ela está descartada por medição direta: `hasClient: true`, `hasMethod: true`.
+3. Continua verdadeiro e medido: `show()` não retorna cedo; o contexto existe com 1 id e revisão 1; o painel exibe a indisponibilidade; nenhuma raiz de sinais aparece na página.
+
+O que isso diz sobre o método desta sessão, e registro sem atenuar: três vezes publiquei conclusões apoiadas em sondas que eu não verifiquei estarem ativas — o defeito de destaque inexistente, a "limitação do helper" e agora o "bloqueio no painel". Em todas, a instrumentação era o elo frágil, não o produto. A regra que faltou é simples: antes de concluir a partir de uma sonda, confirmar que a sonda está no arquivo carregado e que ela dispara — e, quando ela **não** dispara, a primeira hipótese deve ser "a sonda não está lá", não "o código não passou por aqui".
+
+Próxima medição, agora com essa regra: confirmar a presença da sonda no arquivo antes de rodar, e registrá-la no ponto de entrada do cliente de porta e na resposta recebida, para separar "resposta negada pelo worker" de "resposta descartada pelo cliente".
+
+Nada alterado no produto; a sonda desta rodada foi revertida e `src/` está limpo.
