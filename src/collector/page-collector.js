@@ -41,6 +41,30 @@ export function collectRuntimePageData() {
     const gradient = /(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(/u.test(normalized);
     return url && gradient ? 'mixed' : url ? 'url' : gradient ? 'gradient' : 'mixed';
   };
+  // Reads the marker the page puts next to a required field, from the labels the DOM itself
+  // associates with it. innerText already reflects display:none, and a hidden label is skipped
+  // because a marker nobody sees is not a marker. The search is bounded to the first characters so
+  // an asterisk in unrelated prose further down does not become this field's marker.
+  const requiredMarker = text => {
+    const carried = String(text ?? '').replace(/\s+/gu, ' ').trim().slice(0, 120);
+    if (carried === '') return '';
+    const parenthesised = /\(\s*(obrigat[óo]ri[ao]|required)\s*\)/iu.exec(carried);
+    if (parenthesised) return `(${parenthesised[1]})`;
+    if (/\*/u.test(carried)) return '*';
+    const word = /(?:^|[\s\-–—])(obrigat[óo]ri[ao]|required)(?=$|[\s.,;:!?\-–—])/iu.exec(carried);
+    return word ? word[1] : '';
+  };
+  const requiredMarkerNear = element => {
+    const labels = element?.labels;
+    if (!labels || typeof labels.length !== 'number') return '';
+    for (const label of labels) {
+      const text = typeof label?.innerText === 'string' ? label.innerText
+        : typeof label?.textContent === 'string' ? label.textContent : '';
+      const marker = requiredMarker(text);
+      if (marker !== '') return marker;
+    }
+    return '';
+  };
   const opaqueColor = value => {
     const color = String(value || '').trim().toLowerCase();
     return /^rgb\(/u.test(color) || /^#[0-9a-f]{6}$/u.test(color) || /^#[0-9a-f]{3}$/u.test(color) ||
@@ -360,6 +384,11 @@ export function collectRuntimePageData() {
           : undefined;
     const measuredTarget = targetSizeRect(element);
     const measuredLine = hasRenderedBox ? charactersPerLine(element) : undefined;
+    // What the page declares next to the field about its requiredness. This is an observation, not a
+    // claim that everyone can perceive it: the marker could be the wrong colour, too small or off
+    // screen, and 5.9.7 asks for perception. Reporting the declaration removes the "missing data"
+    // state and lets the consumer judge with the declaration in hand.
+    const requiredIndicator = required === true ? requiredMarkerNear(element) : '';
     const record = {
       order,
       tagName: element.localName,
@@ -377,6 +406,7 @@ export function collectRuntimePageData() {
       focusable: element.matches('a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]') && !disabled,
       ...(nativeControl ? { disabled } : {}),
       ...(required === undefined ? {} : { required }),
+      ...(required === true ? { requiredIndicator } : {}),
       active: document.activeElement === element,
       shadowHost: Boolean(element.shadowRoot),
       shadowRootMode: element.shadowRoot?.mode || null

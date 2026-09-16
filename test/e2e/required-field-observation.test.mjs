@@ -11,7 +11,9 @@ import { launchUnpackedExtension, resolveRealChromeTestBinary, startFixtureServe
 test('observed required state reaches the ABNT 5.9.7 consumer without inventing visual identification', { timeout: 60_000 }, async t => {
   const fixture = await startFixtureServer(t, new Map([['/', {
     status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: `<!doctype html><html lang="pt-BR"><title>Obrigatoriedade</title>
+    <label for="native-required">Nome completo *</label>
     <input id="native-required" required>
+    <label for="native-optional">Apelido</label>
     <input id="native-optional">
     <input id="aria-required" aria-required="true">
     <div id="custom-required" role="textbox" contenteditable="true" aria-required="true" style="width:200px;height:40px;border:1px solid"></div></html>`,
@@ -38,10 +40,26 @@ test('observed required state reaches the ABNT 5.9.7 consumer without inventing 
     'the native observation must not claim the ARIA declaration of a custom field');
   assert.equal(byId('native-required').form?.required, true, 'the nested form record stays consistent');
 
-  // The consumer must see a declared required field, a consistent state and a missing
-  // perceptibility producer — never an invented failure nor an invented approval.
+  // The declared marker is now observed, and observation is not perception: the collector reports
+  // what the page declares next to the field, and the rule stays in review rather than converting a
+  // declaration into proof that everyone can perceive it.
+  assert.equal(byId('native-required').requiredIndicator, '*',
+    'the declared marker next to the field must be observed');
+  assert.equal(byId('native-optional').requiredIndicator, undefined,
+    'an optional field declares no marker, and required=false already says so');
+  assert.equal(byId('native-required').form?.requiredIndicator, undefined,
+    'the marker belongs to the record, not to the nested native observation');
+  assert.equal(byId('aria-required').requiredIndicator, '',
+    'a required field with no associated label declares no marker');
+
+  // With the declaration observed the rule decides instead of reporting missing data: the field
+  // that declares a marker is not a finding, and the required field with no declared marker is a
+  // confirmed failure — nothing declared means nothing anyone could perceive. The message still
+  // speaks of identification rather than of a legal infraction.
   const result = (await runRules(snapshot, {}, FORM_RULES.filter(rule => rule.id === 'required-field-identification')))[0];
-  assert.equal(result.outcome, 'cantTell');
-  assert.deepEqual(result.targets, []);
+  assert.equal(result.outcome, 'failed');
+  assert.deepEqual(result.targets.map(target => target.selectorHint), ['#aria-required']);
+  assert.equal(result.targets[0].data.reason, 'missing-required-identification');
+  assert.doesNotMatch(result.summary, /infração|inconformidade ao item/iu);
   assert.deepEqual(await extension.evaluate(page, state), before);
 });

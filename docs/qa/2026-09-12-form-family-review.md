@@ -132,3 +132,27 @@ Correção: o predicado agora expande os valores como margens (um valor para os 
 Ao escrever os testes unitários errei **sete vezes** a expansão do `inset` — cheguei a afirmar que `inset(50% 0% 0% 0%)` fechava o eixo horizontal quando na verdade fecha o topo. Cada erro foi corrigido pela medição, não por releitura, e o teste final usa uma matriz de valores em vez de estilos escritos à mão, justamente para não repetir esse tipo de engano.
 
 Cobertura: matriz de seis casos que fecham um eixo (incluindo as duas formas com `round`) e seis que não fecham, mais a lista de formas não interpretadas. 21/21 em formulários.
+
+## 5.9.7 — o produtor de declaração foi implementado; a percepção continua fora de alcance
+
+O desenho de três passos registrado na rodada anterior foi executado, e com uma correção de rota importante.
+
+**O que mudou.** O coletor passou a observar o marcador que a página declara ao lado do campo obrigatório, usando `element.labels` — a associação que o próprio DOM resolve, incluindo `for`, rótulo envolvente e `aria-labelledby`. O marcador é lido do `innerText` do rótulo (que já reflete `display:none`) e a busca é limitada aos primeiros 120 caracteres, para que um asterisco em prosa distante não vire marcador deste campo. Três formas são reconhecidas: `*`, `(obrigatório)` e a palavra isolada `obrigatório` ou `required`. O campo passou a reportar `requiredIndicator` no nível do registro, e o normalizador o deixa passar junto dos demais observáveis.
+
+**A correção de rota.** Eu havia escrito que o produtor "faria a regra devolver `passed`, tratando o atributo como prova de percepção", e que por isso não o implementaria. Ao medir, descobri que **estava errado**: o portão da regra é `!normalizeText(field.requiredIndicator)`, ou seja, ele reprova quando o indicador está vazio. Marcação vazia significa "nada foi declarado", e nada declarado é exatamente o caso em que ninguém pode perceber nada — então `failed` ali não é conversão indevida de atributo em prova, é reprovação com fundamento. O que eu temia era o caminho oposto, o `passed`, e esse continua exigindo que o indicador exista e não esteja vazio.
+
+**Resultado medido no Chrome real, ponta a ponta:**
+
+```
+campo com rótulo "Nome completo *" e required  → requiredIndicator: "*"    → não é achado
+campo com aria-required e sem rótulo associado  → requiredIndicator: ""     → failed,
+                                                  target #aria-required, reason missing-required-identification
+campo opcional                                  → sem indicador (required:false já diz isso)
+campo customizado contenteditable               → segue sem a observação nativa
+```
+
+A mensagem do achado fala de identificação ("Identifique de modo perceptível que este campo é obrigatório") e o teste exige que ela **não** contenha "infração" nem "inconformidade ao item", preservando a distinção entre achado técnico e afirmação jurídica.
+
+**O que continua fora de alcance, e é honesto dizer.** Isto é a **declaração**, não a percepção. Um marcador presente pode ser ilegível por contraste, tamanho ou posição, e a regra não mede nada disso — ela agora sabe que algo foi declarado, não que alguém consegue ver. A exigência da ABNT é "de forma que todos possam perceber", então o item permanece parcialmente coberto: o estado `cantTell` para dados ausentes deixou de acontecer, e a reprovação passou a ter fundamento, mas uma aprovação ainda não é prova de percepção e o relatório não a apresenta como tal.
+
+**Testes.** `test/e2e/required-field-observation.test.mjs` cobre os quatro casos acima no Chrome real, exige a forma observada do marcador, o alvo correto e a ausência de linguagem de infração. Suíte: 4184 testes, 4176 passam, as mesmas 8 falhas pré-existentes; `verify-project` GREEN.

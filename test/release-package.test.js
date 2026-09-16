@@ -13,7 +13,7 @@ const packageName = 'audita-acessibilidade-1.1.15.zip';
 // The digest of the artifact that is actually delivered. It is recorded here so a source change
 // that was not followed by a rebuild fails the suite: the test builds from the current tree, so a
 // stale release/audita-acessibilidade-1.1.15.zip and a drifted source cannot both stay green.
-const deliveredPackageSha256 = '5619e27d4002620fa61d57d24b06279dbc5a7ace1ec50a3e9b9df0b775b6b03b';
+const deliveredPackageSha256 = 'df02b7bc6bcac30f265b3c0abf0027f3148653eb3426fab9e6f617a73d3b1be5';
 
 function runBuild(args) {
   return spawnSync(process.execPath, ['scripts/build-release.mjs', ...args], {
