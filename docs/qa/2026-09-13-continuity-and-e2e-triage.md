@@ -1530,3 +1530,15 @@ Dois recursos obrigatórios da meta que eu ainda não tinha verificado pessoalme
 **Auditoria de várias URLs.** O caminho existe ponta a ponta: o painel projeta o estado `batch` (`panel-view.js:56-71`), o roteador de intenções aceita `PANEL_START_BATCH_AUDIT` (`side-panel-intent-router.js:42`) e o encaminha para `startBatch` (`:965`), e o starter tem `runBatchAuditExecution` com `src/background/run-batch.js` e `batch-audit-execution.js` por trás. Também não é código morto.
 
 **O que isto não é.** É verificação de existência e alcance, não de comportamento: os E2E que exercitam lote, cópia atual e URL (`url-audit-mv3`, `batch-pixel-consent-mv3`, `current-page…`, `passive current-page…`) estão justamente entre as 11 falhas não triadas da fase serial, e é a triagem em curso que decide se alguma delas é defeito de produto. Enquanto isso não fechar, o critério 9 está atendido quanto a "implementado", não quanto a "funcionando sem instabilidade".
+
+## Verificação estática do invariante do nonce (item de rigor máximo, não coberto pelas revisões)
+
+As duas revisões independentes desta sessão declararam explicitamente que **não** verificaram o invariante do nonce de ponta a ponta. Fechei a metade que se pode fechar por leitura, e digo com precisão o que ela é.
+
+**O nonce não tem como chegar ao modelo, ao relatório, à revisão nem às exportações — por construção.** `grep -rl "nonce"` em `src/core/report/`, `src/core/review/`, `src/review/` e `src/export/` devolve **zero arquivos**: nenhum módulo dessas camadas menciona a palavra, então nenhum deles pode serializar o valor. As 19 ocorrências de `eventNonce` estão todas em `src/background/`, o caminho de autorização do trabalhador, e nenhuma em `src/panel/` ou `src/core/`.
+
+**O nonce não tem como chegar a um log — por construção.** Não existe **nenhuma** chamada `console.*` no código do produto (`src/background/`, `src/panel/`, `src/core/report/`, `src/export/` devolvem zero). O trabalhador registra por uma interface injetada cujo padrão é um no-op (`{ error() {} }`), e **todos os 10 pontos de chamada passam apenas constante**: `SIDE_PANEL_DEFAULT_DENIED`, `SIDE_PANEL_BEHAVIOR_DENIED`, `PANEL_LAUNCH_UNAVAILABLE`, `SESSION_ACCESS_LEVEL_DENIED` e o `code` validado de `panel-launcher.js:51`. Nenhum passa objeto, requisição ou estado.
+
+**Distinção que importa, para não confundir dois valores.** O nonce de consentimento é um token de 22 caracteres (`^[A-Za-z0-9_-]{22}$`, em `context-menu.js` e `chrome-adapter.js`). O que aparece na URL do painel é outro valor, de 43 caracteres, que existe por desenho para o painel poder se abrir. Tratar os dois como o mesmo item produziria uma conclusão falsa nos dois sentidos.
+
+**O que isto NÃO prova.** Não é uma varredura de runtime: eu não medi, num Chrome real, que nenhum atributo do DOM receba o nonce durante uma auditoria, nem que nenhuma mensagem trocada entre painel e trabalhador o carregue em claro. A contenção estática mostra que as camadas que persistem e exibem não o conhecem; a varredura de runtime continua pendente e assim registrada.
