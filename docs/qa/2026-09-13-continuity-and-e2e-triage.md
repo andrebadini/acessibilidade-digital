@@ -1243,7 +1243,7 @@ Pela mesma regra que apliquei na 1.1.14 → 1.1.15: **um relatório que decide d
 - `test/extension-shell.test.js` e `test/release-package.test.js`: as asserções que fixavam 1.1.15 e o nome do pacote.
 - `store-assets/STORE-LISTING.md`, `store-assets/TEST-INSTRUCTIONS.md`, `docs/COMO-USAR.md`: versão declarada e nome do ZIP.
 - `README.md`: declara 1.1.16, explica por que subiu e preserva o registro da 1.1.15 abaixo, sem reescrever o que foi congelado e revisado.
-- `release/audita-acessibilidade-1.1.15.zip` removido; `release/audita-acessibilidade-1.1.16.zip` construído e rastreado.
+- `release/audita-acessibilidade-1.1.16.zip` construído e rastreado. O `1.1.15.zip` **foi preservado**, não removido: o diretório `release/` guarda todas as versões (1.0.1 a 1.1.16) e o 1.1.15 é o artefato que a revisão independente aprovou, com hash `5619e27d…` conferido depois do bump. Como o fonte andou, ele **não é mais reproduzível** — guardá-lo é o que preserva a prova do que foi revisado.
 
 ### Artefato
 
@@ -1259,7 +1259,7 @@ Note-se o tamanho: 1.044.772 bytes contra 1.044.773 do 1.1.15. A diferença de u
 
 ### O que isto deixa explícito
 
-**O 1.1.16 não passou por revisão independente.** O veredito C=0/I=0 e o "pode substituir o candidato" valem para o artefato `5619e27d…` do 1.1.15, que **não existe mais** em `release/`. As mudanças posteriores — a fronteira do veredito humano (`49d70ca`) e o produtor de 5.9.7 (`8d8509b`) — têm cada uma teste e medição própria, mas a revisão integrada do conjunto como artefato não foi feita. É a mesma ressalva que registrei ao subir para 1.1.15 e vale de novo aqui, sem atenuar: **empacotado e verde não é revisado**.
+**O 1.1.16 não passou por revisão independente.** O veredito C=0/I=0 e o "pode substituir o candidato" valem para o artefato `5619e27d…` do 1.1.15, que segue preservado em `release/` exatamente com esse hash. As mudanças posteriores — a fronteira do veredito humano (`49d70ca`) e o produtor de 5.9.7 (`8d8509b`) — têm cada uma teste e medição própria, mas a revisão integrada do conjunto como artefato não foi feita. É a mesma ressalva que registrei ao subir para 1.1.15 e vale de novo aqui, sem atenuar: **empacotado e verde não é revisado**.
 
 ### Suíte
 
