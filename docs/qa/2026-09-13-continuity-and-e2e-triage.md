@@ -2128,3 +2128,15 @@ Medindo o efeito colateral da regra de impressão, encontrei **identificadores d
 **Não é efeito da minha regra, e isso está medido no HTML entregue:** a região `.matrix-scroll` contém exatamente **146** células `th scope="row"` — os itens ABNT —, o anexo de evidências **não está dentro** dela, e **não existe** regra global de `th[scope="row"]` no CSS (procurado por expressão). A regra que escrevi é `.matrix-scroll th[scope="row"]` e só alcança a matriz.
 
 **Estado honesto da atribuição:** o *mecanismo* está excluído por medição (a regra não alcança o anexo), mas eu **não** medi um PDF da 1.1.19 com a mesma fixture para mostrar as mesmas 6 quebras — o que exigiria rodar os bytes da 1.1.19, e o Chrome está com a revisão. Então fica como "pré-existente por exclusão de mecanismo", não como "reproduzido nas duas versões", e entra no backlog como achado menor de apresentação: a coluna do anexo precisa da mesma proteção contra quebra, na mesma família de correção.
+
+### Onde o filtro pode e onde ele não pode ser aplicado
+
+Procurei **todos** os consumidores de `view.executive.limitations` depois de corrigir, porque foi exatamente esse tipo de busca que faltou quando eu corrigi só um dos dois renderizadores. São três:
+
+1. `src/core/report/html.js:282` — o HTML e a impressão que viram PDF: **filtrado** por `listedLimitations` ✔
+2. `src/review/report-view.js` — a aba interativa: **filtrado** no ponto da lista, e as duas checagens de texto do título continuam lendo a lista completa ✔
+3. `src/review/review.js:388` — passa `view.executive.limitations` **sem filtrar** para `applyReportSourceControls`, que decide com `hasAttachedCopyReloadedLimitation()` se o controle de retorno entra em modo "somente evidências" (`report-view.js:73-80`), e essa função procura a **frase simples** `ATTACHED_COPY_RELOADED_MESSAGE` na lista.
+
+**Por que isso importa para quem mexer depois:** `listedLimitations` remove a frase simples quando existe a forma codificada com o mesmo corpo — e `ATTACHED_COPY_RELOADED` está no conjunto fechado que põe a frase simples em `model.limitations`. Se alguém aplicar o filtro **na projeção** (ou em tudo que `review.js` recebe) em vez de aplicá-lo nos dois pontos de renderização, a frase simples some, `hasAttachedCopyReloadedLimitation` passa a devolver falso, e o controle de retorno deixa de avisar que o destaque ao vivo não está disponível — **em silêncio**, porque nada lança. É o mesmo modo de falha que eu quase introduzi na primeira tentativa de conserto, por um caminho diferente.
+
+**O que me diz que o portão segue de pé:** `test/review/report-view.test.js` exercita esse caminho empurrando `ATTACHED_COPY_RELOADED_MESSAGE` na lista, e a suíte passa 53/53 depois da correção. O filtro ficou onde devia: nos renderizadores, não no modelo.
