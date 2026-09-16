@@ -822,3 +822,36 @@ A causa provável do registro ausente é estrutural: quem grava `owned-tab:v2` �
 Isso é diagnóstico, não correção: não reescrevi as expectativas de propriedade de aba de um arquivo que pertence a outro incremento e cuja outra metade está incompleta (`test/e2e/sidepanel-flow-mv3.test.mjs` está modificado no worktree com fixture e asserções de observação passiva ainda em andamento). O próximo passo para quem fechar esse incremento é decidir, com o autor, se a cópia inativa deve registrar um dono — e em que chave — ou se as nove expectativas de `owned-tab:v2` devem passar a descrever a cópia inativa. Sem essa decisão, qualquer alteração minha seria adivinhação sobre trabalho alheio.
 
 Duas hipóteses minhas foram **descartadas por medição** nesta rodada, e registro para não voltarem: (1) "o painel não está oferecendo os sinais" — `panel-view.js` oferece `SHOW_PAGE_MARKERS`, com o rótulo alternativo só no ramo indisponível; (2) "`waitForValue` engole o IIFE assíncrono" — ele já passa `awaitPromise: true`, e medi os dois ramos diretamente no harness (`{}` sem a opção, `{keyCount:0}` com ela).
+
+## Rodada 30 — percurso obrigatório completo, e a comparação externa entregue
+
+### Percurso obrigatório num teste só
+
+Cada etapa já tinha teste focado, mas **o percurso como percurso não tinha**. É exatamente onde uma superfície pode estar correta sozinha e ainda assim não conectar à seguinte. Criei `test/e2e/mandatory-journey-mv3.test.mjs`, registrado em `scripts/run-tests.mjs`, que numa única sessão de Chrome real percorre, em ordem: abrir o painel → avaliar a página atual (modo sem pixels) → progresso → sumário → abrir uma ocorrência pela ficha de falha confirmada → blocos didáticos → mapeamento ABNT/WCAG com anúncio estimado e referência curta → **destacar o elemento na página** → exportar o relatório com os quatro formatos confirmados pelo recibo durável.
+
+Medido: verde em 3,4 s, `formats=html,pdf,csv,json`.
+
+Três asserções minhas precisaram de correção, e as três eram erro do teste, não do produto:
+
+1. Eu esperava a ação de destaque imediatamente como `highlight-occurrence`; o produto passa por `highlight-checking` enquanto consulta a disponibilidade. Passei a esperar o estado estabilizar.
+2. Eu comparava o `outerHTML` do documento antes e depois. Ele cresce de 370 para 22.332 caracteres porque **o próprio destaque é um overlay que a extensão insere** — a asserção falhava justamente pelo recurso funcionar. Passou a comparar o markup do autor (`main`), o foco e a rolagem.
+3. Eu esperava `[data-detail="..."]` para ler os blocos; o atributo real é `data-detail-block`. A falha mostrou, aliás, que o detalhe renderiza tudo o que devia: "Quem é afetado", "O que foi observado", "Como corrigir e conferir", "Nome acessível ausente / Origem do nome / Anúncio esperado: campo de texto", "WCAG 4.1.2 / Nível A / ABNT NBR 17225: 5.13.10" e "Inconformidade ao item 5.13.10 da ABNT NBR 17225:2025".
+
+Também ocorreu uma contradição aparente que investiguei e descartei: os dois testes E2E novos passavam isolados e falhavam juntos (`0/2`). Não era interferência entre eles — eu tinha esquecido `AUDITA_E2E_CHROME` naquela execução. Com a variável, os dois passam juntos (`2/2`). Registro porque a leitura errada era plausível e custaria horas.
+
+### Comparação com AMAWeb e AccessMonitor
+
+Entrega nova, fora do versionamento (como as demais): `entregas/comparacao-avaliadores-externos.md`. Foi produzida **somente de fontes públicas**, sem submeter nenhuma URL à AMAWeb ou ao AccessMonitor e sem ler arquivos locais de usuário. Cobre metodologia, categorias, fórmula da nota, exigência de login, onde roda e exportação de cada ferramenta, mais uma lista explícita do que não foi possível confirmar.
+
+Achados que mudam a leitura de comparações anteriores:
+
+- **A ligação verificável da AMAWeb com a NBR 17225 é o módulo *Checklist*, não o avaliador automático.** O relatório do avaliador se intitula "WCAG 2.1 do W3C". Não existe documentação pública do mapeamento prática-a-requisito. Contar os apontamentos da AMAWeb como requisitos ABNT descumpridos não se sustenta sozinho.
+- **A AMAWeb envia a URL ou o HTML ao servidor** (`/server/amp/eval/...`) e gera o PDF em outro serviço do mesmo host. O AccessMonitor tem **duas arquiteturas**: o validador online envia à AMA, a extensão avalia localmente. O axe-core e o Audita avaliam localmente.
+- **A nota do AccessMonitor tem fórmula publicada** e o denominador é a soma dos pesos das práticas consideradas, não o número de testes; os 26 testes de verificação manual ficam fora do numerador e do denominador. A nota da AMAWeb não é auditável publicamente.
+- O bundle da AMAWeb reutiliza marca e contratos de dados do AccessMonitor, o que indica que o front-end deriva do cliente open-source dele; o motor do servidor não é público.
+
+Deixei explícito no documento, e repito aqui, que o parecer com números (`entregas/analise-comparativa-2026-09-12/parecer.html`) é **histórico**: avaliou a versão 1.1.14 antes das correções desta sessão. A versão continua 1.1.14, mas o produto mudou; aqueles números não descrevem o código atual.
+
+### Ainda pendente
+
+Os itens 3 a 6 da fila registrada na rodada anterior seguem abertos: campos customizados anônimos (fronteira de privacidade desenhada, não implementada), produtor de identificação visual (5.9.1), produtor de perceptibilidade da obrigatoriedade (5.9.7), e a decisão sobre os 9 cenários de `sidepanel-flow`. A revisão integrada independente do estado atual está em andamento.
