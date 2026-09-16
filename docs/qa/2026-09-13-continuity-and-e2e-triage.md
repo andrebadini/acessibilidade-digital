@@ -786,3 +786,39 @@ O item obrigatório dos sinais numerados na página está fechado e medido (roda
 4. **Produtor de identificação visual (5.9.1).** A evidência decisiva já existe no coletor e está provada por teste: `label` com `clip-path:inset(50%)` mantém `hasRenderedBox:true` e `visibleText:'Nome'` (`test/e2e/field-label-review.test.mjs`, linhas 33–36). Falta capturar `clip-path` e `clip` em `styleNames` (`page-collector.js:7`) e usar isso para (a) parar de contar rótulo recortado como rótulo visível em `formLabelAssociation` e (b) dar alvos por campo em 5.9.1 em vez de pendência agregada sem alvo. Ao implementar, manter `cantTell`: rótulo recortado não autoriza `failed`, porque a norma admite propósito visualmente evidente com nome acessível, e a ausência de rótulo visível não prova ausência de percepção.
 5. **Perceptibilidade da obrigatoriedade (5.9.7).** O estado `required` chega ao consumidor; o que falta é um produtor que demonstre percepção. Mesma família de solução do item 4 e mesma cautela: presença de atributo não é prova de percepção.
 6. **Comparação com AMAWeb e AccessMonitor, versão contra versão**, e **revisão integrada independente desta versão** — os dois maiores itens ainda abertos, ambos exigindo execução das ferramentas externas e registro de URL/estado/menus/sessão/viewport/data. Nada foi iniciado nesta sessão. `eval_mymonitor.csv` contém sessão e e-mail privados e não deve ser despejado em log nem enviado para fora.
+
+## Rodada 29 — por que as 9 falhas do fluxo do painel: a sessão pausada não tem dono registrado
+
+Instrumentei uma **cópia** de `test/e2e/sidepanel-flow-mv3.test.mjs` (o original não foi tocado, porque pertence a outro incremento) com registro de tela em cada etapa de `beginAttachedAttempt`. Resultado no teste `current-page audits run in one inactive copy`:
+
+```
+begin:full-evidence:front      initial:-
+begin:full-evidence:visible    initial:-
+begin:full-evidence:raf        initial:-
+begin:full-evidence:initial    initial:-          ← a tentativa 1 começa bem
+sub1:paused                    running:privacy-paused   ← o painel pausa de verdade
+sub1:PAUSED_ATTEMPT_FAILED:WAIT_TIMEOUT
+begin:no-pixels:front          running:privacy-paused   ← e as seguintes ficam presas aí
+```
+
+Ou seja: **a tentativa 1 chega ao estado inicial e pausa corretamente**. O que falha é `assertPausedAttempt`, e a causa está medida, não suposta. Despejei `chrome.storage.session` inteiro no momento da pausa:
+
+```
+audita:active-audit-job:v1            → auditId a4943e34…, state privacy-paused
+audita:audit-session-capability:v1:…  → auditId a4943e34…
+audita:execution-checkpoint:v1:…      → auditId a4943e34…
+audita:pixel-capture:v1:…             → state paused
+audita:panel-bootstrap:v1:…
+audita:panel-launch:index/record:v1:…
+audita:retention-preference:v1:…
+audita:session-hmac-key:v1
+audita:target-capability:v1:…         → state claimed
+```
+
+**Não existe nenhuma chave `audita:owned-tab:v2:*`.** E `waitForOwner` (linha 899) exige exatamente uma: filtra as chaves com esse prefixo para o `auditId` e só aceita quando `value.length === 1` com o estado esperado (`retained-for-consent` na pausa, `removed` no terminal). Sem nenhum registro de dono, a espera estoura sempre — e como as subtests são sequenciais e o painel fica preso em `privacy-paused`, as três seguintes falham por consequência. Isso explica exatamente o padrão 3/12: as que passam são as que não passam por `beginAttachedAttempt`.
+
+A causa provável do registro ausente é estrutural: quem grava `owned-tab:v2` é `observed-tab-runner.js:511` (`registerCreated`), isto é, o caminho que **cria uma aba própria**. A auditoria da página atual deixou de criar aba (é cópia inativa recarregada) quando `1c9b296` substituiu o ramo de cópia anexada — o mesmo commit que matou o registro da origem dos sinais. Então a expectativa do teste é anterior a essa mudança e ficou desatualizada junto com o resto do arquivo.
+
+Isso é diagnóstico, não correção: não reescrevi as expectativas de propriedade de aba de um arquivo que pertence a outro incremento e cuja outra metade está incompleta (`test/e2e/sidepanel-flow-mv3.test.mjs` está modificado no worktree com fixture e asserções de observação passiva ainda em andamento). O próximo passo para quem fechar esse incremento é decidir, com o autor, se a cópia inativa deve registrar um dono — e em que chave — ou se as nove expectativas de `owned-tab:v2` devem passar a descrever a cópia inativa. Sem essa decisão, qualquer alteração minha seria adivinhação sobre trabalho alheio.
+
+Duas hipóteses minhas foram **descartadas por medição** nesta rodada, e registro para não voltarem: (1) "o painel não está oferecendo os sinais" — `panel-view.js` oferece `SHOW_PAGE_MARKERS`, com o rótulo alternativo só no ramo indisponível; (2) "`waitForValue` engole o IIFE assíncrono" — ele já passa `awaitPromise: true`, e medi os dois ramos diretamente no harness (`{}` sem a opção, `{keyCount:0}` com ela).
