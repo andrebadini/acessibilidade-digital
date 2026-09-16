@@ -10,4 +10,6 @@ Cópias integrais dos relatórios produzidos pelos revisores independentes desta
 
 **Os textos estão em inglês porque os revisores os escreveram assim**; não foram traduzidos para não alterar a evidência. O desfecho de cada achado, em português e com a medição que o sustenta, está em `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md`.
 
+**Conferência de privacidade nestes arquivos.** Antes de publicá-los aqui, procurei conteúdo sensível: não há e-mail, caminho pessoal (`/Users/...`), token real nem qualquer linha do CSV privado de sessão. As duas únicas cadeias que *parecem* credenciais — `Senha SEGREDO-DO-USUARIO-1234` e `VALOR-SECRETO-9F3A` — são marcadores **fictícios que o próprio revisor inventou** para provar que valores sensíveis **não** aparecem no instantâneo normalizado; elas são a evidência do teste negativo, não dado real.
+
 **A revisão da 1.1.19 ainda não tem relatório** — ela inclui a triagem das falhas da fase serial de Chrome real e está em execução. Quando concluir, o relatório dela entra aqui e o registro de achados é atualizado.
