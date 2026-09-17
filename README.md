@@ -4,7 +4,36 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.33 preparada — sem revisão independente ainda.** A revisão da **1.1.32** deu **1 Critical,
+**Versão 1.1.34 preparada — sem revisão independente ainda.** A revisão da **1.1.33** deu **1 Critical,
+3 Important, 4 Minor e 8 observações** e **reprovou** o artefato. O Critical era **estreitamento meu**: a
+fronteira de palavra que fechou o falso positivo de "shipping" devolveu à página `userPin`, `cardPin`,
+`PINpad` e `data-userpin`, que voltaram a chegar a quatro superfícies entregues. O Important mais grave
+mediu o outro lado, e é o que muda o desenho daqui em diante: o resíduo de falso positivo que eu havia
+declarado como observação **destruía evidência** — `Chaveiro: R$ 30,00` e `Secretaria de Saúde: 12
+unidades` viravam tarja, `placeholder="Chaveiro"` era descartado inteiro do trecho, e no caminho
+JSON/MODELO **14 de 16 frases realistas** com marcação eram destruídas (`<p>A senha deve ser forte</p>`
+saía como `<p>A [redacted]`).
+
+A 1.1.34 troca o remendo pelo desenho. O vocabulário passa a ser uma **lista única de radicais com
+fronteira de palavra**: um radical casa a palavra inteira (`senha`, `senha:`, `pin`) ou o **fim** de uma
+palavra com prefixo de duas letras ou mais (`userpin`, `datapin`), nunca o meio — é isso que tira
+`Chaveiro`, `Secretaria`, `tokenizador`, `chaveamento`, `obsessão` e `passível` da tarja. O camelCase, que
+era a razão de não haver fronteira nenhuma, passa a ter **marca interna** nas transições
+minúscula→maiúscula (`senhaAtual`, `userPin`, `PINpad` continuam fechados) e a marca é removida de toda
+saída. Do outro lado, a decisão de "cara de valor" passa a descartar marcação colada na cauda (`</p>`) e
+datas com ano de quatro dígitos, e a string com marcação é decidida na projeção sem tags. Entram `dígito
+verificador`, `conta corrente`, `certificado digital` e `assinatura eletrônica`; `agência`, `matrícula` e
+`protocolo` ficam fora por decisão. O preço está declarado e medido: palavra terminada em radical curto
+com 2+ letras de prefixo é rótulo (`hairpin`, `pushpin`), e `spin` fica preservado.
+
+A revisão também mostrou que a suíte de formas passava **8/8 dos dois lados** da mutação — prova sem
+dentes para a fronteira. Entram cinco formas compostas de PIN e um E2E novo de **falso positivo**
+(`credential-false-positives-mv3`), com controle negativo na mesma página para a medição não ser vacuosa:
+contra os bytes da 1.1.33, **9 dos 17 testes reprovam**. A métrica da classe vai a **65 formas e 246
+combinações** calculadas, e reprova 4 de 6 testes contra cada uma das duas gerações anteriores.
+
+**Versão 1.1.33 — revisada: 1 Critical, 3 Important, 4 Minor e 8 observações**, todos fechados na 1.1.34.
+A revisão da **1.1.32** deu **1 Critical,
 3 Important, 4 Minor e 6 observações**, e três dos quatro bloqueios eram **regressões minhas**, todas da
 mesma família: consertei um caso e quebrei outro. O Critical era pré-existente e de vocabulário — `PIN`,
 `CVV`/`CVC`, `PUK`, `seed` de 2FA, `Número de segurança`, `Linha digitável` e `Código de barras` de boleto
@@ -46,15 +75,17 @@ contêm radical curto e não são rótulo** mais sete frases — sem ele, estrei
 pacote medido antes disso (`6f26a822`) **foi substituído antes de qualquer revisão**, e o artefato corrente
 é `6b1f2733…ee20`.
 
-Medido nesses bytes: gate de release GREEN; suíte com **4.209 testes na fase paralela (4.207 passam, 1
-falha — o teste de bitmap que passa 26/26 isolado —, 1 pulado)**; **fase serial completa na raiz extraída do
-zip, 74 testes com 65 passando e as 9 falhas todas no arquivo do outro incremento**; E2E de forma isolada
-com **6 passando e 2 reprovando** quando o sanitizador da geração anterior é restaurado (as duas formas de
-cartão e boleto); métrica da classe em **0 de 57 formas**; e auditoria ao vivo no Google, do pacote, em modo
-sem pixels: **0 falhas confirmadas, 1 recomendação/alerta, 2 suspeitas a confirmar, 9 resultados positivos,
-109 verificações no checklist, cobertura 28,5%, índice 9,0/10, PDF de 17 páginas**, quatro exportações
-`complete`, **146/146 ids e títulos no HTML e no PDF**, notas editoriais 5/5 nos dois, 0 palavras partidas e
-**0 `[redacted]`** no HTML e no JSON.
+Medido nesses bytes: gate de release GREEN; fase paralela com **4.210 testes, 4.208 passam, 1 pulado, 0
+falham**; fase serial completa na raiz extraída do zip **com a árvore de teste do próprio commit** (hash
+conferido contra `git show`), com as falhas restantes no arquivo do outro incremento; E2E de forma isolada e
+de falso positivo **17/17 verdes** nos bytes entregues e **9/17 reprovando** contra os bytes da 1.1.33;
+métrica da classe em **0 de 65 formas**; e auditoria ao vivo no Google, do pacote, em modo sem pixels:
+**0 falhas confirmadas, 1 recomendação/alerta, 2 suspeitas a confirmar (2 ocorrências), 9 resultados
+positivos, 108 verificações no checklist, cobertura 29,2%, índice 9,0/10, PDF de 17 páginas**, quatro
+exportações `complete`, **146/146 ids e títulos no HTML e no PDF**, notas editoriais 5/5 nos dois, 0 palavras
+partidas e **0 `[redacted]`** no HTML e no JSON. Uma segunda medição dos MESMOS bytes deu 3 suspeitas
+(4 ocorrências), 109 no checklist, 28,5% e 18 páginas: a página do Google entrega conteúdo diferente em
+sessões diferentes, e a diferença é de instância, não de versão.
 
 A revisão da **1.1.31** deu **2 Critical, 4 Important, 5 Minor e 5 observações**, e o diagnóstico dela é o que
 importa. Ela confirmou o conserto de
