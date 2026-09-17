@@ -4,7 +4,36 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.41 preparada — sem revisão independente ainda.** A revisão da **1.1.40** confirmou por medição
+**Versão 1.1.42 preparada — sem revisão independente ainda.** A revisão da **1.1.41** confirmou tudo o
+que aquela geração tinha de real (integridade do pacote byte a byte, métrica 11/11 com não vacuidade,
+morfologia PT 20→0, dicionário 563→360, caçador do revisor 336→0, E2E novo 6/6, key-axis 1/1, fase paralela
+4.180/4.179/0/1, escopo serial 58/58, gate GREEN, auditoria ao vivo com todos os números e 146/146 ids e
+títulos) e mediu **1 Critical e 1 Important**, os dois como **regressão da própria 1.1.41**. O Critical era a
+família de **SUFIXO**: como as palavras de sufixo (`token`, `pin`, `bearer`, `session`, `seed`, `pass`,
+`spin`) são elas mesmas radicais de credencial, a exceção poupava `<prefixo><radical>` (`xsession`,
+`novaseed`, `getseed`, `xpin`) e `<radical><cauda><palavra>` (`senhaassinaturatoken`, `senhapixpin`) — o
+valor saía no modelo guardado e nos artefatos HTML/JSON entregues (7.302 vazamentos em 13.824 casos; a 1.1.40
+tinha 1.830). O Important era o par identificador→valor **apagando evidência legítima** de elementos cujo
+`id`/`classe` apenas contém um radical (`chavear`, `chavena`, `secretas`, `sessao`, `password`,
+`cookie-banner`, `map-pin`, `session-info`, `token-de-acesso`).
+
+A 1.1.42 fecha os dois **redesenhando a fronteira** em vez de acrescentar remendos: a família de sufixo foi
+**removida** (ficam só as famílias de prefixo medidas, com guarda simétrica — o prefixo só poupa quando o que
+vem depois dele não carrega radical) e o par identificador→valor passa a exigir **rótulo colado** (radical
+longo + cauda de conteúdo de 3+ caracteres, prefixo de até 3) e não-família. Medições com as **sondas do
+próprio revisor**: caçador estendido **7.302 → 0** de 13.824 casos; E2E dele em Chrome real **19/19** com
+`vazou_em=(nenhuma)` nos seis casos de identificador e nos três de prosa; corpus PT-BR de falsos positivos
+**NOVOS=6 → NOVOS=[]** com 30 correções em `data` e 15 em prosa; 880 formas realistas com 0 vazamento em
+prosa/modelo; `COBERTURA_PERDIDA=0` em 516.235 formas; morfologia PT **0/39**; corpus de chaves inocentes
+**3/55**; 70/70 nos testes afetados. **Preço declarado e medido da troca:** palavras inglesas que TERMINAM no
+radical (`pallbearer`, `cupbearer`, `allseed`, `antipass`, `chipping`) voltam a ser tarjadas em prosa —
+dicionário **360 → 537**, falso positivo, nunca vazamento. Pacote: fase paralela **4.180/4.178/1** (a única
+falha é o `release-package`, que exige pacote reconstruído no momento da medição), escopo serial **57/58** (a
+única vermelha é o flake de limpeza do `axe-mv3-csp`, que passa 1/1 isolado), auditoria ao vivo **0 falhas /
+3 sob revisão humana / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, **146/146 ids e títulos** no
+HTML e no PDF, notas 5/5, 0 palavras partidas e 0 `[redacted]`.
+
+**Versão 1.1.41.** A revisão da **1.1.40** mediu 3 Important (identificador, chave e falsos positivos), fechados na 1.1.41. A revisão da **1.1.40** confirmou por medição
 própria tudo o que aquela geração tinha de real — em especial que o **Critical da 1.1.39 está fechado de fato**
 no caminho de prosa/modelo, com E2E por caso em Chrome real e controle de não vacuidade — e mediu **3
 Important**: (I-1) o rótulo da credencial num **identificador** (`<div id="senhaassinatura">borboleta</div>`,

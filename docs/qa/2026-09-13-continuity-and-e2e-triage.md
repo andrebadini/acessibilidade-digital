@@ -2828,3 +2828,62 @@ lista ESTREITA de sufixos (`seed`, `session`, `pass`, `spin`, `pping`). As duas 
 **revertidas de propósito** para não alterar os bytes empacotados com a revisão independente da 1.1.41 em
 andamento (o `release-package` reconstrói o zip a partir da árvore e compara com o entregue). Saem na próxima
 geração, junto com o que a revisão medir.
+
+## Rodada 88 — a revisão da 1.1.41 REPROVOU (1 Critical e 1 Important, ambos regressão da própria geração): fronteira redesenhada na 1.1.42
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.41.md`. A revisão **confirmou por medição própria** a
+integridade do pacote (199 arquivos byte a byte iguais ao `git archive 4df8c8c`, 0 fora do commit), a métrica
+**11/11 com não vacuidade** (3/4/5 falhas nas gerações anteriores com o mesmo arquivo), morfologia PT **20→0**,
+dicionário **563→360 exato**, caçador do revisor **336→0**, o E2E novo **6/6**, o `key-axis` **1/1** com
+`VAZA_EM=(nenhuma)`, fase paralela **4.180/4.179/0/1 EXIT=0**, escopo serial **58/58** (com um flake de limpeza
+declarado), gate **GREEN**, auditoria ao vivo com todos os números e a integridade de artefato
+**146/146 ids e títulos**, notas 5/5, 0 palavras partidas e 0 `[redacted]`. E mediu **1 Critical e 1 Important**,
+os dois **introduzidos pela 1.1.41**.
+
+**C1 — a família de SUFIXO reabriu a classe.** Como as palavras de sufixo (`token`, `pin`, `bearer`,
+`session`, `seed`, `pass`, `spin`) são **elas mesmas radicais de credencial**, a exceção de sufixo poupava
+`<prefixo><radical>` (`xsession`, `novasession`, `getseed`, `xpin`, `novaseed`, `xseed`, `getpin`,
+`getsession`) e `<radical><cauda><palavra-de-família>` (`senhaassinaturatoken`, `senhapixpin`,
+`senhacadastrotoken`, `senhaassinaturaseed`). Efeito medido pelo revisor: **7.302 vazamentos em 13.824
+casos** (1.1.40: 1.830), **19.141 formas** redigidas na 1.1.40 e entregues na 1.1.41 no corpus de 64.055, e
+E2E em Chrome real com o valor saindo no **modelo guardado + HTML + JSON exportados** (1.1.40: nenhuma
+superfície). Os dois primeiros consertos que fiz assim que li a evidência bruta (guarda de prefixo nas duas
+formas, depois guarda simétrica na família de prefixo) já levavam o caçador estendido a **0/13.824** — mas a
+causa raiz era a própria existência da família de sufixo.
+
+**I-1 — o par identificador→valor apagava evidência legítima.** Qualquer `id`/`classe` que
+`isSensitiveKeyName` reconhecesse virava raiz de texto privado, e o texto do elemento desaparecia:
+`chavear`, `chavena`, `secretas`, `sessao`, `password`, `cookie-banner`, `map-pin`, `session-info`, `pin`,
+`token-de-acesso` → **0/6 superfícies** preservavam o texto contra 2–3/6 na 1.1.40; no corpus PT-BR de 70
+palavras do revisor, **NOVOS=6**.
+
+**A 1.1.42 redesenha a fronteira, em vez de somar remendos.** (a) A família de **SUFIXO foi removida**:
+ficam só as famílias de **PREFIXO** medidas (`chaveir`, `chaveta`, `chaveament`, `pintur`, `pintor`, `pincel`,
+`pincé`, `pingent`, `pingu`, `espinh`, `opini`, `secretar`, `secretári`, `secretos`, `tokeniz`, `obsess`,
+`possess`), com a **guarda simétrica** — o prefixo só poupa quando o que vem depois dele não carrega radical
+(`chaveirotoken` e `pinturasenha` voltam a ser tarja). (b) O par identificador→valor passa a exigir **rótulo
+colado** (radical longo + cauda de conteúdo de 3+ caracteres, prefixo de até 3) **e** não-família: é a forma
+que as duas revisões mediram vazando, e é só ela que autoriza descartar o conteúdo do elemento.
+
+**Medições da 1.1.42, com as sondas do revisor e as minhas:**
+- caçador do revisor **0/1.728** e caçador estendido **0/13.824** (1.1.41: 7.302; 1.1.40: 1.830);
+- E2E do revisor em Chrome real **19/19**: os 6 casos de identificador e os 3 de prosa com
+  `vazou_em=(nenhuma)`, e as evidências legítimas de volta em **2–3 de 6 superfícies** (0/6 na 1.1.41);
+- corpus PT-BR de falsos positivos: **NOVOS=6 → NOVOS=[]**, com **30** correções na superfície `data` e
+  **15** em prosa;
+- 880 formas realistas: **0** vazamento em prosa/modelo (1.1.41: 5.542 em cada);
+- `COBERTURA_PERDIDA=0 / GANHA=5.661` em 516.235 formas; morfologia PT **0/39**; corpus de chaves inocentes
+  **3/55**; corpus de colisão 67 radicais × 55 caudas = **540** (só radicais curtos, teto afirmado em teste);
+- bateria de 39 rótulos sem perda; **70/70** nos testes afetados; fase paralela **4.180/4.178/1** — a única
+  falha é o `release-package`, que exige pacote reconstruído (feito em seguida) —; escopo serial no zip
+  **57/58**, e a única vermelha é o flake de limpeza do `axe-mv3-csp`, que passa **1/1 isolado**;
+- auditoria ao vivo do pacote: versão **1.1.42**, 0 falhas confirmadas, 3 sob revisão humana (4 ocorrências),
+  9 positivos, 109 no checklist, 28,5%, 9,0/10, quatro exportações `complete`; integridade **146 itens,
+  146/146 ids e títulos no HTML e no PDF**, notas 5/5, 0 palavras partidas, 0 `[redacted]`, 11 trechos com
+  5.228 caracteres.
+
+**Preço declarado da troca (medido):** palavras inglesas que TERMINAM num radical voltam a ser tarjadas em
+prosa (`pallbearer`, `cupbearer`, `allseed`, `antipass`, `assession`, `chipping`): o dicionário vai de
+**360** (com a família de sufixo, insegura) para **537** palavras inocentes destruindo valor fraco — contra
+**563** da 1.1.40. É falso positivo, não vazamento, e nenhuma forma de credencial depende dele. Ficam
+preservadas as que COMEÇAM numa família de prefixo (`obsession`, `possession`) e as da lista exata.

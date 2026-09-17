@@ -498,3 +498,20 @@ três posições diferentes — e os três foram fechados na **1.1.41** com medi
 | O-2 | Observação | `isPermissiveCredentialLabel` era allowlist de 57 palavras sobre classe de 563 | **corrigido** na 1.1.41 | A decisão passa a ser por família (prefixo/sufixo) e a asserção percorre a classe |
 | O-3 | Observação | `id`/`class`/`name` são preservados de propósito no trecho, mesmo quando o valor do atributo é rótulo de credencial | **delimitado** | Decisão de produto para manter a identidade do elemento na evidência; o **valor** deixa de ser entregue (I-1) e o rótulo não é segredo |
 | O-4 | Observação | A varredura de credencial do artefato ao vivo é pouco informativa (página sem credencial) | **delimitado** | Os E2E de fixture é a superfície com dentes; o instrumento continua medindo 0 `[redacted]` ao vivo |
+
+## Revisão da 1.1.41 → veredito 1 Critical e 1 Important, ambos regressão da própria geração
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.41.md`. A revisão confirmou por medição própria tudo o que
+a geração tinha de real (integridade byte a byte, métrica 11/11 com não vacuidade, morfologia PT 20→0,
+dicionário 563→360, caçador 336→0, E2E novo 6/6, key-axis 1/1, fase paralela 4.180/4.179/0/1, escopo serial
+58/58, gate GREEN, auditoria ao vivo e integridade 146/146) e mediu dois achados **introduzidos pela 1.1.41**.
+Os dois foram fechados na **1.1.42** com as sondas do próprio revisor.
+
+| # | Sev. | Achado | Desfecho | Evidência |
+|---|---|---|---|---|
+| C1 | **Critical** | A família de **SUFIXO** reabriu a classe: como as palavras de sufixo (`token`, `pin`, `bearer`, `session`, `seed`, `pass`, `spin`) são elas mesmas radicais, a exceção poupava `<prefixo><radical>` e `<radical><cauda><palavra>` — valor saindo no modelo guardado e nos artefatos HTML/JSON. Medido: **7.302 vazamentos em 13.824 casos** (1.1.40: 1.830), 19.141 formas perdidas no corpus de 64.055, E2E em Chrome real com o valor em 3 de 6 superfícies | **corrigido** na 1.1.42 | Família de sufixo **removida** por decisão de fronteira (só prefixo, com guarda simétrica): caçador **0/13.824**, 880 formas realistas com **0** em prosa/modelo, E2E do revisor **19/19** com `vazou_em=(nenhuma)` nos 6 casos de identificador e nos 3 de prosa |
+| I-1 | **Important** | O par identificador→valor **apagava evidência legítima**: `chavear`, `chavena`, `secretas`, `sessao`, `password`, `cookie-banner`, `map-pin`, `session-info`, `pin`, `token-de-acesso` → **0/6** superfícies preservavam o texto (1.1.40: 2–3/6); corpus PT-BR do revisor com **NOVOS=6** | **corrigido** na 1.1.42 | O par passa a exigir **rótulo colado** (radical longo + cauda de conteúdo ≥3, prefixo ≤3) e não-família: **NOVOS=[]** nas quatro superfícies, 30 correções em `data` e 15 em prosa, evidência de volta em 2–3 de 6 superfícies, e as formas de credencial seguem seladas |
+| M-1 | Minor | `data-<palavra>`: 21 de 70 ainda descartados (o autor declarava 12/12 — o corpus dele era menor) | **aberto, declarado** | O trecho preserva as famílias de prefixo medidas; as 21 restantes são palavras que só a lista exata cobriria; fica no backlog com o número do revisor |
+| M-2 | Minor | Rótulo em `name`/`aria-label`/`autocomplete`/`title`/`data-*` e em nós irmãos ainda entrega o valor | **aberto, declarado** | Pré-existente nas duas gerações; o par cobre `id`/`classe` (a posição que as duas revisões mediram). `name`/`autocomplete` são preservados de propósito (identidade do elemento) — decisão registrada |
+| M-3 | Minor | Assimetria: `senhaassinaturapass` tarja na chave e não na prosa | **aberto, declarado** | Sobrou da remoção da família de sufixo; mesma família dos resíduos de radical curto, com teto afirmado em teste |
+| M-4 | Minor | A declaração do resíduo citava `seedling`, mas o terceiro do corpus 3/55 é `chipping` | **corrigido** (declaração) | A lista do resíduo no teste da métrica passa a nomear as palavras medidas |

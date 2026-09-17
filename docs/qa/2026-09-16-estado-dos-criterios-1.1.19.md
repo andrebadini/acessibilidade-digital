@@ -1,6 +1,31 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
-> **Incremento 1.1.41, e o que ele muda aqui.** Artefato corrente
+> **Incremento 1.1.42, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.42.zip` (`4d960106…787e`), **sem revisão independente ainda**.
+> Fecha o **Critical** e o **Important** da revisão da 1.1.41 — os dois eram **regressão da 1.1.41**. O
+> Critical era a família de **SUFIXO**: como as palavras de sufixo (`token`, `pin`, `bearer`, `session`,
+> `seed`, `pass`, `spin`) são elas mesmas radicais de credencial, a exceção poupava `<prefixo><radical>`
+> (`xsession`, `novaseed`, `getseed`, `xpin`) e `<radical><cauda><palavra>` (`senhaassinaturatoken`,
+> `senhapixpin`), com o valor saindo no modelo guardado e nos artefatos HTML/JSON (7.302 vazamentos em
+> 13.824 casos; 1.1.40: 1.830). O Important era o par identificador→valor **apagando evidência legítima**
+> (`chavear`, `chavena`, `secretas`, `sessao`, `password`, `cookie-banner`, `map-pin`, `session-info`,
+> `token-de-acesso`). A 1.1.42 **redesenha a fronteira** em vez de somar remendos: (a) a família de sufixo
+> foi **removida** — ficam só as famílias de prefixo medidas, com guarda simétrica (o prefixo só poupa
+> quando o que vem depois não carrega radical); (b) o par identificador→valor passa a exigir **rótulo
+> colado** (radical longo + cauda de conteúdo ≥3, prefixo ≤3) e não-família. **Medições com as sondas do
+> revisor:** caçador **0/13.824**, 880 formas realistas com **0** em prosa/modelo, E2E dele em Chrome real
+> **19/19** com `vazou_em=(nenhuma)` nos 6 casos de identificador e nos 3 de prosa, falsos positivos PT-BR
+> **NOVOS=6 → []**. **Medições próprias:** `COBERTURA_PERDIDA=0` em 516.235, morfologia PT **0/39**,
+> chaves inocentes **3/55**, bateria de 39 rótulos sem perda, **70/70** nos testes afetados, fase paralela
+> **4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o zip), escopo serial no zip
+> **57/58** (a única vermelha é o flake de limpeza do `axe-mv3-csp`, 1/1 isolado), auditoria ao vivo
+> **0 falhas / 3 sob revisão humana / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, 146/146 ids e
+> títulos no HTML e no PDF, notas 5/5, 0 palavras partidas, 0 `[redacted]`. **Preço declarado e medido da
+> troca:** palavras inglesas que TERMINAM num radical (`pallbearer`, `allseed`, `antipass`, `chipping`)
+> voltam a ser tarjadas em prosa — dicionário **360 → 537** (1.1.40: 563), falso positivo, nunca vazamento.
+> **8** segue **Parcial** por decisão do usuário, fora do caminho de bloqueio.
+
+> **Incremento 1.1.41, e o que ele muda aqui.** Artefato
 > `release/audita-acessibilidade-1.1.41.zip` (`0656fd44…5d20`), **sem revisão independente ainda**.
 > Fecha os **três Important** da revisão da 1.1.40 — todos da mesma classe, em três posições sintáticas
 > diferentes. **I-1 (identificador):** `<div id="senhaassinatura">borboleta</div>`,
