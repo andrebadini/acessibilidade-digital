@@ -2820,3 +2820,11 @@ seguem sem cobertura de chave composta (`pwdassinatura`), com teto medido; `codi
 `private_key`, separadores exóticos, rótulos codificados e rótulo+valor em nós irmãos continuam abertos como
 antes; e o **percurso da página atual em modo de pixel** continua sem começar (rodada 86 — escopo do
 incremento paralelo).
+
+**Minors declarados desta geração, para a próxima:** (a) o predicado `isLanguageWordHead` ficou **sem
+chamador** quando a decisão de chave passou a ser "lista fechada primeiro, famílias só na forma nova de cauda
+colada"; (b) o comentário de `isLanguageWordStrictForm` fala só de prefixo, mas a função consulta também a
+lista ESTREITA de sufixos (`seed`, `session`, `pass`, `spin`, `pping`). As duas correções foram escritas e
+**revertidas de propósito** para não alterar os bytes empacotados com a revisão independente da 1.1.41 em
+andamento (o `release-package` reconstrói o zip a partir da árvore e compara com o entregue). Saem na próxima
+geração, junto com o que a revisão medir.
