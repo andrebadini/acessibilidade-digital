@@ -76,7 +76,7 @@ function escapeLiteral(value) {
 // segmento de URL e atributo de rótulo derivam dela.
 const WORD_STEMS = Object.freeze([
   'pwd', 'bearer', 'token', 'tokens', 'secret', 'secrets', 'session', 'sessions', 'cookie', 'cookies',
-  'csrf', 'xsrf', 'otp', 'auth', 'oauth', 'authentication', 'authentications', 'authorization',
+  'csrf', 'xsrf', 'otp', 'mfa', '2fa', 'auth', 'oauth', 'authentication', 'authentications', 'authorization',
   'authorizations', 'authorisation', 'authorisations', 'credential', 'credentials', 'password', 'passwords', 'passwd',
   'passphrase', 'passcode', 'passkey', 'passwort', 'passwörter', 'passworter', 'passw0rd', 'passkod',
   'passkode', 'passfrase', 'passsatz',

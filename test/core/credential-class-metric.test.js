@@ -142,7 +142,7 @@ const CONCATENACOES = [
   // minha sonda mediu o vazamento antes de congelar a 1.1.36.
   'novasenhaadmin', 'chaveacessouser', 'senhadobanco',
 ];
-const ROTULOS = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
+const ROTULOS = ['mfa:', '2fa:', 'tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
 const CAUDAS = [
   ['cauda depois de vazio', `<p>senha: ${S('40')}<br>${S('41')}</p>`],
   ['cauda depois de quebra de linha', `<p>token: ${S('42')}\n${S('43')}</p>`],
