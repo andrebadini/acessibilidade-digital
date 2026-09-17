@@ -587,6 +587,13 @@ test('morfologia portuguesa e famílias inglesas continuam evidência, e as form
   // prefixo na prosa (`spin`, `hairpin`, `linseed`, `bypass`) e por isso a regra de chave composta exige
   // radical LONGO — o resíduo de chave deles é medido aqui e não pode CRESCER (era 540 de 1.265 formas na
   // 1.1.40). Nas superfícies de prosa e modelo a exigência é zero para todos os radicais.
+  //
+  // O ataque da revisão da 1.1.41 mediu esta fronteira de fora: das 3.240 formas concatenadas do corpus
+  // dela, **100** seguem sem reconhecimento de chave nesta geração e são TODAS desta família (`puk…`:
+  // `pukassinaturatoken`, `pukpixpin`), que já vazava na 1.1.40 e nas anteriores
+  // (`DESSES_ERAM_TARJADOS_NA_140=0`). Fechá-las exigiria radical curto na regra de chave, o que reabre a
+  // classe de falso positivo que a 1.1.36 mediu (`spinner`, `pinned`, `seedling`, `passing` são palavra da
+  // língua com o radical no meio ou no começo). Fica declarado, com teto.
   const CURTOS = new Set(['pin', 'pins', 'puk', 'seed', 'cvv', 'otp', 'cpf', 'cnpj', 'auth', 'pwd']);
   const vazios = [];
   const vaziosChaveCurta = [];
