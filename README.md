@@ -29,7 +29,7 @@ com 2+ letras de prefixo é rótulo (`hairpin`, `pushpin`), e `spin` fica preser
 A revisão também mostrou que a suíte de formas passava **8/8 dos dois lados** da mutação — prova sem
 dentes para a fronteira. Entram cinco formas compostas de PIN e um E2E novo de **falso positivo**
 (`credential-false-positives-mv3`), com controle negativo na mesma página para a medição não ser vacuosa:
-contra os bytes da 1.1.33, **9 dos 17 testes reprovam**. A métrica da classe vai a **65 formas e 246
+contra os bytes da 1.1.33, **9 dos 17 testes reprovam**. A métrica da classe vai a **70 formas e 261
 combinações** calculadas, e reprova 4 de 6 testes contra cada uma das duas gerações anteriores.
 
 **Versão 1.1.33 — revisada: 1 Critical, 3 Important, 4 Minor e 8 observações**, todos fechados na 1.1.34.
@@ -79,7 +79,7 @@ Medido nesses bytes: gate de release GREEN; fase paralela com **4.210 testes, 4.
 falham**; fase serial completa na raiz extraída do zip **com a árvore de teste do próprio commit** (hash
 conferido contra `git show`), com as falhas restantes no arquivo do outro incremento; E2E de forma isolada e
 de falso positivo **17/17 verdes** nos bytes entregues e **9/17 reprovando** contra os bytes da 1.1.33;
-métrica da classe em **0 de 65 formas**; e auditoria ao vivo no Google, do pacote, em modo sem pixels:
+métrica da classe em **0 de 70 formas**; e auditoria ao vivo no Google, do pacote, em modo sem pixels:
 **0 falhas confirmadas, 1 recomendação/alerta, 2 suspeitas a confirmar (2 ocorrências), 9 resultados
 positivos, 108 verificações no checklist, cobertura 29,2%, índice 9,0/10, PDF de 17 páginas**, quatro
 exportações `complete`, **146/146 ids e títulos no HTML e no PDF**, notas editoriais 5/5 nos dois, 0 palavras
