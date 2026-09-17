@@ -1,4 +1,4 @@
-import { SENSITIVE_KEY } from '../privacy.js';
+import { isSensitiveKey, SENSITIVE_KEY } from '../privacy.js';
 // QUINTO vocabulário do produto, e o único que ainda era só em inglês: com ele, um `title="senha …"`
 // virava seletor CSS e o valor ia inteiro para o relatório, o modelo e os artefatos (Critical da revisão
 // da 1.1.31). Passa a usar o mesmo vocabulário compartilhado do resto do produto.
@@ -69,7 +69,7 @@ function idIsUnique(id, node, index) {
 function semanticSelector(node, index) {
   for (const name of SEMANTIC_ATTRIBUTES) {
     const value = typeof node?.attributes?.[name] === 'string' ? node.attributes[name].trim() : '';
-    if (!value || SENSITIVE.test(`${name} ${value}`)) continue;
+    if (!value || isSensitiveKey(`${name} ${value}`)) continue;
     const matches = nodesFromIndex(index).filter(candidate => scopeKey(candidate) === scopeKey(node) &&
       tagOf(candidate) === tagOf(node) && candidate?.attributes?.[name] === value);
     if (matches.length <= 1) return `${tagOf(node)}[${name}="${escapeCssString(value)}"]`;
@@ -101,7 +101,7 @@ function nthPath(node, index) {
 }
 
 function safePath(value) {
-  return (Array.isArray(value) ? value : []).map(String).filter(part => part && !SENSITIVE.test(part));
+  return (Array.isArray(value) ? value : []).map(String).filter(part => part && !isSensitiveKey(part));
 }
 
 /** Builds a deterministic selector without embedding credential-like data. */
@@ -114,7 +114,7 @@ export function buildStableSelector(node, index = {}) {
     const id = typeof current.attributes?.id === 'string' ? current.attributes.id.trim() : '';
     let css;
     let confidence;
-    if (id && !SENSITIVE.test(id) && idIsUnique(id, current, index)) {
+    if (id && !isSensitiveKey(id) && idIsUnique(id, current, index)) {
       css = `${tagOf(current)}#${escapeCssIdentifier(id)}`;
       confidence = 'high';
     } else {

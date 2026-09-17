@@ -20,6 +20,15 @@ const SHAPES = [
   // artefatos entregues e não só na unidade: são as duas que a revisão viu chegando inteiras.
   ['CVV do cartão', 'card-cvv', (secret) => `<p>CVV: ${secret}</p>`],
   ['linha digitável do boleto', 'boleto-linha', (secret) => `<p>Linha digitável: ${secret}</p>`],
+  // Formas do Critical da 1.1.33: a fronteira de palavra que fechou o falso positivo de "shipping"
+  // devolveu à página as compostas em que `pin` é o SEGUNDO componente colado (`userPin`, `cardPin`,
+  // `userpin`) ou o primeiro de um composto (`PINpad`), inclusive em nome de atributo (`data-userpin`).
+  // Sem estas quatro, a suíte de formas passava 8/8 dos DOIS lados da mutação — prova sem dentes.
+  ['PIN prefixado em camelCase', 'user-pin', (secret) => `<p>userPin: ${secret}</p>`],
+  ['PIN prefixado no cartão', 'card-pin', (secret) => `<p>cardPin: ${secret}</p>`],
+  ['PIN prefixado minúsculo', 'userpin-lower', (secret) => `<p>userpin: ${secret}</p>`],
+  ['PIN em composto maiúsculo', 'pin-pad', (secret) => `<p>PINpad: ${secret}</p>`],
+  ['PIN em nome de atributo', 'data-userpin', (secret) => `<div data-userpin="${secret}">x</div>`],
 ];
 
 for (const [nome, slug, montar] of SHAPES) {

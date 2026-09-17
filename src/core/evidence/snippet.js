@@ -1,4 +1,4 @@
-import { decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, isSensitiveKey, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -91,8 +91,8 @@ function sanitizeUrl(value) {
     if (!['http:', 'https:'].includes(url.protocol)) return null;
     url.username = '';
     url.password = '';
-    for (const key of [...url.searchParams.keys()]) if (SENSITIVE.test(key)) url.searchParams.delete(key);
-    if (SENSITIVE.test(url.hash) || FRAGMENT_CREDENTIAL_KEY.test(url.hash)) url.hash = '';
+    for (const key of [...url.searchParams.keys()]) if (isSensitiveKey(key)) url.searchParams.delete(key);
+    if (isSensitiveKey(url.hash) || FRAGMENT_CREDENTIAL_KEY.test(url.hash)) url.hash = '';
     if (absolute) return url.href;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
@@ -117,7 +117,7 @@ function contentEditableTag(parsed) {
 
 function safeIdRefs(value) {
   const tokens = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
-  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !SENSITIVE.test(token))
+  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !isSensitiveKey(token))
     ? tokens.join(' ')
     : null;
 }
@@ -136,12 +136,12 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
     if (contentEditableRoot && !['contenteditable', 'role', 'tabindex', 'aria-labelledby', 'aria-describedby'].includes(name)) continue;
     if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
     if (name === 'xlink:href' || name === 'ping' || name === 'srcset') continue;
-    if (PRIVATE_ATTRIBUTE.test(name)) continue;
+    if (PRIVATE_ATTRIBUTE.test(withCamelMarks(name))) continue;
     if ((parsed.name === 'object' && name === 'data') || (parsed.name === 'embed' && name === 'src')) continue;
     if (parsed.name === 'meta' && String(values['http-equiv']).toLowerCase() === 'refresh' && name === 'content') continue;
-    if (SENSITIVE.test(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
+    if (isSensitiveKey(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
     if (editable && ['value', 'aria-valuenow', 'aria-valuetext'].includes(name)) continue;
-    if (name === 'value' && (parsed.name === 'option' || SENSITIVE.test(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
+    if (name === 'value' && (parsed.name === 'option' || isSensitiveKey(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
     if (parsed.name === 'option' && (name === 'selected' || name === 'aria-selected')) continue;
     let value = attribute.value;
     if (value !== null && (name === 'type' || name === 'autocomplete')) value = value.toLowerCase();
@@ -152,7 +152,7 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
     }
     if (contentEditableRoot && name === 'role') {
       const normalized = String(value ?? '').trim().toLowerCase();
-      if (!/^[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)*$/u.test(normalized) || SENSITIVE.test(normalized)) continue;
+      if (!/^[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)*$/u.test(normalized) || isSensitiveKey(normalized)) continue;
       value = normalized;
     }
     if (contentEditableRoot && name === 'tabindex') {
@@ -168,8 +168,8 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
       value = sanitizeUrl(value);
       if (value === null) continue;
     }
-    if (value !== null && !['type', 'autocomplete'].includes(name) && SENSITIVE.test(value) &&
-      !(LABEL_ATTRIBUTES.has(name) && SENSITIVE_LABEL_ONLY.test(value.trim()))) continue;
+    if (value !== null && !['type', 'autocomplete'].includes(name) && isSensitiveKey(value) &&
+      !(LABEL_ATTRIBUTES.has(name) && SENSITIVE_LABEL_ONLY.test(withCamelMarks(value.trim())))) continue;
     // O valor do atributo também passa pelo tarjador: a regra acima só descarta o atributo quando ele
     // MENCIONA uma palavra sensível, e um valor como `Bearer …` ou `senha: …` sem a palavra no nome
     // não era tarjado nem descartado.

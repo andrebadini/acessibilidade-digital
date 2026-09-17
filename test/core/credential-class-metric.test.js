@@ -88,6 +88,18 @@ const CARTAO = [
   ['PIN com hífen', `<p>pin-code: ${S('109')}</p>`],
   ['PIN em camelCase', `<p>pinCode: ${S('110')}</p>`],
   ['PIN em maiúsculas com espaço', `<p>PIN CODE: ${S('111')}</p>`],
+  // Compostas de PIN medidas pela revisão da 1.1.33 (C1): a fronteira de palavra que fechou "shipping"
+  // devolveu à página estas formas, em que `pin` é o SEGUNDO componente colado (`userPin`, `cardPin`) ou
+  // o primeiro de um composto (`PINpad`). Uma forma que passa nos dois lados de uma mutação não tem
+  // dentes: por isso as quatro estão aqui e no E2E de forma isolada.
+  ['PIN prefixado em camelCase', `<p>userPin: ${S('112')}</p>`],
+  ['PIN prefixado com cartão', `<p>cardPin: ${S('113')}</p>`],
+  ['PIN em composto maiúsculo', `<p>PINpad: ${S('114')}</p>`],
+  ['PIN prefixado minúsculo', `<p>userpin: ${S('115')}</p>`],
+  ['PIN prefixado em atributo', `<div data-userpin="${S('116')}">x</div>`],
+  ['dígito verificador', `<p>Dígito verificador: ${S('117')}</p>`],
+  ['conta corrente', `<p>Conta corrente: ${S('118')}</p>`],
+  ['certificado digital', `<p>Certificado digital: ${S('119')}</p>`],
 ];
 const ROTULOS = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
 const CAUDAS = [
@@ -121,6 +133,29 @@ const NAO_ROTULO = [
 const PROSA_NAO_ROTULO = [
   'shipping street-address', 'Pintura: látex acrílico', 'Opinião do cliente: ótima',
   'Pincel: cerda sintética', 'Espinha de peixe: 12', 'Pingente: prata', 'O pinguim nada no gelo.',
+  // Falsos positivos que a revisão da 1.1.33 mediu destruindo EVIDÊNCIA nas quatro superfícies: a palavra
+  // da língua contém o radical (`chave` em "Chaveiro", `secret` em "Secretaria") e o valor vira tarja.
+  'Chaveiro: R$ 30,00', 'Secretaria de Saúde: 12 unidades', 'Chaveta: aço temperado',
+  'Secretário de educação: nomeado', 'Tokenizador: componente interno',
+  'A senha foi alterada em 12/03/2026 pelo administrador.',
+  'A chave foi alterada em 12/03/2026 pelo administrador.',
+  // A janela de rótulo (M1): seis palavras entre o rótulo e o valor ainda precisam ser cobertas.
+  'chave de acesso ao sistema principal da conta ZQXJKVBWPMTLRNHS',
+];
+// Palavras medidas uma a uma pela revisão da 1.1.33: contêm radical e NÃO podem ser rótulo.
+const PALAVRAS_FALSAS = [
+  'chaveiro', 'chaveta', 'chaveamento', 'secretaria', 'secretário', 'secretariado', 'secreto',
+  'obsessão', 'obsessões', 'possessão', 'possessões', 'passível', 'passíveis', 'passé',
+];
+// Prosa realista no caminho JSON/MODELO **com marcação**, que é onde a revisão da 1.1.33 mediu 14 de 16
+// frases destruídas: o token da cauda carregava `</p>` e a pontuação final não descartava a marcação.
+const PROSA_JSON = [
+  'A senha deve ser forte', 'A senha deve ter pelo menos oito caracteres',
+  'Sua senha é pessoal e intransferível', 'Informe o token no cabeçalho Authorization',
+  'O segredo de justiça requer credenciamento no sistema', 'Digite sua senha atual',
+  'A senha expira em 30 minutos', 'Esqueci minha senha', 'Crie uma senha com letras e números',
+  'A chave do problema é a educação', 'O passeio de barco passou pelo cais',
+  'Sua sessão expira em 30 minutos', 'A matrícula foi alterada em 12/03/2026 pelo administrador.',
 ];
 
 // Prosa legítima: o sinal de credencial NÃO pode acender, e o texto tem de sair intacto.
@@ -210,7 +245,7 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
   // A fronteira do radical é uma decisão de cobertura com dois lados, e este é o lado que o E2E do 5.9.8
   // mediu: `pins?` sem fronteira casava o "pin" de "shipping". Sem esta asserção, a correção da fronteira
   // fica sem controle — e foi exatamente assim que o defeito passou pela métrica na primeira medição.
-  for (const palavra of NAO_ROTULO) {
+  for (const palavra of [...NAO_ROTULO, ...PALAVRAS_FALSAS]) {
     assert.equal(SENSITIVE_KEY.test(palavra), false, `"${palavra}" contém radical curto e não é rótulo`);
   }
   for (const frase of PROSA_NAO_ROTULO) {
@@ -224,10 +259,34 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
   }
 });
 
+test('valor de atributo legítimo é preservado e valor de credencial não', () => {
+  // A revisão da 1.1.33 mediu o oposto: `placeholder="Chaveiro"`, `aria-label="Secretaria"` e
+  // `alt="Chaveiro"` eram DESCARTADOS do trecho porque o vocabulário casava substring — o campo chegava à
+  // evidência sem nome acessível. A fronteira vale para os dois lados.
+  for (const atributo of ['placeholder', 'aria-label', 'alt', 'title']) {
+    const legitimo = sanitizeHtmlSnippetSource(`<input ${atributo}="Chaveiro de latão">`);
+    assert.match(legitimo, /Chaveiro de latão/u, `${atributo} legítimo não pode ser descartado`);
+    const credencial = sanitizeHtmlSnippetSource(`<input ${atributo}="senha ${S('150')}">`);
+    assert.doesNotMatch(credencial, new RegExp(S('150'), 'u'), `${atributo} com credencial precisa ser tarjado`);
+  }
+  // E nenhuma superfície pode devolver o sentinela interno da marcação camelCase.
+  assert.doesNotMatch(sanitizeHtmlSnippetSource(`<p>senhaAtual: ${S('151')}</p>`), /\u0001/u);
+  assert.doesNotMatch(sanitizeJsonData({ snippet: `<p>senhaAtual: ${S('152')}</p>` }).snippet, /\u0001/u);
+});
+
 test('o sinal de credencial não acende em prosa legítima e o texto sai intacto', () => {
-  for (const texto of [...PROSA, ...PROSA_IDIOMA]) {
+  for (const texto of [...PROSA, ...PROSA_IDIOMA, ...PROSA_NAO_ROTULO]) {
     assert.doesNotMatch(sanitizeHtmlSnippetSource(`<p>${texto}</p>`), /\[redacted\]/u, `"${texto}" é prosa, não credencial`);
     assert.equal(hasCredentialValueSignal(texto), false, `"${texto}" não pode acender o sinal`);
+    // O caminho JSON/MODELO é o que a revisão da 1.1.33 mediu destruindo 14 de 16 frases: a string do
+    // modelo carrega marcação, e é ela que decide a tarja.
+    assert.doesNotMatch(sanitizeJsonData({ snippet: `<p>${texto}</p>` }).snippet, /\[redacted\]/u,
+      `"${texto}" não pode ser tarjada no caminho JSON com marcação`);
+    assert.doesNotMatch(sanitizeJsonData({ texto }).texto, /\[redacted\]/u, `"${texto}" é prosa no JSON puro`);
+  }
+  for (const texto of PROSA_JSON) {
+    assert.doesNotMatch(sanitizeJsonData({ snippet: `<p>${texto}</p>` }).snippet, /\[redacted\]/u,
+      `"${texto}" é prosa e não pode ser tarjada no caminho JSON`);
   }
   // E o outro lado: as formas que PRECISAM acender continuam acendendo, com a largura da 1.1.29.
   for (const texto of PROSA_IDIOMA) {
