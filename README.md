@@ -4,29 +4,31 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.39 preparada — sem revisão independente ainda.** A revisão da **1.1.38** confirmou por medição
-própria o que aquela geração tinha de real (C1 fechado 6/6 com a caixa preservada, C2 fechado em prosa 7/7,
-métrica 92/72/543 não vacuosa, 4/4 formas novas do E2E reprovando na mutação, fase paralela 4.218/4.217/0/1,
-gate GREEN, auditoria ao vivo reproduzida) e mediu **três Important**, sendo o primeiro **regressão do meu
-próprio conserto do C1**: a marca de camelCase era dispensada pela leitura contígua do vocabulário de PROSA,
-mas o de **chave** não tinha o conector `de/da/do` — `isSensitiveKeyName` perdeu **30.550 formas**, `?chaveDeApi=`
-passava na URL, chave JSON vazava e o seletor emitia `div#chaveDeApi`.
+**Versão 1.1.40 preparada — sem revisão independente ainda.** A revisão da **1.1.39** confirmou tudo o
+que aquela geração entregou (fase paralela 4.221/4.220/0/1, escopo serial 52/52, gate GREEN, auditoria ao
+vivo reproduzida, 146 itens, axe do produto sem violação) e mediu **1 Critical e 3 Important** — o Critical
+era **resíduo de quatro gerações**: `senhaassinatura: borboleta` e `chavepix: girassol`, com rótulo
+**minúsculo** e cauda **fora** da lista fechada, chegavam ao modelo e aos **artefatos HTML/JSON entregues**,
+sem nenhum `[redacted]`. A causa é a assimetria que a revisão mediu: o camelCase (`SenhaAssinatura:`) fechava
+porque a marca cria a borda de palavra, e a cauda listada fechava pela lista — a cauda desconhecida em
+minúscula não tinha nem uma coisa nem outra.
 
-A 1.1.39 fecha os três. A marca só é dispensada quando **os dois** vocabulários reconhecem a forma contígua e
-só fica quando **acrescenta** reconhecimento (senão `xSeNhA`/`noVaSeNhA` perdiam os dois), e o conector entra
-no vocabulário de chave: medido com as sondas do próprio revisor, **`COBERTURA_PERDIDA=0 / GANHA=0`** em
-341.164 formas e zero vazamentos em URL, chave JSON e seletor. O C2 nas chaves usa agora **chave de
-atribuição** (vocabulário de prosa, com decodificação) onde a string é o assunto de um valor — chave JSON,
-consulta/hash de URL, nome de atributo — e mantém o vocabulário **fechado** onde ela é identificador (id,
-referência de rótulo, rota), que é o que preserva `pintura.png`, `secretaria-saude` e `Chaveiro`; as **caudas
-qualificadoras medidas** entram na lista fechada (**383 → 86** vazando, e **0** delas era coberta na 1.1.36) e o
-nome acessível passa pelo tarjador completo (**57 → 10**). O caçador adversarial do revisor foi de **329 para
-154** vazamentos em 1.260 casos, sem nenhuma palavra nova no dicionário além das 39 declaradas. Na privacidade,
-a limpeza passou a distinguir **aba inexistente** (resolve `null`: limpeza satisfeita, registro pode ir para
-`removed`) de **leitura impossível** (rejeita: nada fecha e o registro fica em `cleanup-pending`); e o nome de
-um nó de texto privado continua retirado — só a **vaziez** é preservada, o que permite à regra apontar 5.13.10
-sem entregar conteúdo. **Resíduo declarado:** journal forjado com `tabId` **e** `windowId` que casam (o vínculo
-por identidade de documento muda a cada navegação e o atacante deste cenário já executa código na extensão).
+A 1.1.40 fecha isso na **posição de atribuição** (`rótulo: valor`, rótulo de um token): o vocabulário
+**permissivo** passa a contar como rótulo reconhecido, menos as **22 palavras da língua medidas** pelos
+revisores (`chaveiro`, `chaveta`, `chaveamento`, `secretaria`, `pintura`, `pincel`, `pingente`, `tokenizador`,
+`obsessão`, `hairpin`, `spin`, …) — a lista é fonte única e a métrica a percorre, de modo que acrescentar um
+radical sem conferir colisões derruba o teste. A forma `prefixo curto (1-3) + radical longo + cauda`
+(`xsenhapix`) entra na fonte do rótulo com **preço medido no dicionário**: 35 palavras inglesas e **zero**
+portuguesas. O preço do lado permissivo nas superfícies de **chave** foi revertido — chave JSON, consulta de
+URL e nome de atributo voltam ao vocabulário fechado (**1/34 nas três, igual à 1.1.38**), que agora inclui a
+regra de prefixo e continua fechando `xsenha`/`data-xsenha`. E a alegação de cobertura passou a valer no
+universo certo: **`COBERTURA_PERDIDA=0 / GANHA=0` em 516.235 formas**. Medições do pacote: fase paralela
+**4.221/4.220/0/1**, escopo serial **52/52**, auditoria ao vivo no Google com 0 falhas, 1 alerta, 3 suspeitas,
+9 positivos, 109 no checklist, 28,5%, 9,0 de 10, 146/146 ids e títulos no HTML e no PDF, notas 5/5, 0
+palavras partidas e 0 `[redacted]`; o E2E do próprio revisor, rodado nos bytes empacotados, mede **S1/S2 =
+false** nas cinco superfícies. **Resíduos declarados:** `codigo*`/`conta*` (radicais fora do vocabulário de
+propósito — `Conta: R$ 30,00` é evidência), `api.key`, `private_key`, `chave·de·api`, separadores exóticos,
+rótulos codificados no caminho de prosa/modelo e rótulo+valor em nós irmãos.
 
 **Versão 1.1.36 — revisada: 2 Critical, 4 Important, 5 Minor e 8 observações**, todos fechados na 1.1.37.
 A revisão da **1.1.35** deu **2 Critical,

@@ -1,6 +1,26 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
-> **Incremento 1.1.39, e o que ele muda aqui.** Artefato corrente
+> **Incremento 1.1.40, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.40.zip` (`8deba155…9a52`), **sem revisão independente ainda**.
+> Fecha o **Critical** da revisão da 1.1.39 e os três Important dela. O Critical era resíduo de quatro
+> gerações: `senhaassinatura: borboleta` / `chavepix: girassol` — rótulo **minúsculo** com cauda **fora** da
+> lista fechada — chegavam ao modelo e aos artefatos **HTML/JSON entregues**, porque a marca de camelCase
+> (que cria a borda) só existe quando há transição de caixa. Agora, na posição de atribuição, o vocabulário
+> **permissivo** conta como rótulo reconhecido, menos as **22 palavras da língua medidas** (`chaveiro`,
+> `pintura`, `pincel`, `pingente`, `tokenizador`, `secretaria`, `obsessão`, `hairpin`, `spin`, …), em fonte
+> única percorrida pela métrica; a forma `prefixo curto + radical longo + cauda` entra na fonte do rótulo
+> com **preço medido**: 35 palavras inglesas, **zero** portuguesas. O preço do lado permissivo nas
+> superfícies de **chave** foi revertido (1/34 nas três, igual à 1.1.38) e a alegação de cobertura passou a
+> valer no universo certo: **`COBERTURA_PERDIDA=0 / GANHA=0` em 516.235**. Medições do pacote: fase paralela
+> **4.221/4.220/0/1 EXIT=0**, escopo serial **52/52**, auditoria ao vivo no Google **0 falhas/1 alerta/3
+> suspeitas/9 positivos/109 no checklist/28,5%/9,0 de 10**, 146/146 ids e títulos no HTML e no PDF, notas
+> 5/5, 0 palavras partidas, 0 `[redacted]`, gate **GREEN**; e o E2E do próprio revisor, rodado nos bytes
+> empacotados, mede **S1/S2 = false** nas cinco superfícies. **Resíduos declarados:** `codigo*`/`conta*`
+> (radicais fora do vocabulário de propósito), `api.key`, `private_key`, `chave·de·api`, separadores
+> exóticos, rótulos codificados no caminho de prosa e rótulo+valor em nós irmãos. **8** segue **Parcial**
+> por decisão do usuário, fora do caminho de bloqueio.
+
+ Artefato corrente
 > `release/audita-acessibilidade-1.1.39.zip` (`4ada4e9a…896c`), **sem revisão independente ainda**.
 > Fecha os três Important da revisão da 1.1.38 — e o primeiro deles era **regressão do meu próprio
 > conserto do C1**: o vocabulário de CHAVE perdeu o conector `de/da/do` (30.550 formas, 23/28 nomes
