@@ -3024,3 +3024,12 @@ zip); escopo serial no pacote **56/58** — `axe-mv3-csp` (flake de limpeza decl
 **GREEN**; auditoria ao vivo **0 falhas / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, versão
 **1.1.44**, quatro exportações `complete`; integridade **146/146 ids e títulos no HTML e no PDF**, notas 5/5,
 0 palavras partidas, 0 `[redacted]`.
+
+**Conferência pontual da distinção requisito × recomendação contra o PDF da norma (17/09/2026).** A meta
+exige que as conclusões respeitem a obrigatoriedade da ABNT, e o catálogo declara 96 requisitos e 50
+recomendações. Amostra conferida com `pypdf` no sumário do PDF fornecido, nos dois sentidos: **5.1.5 "Uso de
+foco – Recomendação"** e **5.9.11 "Prevenção de erro – Recomendação"** batem com `RECOMMENDATION` no catálogo
+(`src/core/normative/nbr17225.js`), e **5.9.2 "Rótulo de campo previsível – Requisito"** e **5.1.6 "Armadilha
+de foco – Requisito"** batem com `REQUIREMENT`. É conferência **pontual** (quatro itens, dois de cada lado),
+somada às quatro já registradas (5.9.1, 5.1.3, 5.9.7, 5.9.8) e à conferência dos 146 itens de rodadas
+anteriores; serve para mostrar que o catálogo continua alinhado ao PDF depois das mudanças desta sessão.
