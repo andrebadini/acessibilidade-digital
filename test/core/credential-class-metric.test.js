@@ -571,6 +571,19 @@ test('morfologia portuguesa e famílias inglesas continuam evidência, e as form
     assert.match(redactSensitiveText(`${palavra}: abc123`), /\[redacted\]/u,
       `"${palavra}" é resíduo declarado do lado do recall — se passou a ser preservada, atualize a declaração`);
   }
+  // A FRESTA DA FLEXÃO (Critical da revisão final da 1.1.45): a exceção de família escolhia a MAIOR
+  // flexão que começava o resto e conferia só o que sobrava dela, então `<família><flexão><radical>`
+  // passava — `chaveiroSenha` = `chaveir` + `os` + `enha`, e `enha` não é sinal. A regra passou a exigir
+  // que o resto INTEIRO (flexão incluída) esteja limpo. Estas nove formas reprovavam contra a 1.1.45.
+  for (const forma of ['chaveiroSenha', 'chaveiroSegredo', 'chaveiroSecret', 'chaveiroSession',
+    'chaveiroSeed', 'secretarioSenha', 'secretariaSenha', 'pinturaSegredo', 'sepingenteSenha']) {
+    assert.equal(isSensitiveKeyName(forma), true, `"${forma}" é identificador de credencial`);
+    assert.match(redactSensitiveText(`${forma}: borboleta`), /\[redacted\]/u, `"${forma}" precisa ser tarjado na prosa`);
+  }
+  for (const forma of ['chaveiroSenha', 'secretarioSenha', 'pinturaSegredo']) {
+    assert.doesNotMatch(sanitizeHtmlSnippetSource(`<div id="${forma}">borboleta</div>`), /borboleta/u,
+      `"${forma}" não pode entregar o conteúdo do elemento`);
+  }
   for (const palavra of FAMILIAS_EN_PREFIXO) {
     assert.equal(redactSensitiveText(`${palavra}: abc123`), `${palavra}: abc123`,
       `"${palavra}" é preservada pela família de PREFIXO`);

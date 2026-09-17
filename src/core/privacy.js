@@ -451,12 +451,17 @@ function languageFamilyExemption(plain) {
   // `secretaria-saude` é `ia` (e o que sobra, `-saude`, é conferido), em `chaveiroDeLatão` é `o` com
   // `delatão` sobrando, e em `tokenizacaoDeTexto` é `acao` com `detexto` sobrando. O que sobra depois da
   // flexão também passa pelo teste de sinal: sem isso `chaveir-senha` passava por "família + flexão vazia".
-  const candidatas = LANGUAGE_INFLECTIONS.filter(flexao => after.startsWith(flexao))
-    .sort((a, b) => b.length - a.length);
-  // A palavra da língua é SÓ a família e a sua flexão: qualquer sinal de credencial antes, no meio ou depois
-  // (`senha-chaveir`, `pix-chaveir`, `chaveir-senha`, `chaveirpix`, `chaveirotoken`) tira a exceção.
+  // A palavra da língua é SÓ a família: o que vem antes e o que vem DEPOIS dela — a flexão incluída — não
+  // pode carregar radical nem qualificador de credencial (`senha-chaveir`, `pix-chaveir`, `chaveir-senha`,
+  // `chaveirpix`, `chaveirotoken`, `chaveiroSenha`).
+  //
+  // A versão anterior escolhia a MAIOR flexão que começava o resto e conferia só o que sobrava dela: assim
+  // `chaveiroSenha` virava família `chaveir` + flexão `os` + resto `enha`, e `enha` não é sinal — a exceção
+  // era concedida e o valor do elemento saía. A revisão final da 1.1.45 mediu +282 formas novas no
+  // trecho/modelo e +72 na chave JSON contra a 1.1.44 (Critical). Conferir o resto INTEIRO fecha a fresta
+  // sem perder `secretario`, `secretariaDeSaude`, `tokenizacaoDeTexto` nem `chaveiroDeLatão`.
   const limpo = parte => !SENSITIVE_KEY.test(parte) && !CREDENTIAL_QUALIFIER_SIGNAL.test(parte);
-  return candidatas.some(flexao => limpo(before) && limpo(after.slice(flexao.length)));
+  return limpo(before) && limpo(after);
 }
 /**
  * Verdadeiro quando o token é forma de palavra da língua (exata ou de família medida) e por isso NÃO

@@ -3075,3 +3075,34 @@ inalcançáveis pelo `DOM.getOuterHTML` do produto.
 zip); escopo serial no pacote **57/58** (só a flake `axe-mv3-csp`); gate **GREEN**; auditoria ao vivo
 **0 falhas / 9 positivos / 109 no checklist / versão 1.1.45**; integridade **0 palavras partidas, 0
 `[redacted]`**, notas 5/5, 146/146 ids e títulos.
+
+## Rodada 92 — a revisão final da 1.1.45 achou um Critical **introduzido pela própria 1.1.45** (a fresta da flexão) e a 1.1.46 fecha
+
+A revisão integrada final (subagente `ad8456dd`, em andamento) reportou de imediato um achado que muda o
+veredito, com medição própria e reprodutível:
+
+**C-1 — a exceção de família voltou a poupar `<família><flexão><radical>`.** O conserto do Minor m-1 (rodada
+91) passou a escolher a **maior** terminação da lista de flexões que começa o que vem depois da família. Com
+isso `chaveiroSenha` vira família `chaveir` + flexão `os` + resto `enha`, e `enha` não carrega sinal — a
+exceção de palavra da língua era concedida e o conteúdo do elemento saía. Medição do revisor no corpus dele de
+**896 formas** (28 palavras de família × 16 radicais iniciados por S × 2 caixas), nos bytes empacotados da
+1.1.45: **trecho 478, modelo 478, chave JSON 268** contra **228/228/198 da 1.1.44 aprovada** — 250 formas novas
+no trecho/modelo e 70 na chave. Exemplos: `chaveiroSenha`, `chaveiroSegredo`, `chaveiroSecret`,
+`chaveiroSession`, `chaveiroSeed`, `secretarioSenha`, `secretariaSenha`, `pinturaSegredo`,
+`sepingenteSenha`.
+
+**A 1.1.46 fecha a fresta reduzindo a regra.** A exceção de família deixou de escolher flexão: passa a exigir
+que **o que vem antes e o que vem depois da família — a flexão incluída — estejam limpos** de radical e de
+qualificador de credencial. A lista de flexões saiu dessa decisão, porque era ela a fonte da fresta. Medições
+com as sondas do próprio revisor:
+
+- o corpus dele (896 formas): **228/228/198 — idêntico à 1.1.44** e **`NOVOS vs 1.1.44 = 0`** (o pacote 1.1.45
+  congelado dá 478/478/268); as nove formas de exemplo estão **seladas**;
+- os inocentes do m-1 seguem **preservados**: `secretario`, `secretarios`, `secretariaDeSaude`,
+  `tokenizacaoDeTexto`, `chaveiroDeLatão`, `chaveiro`, `pintura`, `obsession`, `possession`;
+- `v143-shapes` **0/18 em todas as formas** com `REABERTOS=0`; `v143-recall-198k` com **`VAZA=6.707`** e
+  `REABERTOS=0` contra a 1.1.41 e a 1.1.42; `v143-context-stack` com tarja em todos os casos; `p02`
+  6.707/198.360 com 0 reabertos; `p03` **0 reabertos** nas oito superfícies;
+- **329/329** nos testes afetados (núcleo, evidência, métrica e painel), e a métrica da classe ganhou as nove
+  formas do revisor **com não vacuidade conferida**: o mesmo arquivo de teste **reprova** contra os bytes
+  empacotados da 1.1.45 e passa nesta árvore.
