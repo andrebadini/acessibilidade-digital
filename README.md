@@ -4,8 +4,30 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.34 preparada — sem revisão independente ainda.** A revisão da **1.1.33** deu **1 Critical,
-3 Important, 4 Minor e 8 observações** e **reprovou** o artefato. O Critical era **estreitamento meu**: a
+**Versão 1.1.35 preparada — sem revisão independente ainda.** A revisão da **1.1.34** deu **1 Critical,
+2 Important, 5 Minor e 10 observações** e **reprovou** o artefato. O Critical era **regressão minha**: a
+fronteira de palavra da 1.1.34 cobria só o radical no **fim** da palavra (`userpin`) e devolveu ao
+entregável o radical no **início** da palavra colada — `senhaforte:`, `tokenacesso:`, `sessionid:`,
+`data-senhaforte="…"`, `?sessionid=`, `{"sessionid":…}` —, formas que a 1.1.33 tarjava. O Important I1
+era o outro lado: as frases que eu tinha acrescentado e a regra genérica de prefixo destruíam prosa
+(`O certificado digital A1 é válido`, `The hairpin: 12 units`). O I2 era pré-existente: `<b>sen</b>ha: X`,
+o rótulo partido por marcação, vazava nas quatro superfícies.
+
+A 1.1.35 tira a lição de desenho: **um vocabulário só não serve para contextos diferentes**. Agora há
+**dois** — o de **prosa** (palavra inteira, camelCase, prefixo de credencial como `user`/`card`/`data` e
+cauda de credencial como `id`/`key`/`acesso`/`forte`/`dousuario`, com o conector `de/da/do/d`, em listas
+**fechadas**, que é o que separa `senhaforte` de `chaveiro`) e o de **chave** (nome de atributo, chave de
+JSON, chave de URL, `id`, nome no seletor: **permissivo**, com o radical em qualquer posição, como a
+1.1.33 fazia para tudo). As frases `certificado digital`, `conta corrente`, `assinatura eletrônica` e
+`dígito verificador` valem em prosa **só com separador** e continuam valendo como chave; `hairpin`, `spin`
+e `chaveiro` voltam a ser palavra. O rótulo partido por marcação é lido por uma **segunda leitura sem
+espaço** entre fragmentos, o caminho JSON decide sobre duas projeções (com e sem espaço entre tags), o
+**percent-encoding** entra no decodificador (`sen%68a:`), o pré-filtro aceita **escape octal** e a rota com
+chave no penúltimo segmento (`#/auth/senha/X`) tarja o último. O preço declarado mudou de lado e está
+medido: **203 palavras** do dicionário casam no caminho de chave (contra 284 da 1.1.33 e 87 novas).
+
+**Versão 1.1.34 — revisada: 1 Critical, 2 Important, 5 Minor e 10 observações**, todos fechados na 1.1.35.
+A revisão da **1.1.33** deu **1 Critical, 3 Important, 4 Minor e 8 observações** e **reprovou** o artefato. O Critical era **estreitamento meu**: a
 fronteira de palavra que fechou o falso positivo de "shipping" devolveu à página `userPin`, `cardPin`,
 `PINpad` e `data-userpin`, que voltaram a chegar a quatro superfícies entregues. O Important mais grave
 mediu o outro lado, e é o que muda o desenho daqui em diante: o resíduo de falso positivo que eu havia
@@ -75,18 +97,17 @@ contêm radical curto e não são rótulo** mais sete frases — sem ele, estrei
 pacote medido antes disso (`6f26a822`) **foi substituído antes de qualquer revisão**, e o artefato corrente
 é `6b1f2733…ee20`.
 
-Medido nesses bytes: gate de release GREEN; fase paralela com **4.210 testes, 4.208 passam, 1 pulado, 0
-falham**; fase serial completa na raiz extraída do zip **com a árvore de teste do próprio commit** (hash
-conferido contra `git show`): 80 testes, 70 passam, 10 falham — 7 no arquivo do outro incremento e 3 em
-arquivos de flakiness sob carga que passam **11/11 isolados**; E2E de forma isolada e
-de falso positivo **17/17 verdes** nos bytes entregues e **9/17 reprovando** contra os bytes da 1.1.33;
-métrica da classe em **0 de 75 formas**; e auditoria ao vivo no Google, do pacote, em modo sem pixels:
-**0 falhas confirmadas, 1 recomendação/alerta, 2 suspeitas a confirmar (2 ocorrências), 9 resultados
-positivos, 108 verificações no checklist, cobertura 29,2%, índice 9,0/10, PDF de 17 páginas**, quatro
+Medido nesses bytes: gate de release GREEN; fase paralela no **clone completo** (com `.git` e `release/`)
+com **4.210 testes, 4.209 passam, 1 pulado, 0 falham**; fase serial na raiz extraída do zip **com a árvore
+de teste do próprio commit**: 80 testes, 72 passam, 8 falham — 7 no arquivo do outro incremento e 1 flake
+declarada, que passa isolada; E2E de forma isolada e de falso positivo **17/17 verdes**; métrica da classe
+em **0 de 92 formas e 347 combinações**; e auditoria ao vivo no Google, do pacote, em modo sem pixels:
+**0 falhas confirmadas, 1 recomendação/alerta, 3 suspeitas a confirmar (4 ocorrências), 9 resultados
+positivos, 109 verificações no checklist, cobertura 28,5%, índice 9,0/10, PDF de 18 páginas**, quatro
 exportações `complete`, **146/146 ids e títulos no HTML e no PDF**, notas editoriais 5/5 nos dois, 0 palavras
-partidas e **0 `[redacted]`** no HTML e no JSON. Uma segunda medição dos MESMOS bytes deu 3 suspeitas
-(4 ocorrências), 109 no checklist, 28,5% e 18 páginas: a página do Google entrega conteúdo diferente em
-sessões diferentes, e a diferença é de instância, não de versão.
+partidas e **0 `[redacted]`** no HTML e no JSON. A página do Google entrega conteúdo diferente em sessões
+diferentes — medições da mesma versão deram 2 ou 3 suspeitas, 108 ou 109 no checklist, 28,5% ou 29,2% e 17
+ou 18 páginas —, e a diferença é de instância, não de versão.
 
 A revisão da **1.1.31** deu **2 Critical, 4 Important, 5 Minor e 5 observações**, e o diagnóstico dela é o que
 importa. Ela confirmou o conserto de

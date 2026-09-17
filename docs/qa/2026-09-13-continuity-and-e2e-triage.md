@@ -2486,3 +2486,24 @@ Antes de congelar a 1.1.34 para a revisão, testei evasões contra a própria co
 - `numero de seguranca:` (sem acento) e os outros rótulos de várias palavras **não eram tarjados** quando escritos sem acento: a lista pegava só a primeira variante da primeira parte. Agora entram todas as variantes, e a métrica tem cinco formas sem acento.
 
 **O que continua fora, declarado com medição:** separador DENTRO do radical (`se.nha: X`) não é reconhecido — aceitar qualquer separador entre as letras de um radical abriria falso positivo largo (`s.e.n.h.a` casa com qualquer coisa) e o custo não se paga. É a mesma fronteira de projeto que a revisão da 1.1.33 registrou para `agência` e `matrícula`.
+
+## Rodada 75 — a 1.1.35: vocabulário por CONTEXTO (chave × prosa) e os três bloqueios da 1.1.34
+
+A revisão da 1.1.34 **reprovou** com 1 Critical, 2 Important, 5 Minor e 10 observações. O Critical era regressão minha: a fronteira de palavra cobria só o radical no **fim** (`userpin`), e o radical no **início** da palavra colada (`senhaforte:`, `tokenacesso:`, `sessionid:`, `data-senhaforte="…"`, `?sessionid=`, `{"sessionid":…}`) voltou a chegar a relatório, modelo, HTML e JSON — formas que a 1.1.33 tarjava. O Important I1 era do outro lado: as frases que eu tinha acrescentado (`certificado digital`, `conta corrente`, `assinatura eletrônica`) e a regra genérica de prefixo destruíam prosa (`O certificado digital A1 é válido`, `The hairpin: 12 units`). O Important I2 era pré-existente: `<b>sen</b>ha: X`, o rótulo partido por marcação, vazava nas quatro superfícies.
+
+**O desenho que fecha os dois lados: vocabulário POR CONTEXTO.** A 1.1.34 tentou um vocabulário só; a 1.1.35 tem dois:
+
+- **Prosa** (texto visível, valor de atributo de rótulo, nome acessível): palavra inteira + camelCase + **prefixo de credencial** (`user`, `card`, `data`, `session`, `cookie`, `chave`, `senha`, `token`, `pin`…) + **cauda de credencial** (`id`, `key`, `acesso`, `forte`, `padrao`, `dousuario`, `dapi`…) com o conector `de/da/do/d`, tudo em LISTAS FECHADAS — é isso que separa `senhaforte` (rótulo) de `chaveiro` (palavra), que uma regra genérica de "radical + letras" não separa.
+- **Chave** (nome de atributo, chave de JSON, chave de URL, `id`, nome no seletor, `aria-label` de raiz editável): vocabulário **permissivo** próprio (`isSensitiveKeyName`), com o radical em qualquer posição — é o que a 1.1.33 tinha para tudo. Tarjar uma chave a mais custa menos que deixar passar o valor.
+
+**E as frases que viraram preço:** `certificado digital`, `conta corrente`, `assinatura eletrônica` e `dígito verificador` valem em prosa **só com separador** (`Certificado digital: 1234` continua tarjado) e continuam valendo como chave. A regra genérica de prefixo sai da prosa: `hairpin`, `pushpin`, `spin` e `chaveiro` voltam a ser palavra. O preço declarado mudou de lado e está medido: 203 palavras do dicionário casam no caminho de CHAVE (contra 284 da 1.1.33 e 87 novas).
+
+**Rótulo partido e codificações.** O acumulado do trecho ganha uma **segunda leitura sem espaço** entre fragmentos (fecha `<b>sen</b>ha:`), o caminho JSON decide sobre **duas projeções** (com e sem espaço entre tags), o **percent-encoding** entra no decodificador de matching (`sen%68a:`), o pré-filtro aceita **escape octal** e a rota com chave no penúltimo segmento (`#/auth/senha/X`) passa a tarjar o último.
+
+## Rodada 76 — as medições da 1.1.35
+
+- **Gate de release**: `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` GREEN, exit 0, pacote `950b3eb2…9866`.
+- **Fase paralela** (180 arquivos, **clone completo** com `.git` e `release/` — a raiz extraída do zip não serve para esta fase e a revisão da 1.1.34 apontou isso): **4.210 testes, 4.209 passam, 1 pulado, 0 falham**.
+- **Fase serial na raiz extraída do zip, com a árvore de teste DO COMMIT**: **80 testes, 72 passam, 8 falham** — 7 em `test/e2e/sidepanel-flow-mv3.test.mjs` (arquivo do outro incremento, falho também isolado) e 1 em `axe-mv3-csp` (flake declarada, passa isolado). Os dois arquivos de credencial (13 formas + 4 controles de falso positivo) passam **17/17**.
+- **Métrica da classe**: **92 formas, 347 combinações, 0 vazamentos** — com as 13 formas novas da concatenação, o rótulo partido, o percent/octal e a rota.
+- **Auditoria ao vivo no Google, do pacote, sem pixels**: 0 falhas confirmadas (0 ocorrências), 1 recomendação/alerta, 3 suspeitas a confirmar (4 ocorrências), 9 resultados positivos, 109 verificações no checklist, cobertura 28,5% (denominador 130 declarado), índice 9,0/10, PDF de 18 páginas, quatro exportações `complete`; 146 itens (96+50), 134 resultados de regra, 118 ocorrências, 117 registros de revisão humana, 11 evidências, 0 `[redacted]`, notas 5/5, 146/146 ids e títulos, 0 palavras partidas, 0 frases de "Inconformidade ao item" e 112 "Verificar o item".
