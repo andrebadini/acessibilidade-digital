@@ -1,4 +1,4 @@
-import { decodeForMatching, hasCredentialValueSignal, isSensitiveKey, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, isSensitiveKey, isSensitiveKeyName, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -91,8 +91,8 @@ function sanitizeUrl(value) {
     if (!['http:', 'https:'].includes(url.protocol)) return null;
     url.username = '';
     url.password = '';
-    for (const key of [...url.searchParams.keys()]) if (isSensitiveKey(key)) url.searchParams.delete(key);
-    if (isSensitiveKey(url.hash) || FRAGMENT_CREDENTIAL_KEY.test(url.hash)) url.hash = '';
+    for (const key of [...url.searchParams.keys()]) if (isSensitiveKeyName(key)) url.searchParams.delete(key);
+    if (isSensitiveKeyName(url.hash) || FRAGMENT_CREDENTIAL_KEY.test(url.hash)) url.hash = '';
     if (absolute) return url.href;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
@@ -117,7 +117,7 @@ function contentEditableTag(parsed) {
 
 function safeIdRefs(value) {
   const tokens = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
-  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !isSensitiveKey(token))
+  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !isSensitiveKeyName(token))
     ? tokens.join(' ')
     : null;
 }
@@ -139,9 +139,9 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
     if (PRIVATE_ATTRIBUTE.test(withCamelMarks(name))) continue;
     if ((parsed.name === 'object' && name === 'data') || (parsed.name === 'embed' && name === 'src')) continue;
     if (parsed.name === 'meta' && String(values['http-equiv']).toLowerCase() === 'refresh' && name === 'content') continue;
-    if (isSensitiveKey(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
+    if (isSensitiveKeyName(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
     if (editable && ['value', 'aria-valuenow', 'aria-valuetext'].includes(name)) continue;
-    if (name === 'value' && (parsed.name === 'option' || isSensitiveKey(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
+    if (name === 'value' && (parsed.name === 'option' || isSensitiveKeyName(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
     if (parsed.name === 'option' && (name === 'selected' || name === 'aria-selected')) continue;
     let value = attribute.value;
     if (value !== null && (name === 'type' || name === 'autocomplete')) value = value.toLowerCase();
@@ -210,6 +210,10 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
   // sinal, e é isso que impede o remédio de virar o novo defeito.
   let tainted = false;
   let textStream = '';
+  // O acumulado SEM espaço entre fragmentos: `<b>sen</b>ha: X` é o rótulo partido por marcação, e o
+  // acumulado com espaço (`sen ha: X`) não o enxerga — Important da revisão da 1.1.34. O acumulado com
+  // espaço continua sendo o principal (é ele que lê `senha` + `valor` em nós diferentes).
+  let compactStream = '';
   const decodeEntities = decodeForMatching;
   const emitText = fragment => {
     if (privateStructure.length || pendingPrivateRoot) return;
@@ -219,7 +223,8 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
     }
     const decoded = decodeEntities(fragment);
     textStream = `${textStream} ${decoded}`;
-    if (!tainted && hasCredentialValueSignal(textStream)) tainted = true;
+    compactStream = `${compactStream}${decoded}`;
+    if (!tainted && (hasCredentialValueSignal(textStream) || hasCredentialValueSignal(compactStream))) tainted = true;
     if (tainted) {
       // O fragmento que trouxe o sinal preserva o rótulo e tarja o valor; quando o sinal veio de antes,
       // o fragmento inteiro É o valor. A tarja parte do texto DECODIFICADO: o rótulo pode estar

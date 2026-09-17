@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { SENSITIVE_KEY, decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
+import { isSensitiveKeyName, SENSITIVE_KEY, decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
 import { sanitizeHtmlSnippetSource } from '../../src/core/evidence/snippet.js';
 import { computeAccessibleText } from '../../src/core/accessibility/accessible-name.js';
 import { buildStableSelector } from '../../src/core/evidence/selector.js';
@@ -107,6 +107,27 @@ const CARTAO = [
   ['hífen suave no radical', `<p>car\u00adtão de crédito: ${S('123')}</p>`],
   ['BOM no meio do radical', `<p>to\ufeffken: ${S('124')}</p>`],
   ['conta corrente', `<p>Conta corrente: ${S('118')}</p>`],
+  // CONCATENAÇÕES com o radical no INÍCIO da palavra, medidas pela revisão da 1.1.34 (Critical): a
+  // fronteira de fim de palavra não cobria esse lado e estas formas eram tarjadas na 1.1.33.
+  ['senha + forte', `<p>senhaforte: ${S('140')}</p>`],
+  ['token + acesso', `<p>tokenacesso: ${S('141')}</p>`],
+  ['session + id', `<p>sessionid: ${S('142')}</p>`],
+  ['senha + temporaria', `<p>senhatemporaria: ${S('143')}</p>`],
+  ['chave + d + api', `<p>chavedapi: ${S('144')}</p>`],
+  ['senha + do + usuario', `<p>senhadousuario: ${S('145')}</p>`],
+  ['chave + secreta', `<p>chavesecreta: ${S('146')}</p>`],
+  ['cookie + consent', `<p>cookieconsent: ${S('147')}</p>`],
+  ['secret + key', `<p>secretkey: ${S('148')}</p>`],
+  ['password + key', `<p>passwordkey: ${S('149')}</p>`],
+  ['atributo data-senhaforte', `<div data-senhaforte="${S('150')}">x</div>`],
+  ['atributo data-sessionid', `<div data-sessionid="${S('151')}">x</div>`],
+  ['chave JSON sessionid', `<pre>{"sessionid": "${S('152')}"}</pre>`],
+  // Rótulo partido por MARCAÇÃO dentro da palavra (Important da revisão da 1.1.34: a 1.1.33 também
+  // vazava) e rótulo escondido em percent-encoding ou escape octal (Minor M1 da mesma revisão).
+  ['rótulo partido por marcação', `<p><b>sen</b>ha: ${S('156')}</p>`],
+  ['rótulo partido em três', `<p><b>se</b>n<i>ha</i>: ${S('157')}</p>`],
+  ['rótulo em percent-encoding', `<p>sen%68a: ${S('158')}</p>`],
+  ['rótulo em escape octal', `<p>sen\\150a: ${S('159')}</p>`],
   ['certificado digital', `<p>Certificado digital: ${S('119')}</p>`],
 ];
 const ROTULOS = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
@@ -126,6 +147,11 @@ const ATRIBUTOS = [
 // Chaves de credencial de URL em TODAS as grafias do padrão: o pré-filtro da 1.1.34 gerava só a forma
 // colada e deixava `?saml_response=` fora da varredura — falso negativo medido na rodada 74.
 const URLS_CHAVE = [
+  ['consulta ?sessionid=', `/p?sessionid=${S('153')}`],
+  ['consulta ?cookieconsent=', `/p?cookieconsent=${S('154')}`],
+  ['consulta ?secretkey=', `/p?secretkey=${S('155')}`],
+  ['rota #/auth/senha/', `/p#/auth/senha/${S('160')}`],
+  ['rota #/auth/senha/ com consulta', `/p#/auth/senha/${S('161')}`],
   ['consulta ?saml_response=', `/p?saml_response=${S('130')}`],
   ['consulta ?samlresponse=', `/p?samlresponse=${S('131')}`],
   ['consulta ?saml-response=', `/p?saml-response=${S('132')}`],
@@ -168,10 +194,11 @@ const PROSA_NAO_ROTULO = [
   // A janela de rótulo (M1): seis palavras entre o rótulo e o valor ainda precisam ser cobertas.
   'chave de acesso ao sistema principal da conta ZQXJKVBWPMTLRNHS',
 ];
-// PREÇO DECLARADO da fronteira de palavra: palavras que TERMINAM num radical curto com duas letras ou
-// mais de prefixo viram rótulo. A lista existe para o preço ser medido, não escondido — e é o motivo de
-// `spin` (uma letra de prefixo) ficar preservado e `hairpin` não.
-const PRECO_DECLARADO = ['hairpin', 'pushpin', 'backspin', 'mypassword', 'userpin'];
+// PREÇO DECLARADO, e ele mudou de lado na 1.1.35: palavra que TERMINA num radical curto é rótulo no
+// caminho de CHAVE (identificador colado: `data-hairpin`, `hairpin`) e é PRESERVADA em prosa — a revisão
+// da 1.1.34 mediu que a regra genérica de prefixo destruía `The hairpin: 12 units` sem cobrir o que
+// importava (`sessionid`, `senhaforte`), que agora têm prefixo/cauda de credencial próprios.
+const PRECO_DECLARADO = ['hairpin', 'pushpin', 'backspin', 'userpin'];
 // Palavras medidas uma a uma pela revisão da 1.1.33: contêm radical e NÃO podem ser rótulo.
 const PALAVRAS_FALSAS = [
   'chaveiro', 'chaveta', 'chaveamento', 'secretaria', 'secretário', 'secretariado', 'secreto',
@@ -279,7 +306,15 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
     assert.equal(SENSITIVE_KEY.test(palavra), false, `"${palavra}" contém radical curto e não é rótulo`);
   }
   for (const palavra of PRECO_DECLARADO) {
-    assert.equal(SENSITIVE_KEY.test(palavra), true, `"${palavra}" é o preço declarado da fronteira e precisa estar medido`);
+    assert.equal(isSensitiveKeyName(palavra), true, `"${palavra}" é o preço declarado do caminho de CHAVE e precisa estar medido`);
+  }
+  // E o outro lado do preço: em PROSA a palavra terminada em radical curto é preservada, com o caso que a
+  // revisão da 1.1.34 mediu.
+  for (const palavra of ['hairpin', 'spin', 'chaveiro', 'tokenizador']) {
+    assert.equal(SENSITIVE_KEY.test(palavra), false, `"${palavra}" é palavra da língua e não pode ser rótulo em prosa`);
+  }
+  for (const frase of ['The hairpin: 12 units', 'O tokenizador é interno', 'Chaveiro: R$ 30,00']) {
+    assert.doesNotMatch(redactSensitiveText(frase), /\[redacted\]/u, `"${frase}" é prosa e não pode ser tarjada`);
   }
   for (const frase of PROSA_NAO_ROTULO) {
     assert.equal(redactSensitiveText(frase), frase, `"${frase}" é prosa e não pode ser tarjada`);

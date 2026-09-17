@@ -42,7 +42,11 @@ const CAMEL_MARK_GLOBAL = /\u0001/gu;
 // O prefixo tem de ter DUAS letras ou mais: é o que separa `userpin`/`cardpin` (concatenções reais de
 // chave) de `spin`, palavra da língua que termina no mesmo radical. Palavra inteira (`pin`) continua
 // valendo pelo lookbehind.
-const WORD_HEAD = String.raw`(?:[A-Za-z]{2,12}|(?<![\p{L}\p{N}]))`;
+// Cabeça do radical no caminho de PROSA: palavra inteira ou prefixo de CREDENCIAL da lista fechada
+// (`userpin`, `cardpin`, `meupin`). O prefixo genérico de 2 a 12 letras ficou só no vocabulário de CHAVE
+// (`isSensitiveKeyName`), porque em prosa ele transformava `hairpin` em rótulo e destruía a frase
+// (Important da revisão da 1.1.34).
+const WORD_HEAD_PERMISSIVE = String.raw`(?:[A-Za-z]{2,12}|(?<![\p{L}\p{N}]))`;
 const WORD_TAIL = String.raw`(?!\p{L})`;
 const WORD_SEP = String.raw`(?:\u0001|[\s\-_–—])`;
 
@@ -84,10 +88,6 @@ const PHRASE_STEMS = Object.freeze([
   [['código', 'codigo'], ['de'], ['verificação', 'verificacao', 'acesso', 'segurança', 'seguranca',
     'recuperação', 'recuperacao', 'autenticação', 'autenticacao', 'confirmação', 'confirmacao']],
   [['frase'], ['de'], ['recuperação', 'recuperacao']],
-  [['dígito', 'digito'], ['verificador', 'verificadora']],
-  [['conta'], ['corrente']],
-  [['certificado'], ['digital']],
-  [['assinatura'], ['eletrônica', 'eletronica']],
   [['palavra'], ['passe']],
   [['frase'], ['passe']],
   [['mot'], ['de'], ['passe']],
@@ -100,6 +100,19 @@ const PHRASE_STEMS = Object.freeze([
   [['pass'], ['word', 'words', 'wd', 'wds', 'wrd', 'w0rd', 'wort', 'wörter', 'worter', 'code', 'codes', 'phrase',
     'phrases', 'key', 'keys', 'kod', 'kode', 'frase', 'satz', 'passe', 'pwd']],
 ]);
+// Frases que só valem com SEPARADOR no caminho de prosa: `certificado digital A1` é texto sobre o
+// documento, `Certificado digital: A1` é o rótulo do dado. A revisão da 1.1.34 mediu a destruição da
+// primeira forma; a chave/atributo continua coberta pelo vocabulário permissivo.
+const PHRASE_STEMS_COM_SEPARADOR = Object.freeze([
+  [['dígito', 'digito'], ['verificador', 'verificadora']],
+  [['conta'], ['corrente']],
+  [['certificado'], ['digital']],
+  [['assinatura'], ['eletrônica', 'eletronica']],
+]);
+const PHRASES_SEPARADOR_ALTERNATION = PHRASE_STEMS_COM_SEPARADOR.map(parts => parts
+  .map(part => `(?:${part.map(escapeLiteral).join('|')})`)
+  .join(`${WORD_SEP}?`)).join('|');
+
 // Radicais que só valem como PALAVRA INTEIRA: `sessão` é sufixo de palavra comum em português
 // ("obsessão", "possessão", "obsessões") e a regra de fim de palavra os tarjaria — falso positivo medido
 // pela revisão da 1.1.33. Os demais radicais aceitam prefixo curto porque é assim que a página escreve a
@@ -109,10 +122,58 @@ const WHOLE_WORD_STEMS = Object.freeze(['sessão', 'sessões', 'sessao', 'sessoe
 // cada alternativa o motor tentava 65 padrões por posição e o tarjador do modelo ficava 46× mais lento
 // (medido: 19,7 s contra 0,42 s num modelo de 4.000 nós) — e a lentidão aparecia como falha de prazo em
 // teste de agenda sob carga. Uma estrutura só, com a lista de radicais dentro, mantém a semântica e o custo.
-const WORD_RADICAL_SOURCE = String.raw`${WORD_HEAD}(?:${WORD_STEMS.map(escapeLiteral).join('|')})${WORD_TAIL}|(?<![\p{L}\p{N}])(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})${WORD_TAIL}`;
-const PHRASE_RADICAL_SOURCE = String.raw`${WORD_HEAD}(?:${PHRASE_STEMS.map(parts => parts
+// CONCATENAÇÃO COM RADICAL NO INÍCIO (`senhaforte`, `sessionid`, `tokenacesso`): a fronteira de fim de
+// palavra não cobre esse lado, e a revisão da 1.1.34 mediu que a 1.1.33 tarjava essas formas e a 1.1.34
+// devolveu — Critical daquela revisão. A cauda e o prefixo são LISTAS FECHADAS: é o que separa
+// `senhaforte` (rótulo) de `chaveiro` (palavra), que uma regra genérica de "radical + letras" não separa.
+const CREDENTIAL_TAILS = Object.freeze([
+  'id', 'ids', 'key', 'keys', 'code', 'codes', 'token', 'tokens', 'acesso', 'admin', 'master', 'padrao',
+  'forte', 'secreta', 'secreto', 'provisoria', 'provisorio', 'temporaria', 'atual', 'nova', 'novo',
+  'principal', 'unica', 'unico', 'hash', 'value', 'values', 'consent', 'confirmacao', 'recuperacao',
+  'usuario', 'usuário', 'user', 'cliente', 'titular', 'sistema', 'conta', 'portal', 'app', 'web', 'site',
+  'servico', 'serviço', 'banco', 'digital', 'mestra', 'antiga', 'inicial', 'seguranca', 'segurança',
+  'privada', 'publica', 'pública', 'api', 'redefinida', 'expirada', 'bloqueada', 'incorreta', 'errada',
+]);
+const CREDENTIAL_PREFIXES = Object.freeze([
+  'user', 'card', 'cartao', 'meu', 'minha', 'my', 'our', 'app', 'sim', 'chip', 'account', 'login',
+  'bank', 'banco', 'device', 'phone', 'celular', 'data', 'master', 'admin', 'super', 'root', 'api',
+  'auth', 'oauth', 'session', 'cookie', 'secret', 'chave', 'senha', 'token', 'pass', 'pin', 'conta',
+  'acesso', 'client', 'server', 'service', 'default',
+]);
+const STEMS_ALTERNATION = WORD_STEMS.map(escapeLiteral).join('|');
+const PHRASES_ALTERNATION = PHRASE_STEMS.map(parts => parts
   .map(part => `(?:${part.map(escapeLiteral).join('|')})`)
-  .join(`${WORD_SEP}?`)).join('|')})${WORD_TAIL}`;
+  .join(`${WORD_SEP}?`)).join('|');
+const TAILS_ALTERNATION = CREDENTIAL_TAILS.map(escapeLiteral).join('|');
+const PREFIXES_ALTERNATION = CREDENTIAL_PREFIXES.map(escapeLiteral).join('|');
+const WORD_HEAD = String.raw`(?:${PREFIXES_ALTERNATION}|(?<![\p{L}\p{N}]))`;
+const WORD_RADICAL_SOURCE = [
+  // palavra inteira, ou fim de palavra com prefixo de CREDENCIAL (`userpin`, `datapin`)
+  String.raw`${WORD_HEAD}(?:${STEMS_ALTERNATION})${WORD_TAIL}`,
+  // radical no início + cauda de credencial (`senhaforte`, `sessionid`, `tokenacesso`), inclusive com o
+  // conector de/da/do/d (`chavedapi`, `senhadousuario`)
+  String.raw`(?:${STEMS_ALTERNATION})(?:(?:d|de|da|do))?(?:${TAILS_ALTERNATION}|${STEMS_ALTERNATION})${WORD_TAIL}`,
+  // prefixo de credencial + radical (`cardpin`, `meupin`, `sessiontoken`)
+  String.raw`(?:${PREFIXES_ALTERNATION})(?:${STEMS_ALTERNATION})${WORD_TAIL}`,
+  String.raw`(?<![\p{L}\p{N}])(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})${WORD_TAIL}`,
+].join('|');
+// Vocabulário PERMISSIVO de CHAVE (nome de atributo, chave de JSON, chave de URL, nome no seletor): aqui
+// o radical pode estar em qualquer posição da palavra, porque quem escreve a chave usa identificador
+// colado (`sessionid`, `data-senhaforte`, `senhaforte`) e o custo de tarjar uma chave a mais é menor que
+// o de deixar passar um valor. É o vocabulário que a 1.1.33 tinha para tudo; a 1.1.34 o restringiu por
+// engano também nas chaves, e a revisão mediu o vazamento.
+// Guardas que o vocabulário de chave mantém: `auth(?!or)` (senão `author`/`authority` viram credencial —
+// A7 da revisão da 1.1.26) e o `pass` que não vem de `by`/`com`.
+const STEMS_COM_GUARDAS = WORD_STEMS.map(stem => {
+  if (stem === 'auth') return 'auth(?!or)';
+  // `oauth` só como palavra: sem a fronteira, `coauthor` casa pelo `oauth` de dentro e uma palavra
+  // legítima vira credencial (medido pelo próprio teste A7 da revisão da 1.1.26).
+  if (stem === 'oauth') return String.raw`(?<![\p{L}\p{N}])oauth`;
+  return escapeLiteral(stem);
+}).join('|');
+const KEY_NAME_SOURCE = String.raw`(?:${WORD_HEAD_PERMISSIVE})?(?:(?:${STEMS_COM_GUARDAS})|(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})|(?:${PHRASES_ALTERNATION})|(?:${PHRASES_SEPARADOR_ALTERNATION}))[\p{L}\p{N}]{0,24}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
+const PHRASE_RADICAL_SOURCE = String.raw`${WORD_HEAD}(?:${PHRASES_ALTERNATION})${WORD_TAIL}`;
+const PHRASE_SEPARATOR_ONLY_SOURCE = String.raw`${WORD_HEAD}(?:${PHRASES_SEPARADOR_ALTERNATION})${WORD_TAIL}`;
 // `pass` sozinho: `bypass` e `compass` ficam preservados (lookbehind) e `passed`/`passive`/`passo`
 // também, porque a fronteira exige que a palavra TERMINE no radical.
 const BARE_PASS_SOURCE = String.raw`${WORD_HEAD}(?<!by)(?<!com)pass${WORD_TAIL}`;
@@ -137,7 +198,7 @@ function decodeKeySafely(key) {
 }
 function credentialKey(key) {
   const decoded = decodeKeySafely(key);
-  return isSensitiveKey(decoded) || URL_CREDENTIAL_KEY.test(decoded);
+  return isSensitiveKeyName(decoded) || URL_CREDENTIAL_KEY.test(decoded);
 }
 export const URL_CREDENTIAL_KEY = new RegExp(String.raw`^(?:${URL_CREDENTIAL_KEY_SOURCE})$`, 'iu');
 // O que segue o rótulo precisa TER CARA DE VALOR para a cauda ser tarjada: dígito, símbolo,
@@ -202,6 +263,16 @@ export const SENSITIVE_KEY = new RegExp(
 export function isSensitiveKey(value) {
   return SENSITIVE_KEY.test(withCamelMarks(String(value ?? '')));
 }
+/**
+ * Testa CHAVE, nome de atributo ou chave de URL — identificador colado, não prosa. Aqui o radical pode
+ * estar em qualquer posição da palavra (`sessionid`, `data-senhaforte`, `senhaforte`), porque foi assim
+ * que a 1.1.33 tarjava e a revisão da 1.1.34 mediu que a 1.1.34 tinha perdido. O custo é tarjar uma
+ * chave a mais; o custo do outro lado era o valor da credencial chegar ao entregável.
+ */
+export const SENSITIVE_KEY_NAME = new RegExp(`(?:${KEY_NAME_SOURCE})`, 'iu');
+export function isSensitiveKeyName(value) {
+  return SENSITIVE_KEY_NAME.test(withCamelMarks(String(value ?? '')));
+}
 // Pré-filtro barato: se a string não contém NENHUM radical (nem as chaves de URL), nenhuma regra de
 // rótulo pode morder, e as regexes caras de fronteira não precisam varrer o texto. Sem ele o tarjador do
 // modelo ficava 3× mais lento que a geração anterior; com ele o custo volta ao da 1.1.33 e a semântica
@@ -219,16 +290,20 @@ const STEM_HINT = new RegExp([
   // As partes seguintes não entram porque `de` apareceria em quase toda frase e o pré-filtro perderia a
   // função.
   ...PHRASE_STEMS.flatMap(parts => parts[0]),
+  ...PHRASE_STEMS_COM_SEPARADOR.flatMap(parts => parts[0]),
   ...URL_KEY_HINTS,
 ].map(escapeLiteral).join('|'), 'iu');
 // Codificação também conta como candidato: `sen&#104;a`, `sen\u0068a` e `sen%68a` escondem o rótulo do
 // pré-filtro literal, e são justamente as formas que as revisões da 1.1.28 e da 1.1.29 mediram.
-const ENCODED_HINT = /&#|\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}/iu;
+const ENCODED_HINT = /&#|\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|\\[0-7]{2,3}|%[0-9a-f]{2}/iu;
 function mayCarryCredential(value) {
   const text = String(value ?? '');
-  // O pré-filtro olha o texto SEM os caracteres invisíveis: `sen\u200bha` esconde o radical de uma
-  // comparação literal e era justamente por onde a evasão passava.
-  return STEM_HINT.test(text) || ENCODED_HINT.test(text) || STEM_HINT.test(text.replace(INVISIBLE_MARKS, ''));
+  // O pré-filtro olha o texto SEM os caracteres invisíveis e SEM as tags: `sen\u200bha` e
+  // `<b>sen</b>ha` escondem o radical de uma comparação literal, e eram justamente por onde as evasões
+  // passavam (rodada 74 e Important da revisão da 1.1.34).
+  return STEM_HINT.test(text) || ENCODED_HINT.test(text) ||
+    STEM_HINT.test(text.replace(INVISIBLE_MARKS, '')) ||
+    STEM_HINT.test(text.replace(/<[^<>]*>/gu, ''));
 }
 
 // Um rótulo de valor não exige fronteira de palavra de nenhum lado — nem `\b` à esquerda, nem `\b` à
@@ -243,6 +318,8 @@ function mayCarryCredential(value) {
 // rótulo, que usa o vocabulário de chave sem sufixo.
 // Segmento de rota com credencial (`#/authorize/code/X`): a chave entra no PRÓPRIO padrão para o
 // motor não consumir um segmento inocente e pular o seguinte, que era o que deixava a rota passar.
+// Chave de credencial como SEGMENTO de rota (`#/senha/X`, `#/authorize/code/X`).
+const URL_SEGMENT_KEY = new RegExp(String.raw`(?:^|/)(?:${URL_CREDENTIAL_KEY_SOURCE}|${WORD_STEMS.map(escapeLiteral).join('|')})(?=/|$)`, 'iu');
 const URL_CREDENTIAL_SEGMENT = new RegExp(
   String.raw`([#/])((?:${URL_CREDENTIAL_KEY_SOURCE}|${SENSITIVE_WORD_SOURCE})/)([^/?#\s]*)`, 'giu');
 // Rota com a chave percent-encoded (`#/authorize/co%64e/X`): uma segunda passada decodifica o segmento.
@@ -253,7 +330,7 @@ const URL_CREDENTIAL_SEGMENT_ENCODED = /([#/])([^/?#\s]*%[0-9a-f]{2}[^/?#\s]*)\/
 const VALUE_LABEL_ADJACENT_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${URL_CREDENTIAL_KEY_SOURCE}|${SENSITIVE_WORD_SOURCE})`;
 // A janela do rótulo descritivo vai até OITO palavras: a revisão da 1.1.33 mediu sete palavras entre o
 // rótulo e o valor chegando às quatro superfícies (`chave de acesso ao sistema principal da conta X`).
-const VALUE_LABEL_SOURCE = String.raw`${VALUE_LABEL_ADJACENT_SOURCE}(?:[\s\-–—\u0001]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,6}?`;
+const VALUE_LABEL_SOURCE = String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE}|${PHRASE_SEPARATOR_ONLY_SOURCE})(?:[\s\-–—\u0001]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,6}?`;
 // O valor vai até o fim da linha, sem teto, sem terminador e sem alternativa entre aspas. Duas
 // revisões seguidas mediram a mesma classe por caminhos diferentes: a 1.1.26 tinha o teto de 120
 // caracteres e o `;` devolvendo a cauda; a 1.1.27 tirou o teto mas manteve `<` como parada e a
@@ -351,7 +428,7 @@ function sanitizeProjectedWarning(observation) {
   const warning = { code, message: FIXED_WARNING_MESSAGES[code] };
   if (!observation) return warning;
   const { frameId } = observation.projected;
-  if (typeof frameId === 'string' && /^[a-z0-9_-]{1,128}$/iu.test(frameId) && !isSensitiveKey(frameId)) warning.frameId = frameId;
+  if (typeof frameId === 'string' && /^[a-z0-9_-]{1,128}$/iu.test(frameId) && !isSensitiveKeyName(frameId)) warning.frameId = frameId;
   else if (Number.isSafeInteger(frameId)) warning.frameId = frameId;
   else if (observation.present.has('frameId')) warning.frameId = null;
   return warning;
@@ -598,7 +675,16 @@ function sensitivePasses(marked) {
         (credentialKey(key) ? `${separator}${key}=[redacted]` : match))
       .replace(URL_CREDENTIAL_SEGMENT, '$1$2[redacted]')
       .replace(URL_CREDENTIAL_SEGMENT_ENCODED, (match, separator, key, value) =>
-        (credentialKey(key) ? `${separator}${key}/[redacted]` : match));
+        (credentialKey(key) ? `${separator}${key}/[redacted]` : match))
+      // A regra de segmento consome a chave e tarja o segmento SEGUINTE; numa rota em que a chave é o
+      // penúltimo segmento e o valor o último (`#/auth/senha/X`), o primeiro casamento é a rota `auth` e
+      // o valor sobrevivia (Minor M2 da revisão da 1.1.34). Aqui o ÚLTIMO segmento cai quando algum
+      // segmento anterior da mesma rota é chave de credencial.
+      .replace(/([#/])([^/?#\s]+)$/u, (match, separator, last, offset, whole) => {
+        const before = whole.slice(0, offset);
+        const route = before.slice(Math.max(before.lastIndexOf('#'), before.lastIndexOf('?')) + 1);
+        return URL_SEGMENT_KEY.test(route) ? `${separator}[redacted]` : match;
+      });
   }
   // Rótulo SEM separador (`senha abc123`, `cartão de crédito S3GR…`, `senha - S3GR…`): a mesma regra
   // de cauda do nome acessível, para o caminho JSON não ficar mais frouxo que o do trecho.
@@ -642,6 +728,9 @@ export function decodeForMatching(value) {
       // Octal no estilo antigo de JavaScript (`\150` = 'h') e escapes literais de espaço (`senha\t:`)
       // são a mesma forma de esconder o rótulo que a entidade e o `\uXXXX`.
       .replace(/\\([0-7]{2,3})/gu, (match, oct) => String.fromCodePoint(Number.parseInt(oct, 8)))
+      // Percent-encoding no rótulo (`sen%68a:`) — a promessa estava no comentário do separador e o
+      // decodificador não a cumpria; a revisão da 1.1.34 mediu o vazamento nas três gerações.
+      .replace(/%([0-9a-f]{2})/giu, (match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
       .replace(/\\t/gu, '\t').replace(/\\r/gu, '\r').replace(/\\f/gu, '\f').replace(/\\v/gu, '\v');
     if (next === text) break;
     text = next;
@@ -655,7 +744,16 @@ function redactStringValue(value) {
   // contém radical nenhum e não precisa pagar a varredura.
   if (!mayCarryCredential(value)) return String(value ?? '');
   const redacted = redactSensitiveText(value);
-  if (!MARKUP_BEARING.test(redacted)) return redacted;
+  if (!MARKUP_BEARING.test(redacted)) {
+    if (redacted !== value) return redacted;
+    // Rótulo escondido em entidade, escape ou percent-encoding (`sen&#104;a:`, `sen\u0068a:`,
+    // `sen%68a:`) não é visto pela varredura crua: a decisão cai na projeção decodificada. Sem isso,
+    // string SEM marcação com rótulo codificado passava intacta pela porta do modelo.
+    const decoded = decodeForMatching(redacted);
+    if (decoded === redacted) return redacted;
+    if (redactCredentialLabelTail(decoded).includes('[redacted]')) return '[redacted]';
+    return hasCredentialValueSignal(decoded) ? '[redacted]' : redacted;
+  }
   if (redacted.includes('[redacted]')) return redacted;
   // Rótulo e valor separados por MARCAÇÃO (`<b>senha</b> X`) não são vistos pelo tarjador de valores: a
   // decisão vem da PROJEÇÃO sem tags e sem entidades, e nesse caso a string inteira cai — é string do
@@ -665,9 +763,14 @@ function redactStringValue(value) {
   // fazia o token final carregar `</p>`, e aí `comprimento ou símbolo` virava "cara de valor" e
   // `<p>A senha deve ser forte</p>` saía como `<p>A [redacted]` — 11 de 13 frases realistas destruídas no
   // caminho JSON/MODELO, medido pela revisão da 1.1.33.
-  const projection = decodeForMatching(redacted.replace(/<[^<>]*>/gu, ' '));
-  if (redactCredentialLabelTail(projection).includes('[redacted]')) return '[redacted]';
-  return hasCredentialValueSignal(projection) ? '[redacted]' : redacted;
+  // DUAS projeções, e as duas são necessárias: com espaço entre as tags, `senha` e o valor em nós
+  // diferentes continuam legíveis (`<p>senha</p><p>v</p>`); SEM espaço, o rótulo partido por marcação
+  // volta a ser uma palavra (`<b>sen</b>ha:`), que era o Important da revisão da 1.1.34.
+  const spaced = decodeForMatching(redacted.replace(/<[^<>]*>/gu, ' '));
+  const joined = decodeForMatching(redacted.replace(/<[^<>]*>/gu, ''));
+  if (redactCredentialLabelTail(spaced).includes('[redacted]') ||
+      redactCredentialLabelTail(joined).includes('[redacted]')) return '[redacted]';
+  return hasCredentialValueSignal(spaced) || hasCredentialValueSignal(joined) ? '[redacted]' : redacted;
 }
 
 export function sanitizeJsonData(value, ancestors = new WeakSet()) {
@@ -680,7 +783,7 @@ export function sanitizeJsonData(value, ancestors = new WeakSet()) {
     if (Array.isArray(value)) return value.map(item => sanitizeJsonData(item, ancestors));
     const output = {};
     for (const [key, item] of Object.entries(value)) {
-      if (isSensitiveKey(key)) output[key] = '[redacted]';
+      if (isSensitiveKeyName(key)) output[key] = '[redacted]';
       else if (URL_ATTRIBUTE_KEYS.has(key) && typeof item === 'string') output[key] = sanitizeEvidenceUrl(item);
       else output[key] = sanitizeJsonData(item, ancestors);
     }
@@ -709,7 +812,7 @@ function contentEditableControl(node) {
 
 function safeIdRefs(value) {
   const tokens = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
-  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !isSensitiveKey(token))
+  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !isSensitiveKeyName(token))
     ? tokens.join(' ')
     : '';
 }
@@ -721,7 +824,7 @@ const MAX_AUTHORED_LABEL = 512;
 function safeAuthoredLabel(value) {
   const label = String(value ?? '').trim().replace(/\s+/gu, ' ');
   return label.length > 0 && label.length <= MAX_AUTHORED_LABEL &&
-    !/[\u0000-\u001F\u007F]/u.test(label) && !isSensitiveKey(label)
+    !/[\u0000-\u001F\u007F]/u.test(label) && !isSensitiveKeyName(label)
     ? label
     : '';
 }
@@ -735,7 +838,7 @@ function contentEditableRootAttributes(attributes) {
       if (['', 'true', 'plaintext-only'].includes(normalized)) output[name] = normalized;
     } else if (name === 'role') {
       const normalized = value.toLowerCase();
-      if (/^[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)*$/u.test(normalized) && !isSensitiveKey(normalized)) output[name] = normalized;
+      if (/^[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)*$/u.test(normalized) && !isSensitiveKeyName(normalized)) output[name] = normalized;
     } else if (name === 'tabindex') {
       if (/^-?\d+$/u.test(value)) output[name] = String(Number(value));
     } else if (name === 'aria-labelledby' || name === 'aria-describedby') {
