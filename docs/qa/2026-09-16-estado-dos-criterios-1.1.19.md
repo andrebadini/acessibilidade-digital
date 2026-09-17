@@ -1,6 +1,29 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
-> **Incremento 1.1.43, e o que ele muda aqui.** Artefato corrente
+> **Incremento 1.1.44, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.44.zip` (`b466cc3d…0755`), **sem revisão independente ainda**.
+> Fecha os **2 Critical, 1 Important e 6 Minor** da revisão da 1.1.43 — a **nona** reprovação da classe de
+> credencial. A revisão mostrou que decidir pela **forma do conteúdo** (`looksLikeFieldValue`, da 1.1.43) não
+> se sustenta: com valor de 5+ palavras, com pontuação final ou com 65+ caracteres, **198.360 de 198.360**
+> formas do corpus dela reabriam, e dois desvios estruturais (pilha do trecho fechada por nome de tag,
+> profundidade 8 no modelo) devolviam valor de uma palavra. A **1.1.44 reduz a fronteira**: a decisão volta a
+> ser **do identificador, e só dele** — se o `id`/`classe` é rótulo de credencial pelo vocabulário de chave
+> (menos as famílias da língua, com a guarda medida dos dois lados), o conteúdo do elemento é tratado como
+> valor, sem pilha por nome, sem limite de profundidade e **sem heurística de forma** (o portão foi removido
+> do código). Medições com as sondas do revisor: `v143-shapes` **0/18 em todas as formas**, `v143-recall-198k`
+> com **`VAZA=6.707` em todas** e **0 reabertos** contra a 1.1.41 e a 1.1.42, `v143-context-stack` com tarja
+> em todos os casos estruturais, E2E `v143-gate`/`v143-gate2` **`vazou_em=(nenhuma)`** em todos, e os E2E
+> herdados (ataque e reabertos) com todos os casos selados. **Preço declarado e medido:** 20 de 25 ids do
+> corpus PT-BR do revisor têm o texto tratado como valor (15 são rótulo de credencial de verdade) e 99
+> palavras do dicionário perdem texto (a 1.1.41 destruía 93) — perda de evidência em identificador ambíguo,
+> **nunca vazamento**. **Medições do pacote:** suíte **4.180/4.178/1** (a única falha é o `release-package`
+> antes de reconstruir o zip), escopo serial **56/58** (o flake de limpeza do `axe-mv3-csp` e um
+> `CONTEXT_PROOF_DENIED` do harness, que passa 1/1 isolado), gate **GREEN**, auditoria ao vivo **0 falhas / 9
+> positivos / 109 no checklist / 28,5% / 9,0 de 10** com versão **1.1.44** e quatro exportações `complete`,
+> integridade **146/146 ids e títulos no HTML e no PDF**, notas 5/5, 0 palavras partidas e 0 `[redacted]`.
+> **8** segue **Parcial** por decisão do usuário, fora do caminho de bloqueio.
+
+> **Incremento 1.1.43, e o que ele muda aqui.** Artefato
 > `release/audita-acessibilidade-1.1.43.zip` (`da5889de…ec2c`), **sem revisão independente ainda**.
 > Fecha o **Critical** e os quatro **Minor** da revisão da 1.1.42. O Critical era o par
 > identificador→valor **estreitado além do necessário** na 1.1.42 (radical de 5+ letras + cauda de 3+):

@@ -4,7 +4,36 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.43 preparada — sem revisão independente ainda.** A revisão da **1.1.42** confirmou a
+**Versão 1.1.44 preparada — sem revisão independente ainda.** A revisão da **1.1.43** confirmou a
+integridade do pacote, os 0 reabertos nas seis superfícies dos 64.064, a prosa 2.038→10, o id 4.797→0, o
+caçador 0/1.728 e 0/13.824, a morfologia 0/39, as chaves inocentes 3/55, a métrica 11/11 não vácua, os E2E
+19/19, 13/13 e 6/6, o `key-axis` 1/1, o gate GREEN e a auditoria ao vivo — e mediu **2 Critical, 1 Important e
+6 Minor**, a **nona** reprovação da classe de credencial. A causa raiz era a decisão pela **forma do
+conteúdo** (`looksLikeFieldValue`, introduzida na 1.1.43): com valor de 5+ palavras, com pontuação final ou
+com 65+ caracteres, **198.360 de 198.360** formas do corpus do revisor voltavam a entregar o valor, e dois
+desvios estruturais (pilha do trecho fechada por **nome de tag** e profundidade 8 no modelo) devolviam valor
+de uma palavra.
+
+A 1.1.44 **reduz a fronteira em vez de somar heurística**: a decisão volta a ser **do identificador, e só
+dele** — se o `id`/`classe` é rótulo de credencial pelo vocabulário de chave (menos as famílias da língua, com
+a guarda medida dos dois lados), o conteúdo do elemento é tratado como valor, sem pilha por nome de tag, sem
+limite de profundidade e **sem heurística de forma** (o portão `looksLikeFieldValue` foi removido do código).
+Medições com as sondas do próprio revisor: `v143-shapes` **0/18 em todas as formas de valor** (1 palavra a 200
+caracteres, com `.`/`!`/`?`/`:`/`;`/`,` final, 64 e 65 chars), `v143-recall-198k` com **`VAZA=6.707` em todas
+elas** e **0 reabertos** contra a 1.1.41 e a 1.1.42 (id e classe), `v143-context-stack` com **tarja em todos**
+os casos estruturais (filho `<div>`/`<span>`/`<p>`, rótulo+valor, `apikey`, profundidades 1 a 10), E2E
+`v143-gate`/`v143-gate2` com **`vazou_em=(nenhuma)`** em todos, e os E2E herdados de ataque e de reabertos com
+todos os casos selados. **Preço declarado e medido:** 20 de 25 ids do corpus PT-BR do revisor têm o texto
+tratado como valor (15 são rótulo de credencial de verdade) e **99** palavras do dicionário perdem texto (a
+1.1.41 destruía 93; a diferença são palavras inglesas que terminam em radical, cuja exceção de sufixo foi
+removida na 1.1.42 por vazar `<prefixo><radical>`) — perda de evidência em identificador ambíguo, **nunca
+vazamento**, e é o lado que o mandato de privacidade manda escolher. **Medições do pacote:** suíte
+**4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o zip), escopo serial **56/58** (o
+flake de limpeza do `axe-mv3-csp` e um `CONTEXT_PROOF_DENIED` do harness, que passa **1/1 isolado**), gate
+**GREEN**, auditoria ao vivo **0 falhas / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, **146/146 ids e
+títulos** no HTML e no PDF, notas 5/5, 0 palavras partidas e 0 `[redacted]`.
+
+**Versão 1.1.43.** A revisão da **1.1.42** mediu 1 Critical e 4 Minor, fechados na 1.1.43. A revisão da **1.1.42** confirmou a
 integridade do pacote byte a byte, o caçador 0/1.728 e 0/13.824, o E2E do revisor 19/19, os falsos positivos
 PT-BR zerados, a morfologia PT 0/39, o dicionário 537/360/563 exato, a métrica 11/11, o E2E novo 6/6, o
 `key-axis` 1/1, o gate GREEN e a auditoria ao vivo com integridade 146/146 — e mediu **1 Critical e 4 Minor**.

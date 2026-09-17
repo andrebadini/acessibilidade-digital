@@ -2978,3 +2978,49 @@ determinado – Requisito"** — exatamente como o catálogo
 (`src/core/normative/nbr17225.js`) os declara, com as mesmas palavras e a mesma obrigatoriedade. É conferência
 **pontual**, não substitui a conferência dos 146 itens já registrada; serve para mostrar que o catálogo
 continua alinhado ao PDF fornecido depois das mudanças desta sessão.
+
+## Rodada 90 — a revisão da 1.1.43 REPROVOU (2 Critical, 1 Important, 6 Minor): a decisão volta a ser do IDENTIFICADOR e a 1.1.44 fecha
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.43.md`. A revisão confirmou por medição própria a
+integridade do pacote (digest, 199 arquivos, 0 divergências byte a byte contra `git archive 719fe13`), os 0
+reabertos nas seis superfícies dos 64.064, a prosa 2.038→10, o id 4.797→0, o caçador 0/1.728 e 0/13.824, a
+morfologia 0/39, as chaves inocentes 3/55, a métrica 11/11 não vácua, os E2E 19/19, 13/13 e 6/6, o `key-axis`
+1/1, o gate GREEN, a auditoria ao vivo e a integridade 146/146. E mediu **2 Critical, 1 Important e 6 Minor**.
+
+**O que ela mostrou, e por que é a nona reprovação desta classe.** A 1.1.43 tinha trocado a decisão do
+identificador pela **forma do conteúdo** (`looksLikeFieldValue`: ≤4 palavras, sem pontuação final, ≤64
+caracteres). A revisão mediu o preço com o MESMO corpus de 198.360 formas: com valor de uma palavra, 6.707
+formas seladas (idêntico à 1.1.41); com valor de 5+ palavras, com ponto final ou com 65+ caracteres,
+**198.360 de 198.360** — 191.653 reabertos contra a 1.1.41. E dois desvios estruturais: a pilha do trecho era
+fechada por **nome de tag** (um `<div>` de rótulo dentro do contêiner desarmava o portão) e o sinal do modelo
+parava na **profundidade 8**. A prova de precisão ("0 texto destruído") era artefato do texto de teste, sempre
+o mesmo; com texto curto, 99 palavras do dicionário e 20 de 25 ids PT-BR perdem o texto.
+
+**A 1.1.44 reduz a fronteira em vez de somar heurística.** A decisão volta a ser **do identificador, e só
+dele**: se o `id`/`classe` é rótulo de credencial pelo vocabulário de chave (menos as famílias da língua,
+com a guarda medida dos dois lados), o conteúdo do elemento é tratado como valor — sem pilha por nome de tag,
+sem limite de profundidade e sem heurística de forma. O portão `looksLikeFieldValue` foi **removido** do
+código. Com isso:
+
+- **Recall (as duas revisões anteriores):** `v143-shapes` **0/18 em TODAS as formas de valor** (1 palavra a
+  200 caracteres, com `.`/`!`/`?`/`:`/`;`/`,` final, 64 e 65 chars) e `v143-recall-198k` com **`VAZA=6.707` em
+  todas elas**, `REABERTOS_vs_1.1.41=0` e `vs_1.1.42=0` em id e classe; `v143-context-stack` com **tarja em
+  todos** os casos estruturais (filho `<div>`/`<span>`/`<p>`, rótulo+valor, `apikey`, profundidades 1 a 10);
+  E2E do revisor `v143-gate` e `v143-gate2` com **`vazou_em=(nenhuma)` em todos os casos** e os E2E herdados
+  `attack-e2e-141` e `reabertos-e2e-142` com **todos os casos selados**.
+- **Preço declarado e medido:** 20 de 25 ids do corpus PT-BR do revisor têm o texto tratado como valor — 15
+  deles são **rótulo de credencial de verdade** (`senha`, `password`, `token`, `pin`, `chave`, `credencial`,
+  `sessao`, `cookie`, `segredo`, `session`, `secret`, `puk`, `seed`, `sessões`, `chavear`/`chavena`/`secretas`
+  são palavras com radical) — e **99 palavras do dicionário** (a 1.1.41 destruía 93; a diferença são as
+  palavras inglesas que TERMINAM em radical, cuja exceção de sufixo foi removida na 1.1.42 por vazar
+  `<prefixo><radical>`). É perda de evidência em identificador ambíguo, **nunca vazamento**, e é o lado que o
+  mandato de privacidade manda escolher.
+- **Minor corrigido:** a declaração "55 qualificadores" virou **53**, o número real do array (o corpus de 55
+  caudas dos revisores tem itens que já estão na lista fechada do produto).
+
+**Medições da 1.1.44:** suíte **4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o
+zip); escopo serial no pacote **56/58** — `axe-mv3-csp` (flake de limpeza declarado) e `credential-shapes`
+(`CONTEXT_PROOF_DENIED`, falha de **prova de contexto do harness**, que passa **1/1 isolado**) —; gate
+**GREEN**; auditoria ao vivo **0 falhas / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, versão
+**1.1.44**, quatro exportações `complete`; integridade **146/146 ids e títulos no HTML e no PDF**, notas 5/5,
+0 palavras partidas, 0 `[redacted]`.

@@ -3,7 +3,6 @@ import { escapeCssIdentifier } from './evidence/selector.js';
 import {
   backgroundImageKind,
   isPairedCredentialIdentity,
-  looksLikeFieldValue,
   redactCredentialLabelTail,
   redactNormalizedNode,
   sanitizeEvidenceUrl,
@@ -198,12 +197,14 @@ function credentialIdentityAttributes(tagName, attributes) {
   }
   return false;
 }
-function privateTextElement(tagName, attributes, text = '') {
-  // Identificador de credencial só torna o texto privado quando o texto TEM FORMA DE VALOR de campo: a
-  // prosa da página num elemento com id/classe que apenas contém um radical (`<div id="sessao">Sessão das
-  // 19h…</div>`) continua na evidência — precisão medida na revisão da 1.1.42 (p04).
-  if (tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName))) return true;
-  return credentialIdentityAttributes(tagName, attributes) && looksLikeFieldValue(text);
+function privateTextElement(tagName, attributes) {
+  // Identificador de credencial é declaração da página: o conteúdo do elemento é tratado como VALOR,
+  // sempre. A 1.1.43 tentou condicionar isso à forma do texto e a revisão mediu 198.360 de 198.360 formas
+  // reabertas com valor longo, pontuado ou acima de 64 caracteres (e dois desvios estruturais: pilha por
+  // nome de tag e profundidade 8). O preço do outro lado — texto de elemento com id ambíguo que vira
+  // tarja — é medido e declarado.
+  return tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName)) ||
+    credentialIdentityAttributes(tagName, attributes);
 }
 
 function markPrivateReferenceConsumers(nodes, privateReferenceIds) {
@@ -474,8 +475,7 @@ function normalizeSimplified(raw) {
   const byId = new Map(nodes.map(node => [node.nodeId, node]));
   for (const node of nodes) if (node.parentId && byId.has(node.parentId)) byId.get(node.parentId).children.push(node.nodeId);
   const executableById = new Map(nodes.map(node => [node.nodeId, EXECUTABLE_TEXT_PARENTS.has(node.tagName)]));
-  const privateTextById = new Map(nodes.map(node => [node.nodeId,
-    privateTextElement(node.tagName, node.attributes, `${node.text ?? ''} ${node.visibleText ?? ''}`.trim())]));
+  const privateTextById = new Map(nodes.map(node => [node.nodeId, privateTextElement(node.tagName, node.attributes)]));
   const parentOfNode = node => node.parentId ? byId.get(node.parentId) : null;
   const privateTextAncestors = ancestorsOfMatching(nodes, node => privateTextById.get(node.nodeId), parentOfNode);
   const inExecutableSubtree = node => {
@@ -739,17 +739,9 @@ function normalizeColumnar(raw) {
   const executableMemo = new Map();
   const privateTextMemo = new Map();
   const parentOfRecord = record => byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
-  // Texto do próprio registro e dos descendentes, SEM a maquinaria de privacidade (que depende desta
-  // decisão): é o que permite exigir forma de VALOR para o identificador de credencial tornar o texto
-  // privado. Sem isto o portão via texto vazio no caminho colunar e o valor seguia para o modelo.
-  const ownTextSignal = (record, depth = 0) => {
-    const parts = [record.rawText ?? ''];
-    if (depth < 8) for (const child of childrenByRecord.get(record) || []) parts.push(ownTextSignal(child, depth + 1));
-    return cleanText(parts.join(' '));
-  };
   const privateTextAncestors = ancestorsOfMatching(
     records,
-    record => privateTextElement(record.tagName, record.attributes, ownTextSignal(record)),
+    record => privateTextElement(record.tagName, record.attributes),
     parentOfRecord,
   );
   const inExecutableSubtree = record => {
@@ -773,7 +765,7 @@ function normalizeColumnar(raw) {
     const visited = new Set();
     while (current && !visited.has(current)) {
       visited.add(current);
-      if (privateTextElement(current.tagName, current.attributes, ownTextSignal(current))) {
+      if (privateTextElement(current.tagName, current.attributes)) {
         privateTextMemo.set(record, true);
         return true;
       }
@@ -787,7 +779,7 @@ function normalizeColumnar(raw) {
     const visited = new Set();
     while (current && !visited.has(current)) {
       visited.add(current);
-      if (privateTextElement(current.tagName, current.attributes, ownTextSignal(current))) return true;
+      if (privateTextElement(current.tagName, current.attributes)) return true;
       current = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
     }
     return false;
@@ -915,7 +907,7 @@ function normalizeColumnar(raw) {
   const redactedNodes = ordered.map(record => redactPlaceholderText(redactNormalizedNode(outputByRecord.get(record), {
     executable: inExecutableSubtree(record),
     privateText: inPrivateTextSubtree(record),
-    privateTextRoot: privateTextElement(record.tagName, record.attributes, ownTextSignal(record)) && !hasPrivateTextAncestor(record),
+    privateTextRoot: privateTextElement(record.tagName, record.attributes) && !hasPrivateTextAncestor(record),
     privateTextDescendant: hasPrivateTextAncestor(record),
     privateTextAncestor: privateTextAncestors.has(record),
     // O controle nativo mantém o nome; o nó de texto privado só mantém o nome VAZIO (ver

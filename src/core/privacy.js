@@ -428,9 +428,10 @@ const LANGUAGE_INFLECTIONS = Object.freeze(['', 'a', 'as', 'o', 'os', 'e', 'es',
   'ado', 'ada', 'ador', 'adores', 'oso', 'osa', 'osos', 'osas', 'ivo', 'iva', 'ivos', 'ivas', 'atico',
   'ura', 'uras', 'el', 'éis', 'ente', 'entes', 'or', 'ores', 'aria', 'arias', 'ário', 'ários',
   'amento', 'amentos', 'izacao', 'ização', 'izações', 'zinho', 'zinha', 'zinhos', 'zinhas']);
-// Qualificadores REALISTAS de credencial medidos pelos revisores (o corpus de 55 caudas das revisões da
-// 1.1.38/1.1.40/1.1.41), além da lista fechada do produto. Servem para os DOIS lados da família: o que
-// vem ANTES dela (`pix-chaveir`, `senha-chaveir`) e o que vem depois (`chaveirpix`).
+// 53 qualificadores REALISTAS de credencial medidos pelos revisores (o corpus de 55 caudas das revisões da
+// 1.1.38/1.1.40/1.1.41 tem itens que já estão na lista fechada do produto), somados a ela. Servem para os
+// DOIS lados da família: o que vem ANTES dela (`pix-chaveir`, `senha-chaveir`) e o que vem depois
+// (`chaveirpix`, `chaveirlogin`).
 const CREDENTIAL_QUALIFIERS = Object.freeze(['assinatura', 'pix', 'whatsapp', 'chat', 'telegram',
   'cobranca', 'recebimento', 'email', 'login', 'conta', 'pessoal', 'trabalho', 'wifi', 'roteador',
   'producao', 'teste', 'cliente', 'titular', 'sistema', 'portal', 'servidor', 'backup', 'nuvem',
@@ -549,21 +550,16 @@ export function isPairedCredentialIdentity(value) {
   const text = String(value ?? '');
   // Identificador de credencial pelo vocabulário de chave, menos as FAMÍLIAS da língua (`chaveiro`,
   // `pintura`, `tokenizacao`) — e só elas: a lista EXATA de palavras (`pin`, `pins`, `hairpin`) existe
-  // para a prosa, e usá-la aqui deixava `id="pin"` entregar o valor (medido no e2e do revisor, f09).
-  // A POSIÇÃO autoriza olhar o conteúdo; a FORMA do conteúdo decide (ver `looksLikeFieldValue`), porque
-  // prosa da página não é valor de campo.
+  // para a prosa, e usá-la aqui deixava `id="pin"` entregar o valor (e2e f09 da revisão da 1.1.42).
+  //
+  // A decisão é do IDENTIFICADOR, e só dele. A 1.1.43 tentou decidir pela FORMA do conteúdo
+  // (`looksLikeFieldValue`) e a revisão da 1.1.43 mediu o preço: valor de 5+ palavras, com ponto final ou
+  // com mais de 64 caracteres reabria **198.360 de 198.360** formas do corpus do revisor — e o valor saía
+  // no modelo guardado e nos artefatos entregues. Forma de valor é heurística; identificador de credencial
+  // é declaração da página. O preço do lado da precisão (texto de elemento com id ambíguo tratado como
+  // valor) é medido e declarado, e é o lado que o mandato de privacidade manda escolher.
   const plain = text.replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
   return isSensitiveKeyName(text) && !languageFamilyExemption(plain);
-}
-// Forma de VALOR de campo: curto, poucas palavras e sem pontuação de frase. Separa
-// `<div id="senha">borboleta</div>` (valor, tarja) de `<div id="sessao">Sessão das 19h no cinema.</div>`
-// (prosa da página, preservada) — a precisão que a revisão da 1.1.42 mediu (p04), sem reabrir os casos do
-// e2e de identificador nem os do e2e do revisor da 1.1.40.
-export function looksLikeFieldValue(value) {
-  const text = String(value ?? '').replace(/\s+/gu, ' ').trim();
-  if (text === '' || text.length > 64) return false;
-  if (/[.!?;:]\s*$/u.test(text)) return false;
-  return text.split(' ').length <= 4;
 }
 export function isSensitiveKeyName(value) {
   const text = String(value ?? '');
