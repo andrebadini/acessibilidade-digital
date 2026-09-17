@@ -388,32 +388,26 @@ const LANGUAGE_WORD_EXCEPTIONS = Object.freeze([
   'uncredentialled', 'unsecretarylike', 'unsecreted', 'unsecreting', 'unsecretly', 'unsecretness',
 ]);
 const LANGUAGE_WORD_EXCEPTION_SET = new Set(LANGUAGE_WORD_EXCEPTIONS);
-// FAMÍLIAS da língua, medidas nas revisões da 1.1.39 e da 1.1.40: a lista de palavras exatas cobria o
-// que os revisores mediram (`chaveiro`, `pintura`), não a CLASSE — e 20 de 39 frases de morfologia
+// FAMÍLIAS da língua, medidas nas revisões da 1.1.39, 1.1.40 e 1.1.41: a lista de palavras EXATAS cobria
+// o que os revisores mediram (`chaveiro`, `pintura`), não a CLASSE — e 20 de 39 frases de morfologia
 // portuguesa eram destruídas (`Chaveiros:`, `Pinturas:`, `Pincéis:`, `Pingentes:`, `Secretarias:`,
-// `Tokenização:`, `Obsessões:`, `A loja vende chaveiros personalizados.`). Radicais de PREFIXO (com
-// fronteira, para `data-chaveiro` também valer) e de SUFIXO. O sufixo é o lado seguro do inglês: a
-// credencial ACRESCENTA qualificador (`sessionid`, `seedphrase`, `bearerToken`), então a palavra
-// inocente que TERMINA no radical (`pallbearer`, `allseed`, `antipass`) é preservada sem abrir mão de
-// nenhuma forma concatenada. O lado do prefixo foi medido e DESCARTADO para radicais de credencial
-// (`token`/`secret`/`auth`/`puk` como prefixo reabriam 144 vazamentos: `tokenassinatura`, `secretpix`,
-// `authvpn`, `puklogin`); o que fica de prefixo são famílias de palavra da língua, sem forma de
-// credencial conhecida.
+// `Tokenização:`, `Obsessões:`, `A loja vende chaveiros personalizados.`). Ficam só as famílias de
+// PREFIXO, com fronteira (para `data-chaveiro` também valer).
+//
+// A família de SUFIXO foi tentada e **removida por medição**: como o teste é "termina na palavra", e as
+// palavras de sufixo (`token`, `pin`, `bearer`, `session`, `seed`, `pass`, `spin`) são ELAS MESMAS
+// radicais de credencial, ela poupava `<prefixo><radical>` — `xsession`, `novasession`, `getseed`,
+// `xpin`, `novaseed`, `xseed`, `getpin`, `getsession` — e, com a palavra de família colada depois,
+// `senhaassinaturatoken`/`senhapixpin`. A revisão da 1.1.41 mediu esse eixo como **Critical**: 7.302
+// vazamentos em 13.824 casos (1.1.40: 1.830) e valor saindo no modelo guardado e nos artefatos HTML/JSON
+// entregues. O preço de remover o sufixo é declarado e medido: palavras inglesas que TERMINAM no radical
+// (`pallbearer`, `cupbearer`, `allseed`, `antipass`, `assession`, `chipping`) voltam a ser tarjadas em
+// prosa — é falso positivo, não vazamento, e nenhuma forma de credencial depende dele.
 const LANGUAGE_PREFIX_FAMILIES = Object.freeze([
   'chaveir', 'chaveta', 'chaveament', 'pintur', 'pintor', 'pincel', 'pincé', 'pingent', 'pingu',
   'espinh', 'opini', 'secretar', 'secretári', 'secretos', 'tokeniz', 'obsess', 'possess',
 ]);
-const LANGUAGE_SUFFIX_FAMILIES = Object.freeze([
-  'seed', 'bearer', 'session', 'pass', 'token', 'spin', 'pin', 'pping',
-]);
-// O sufixo que a credencial usa como CAUDA (`authtoken`, `mytoken`, `userpin`, `cardpin`, `jwtbearer`)
-// não pode poupar palavra nenhuma nas regras ESTRITAS: só entram aqui os radicais que a credencial não
-// forma por composição. É esta a lista que decide `pallbearer` (continua tarjado, resíduo declarado) e
-// `allseed`/`assession`/`antipass`/`chipping` (preservados).
-const LANGUAGE_STRICT_SUFFIX_FAMILIES = Object.freeze(['seed', 'session', 'pass', 'spin', 'pping']);
 const LANGUAGE_FAMILY_PREFIX = new RegExp(String.raw`(?:^|[^\p{L}\p{N}])(?:${LANGUAGE_PREFIX_FAMILIES.join('|')})`, 'u');
-const LANGUAGE_FAMILY_SUFFIX = new RegExp(String.raw`(?:${LANGUAGE_SUFFIX_FAMILIES.join('|')})$`, 'u');
-const LANGUAGE_STRICT_FAMILY_SUFFIX = new RegExp(String.raw`(?:${LANGUAGE_STRICT_SUFFIX_FAMILIES.join('|')})$`, 'u');
 /**
  * Verdadeiro quando o token é forma de palavra da língua (exata ou de família medida) e por isso NÃO
  * pode ser tratado como rótulo de credencial pela regra permissiva. É a mesma decisão nas três
@@ -427,14 +421,7 @@ export function isLanguageWordForm(value) {
   // `tokenizacao` são palavra da língua, `chaveirotoken` e `pinturasenha` são credencial concatenada.
   const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
   if (prefix !== null && !SENSITIVE_KEY.test(plain.slice(prefix.index + prefix[0].length))) return true;
-  const suffix = LANGUAGE_FAMILY_SUFFIX.exec(plain);
-  // A palavra da língua TERMINA no radical (`pallbearer`, `allseed`, `antipass`), mas uma CREDENCIAL
-  // também pode terminar nele (`senhaassinaturatoken`, `senhapixpin`, `senhaassinaturaseed`,
-  // `xsenhaseed`): o sufixo só poupa quando o que vem ANTES dele não carrega radical de credencial. A
-  // revisão da 1.1.41 mediu **982** formas concatenadas passando por essa fresta (e a prosa regredia em
-  // relação à 1.1.40 nelas); com a guarda, 100 continuam abertas e todas são de radical CURTO (`puk…`),
-  // que já vazavam na 1.1.40 e nas gerações anteriores.
-  return suffix !== null && !SENSITIVE_KEY.test(plain.slice(0, suffix.index));
+  return false;
 }
 /**
  * Mesma decisão, restrita às famílias de PREFIXO, para o vocabulário de CHAVE/IDENTIFICADOR: lá o
@@ -448,11 +435,7 @@ export function isLanguageWordStrictForm(value) {
   if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return true;
   const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
   if (prefix !== null && !SENSITIVE_KEY.test(plain.slice(prefix.index + prefix[0].length))) return true;
-  const suffix = LANGUAGE_STRICT_FAMILY_SUFFIX.exec(plain);
-  // Mesma guarda da forma permissiva: a credencial também TERMINA nesses radicais
-  // (`senhaassinaturaseed`, `senhaassinaturasession`, `senhaassinaturapass`, `xsenhasession`), e é o
-  // portão ESTRITO que decide se o valor sai inteiro.
-  return suffix !== null && !SENSITIVE_KEY.test(plain.slice(0, suffix.index));
+  return false;
 }
 export function isLanguageWordHead(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
@@ -520,6 +503,19 @@ const ID_NAME_CONNECTOR = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:d|de|d
 const ID_NAME_SOURCE = String.raw`${ID_NAME_CONNECTOR}|${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?<![\p{L}\p{N}])${STEM_ALTERNATION}(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){1,3}|(?:${PREFIXES_ALTERNATION})${STEM_ALTERNATION}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}(?:${PHRASES_ALTERNATION})${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
 export const SENSITIVE_KEY_NAME = new RegExp(`(?:${ID_NAME_SOURCE}|(?:${PHRASES_SEPARADOR_ALTERNATION}))`, 'iu');
 const BARE_TAIL_KEY = new RegExp(BARE_TAIL_SOURCE, 'iu');
+// RÓTULO COLADO que vira PAR identificador→valor: radical LONGO + cauda de CONTEÚDO (>= 3), com prefixo
+// de até 3 (`senhaassinatura`, `chavepix`, `xchavepix`, `senhaassinaturatoken`, `senhapixpin`). É a
+// forma que as revisões da 1.1.40 e da 1.1.41 mediram vazando o valor do elemento (texto e atributos) —
+// e é só ela que autoriza descartar esse conteúdo. Fica de fora, medido na revisão da 1.1.41: palavra
+// que só CONTÉM o radical com desinência curta (`chavear`, `chavena`, `secretas`), palavra exata do
+// vocabulário (`password`, `pin`, `sessao`) e frase com separador (`cookie-banner`, `map-pin`,
+// `session-info`, `token-de-acesso`) — nelas o texto do autor continua na evidência.
+const PAIRED_IDENTITY = new RegExp(
+  String.raw`(?<![\p{L}\p{N}])[\p{L}\p{N}]{0,3}(?:${LONG_STEMS_ALTERNATION})[\p{L}\p{N}]{3,24}(?![\p{L}])`, 'iu');
+export function isPairedCredentialIdentity(value) {
+  const text = String(value ?? '');
+  return PAIRED_IDENTITY.test(text) && !isLanguageWordForm(text);
+}
 export function isSensitiveKeyName(value) {
   const text = String(value ?? '');
   // A lista fechada e o prefixo arbitrário decidem como SEMPRE decidiram: nada de exceção aqui, senão

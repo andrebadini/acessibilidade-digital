@@ -2,7 +2,7 @@ import { assertSnapshotV1 } from './snapshot-schema.js';
 import { escapeCssIdentifier } from './evidence/selector.js';
 import {
   backgroundImageKind,
-  isSensitiveKeyName,
+  isPairedCredentialIdentity,
   redactCredentialLabelTail,
   redactNormalizedNode,
   sanitizeEvidenceUrl,
@@ -190,10 +190,10 @@ function credentialIdentityAttributes(tagName, attributes) {
     const value = identityAttributeText(attributes[name]);
     if (value === '') continue;
     if (name === 'class') {
-      if (value.split(/\s+/u).some(token => token.length > 0 && isSensitiveKeyName(token))) return true;
+      if (value.split(/\s+/u).some(token => token.length > 0 && isPairedCredentialIdentity(token))) return true;
       continue;
     }
-    if (isSensitiveKeyName(value)) return true;
+    if (isPairedCredentialIdentity(value)) return true;
   }
   return false;
 }

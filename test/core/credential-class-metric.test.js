@@ -543,13 +543,17 @@ const MORFOLOGIA_PT = [
 ];
 // Palavras inglesas que TERMINAM no radical: a credencial ACRESCENTA qualificador (`sessionid`,
 // `seedphrase`, `bearerToken`), então a palavra que termina nele é inocente — é o lado seguro do sufixo.
-const FAMILIAS_EN = ['allseed', 'aniseed', 'birdseed', 'antipass', 'repass', 'assession', 'obsession',
-  'possession', 'chipping', 'shipping'];
-// RESÍDUO DECLARADO da mesma classe, medido: `pallbearer`, `cupbearer` (o fechado casa `bearer` DENTRO da
-// palavra e a família de sufixo não pode poupá-los sem poupar `jwtbearer`/`bearertoken`) e `seedling`
-// (o prefixo `seed` forma `seedphrase`, que é credencial). Continuam sendo tarja em prosa e chave — é o
-// preço do lado do recall, e está aqui para não ser confundido com ausência de medição.
-const FAMILIAS_EN_RESIDUO = ['pallbearer', 'cupbearer', 'seedling'];
+// RESÍDUO DECLARADO, medido: palavras inglesas que TERMINAM num radical de credencial. A família de
+// SUFIXO que as pouparia foi tentada na 1.1.41 e **removida** porque o mesmo teste de sufixo poupava
+// `<prefixo><radical>` (`xsession`, `novaseed`, `getseed`, `xpin`, `xseed`, `getpin`) e
+// `<radical><cauda><palavra>` (`senhaassinaturatoken`, `senhapixpin`) — o **Critical** da revisão da
+// 1.1.41, com valor saindo no modelo guardado e nos artefatos HTML/JSON. Falso positivo é o lado
+// suportável desta troca; vazamento não é. A asserção fixa os dois lados.
+const FAMILIAS_EN_RESIDUO = ['pallbearer', 'cupbearer', 'seedling', 'allseed', 'aniseed', 'birdseed',
+  'antipass', 'repass', 'assession', 'chipping'];
+// Preservadas porque COMEÇAM numa família de prefixo medida (`obsess`, `possess`) ou pela lista exata
+// (`shipping`): o lado do prefixo continua valendo, é o do sufixo que foi removido.
+const FAMILIAS_EN_PREFIXO = ['obsession', 'possession', 'shipping'];
 
 test('morfologia portuguesa e famílias inglesas continuam evidência, e as formas de credencial continuam tarjadas', t => {
   for (const frase of MORFOLOGIA_PT) {
@@ -557,14 +561,21 @@ test('morfologia portuguesa e famílias inglesas continuam evidência, e as form
     assert.doesNotMatch(sanitizeJsonData({ texto: frase }).texto, /\[redacted\]/u, `"${frase}" no caminho JSON`);
     assert.doesNotMatch(sanitizeHtmlSnippetSource(`<p>${frase}</p>`), /\[redacted\]/u, `"${frase}" no trecho`);
   }
-  for (const palavra of FAMILIAS_EN) {
-    assert.equal(redactSensitiveText(`${palavra}: abc123`), `${palavra}: abc123`, `"${palavra}" é palavra da língua`);
-    assert.doesNotMatch(sanitizeJsonData({ texto: `${palavra}: abc123` }).texto, /\[redacted\]/u, `"${palavra}" no JSON`);
-  }
   // O resíduo é medido, não presumido: se ele deixar de ser tarja, este teste avisa que a decisão mudou.
   for (const palavra of FAMILIAS_EN_RESIDUO) {
     assert.match(redactSensitiveText(`${palavra}: abc123`), /\[redacted\]/u,
       `"${palavra}" é resíduo declarado do lado do recall — se passou a ser preservada, atualize a declaração`);
+  }
+  for (const palavra of FAMILIAS_EN_PREFIXO) {
+    assert.equal(redactSensitiveText(`${palavra}: abc123`), `${palavra}: abc123`,
+      `"${palavra}" é preservada pela família de PREFIXO`);
+  }
+  // E o outro lado do mesmo eixo, que é o que a revisão da 1.1.41 mediu como Critical: com prefixo
+  // (`xsession`, `novaseed`, `getseed`) ou com cauda colada depois do radical
+  // (`senhaassinaturatoken`, `senhapixpin`) a forma de credencial TEM de ser tarjada.
+  for (const forma of ['xsession', 'novasession', 'getseed', 'xpin', 'novaseed', 'xseed', 'getpin',
+    'getsession', 'senhaassinaturatoken', 'senhapixpin', 'senhacadastrotoken', 'senhaassinaturaseed']) {
+    assert.match(redactSensitiveText(`${forma}: borboleta`), /\[redacted\]/u, `"${forma}" é credencial concatenada`);
   }
   // O outro lado: nenhuma família pode ENGOLIR a forma `<radical><cauda>`. A varredura é a mesma lista de
   // caudas realistas dos revisores contra os radicais do vocabulário, nas quatro superfícies.

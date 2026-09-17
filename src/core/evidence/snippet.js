@@ -1,4 +1,4 @@
-import { decodeForMatching, hasCredentialValueSignal, isLanguageWordStrictForm, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, isLanguageWordStrictForm, isPairedCredentialIdentity, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -135,10 +135,10 @@ function credentialIdentity(parsed) {
     if (attribute.name !== 'id' && attribute.name !== 'class') continue;
     const value = String(attribute.value ?? '');
     if (attribute.name === 'class') {
-      if (value.split(/\s+/u).some(token => token.length > 0 && isSensitiveKeyName(token))) return true;
+      if (value.split(/\s+/u).some(token => token.length > 0 && isPairedCredentialIdentity(token))) return true;
       continue;
     }
-    if (isSensitiveKeyName(value)) return true;
+    if (isPairedCredentialIdentity(value)) return true;
   }
   return false;
 }
