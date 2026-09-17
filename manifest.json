@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "Audita Acessibilidade",
-  "version": "1.1.38",
-  "version_name": "1.1.38",
+  "version": "1.1.39",
+  "version_name": "1.1.39",
   "description": "Auditoria independente de acessibilidade de páginas web.",
   "icons": {
     "16": "assets/icons/icon-16.png",
