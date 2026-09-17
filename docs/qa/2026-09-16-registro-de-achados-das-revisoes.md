@@ -111,6 +111,22 @@ Os três foram verificados primeiro em isolamento e depois **juntos num clone li
 
 **Uma falha da suíte da revisão não era do produto:** o teste do baseline `78ba813` rodava `git show` sem `cwd`, então passava da raiz do repositório e falhava quando a suíte era lançada de outro diretório. **Corrigido na 1.1.22**: a raiz vem de `import.meta.url` e o `git` roda com `cwd` explícito; verificado da raiz e de `/tmp` (5/5 nos dois).
 
+## Revisão da 1.1.35 → veredito 2 Critical, 1 Important, 3 Minor + 6 observações
+
+Relatório completo em `docs/qa/revisoes/REVIEW-1.1.35.md`. O alvo foi o pacote `950b3eb2…9866` (HEAD `55db44b`) e o veredito foi **reprovado** — mas a revisão confirmou por medição própria, com controle positivo na mesma página, tudo o que a 1.1.35 se propôs a fazer: o Critical da 1.1.34 (12 formas de concatenação) foi de 12/12 vazando para **0/12**, a prosa destruída de 8/19 para **0/19**, o rótulo partido por marcação e as codificações fecharam, a fase paralela deu 4.210/4.209/0/1 e o custo 2,09×–2,20×.
+
+| # | Sev. | Achado | Desfecho | Evidência |
+|---|---|---|---|---|
+| C1 | **Critical** | A **lista fechada** de caudas (60 entradas) só cobria o que enumerava: `novasenha`, `redefinirsenha`, `trocarsenha`, `alterarsenha`, `segundasenha`, `primeirasenha`, `novachave`, `senhasegura`, `senhafacil`, `tokenpessoal` — formas **fechadas na 1.1.33 e na 1.1.34** — voltaram a chegar a relatório, modelo, HTML e JSON | **corrigido na 1.1.36** | A lista fechada sai e entra **regra estrutural**: o radical conta quando **toca uma borda do token** (começa nele ou termina nele). Sonda de 41 concatenações: **0 vazam**; `pin` dentro de `shipping` (duas bordas livres) continua fora |
+| C2 | **Critical** | Sublinhado, ponto e barra faziam o extrator parar no radical e **tarjar o lugar errado**, entregando o segredo literal (`senha[redacted] VALOR`) no modelo e no artefato JSON — pré-existente nas quatro gerações | **corrigido na 1.1.36** | A **continuação de identificador** (`_`, `.`, `/`, `-`) entra no rótulo: `senha_forte:`, `senha.mestra:`, `senha/mestra:`, `session-id:` tarjam o lugar certo |
+| I1 | **Important** | O preço declarado estava errado em ~7,8×: os documentos diziam "203 palavras" e a medição do revisor deu 1.576 no caminho de chave | **corrigido na 1.1.36** | Os números passam a ser medidos por predicado, com comando: **566** no caminho de chave, **101** no predicado estrito de valor, **566** no de prosa; a queda de 1.576 para 566 é efeito da regra de borda, declarada |
+| M1 | Minor | Rota com query depois do segmento sensível vazava (`#/auth/senha/X?tab=1`) | **corrigido na 1.1.36** | Medido: `#/auth/senha/X?tab=1` e `#/auth/senha/X#x` saem com o valor tarjado |
+| M2 | Minor | A fase serial medida pelo revisor deu 80/73/7 contra os 80/72/8 declarados | **declarado** | Diferença de carga entre execuções; nenhuma falha é atribuível ao incremento |
+| M3 | Minor | Os números da auditoria ao vivo não tinham comando reproduzível no commit | **corrigido na 1.1.36** | O comando e o caminho do script entram na trilha, com o digest medido |
+| O1–O6 | observações | Forma isolada, falso positivo, invariantes de privacidade, custo, não vacuidade por mutação e critério 8 | **registrado** | O revisor notou que o worktree era editado durante a revisão: as medições dele foram todas contra o clone congelado, e o clone foi conferido byte a byte |
+
+**A lição de desenho, agora em terceira rodada:** nem "sem fronteira" (1.1.33), nem "fronteira só no fim" (1.1.34), nem "lista fechada" (1.1.35). O que fecha os dois lados é **regra estrutural + decisão de valor no contexto**: o radical toca uma borda do token (recall para qualquer concatenação) e, quando o token não é palavra do vocabulário, o valor precisa ter cara de credencial (precisão para a palavra da língua).
+
 ## Revisão da 1.1.34 → veredito 1 Critical, 2 Important, 5 Minor + 10 observações
 
 Relatório completo em `docs/qa/revisoes/REVIEW-1.1.34.md`. O alvo foi o pacote `5ed1b333…2812` (HEAD `e84496a`) e o veredito foi **reprovado**: o desenho novo de vocabulário fechou de fato o Critical e o Important da 1.1.33 (comprovado por sonda própria, 17/17 no E2E e corpus de prosa 14/16 → 0/16), mas **criou um lado cego** e destruiu prosa em dois casos novos.

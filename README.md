@@ -4,8 +4,34 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.35 preparada — sem revisão independente ainda.** A revisão da **1.1.34** deu **1 Critical,
-2 Important, 5 Minor e 10 observações** e **reprovou** o artefato. O Critical era **regressão minha**: a
+**Versão 1.1.36 preparada — sem revisão independente ainda.** A revisão da **1.1.35** deu **2 Critical,
+1 Important, 3 Minor e 6 observações** e **reprovou** o artefato. Ela confirmou por medição própria, com
+controle positivo na mesma página, que o desenho por contexto fechou o que a 1.1.34 tinha aberto (as 12
+formas de concatenação foram de 12/12 vazando para **0/12**; a prosa destruída, de 8/19 para **0/19**),
+mas mediu dois bloqueios: a **lista fechada de caudas** só cobria o que enumerava — `novasenha`,
+`redefinirsenha`, `trocarsenha`, `senhasegura` voltaram a vazar, formas que a 1.1.33 **e** a 1.1.34
+fechavam — e o **sublinhado** (e o ponto, e a barra) fazia o extrator parar no radical, **tarjar o lugar
+errado** e entregar o segredo literal (`senha[redacted] VALOR`), defeito pré-existente nas quatro gerações
+e pior que não tarjar, porque parece protegido.
+
+A 1.1.36 troca a lista fechada por **regra estrutural com decisão de valor no contexto**: o radical conta
+quando **toca uma borda do token** — começa nele (`senhaforte`, `Chaveiro`) ou termina nele (`novasenha`,
+`userpin`); com as duas bordas livres, `pin` dentro de `shipping` continua fora. Não há mais cauda para
+enumerar: **41 concatenações medidas, 0 vazam**. O preço do recall é pago no valor: quando o token **não**
+é palavra do vocabulário, o valor precisa ter cara de credencial, e é isso que mantém `Chaveiro: R$ 30,00`,
+`Secretaria de Saúde: 12 unidades`, `The hairpin: 12 units` e `tokenizador: interno` como evidência —
+rótulo que **é** palavra do vocabulário mantém a semântica de atribuição (`senha: abc` sai inteiro). A
+**continuação de identificador** (`senha_forte`, `senha.mestra`, `senha/mestra`, `session-id`) entra no
+rótulo e tarja o lugar certo; o valor de atributo passa a usar predicado **estrito**, preservando
+`placeholder="Chaveiro de latão"` e `autocomplete="shipping street-address"`; as frases que só valem com
+separador saem do vocabulário de cauda (`conta corrente 12345-6` é prosa, `Conta corrente: 12345-6` é
+rótulo); e o sinal de credencial passa a ser **derivado** das decisões do tarjador (sinal ⟺ tarja, ou
+rótulo pendente no fim), porque antes `Pingente: prata` acendia o sinal sem tarja e o trecho inteiro caía.
+O preço declarado, que a revisão refutou, passa a ser medido por predicado com comando: **566** palavras do
+dicionário no caminho de chave, **101** no predicado estrito de valor, **566** no de prosa.
+
+**Versão 1.1.35 — revisada: 2 Critical, 1 Important, 3 Minor e 6 observações**, todos fechados na 1.1.36.
+A revisão da **1.1.34** deu **1 Critical, 2 Important, 5 Minor e 10 observações** e **reprovou** o artefato. O Critical era **regressão minha**: a
 fronteira de palavra da 1.1.34 cobria só o radical no **fim** da palavra (`userpin`) e devolveu ao
 entregável o radical no **início** da palavra colada — `senhaforte:`, `tokenacesso:`, `sessionid:`,
 `data-senhaforte="…"`, `?sessionid=`, `{"sessionid":…}` —, formas que a 1.1.33 tarjava. O Important I1
