@@ -422,7 +422,11 @@ const LANGUAGE_STRICT_FAMILY_SUFFIX = new RegExp(String.raw`(?:${LANGUAGE_STRICT
  */
 export function isLanguageWordForm(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
-  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain)) return true;
+  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return true;
+  // A família de PREFIXO só poupa quando o que vem DEPOIS dela não carrega radical: `chaveiro` e
+  // `tokenizacao` são palavra da língua, `chaveirotoken` e `pinturasenha` são credencial concatenada.
+  const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
+  if (prefix !== null && !SENSITIVE_KEY.test(plain.slice(prefix.index + prefix[0].length))) return true;
   const suffix = LANGUAGE_FAMILY_SUFFIX.exec(plain);
   // A palavra da língua TERMINA no radical (`pallbearer`, `allseed`, `antipass`), mas uma CREDENCIAL
   // também pode terminar nele (`senhaassinaturatoken`, `senhapixpin`, `senhaassinaturaseed`,
@@ -441,7 +445,9 @@ export function isLanguageWordForm(value) {
  */
 export function isLanguageWordStrictForm(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
-  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain)) return true;
+  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return true;
+  const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
+  if (prefix !== null && !SENSITIVE_KEY.test(plain.slice(prefix.index + prefix[0].length))) return true;
   const suffix = LANGUAGE_STRICT_FAMILY_SUFFIX.exec(plain);
   // Mesma guarda da forma permissiva: a credencial também TERMINA nesses radicais
   // (`senhaassinaturaseed`, `senhaassinaturasession`, `senhaassinaturapass`, `xsenhasession`), e é o
