@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { isSensitiveKeyName, isSensitiveValue, SENSITIVE_KEY, decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
+import { isSensitiveKeyName, isSensitiveValue, SENSITIVE_KEY, decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeEvidenceUrl, sanitizeJsonData } from '../../src/core/privacy.js';
 import { sanitizeHtmlSnippetSource } from '../../src/core/evidence/snippet.js';
 import { computeAccessibleText } from '../../src/core/accessibility/accessible-name.js';
 import { buildStableSelector } from '../../src/core/evidence/selector.js';
@@ -516,4 +516,132 @@ test('o sinal de credencial não acende em prosa legítima e o texto sai intacto
   assert.equal(decodeForMatching('sen&#104;a'), 'senha');
   assert.equal(decodeForMatching('sen\\u0068a'), 'senha');
   assert.equal(decodeForMatching('sen\\150a'), 'senha');
+});
+
+// ---------------------------------------------------------------------------
+// FAMÍLIAS DA LÍNGUA (Important I-3 da revisão da 1.1.40)
+//
+// A lista de exceções cobria o que os revisores mediram palavra a palavra (`chaveiro`, `pintura`), não a
+// CLASSE: 20 de 39 frases de morfologia portuguesa eram destruídas (`Chaveiros:`, `Pinturas:`, `Pincéis:`,
+// `Secretarias:`, `Tokenização:`, `Obsessões:`) e a prosa sem separador virava tarja inteira
+// (`A loja vende chaveiros personalizados.` -> `A loja vende [redacted]`). A asserção percorre a CLASSE:
+// toda palavra da língua tem de sair intacta, e toda forma `<radical de credencial><cauda>` tem de ser
+// tarjada — as duas direções no mesmo teste, porque afrouxar uma abre a outra.
+const MORFOLOGIA_PT = [
+  'Chaveiro: R$ 30,00', 'Chaveiros: R$ 30,00', 'Chaveirinho: R$ 5,00', 'Chaveirões: R$ 90,00',
+  'Pintura: látex acrílico', 'Pinturas: látex acrílico', 'Pintor: João', 'Pintores: dois',
+  'Pincel: cerda sintética', 'Pincéis: cerda sintética', 'Pincelzinho: fino',
+  'Pingente: prata', 'Pingentes: prata', 'Pinguim: animal', 'Pinguins: animais',
+  'Secretaria: saúde', 'Secretarias: duas', 'Secretário: nomeado', 'Secretários: nomeados',
+  'Tokenizador: componente', 'Tokenizadores: dois', 'Tokenização: etapa',
+  'Obsessão: tema', 'Obsessões: duas', 'Possessão: tema', 'Possessões: duas',
+  'Espinha: peixe', 'Espinhas: peixe', 'Opinião: ótima', 'Opiniões: ótimas',
+  'A loja vende chaveiros personalizados.', 'A loja vende chaveiros.',
+  'As pinturas ficaram prontas.', 'Os pincéis são finos.', 'Os pingentes são de prata.',
+  'A secretaria respondeu.', 'As secretarias responderam.',
+  'A obsessão do autor é visível.', 'As possessões foram listadas.',
+];
+// Palavras inglesas que TERMINAM no radical: a credencial ACRESCENTA qualificador (`sessionid`,
+// `seedphrase`, `bearerToken`), então a palavra que termina nele é inocente — é o lado seguro do sufixo.
+const FAMILIAS_EN = ['allseed', 'aniseed', 'birdseed', 'antipass', 'repass', 'assession', 'obsession',
+  'possession', 'chipping', 'shipping'];
+// RESÍDUO DECLARADO da mesma classe, medido: `pallbearer`, `cupbearer` (o fechado casa `bearer` DENTRO da
+// palavra e a família de sufixo não pode poupá-los sem poupar `jwtbearer`/`bearertoken`) e `seedling`
+// (o prefixo `seed` forma `seedphrase`, que é credencial). Continuam sendo tarja em prosa e chave — é o
+// preço do lado do recall, e está aqui para não ser confundido com ausência de medição.
+const FAMILIAS_EN_RESIDUO = ['pallbearer', 'cupbearer', 'seedling'];
+
+test('morfologia portuguesa e famílias inglesas continuam evidência, e as formas de credencial continuam tarjadas', t => {
+  for (const frase of MORFOLOGIA_PT) {
+    assert.equal(redactSensitiveText(frase), frase, `"${frase}" é prosa e não pode ser tarjada`);
+    assert.doesNotMatch(sanitizeJsonData({ texto: frase }).texto, /\[redacted\]/u, `"${frase}" no caminho JSON`);
+    assert.doesNotMatch(sanitizeHtmlSnippetSource(`<p>${frase}</p>`), /\[redacted\]/u, `"${frase}" no trecho`);
+  }
+  for (const palavra of FAMILIAS_EN) {
+    assert.equal(redactSensitiveText(`${palavra}: abc123`), `${palavra}: abc123`, `"${palavra}" é palavra da língua`);
+    assert.doesNotMatch(sanitizeJsonData({ texto: `${palavra}: abc123` }).texto, /\[redacted\]/u, `"${palavra}" no JSON`);
+  }
+  // O resíduo é medido, não presumido: se ele deixar de ser tarja, este teste avisa que a decisão mudou.
+  for (const palavra of FAMILIAS_EN_RESIDUO) {
+    assert.match(redactSensitiveText(`${palavra}: abc123`), /\[redacted\]/u,
+      `"${palavra}" é resíduo declarado do lado do recall — se passou a ser preservada, atualize a declaração`);
+  }
+  // O outro lado: nenhuma família pode ENGOLIR a forma `<radical><cauda>`. A varredura é a mesma lista de
+  // caudas realistas dos revisores contra os radicais do vocabulário, nas quatro superfícies.
+  const RADICAIS = ['senha', 'chave', 'token', 'session', 'cookie', 'secret', 'password', 'puk', 'cartao',
+    'credencial', 'segredo', 'auth', 'bearer', 'pwd', 'passphrase', 'passcode', 'pin', 'pins', 'seed',
+    'cvv', 'otp', 'cpf', 'cnpj'];
+  const CAUDAS = ['assinatura', 'pix', 'whatsapp', 'chat', 'telegram', 'cobranca', 'recebimento', 'email',
+    'login', 'banco', 'cartao', 'conta', 'pessoal', 'trabalho', 'wifi', 'roteador', 'producao', 'teste',
+    'cliente', 'titular', 'sistema', 'portal', 'servidor', 'backup', 'nuvem', 'suporte', 'financeiro',
+    'comercial', 'marketing', 'rh', 'fiscal', 'contabil', 'juridico', 'medico', 'paciente', 'aluno',
+    'professor', 'escola', 'faculdade', 'governo', 'prefeitura', 'corporate', 'intranet', 'vpn', 'proxy',
+    'gateway', 'firewall', 'docker', 'kubernetes', 'aws', 'azure', 'github', 'gitlab', 'jira', 'slack'];
+  // Radicais CURTOS (`pin`, `puk`, `seed`, `cvv`, `otp`, `cpf`, `cnpj`, `pins`) são palavra da língua com
+  // prefixo na prosa (`spin`, `hairpin`, `linseed`, `bypass`) e por isso a regra de chave composta exige
+  // radical LONGO — o resíduo de chave deles é medido aqui e não pode CRESCER (era 540 de 1.265 formas na
+  // 1.1.40). Nas superfícies de prosa e modelo a exigência é zero para todos os radicais.
+  const CURTOS = new Set(['pin', 'pins', 'puk', 'seed', 'cvv', 'otp', 'cpf', 'cnpj', 'auth', 'pwd']);
+  const vazios = [];
+  const vaziosChaveCurta = [];
+  for (const radical of RADICAIS) {
+    for (const cauda of CAUDAS) {
+      const forma = `${radical}${cauda}`;
+      const modelo = sanitizeJsonData({ texto: `${forma}: borboleta` }).texto;
+      const prosa = redactSensitiveText(`${forma}: borboleta`);
+      const chave = sanitizeJsonData({ [forma]: 'borboleta' })[forma];
+      if (!modelo.includes('[redacted]') || !prosa.includes('[redacted]')) {
+        vazios.push(`${forma} (modelo=${modelo.includes('[redacted]')} prosa=${prosa.includes('[redacted]')})`);
+      } else if (chave !== '[redacted]') {
+        if (CURTOS.has(radical)) vaziosChaveCurta.push(forma);
+        else vazios.push(`${forma} (chave livre com radical longo)`);
+      }
+    }
+  }
+  assert.deepEqual(vazios.slice(0, 8), [], `formas de credencial livres em prosa/modelo: ${vazios.length} de ${RADICAIS.length * CAUDAS.length}`);
+  t.diagnostic(`resíduo de chave com radical curto: ${vaziosChaveCurta.length} de ${RADICAIS.filter(r => CURTOS.has(r)).length * CAUDAS.length}`);
+  assert.ok(vaziosChaveCurta.length <= 550, `resíduo de chave com radical curto cresceu: ${vaziosChaveCurta.length}`);
+});
+
+test('identificador com rótulo de credencial é reconhecido, e as famílias da língua não', () => {
+  // Important I-1/I-2 da revisão da 1.1.40: a cauda colada sem prefixo (`senhaassinatura`, `chavepix`)
+  // não era reconhecida em posição de chave/identificador — o vocabulário de chave só conhecia prefixo
+  // ARBITRÁRIO (`xchavepix`) —, e o valor vizinho chegava ao modelo, ao HTML e ao JSON.
+  for (const chave of ['senhaassinatura', 'senhaassinatura2', 'chavepix', 'data-chavepix', 'xchavepix',
+    'senhaforte', 'tokenacesso', 'pinnumber', 'pinpad', 'pincode', 'authToken', 'secretKey']) {
+    assert.equal(isSensitiveKeyName(chave), true, `"${chave}" é identificador de credencial`);
+  }
+  for (const livre of ['chaveiro', 'chaveiros', 'chaveta', 'chaveamento', 'pintura', 'pinturas', 'pincel',
+    'pincéis', 'secretaria', 'secretarias', 'secretário', 'secreto', 'tokenizacao', 'tokenização',
+    'obsessão', 'possessões', 'espinha', 'opinião', 'pintura.png', 'secretaria-saude', 'data-chaveiro',
+    'data-pintura', 'shipping']) {
+    assert.equal(isSensitiveKeyName(livre), false, `"${livre}" é identificador legítimo`);
+  }
+  assert.equal(sanitizeJsonData({ senhaassinatura: 'borboleta' }).senhaassinatura, '[redacted]');
+  assert.equal(sanitizeJsonData({ chavepix: 'girassol' }).chavepix, '[redacted]');
+  assert.equal(sanitizeJsonData({ chaveiro: 'R$ 30,00' }).chaveiro, 'R$ 30,00');
+  assert.equal(sanitizeEvidenceUrl('https://exemplo.test/?senhaassinatura=borboleta'), 'https://exemplo.test/');
+  assert.equal(sanitizeEvidenceUrl('https://exemplo.test/?chaveiro=R%24%2030'), 'https://exemplo.test/?chaveiro=R%24%2030');
+  // O trecho entregue não pode descartar o atributo `data-<palavra>` legítimo (Minor M-2 da mesma revisão).
+  assert.match(sanitizeHtmlSnippetSource('<div data-chaveiro="latão">Peça</div>'), /data-chaveiro="latão"/u);
+  assert.match(sanitizeHtmlSnippetSource('<div data-pintura="látex">Peça</div>'), /data-pintura="látex"/u);
+  // E a forma de credencial no mesmo lugar continua caindo, com os atributos que carregam valor.
+  assert.doesNotMatch(sanitizeHtmlSnippetSource('<div data-senhaassinatura="borboleta">Peça</div>'), /senhaassinatura/u);
+  assert.doesNotMatch(sanitizeHtmlSnippetSource('<div data-userpin="borboleta">Peça</div>'), /data-userpin/u);
+});
+
+test('rótulo no identificador não entrega o texto nem o atributo de valor do próprio elemento', () => {
+  // Important I-1: o valor está no CONTEÚDO do elemento (ou num atributo que carrega valor), e o sinal de
+  // conteúdo do trecho não o enxerga, porque o rótulo não passa pelo fluxo de texto.
+  for (const html of ['<div id="senhaassinatura">borboleta</div>', '<div class="senhaassinatura">borboleta</div>',
+    '<div id="chavepix" title="girassol">Texto innocuo.</div>']) {
+    const trecho = sanitizeHtmlSnippetSource(html);
+    assert.doesNotMatch(trecho, /borboleta|girassol/u, `"${html}" não pode entregar o valor`);
+  }
+  // O controle negativo é o mesmo lugar sintático com palavra da língua: a evidência fica.
+  assert.match(sanitizeHtmlSnippetSource('<div id="chaveiro">R$ 30,00</div>'), /R\$ 30,00/u);
+  assert.match(sanitizeHtmlSnippetSource('<div class="pinturas">látex acrílico</div>'), /látex acrílico/u);
+  // E o rótulo que é NOME acessível de um controle continua entregando o rótulo (testes históricos).
+  assert.equal(sanitizeHtmlSnippetSource('<button id="token-847261" aria-label="Abrir">Abrir</button>'),
+    '<button aria-label="Abrir">Abrir</button>');
 });

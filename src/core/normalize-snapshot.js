@@ -2,6 +2,7 @@ import { assertSnapshotV1 } from './snapshot-schema.js';
 import { escapeCssIdentifier } from './evidence/selector.js';
 import {
   backgroundImageKind,
+  isSensitiveKeyName,
   redactCredentialLabelTail,
   redactNormalizedNode,
   sanitizeEvidenceUrl,
@@ -172,8 +173,33 @@ function editableElement(tagName, attributes) {
   return Object.hasOwn(attributes, 'contenteditable') && !['false', 'inherit'].includes(contenteditable);
 }
 
+function identityAttributeText(value) {
+  return Array.isArray(value) ? value.map(cleanText).filter(Boolean).join(' ') : cleanText(value);
+}
+// O RÓTULO NO IDENTIFICADOR DO PRÓPRIO ELEMENTO (`<div id="senhaassinatura">borboleta</div>`,
+// `<div class="chavepix" title="girassol">`): o texto e os atributos desse elemento SÃO o valor, e nem o
+// sinal de conteúdo do trecho nem o campo `value` do controle editável olham para eles. A revisão da
+// 1.1.40 mediu o valor chegando ao modelo e ao JSON por esse caminho (Important I-1). A decisão é a
+// mesma do trecho entregue: identificador de credencial torna o elemento raiz de texto privado.
+// Elementos cujo texto é NOME acessível, não o valor do campo (mesma decisão do trecho entregue).
+const LABEL_BEARING_TAGS = new Set(['a', 'area', 'button', 'input', 'label', 'legend', 'option',
+  'select', 'summary', 'textarea']);
+function credentialIdentityAttributes(tagName, attributes) {
+  if (LABEL_BEARING_TAGS.has(tagName) || !attributes || typeof attributes !== 'object') return false;
+  for (const name of ['id', 'class']) {
+    const value = identityAttributeText(attributes[name]);
+    if (value === '') continue;
+    if (name === 'class') {
+      if (value.split(/\s+/u).some(token => token.length > 0 && isSensitiveKeyName(token))) return true;
+      continue;
+    }
+    if (isSensitiveKeyName(value)) return true;
+  }
+  return false;
+}
 function privateTextElement(tagName, attributes) {
-  return tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName));
+  return tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName)) ||
+    credentialIdentityAttributes(tagName, attributes);
 }
 
 function markPrivateReferenceConsumers(nodes, privateReferenceIds) {

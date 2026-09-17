@@ -1,4 +1,4 @@
-import { decodeForMatching, hasCredentialValueSignal, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, isLanguageWordStrictForm, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -115,6 +115,34 @@ function contentEditableTag(parsed) {
   return Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(value);
 }
 
+// O RÓTULO PODE ESTAR NO IDENTIFICADOR, e não no texto: `<div id="senhaassinatura">borboleta</div>`,
+// `<div id="chavepix" title="girassol">`, `<div class="senhaassinatura">borboleta</div>`. O valor está
+// no conteúdo do elemento ou num atributo do MESMO elemento, e o sinal de conteúdo não o enxerga porque
+// o rótulo não passa pelo fluxo de texto. A revisão da 1.1.40 mediu esse valor chegando ao modelo, ao
+// HTML e ao JSON com o rótulo no `id`/`class` (Important I-1), idêntico na 1.1.39.
+// O texto de um elemento que CARREGA NOME (controle, botão, link, rótulo) é o nome acessível, não o
+// valor do campo: `<button id="token-…">Abrir</button>` continua entregando o rótulo, como as revisões
+// anteriores fixaram em teste. O identificador de credencial nesses elementos não torna o conteúdo
+// segredo.
+const LABEL_BEARING_ELEMENTS = new Set(['a', 'area', 'button', 'input', 'label', 'legend', 'option',
+  'select', 'summary', 'textarea']);
+// Atributos que CARREGAM VALOR: o elemento está rotulado como credencial, então eles são o valor.
+const CREDENTIAL_VALUE_ATTRIBUTES = new Set(['title', 'alt', 'placeholder', 'aria-description',
+  'aria-placeholder', 'aria-valuenow', 'aria-valuetext']);
+function credentialIdentity(parsed) {
+  if (LABEL_BEARING_ELEMENTS.has(parsed.name)) return false;
+  for (const attribute of parsed.attributes) {
+    if (attribute.name !== 'id' && attribute.name !== 'class') continue;
+    const value = String(attribute.value ?? '');
+    if (attribute.name === 'class') {
+      if (value.split(/\s+/u).some(token => token.length > 0 && isSensitiveKeyName(token))) return true;
+      continue;
+    }
+    if (isSensitiveKeyName(value)) return true;
+  }
+  return false;
+}
+
 function safeIdRefs(value) {
   const tokens = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
   return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !isSensitiveKeyName(token))
@@ -122,7 +150,7 @@ function safeIdRefs(value) {
     : null;
 }
 
-function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = false } = {}) {
+function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = false, credentialIdentityValue = false } = {}) {
   if (parsed.closing) return `</${parsed.name}>`;
   const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
   const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
@@ -136,7 +164,11 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
     if (contentEditableRoot && !['contenteditable', 'role', 'tabindex', 'aria-labelledby', 'aria-describedby'].includes(name)) continue;
     if (/^on/iu.test(name) || name === 'srcdoc' || name === 'style') continue;
     if (name === 'xlink:href' || name === 'ping' || name === 'srcset') continue;
-    if (PRIVATE_ATTRIBUTE.test(withCamelMarks(name))) continue;
+    // O nome do atributo é `data-<palavra>`: a família da língua continua sendo evidência
+    // (`data-chaveiro`, `data-pintura` — Minor M-2 da revisão da 1.1.40), e a forma de credencial
+    // (`data-senhaassinatura`) continua caindo.
+    if (PRIVATE_ATTRIBUTE.test(withCamelMarks(name)) && !isLanguageWordStrictForm(name)) continue;
+    if (credentialIdentityValue && CREDENTIAL_VALUE_ATTRIBUTES.has(name)) continue;
     if ((parsed.name === 'object' && name === 'data') || (parsed.name === 'embed' && name === 'src')) continue;
     if (parsed.name === 'meta' && String(values['http-equiv']).toLowerCase() === 'refresh' && name === 'content') continue;
     // O NOME do atributo é a chave da atribuição (`senhavelha="…"`); o vocabulário fechado continua
@@ -307,10 +339,15 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
     }
     // Depois do sinal, nenhum elemento entrega atributo: eles são candidatos a carregar o valor, e
     // quem decide é o conteúdo, não a forma do elemento.
+    // Identificador de credencial no próprio elemento: ele vira raiz privada (atributos fora, conteúdo
+    // descartado) e o trecho fica contaminado a partir dali — a MESMA decisão monotônica do sinal de
+    // conteúdo, alimentada pelo identificador em vez do texto.
+    const credentialIdentityValue = !parsed.closing && credentialIdentity(parsed);
     const forcedPrivateRoot = pendingPrivateRoot;
     output += sanitizeTag(parsed, {
       contentEditableRoot: contentEditableTag(parsed),
       stripAttributes: forcedPrivateRoot || tainted,
+      credentialIdentityValue,
     });
     if (forcedPrivateRoot) pendingPrivateRoot = false;
     if (!parsed.closing && !parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
@@ -318,7 +355,7 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
       if (parsed.name === 'textarea' || (
         Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
-      ) || forcedPrivateRoot) privateStructure.push(parsed.name);
+      ) || forcedPrivateRoot || credentialIdentityValue) privateStructure.push(parsed.name);
     }
     if (forcedPrivateRoot && (parsed.selfClosing || VOID_ELEMENTS.has(parsed.name))) break;
     position = token.end;

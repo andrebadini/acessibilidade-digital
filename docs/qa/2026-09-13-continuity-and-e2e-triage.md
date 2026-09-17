@@ -2719,3 +2719,104 @@ Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.39.md`. A revisão **confir
 **Menores tratados:** o alias `isSensitiveAssignedKey` (corpo idêntico a `isSensitiveKey`) foi **removido**; o README do commit do artefato passa a descrever a versão corrente; o incidente de processo (checkout de revisor no worktree, com a perda do WIP de um plano alheio) está registrado acima.
 
 **Verificação desta rodada:** 1.081 testes em núcleo/evidência/privacidade/regras/acessibilidade/relatório/revisão/painel **todos verdes**; métrica da classe **8/8** com `formas=92 fracos=72 combinações=559` (as formas novas incluem as caudas fora da lista); fase paralela **4.221 testes, 4.219 passam, 1 falha** — a falha é o `release-package`, que exige pacote reconstruído (feito a seguir).
+
+## Rodada 86 — o percurso da página atual em modo de pixel não começa: achado preexistente medido em três gerações, e o critério 4 medido no modo que conclui
+
+Enquanto a revisão independente da 1.1.40 rodava, fechei a medição pendente do **começo em modo de
+pixel na página atual**. Ela não era artefato de sonda: é **defeito real, preexistente e
+reproduzível**.
+
+**Medição (Chrome 152.0.7977.64, fixture local, painel aberto pelo botão da extensão):**
+`no-pixels` conclui e chega a `result`; `element-only` e `full-evidence` ficam em `initial` por 24 s,
+**sem botão de consentimento e sem nenhum trabalho** em `chrome.storage.session`. Os **bytes
+empacotados** da 1.1.39 e da 1.1.38 falham **do mesmo jeito** (`element-only`), o que descarta
+regressão dos incrementos da classe de credencial.
+
+**Mecanismo, medido ponta a ponta.** O começo é aceito (tela `running` em +500 ms) e então:
+`src/panel/panel-session-port.js:538` pede o bootstrap; `src/background/panel-port.js:942`
+(`handleHello`) não encontra o registro da janela — a auditoria acabou de ser pedida — e responde
+`packet('initial', null, null, null)` (linha 960); `src/panel/panel.js:857` aplica `BOOTSTRAP_INITIAL`
+e **recria o estado neutro** (a tela volta a `initial` e o modo volta ao padrão `full-evidence`,
+observado na linha do tempo); quando o pacote de pausa chega, a porta exige correlação
+(`src/panel/panel-session-port.js:418-425`) que o bootstrap ocioso acabou de zerar, declara-se
+indisponível e a jornada para; a confirmação de captura exige `screen === 'running'` e
+`sessionStatus === 'privacy-paused'` (`src/panel/panel.js:258`), que não sobreviveram.
+
+**Atribuição e fronteira.** O plano do incremento paralelo ("Página atual sem interação visível")
+declara na seção C que "modos com pixels, confirmação/restart, destaque ao vivo, quatro exportações"
+ainda **não foram demonstrados** — este achado é essa lacuna, e as sete falhas de
+`test/e2e/sidepanel-flow-mv3.test.mjs` são **este defeito**, não oráculo obsoleto. O conserto toca
+`src/panel/*` e o atendimento de bootstrap em `src/background/panel-port.js`, fora dos arquivos
+congelados daquele incremento e fora dos meus; **não editei** para não editar os mesmos arquivos em
+paralelo. Fica medido, com direção de conserto e prova exigida, em
+`docs/qa/2026-09-17-percurso-pixels-pagina-atual.md`.
+
+**Critério 4 medido no modo que conclui.** Página com elemento fora da dobra, foco e rolagem não
+triviais antes da auditoria, linha de base depois de a largura do painel assentar, contadores de
+evento e observador de mutações instalados na página: **0 eventos** (rolagem, foco, redimensionamento,
+tecla, clique), **0 mutações** (inclusive de atributo e de texto), geometria/rolagem/foco **idênticos**
+antes e depois, 5 amostras com **0 divergências**. A auditoria da página atual, no modo sem pixels, não
+altera a página observada — o que a medição do critério exigia e não estava feita.
+
+**Verificação desta rodada:** sondas de Chrome real em `/private/tmp/adv143/` (`pixel-aria`,
+`pixel-consent`, `pixel-port`, `pixel-reload`, `pixel-version`, `criterio4`), uma carga de Chrome por
+vez; nenhuma alteração de `src/` nesta rodada (o artefato segue congelado para a revisão da 1.1.40).
+
+## Rodada 87 — a revisão da 1.1.40 REPROVOU (0 Critical novo, 3 Important): a classe de credencial em três posições, fechada na 1.1.41 com medição nas duas direções
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.40.md`. A revisão **confirmou por medição própria** que o
+Critical da 1.1.39 está fechado de fato no caminho de prosa/modelo (E2E por caso em Chrome real, com controle
+de não vacuidade), que o digest `8deba155…9a52` e os 199 arquivos batem byte a byte com o commit `c9d7dd4`,
+que a métrica da classe **não é vacuosa** (7/8 contra a 1.1.39 e 6/8 contra a 1.1.38), e reproduziu fase
+paralela, escopo serial, gate, auditoria ao vivo e os 146 itens. E mediu **três Important da mesma classe, em
+três posições sintáticas**, mais cinco Minor e quatro observações.
+
+**I-1 — o eixo de IDENTIFICADOR.** `<div id="senhaassinatura">borboleta</div>`, `<div class="senhaassinatura">`
+e `<div id="chavepix" title="girassol">` entregavam o valor ao **modelo, ao HTML e ao JSON**, com o seletor
+saindo como `div#senhaassinatura`; idêntico na 1.1.39 (pré-existente). **I-2 — a cobertura de CHAVE**, perdida
+pela minha própria troca de predicado na 1.1.40 (`sanitizeJsonData({senhaassinatura: …})`,
+`?senhaassinatura=`, `data-chavepix`; caçador 24 → 168 por superfície), latente nos artefatos mas real no
+código. **I-3 — os falsos positivos**, provados ponta a ponta: a lista de exceções cobria o que os revisores
+mediram, não a classe — `A loja vende chaveiros personalizados.` chegava ao entregue como
+`<p>A loja vende [redacted]</p>`, e **20 de 39** frases de morfologia portuguesa eram destruídas.
+
+**A 1.1.41 fecha os três eixos, e o desenho foi medido antes de ser aceito.** As exceções passam a ser
+**famílias**: prefixos do português medidos (`chaveir`, `chaveta`, `chaveament`, `pintur`, `pintor`, `pincel`,
+`pincé`, `pingent`, `pingu`, `espinh`, `opini`, `secretar`, `secretári`, `secretos`, `tokeniz`, `obsess`,
+`possess`) e sufixos ingleses que a credencial **não** usa como cauda (`seed`, `session`, `pass`, `spin`,
+`pping`). O sufixo `token`/`pin`/`bearer` foi **medido e recusado**: poupá-lo devolvia `authtoken`,
+`mytoken`, `userpin`, `cardpin`, `jwtbearer`. O vocabulário de chave ganha a **cauda colada sem prefixo**
+(`senhaassinatura`, `chavepix`, `data-chavepix`, `xchavepix`) numa forma prefixo 0-3 + radical longo,
+**sem tocar na lista fechada** — `pin`/`pins` continuam tarjados —, e é só essa forma nova que consulta as
+famílias. No trecho e no modelo, o elemento cujo **identificador** é rótulo de credencial perde o texto e os
+atributos que carregam valor, **sem** virar raiz privada inteira (senão `<button id="token-…">Abrir</button>`
+perdia o rótulo acessível, e quatro testes históricos reprovavam — a primeira versão da regra era larga
+demais e foi estreitada por medição).
+
+**Medições da 1.1.41, todas com comando reproduzível:**
+- métrica da classe **11/11**, com as famílias percorridas nas duas direções (nenhuma forma `<radical><cauda>`
+  poupada, nenhuma palavra da língua tarjada por elas);
+- caçador adversarial do revisor: **336 → 0** vazamentos em 1.728 casos; caudas realistas **0** em 880 formas;
+- **`COBERTURA_PERDIDA=0 / GANHA=5.661`** em 516.235 formas; corpus de chaves do revisor **3/55** (o mesmo
+  resíduo da 1.1.40) e **12/12** atributos `data-<palavra>` preservados no trecho (Minor M-2);
+- dicionário do sistema: **563 → 360** palavras inocentes destruindo valor fraco; morfologia PT **20 → 0**;
+- bateria de 39 rótulos de credencial: **nenhuma perda**, 12 ganhos de cobertura (chave e modelo);
+- corpus de colisão próprio (67 radicais do produto × 55 caudas = 3.685 formas): **2.412 → 540** vazamentos de
+  chave, e o resíduo é só de radicais curtos (`pin`, `puk`, `seed`, `auth`), com teto afirmado em teste;
+- E2E novo `test/e2e/identifier-credential-mv3.test.mjs` **6/6** (três vazamentos + três controles negativos,
+  medindo painel, relatório, modelo/revisão e os quatro artefatos) e o E2E do revisor (eixo de chave) **1/1**;
+- **fase paralela 4.180 testes / 4.179 passam / 0 falham / 1 pulado, EXIT=0**; **escopo serial 58/58** nos bytes
+  empacotados (12 arquivos, incluindo o E2E novo) — a única vermelha da primeira passagem era o `axe-mv3-csp`
+  sem o auxiliar `scripts/axe-e2e-decision.mjs` na raiz extraída, e passa 1/1 com o auxiliar presente;
+- auditoria ao vivo no Google a partir do zip: versão **1.1.41** declarada, **0 falhas confirmadas**, 3
+  verificações sob revisão humana (4 ocorrências), 9 positivos, **109 no checklist**, **28,5%**, **9,0/10**,
+  quatro exportações `complete`; instrumento de integridade: **146 itens, 146 ids únicos, 146/146 ids e
+  títulos no HTML e no PDF, notas editoriais 5/5 nos dois, 0 palavras partidas, 0 `[redacted]`**, 11 trechos
+  com 5.228 caracteres.
+
+**Resíduos declarados nesta geração:** `pallbearer`, `cupbearer` e `seedling` continuam lidos como chave (a
+família de sufixo não pode poupá-los sem poupar `jwtbearer`/`bearertoken`/`seedphrase`); radicais curtos
+seguem sem cobertura de chave composta (`pwdassinatura`), com teto medido; `codigo*`/`conta*`, `api.key`,
+`private_key`, separadores exóticos, rótulos codificados e rótulo+valor em nós irmãos continuam abertos como
+antes; e o **percurso da página atual em modo de pixel** continua sem começar (rodada 86 — escopo do
+incremento paralelo).

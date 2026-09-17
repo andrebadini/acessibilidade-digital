@@ -4,7 +4,38 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.40 preparada — sem revisão independente ainda.** A revisão da **1.1.39** confirmou tudo o
+**Versão 1.1.41 preparada — sem revisão independente ainda.** A revisão da **1.1.40** confirmou por medição
+própria tudo o que aquela geração tinha de real — em especial que o **Critical da 1.1.39 está fechado de fato**
+no caminho de prosa/modelo, com E2E por caso em Chrome real e controle de não vacuidade — e mediu **3
+Important**: (I-1) o rótulo da credencial num **identificador** (`<div id="senhaassinatura">borboleta</div>`,
+`<div class="senhaassinatura">`, `<div id="chavepix" title="girassol">`) entregava o valor ao **modelo, ao HTML
+e ao JSON** — resíduo pré-existente, idêntico na 1.1.39; (I-2) a troca de predicado nas **chaves** tirou
+cobertura da própria família do Critical (`sanitizeJsonData({senhaassinatura: …})`, `?senhaassinatura=`,
+`data-chavepix`), regressão latente no código de produto; (I-3) a lista de exceções cobria o que os revisores
+mediram, não a **classe** — 20 de 39 frases de morfologia portuguesa eram destruídas (`Chaveiros:`,
+`Pinturas:`, `Secretarias:`, `Tokenização:`) e a prosa sem separador virava tarja inteira
+(`A loja vende chaveiros personalizados.`).
+
+A 1.1.41 fecha os três eixos com medição nas duas direções (nenhuma forma de credencial perdida, nenhuma
+palavra da língua destruída). As exceções passam a ser **famílias** — radicais de prefixo (`chaveir`,
+`pintura`→`pintur`, `pincel`, `tokeniz`, `obsess`, `possess`, `espinh`, `opini`, `secretar`, `secretári`) e
+sufixos ingleses que a credencial não usa como cauda (`seed`, `session`, `pass`, `spin`, `pping`) —, e o
+vocabulário de chave ganha a **cauda colada sem prefixo** (`senhaassinatura`, `chavepix`, `data-chavepix`,
+`xchavepix`) sem tocar na lista fechada, que continua tarjando `pin`/`pins`. O valor de um elemento cujo
+identificador é rótulo de credencial deixa de ser entregue (texto e atributos que carregam valor), com os
+controles negativos preservados: `<button id="token-…">Abrir</button>` mantém o rótulo acessível e
+`data-chaveiro`/`data-pintura` continuam na evidência. **Medições desta geração:** métrica da classe **11/11**
+com as famílias percorridas pela asserção; **`COBERTURA_PERDIDA=0`** em 516.235 formas; caçador adversarial do
+revisor **336 → 0** vazamentos em 1.728 casos; caudas realistas **0** em 880 formas; dicionário com
+**563 → 360** palavras inocentes destruindo valor e **20 → 0** frases de morfologia; corpus de chaves do
+revisor **3/55** (o mesmo resíduo da 1.1.40) e **12/12** atributos `data-<palavra>` preservados no trecho;
+E2E novo `identifier-credential-mv3` **6/6** e o E2E do revisor (eixo de chave) **1/1**, ambos em Chrome real
+com as quatro exportações. **Resíduo declarado e medido:** `pallbearer`, `cupbearer` e `seedling` continuam
+sendo lidos como chave (a família de sufixo não pode poupá-los sem poupar `jwtbearer`/`bearertoken`/
+`seedphrase`), e os radicais curtos (`pin`, `puk`, `seed`, `auth`) seguem sem cobertura de chave composta —
+o teste afirma o teto para o resíduo não crescer.
+
+**Versão 1.1.40.** A revisão da **1.1.39** confirmou tudo o
 que aquela geração entregou (fase paralela 4.221/4.220/0/1, escopo serial 52/52, gate GREEN, auditoria ao
 vivo reproduzida, 146 itens, axe do produto sem violação) e mediu **1 Critical e 3 Important** — o Critical
 era **resíduo de quatro gerações**: `senhaassinatura: borboleta` e `chavepix: girassol`, com rótulo

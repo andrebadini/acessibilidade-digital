@@ -215,6 +215,13 @@ const COMPOSTA_SOURCE = String.raw`(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATIO
 // radical no meio não cobre sem abrir a lista de caudas. Entra no vocabulário de PROSA (o de chave não a
 // usa); o preço medido no dicionário está em `LANGUAGE_WORD_EXCEPTIONS`.
 const PREFIXED_TAIL_SOURCE = String.raw`(?<![\p{L}\p{N}])[\p{L}\p{N}]{1,3}(?:${LONG_STEMS_ALTERNATION})[\p{L}\p{N}]{2,24}(?!\p{L})`;
+// CAUDA COLADA SEM PREFIXO (`senhaassinatura`, `chavepix`, `data-chavepix`): a forma do Critical da
+// 1.1.39 em posição de CHAVE ou IDENTIFICADOR. O prefixo arbitrário já era coberto (`xchavepix`); sem
+// prefixo, não era — e a revisão da 1.1.40 mediu o valor da credencial chegando ao modelo, ao HTML e ao
+// JSON quando o rótulo está no `id`/`class` e o valor no texto ou em atributo vizinho. As famílias da
+// língua ficam de fora pela MESMA decisão do lado da prosa (é o que preserva `chaveiro`, `secretaria`,
+// `tokenizador`, `pintura`, `data-chaveiro`).
+const BARE_TAIL_SOURCE = String.raw`(?<![\p{L}\p{N}])[\p{L}\p{N}]{0,3}(?:${LONG_STEMS_ALTERNATION})[\p{L}\p{N}]{2,24}(?!\p{L})`;
 const KEY_NAME_CORE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}[\p{L}\p{N}]{0,24}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}${STEM_ALTERNATION}${LABEL_CONTINUATION}${TAIL_EDGE}|${COMPOSTA_SOURCE}|${PREFIXED_TAIL_SOURCE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
 // As frases que só valem com SEPARADOR (`conta corrente`, `certificado digital`) ficam FORA do
 // vocabulário de cauda: `conta corrente 12345-6` é prosa sobre o dado, `Conta corrente: 12345-6` é o
@@ -381,6 +388,58 @@ const LANGUAGE_WORD_EXCEPTIONS = Object.freeze([
   'uncredentialled', 'unsecretarylike', 'unsecreted', 'unsecreting', 'unsecretly', 'unsecretness',
 ]);
 const LANGUAGE_WORD_EXCEPTION_SET = new Set(LANGUAGE_WORD_EXCEPTIONS);
+// FAMÍLIAS da língua, medidas nas revisões da 1.1.39 e da 1.1.40: a lista de palavras exatas cobria o
+// que os revisores mediram (`chaveiro`, `pintura`), não a CLASSE — e 20 de 39 frases de morfologia
+// portuguesa eram destruídas (`Chaveiros:`, `Pinturas:`, `Pincéis:`, `Pingentes:`, `Secretarias:`,
+// `Tokenização:`, `Obsessões:`, `A loja vende chaveiros personalizados.`). Radicais de PREFIXO (com
+// fronteira, para `data-chaveiro` também valer) e de SUFIXO. O sufixo é o lado seguro do inglês: a
+// credencial ACRESCENTA qualificador (`sessionid`, `seedphrase`, `bearerToken`), então a palavra
+// inocente que TERMINA no radical (`pallbearer`, `allseed`, `antipass`) é preservada sem abrir mão de
+// nenhuma forma concatenada. O lado do prefixo foi medido e DESCARTADO para radicais de credencial
+// (`token`/`secret`/`auth`/`puk` como prefixo reabriam 144 vazamentos: `tokenassinatura`, `secretpix`,
+// `authvpn`, `puklogin`); o que fica de prefixo são famílias de palavra da língua, sem forma de
+// credencial conhecida.
+const LANGUAGE_PREFIX_FAMILIES = Object.freeze([
+  'chaveir', 'chaveta', 'chaveament', 'pintur', 'pintor', 'pincel', 'pincé', 'pingent', 'pingu',
+  'espinh', 'opini', 'secretar', 'secretári', 'secretos', 'tokeniz', 'obsess', 'possess',
+]);
+const LANGUAGE_SUFFIX_FAMILIES = Object.freeze([
+  'seed', 'bearer', 'session', 'pass', 'token', 'spin', 'pin', 'pping',
+]);
+// O sufixo que a credencial usa como CAUDA (`authtoken`, `mytoken`, `userpin`, `cardpin`, `jwtbearer`)
+// não pode poupar palavra nenhuma nas regras ESTRITAS: só entram aqui os radicais que a credencial não
+// forma por composição. É esta a lista que decide `pallbearer` (continua tarjado, resíduo declarado) e
+// `allseed`/`assession`/`antipass`/`chipping` (preservados).
+const LANGUAGE_STRICT_SUFFIX_FAMILIES = Object.freeze(['seed', 'session', 'pass', 'spin', 'pping']);
+const LANGUAGE_FAMILY_PREFIX = new RegExp(String.raw`(?:^|[^\p{L}\p{N}])(?:${LANGUAGE_PREFIX_FAMILIES.join('|')})`, 'u');
+const LANGUAGE_FAMILY_SUFFIX = new RegExp(String.raw`(?:${LANGUAGE_SUFFIX_FAMILIES.join('|')})$`, 'u');
+const LANGUAGE_STRICT_FAMILY_SUFFIX = new RegExp(String.raw`(?:${LANGUAGE_STRICT_SUFFIX_FAMILIES.join('|')})$`, 'u');
+/**
+ * Verdadeiro quando o token é forma de palavra da língua (exata ou de família medida) e por isso NÃO
+ * pode ser tratado como rótulo de credencial pela regra permissiva. É a mesma decisão nas três
+ * posições (atribuição, chave/identificador e trecho), e é o que impede a lista de exceções de virar
+ * uma allowlist que o dicionário não percorre.
+ */
+export function isLanguageWordForm(value) {
+  const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
+  return LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain) || LANGUAGE_FAMILY_SUFFIX.test(plain);
+}
+/**
+ * Mesma decisão, restrita às famílias de PREFIXO, para o vocabulário de CHAVE/IDENTIFICADOR: lá o
+ * SUFIXO é forma de credencial (`userpin`, `cardpin`, `authtoken`, `mytoken` terminam no radical), e
+ * poupá-lo devolveria o vazamento que o vocabulário de chave existe para fechar. O preço declarado é
+ * `pallbearer`/`cupbearer`/`chipping` continuarem sendo lidos como chave (3 de 55 no corpus do revisor,
+ * o mesmo resíduo da 1.1.40), porque quem os casa é a lista FECHADA, que não consulta família nenhuma.
+ */
+export function isLanguageWordStrictForm(value) {
+  const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
+  return LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain) ||
+    LANGUAGE_STRICT_FAMILY_SUFFIX.test(plain);
+}
+export function isLanguageWordHead(value) {
+  const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
+  return LANGUAGE_FAMILY_PREFIX.test(plain);
+}
 /**
  * Rótulo de credencial pelo vocabulário PERMISSIVO, excluídas as palavras da língua medidas. É o que a
  * posição de ATRIBUIÇÃO usa (`rótulo: valor`) — não as superfícies de IDENTIFICADOR, onde a palavra da
@@ -394,7 +453,7 @@ export function isPermissiveCredentialLabel(value) {
   // rótulo de UM token, que é a forma da chave concatenada (`senhaassinatura:`, `chavepix:`).
   if (/\s/u.test(text)) return false;
   const plain = text.replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
-  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return false;
+  if (isLanguageWordForm(plain)) return false;
   if (SENSITIVE_KEY.test(withCamelMarks(text))) return true;
   // Prefixo curto + radical LONGO + cauda fora da lista (`xsenhapix`): o permissivo com o radical no meio
   // exigiria a lista aberta de caudas, e é essa forma — prefixo de até 3 caracteres — que o dicionário
@@ -442,9 +501,15 @@ export function isWholeCredentialLabel(value) {
 const ID_NAME_CONNECTOR = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:d|de|da|do))?(?:(?:${TAILS_ALTERNATION})s?|${STEM_ALTERNATION}|${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})${TAIL_EDGE}`;
 const ID_NAME_SOURCE = String.raw`${ID_NAME_CONNECTOR}|${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?<![\p{L}\p{N}])${STEM_ALTERNATION}(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){1,3}|(?:${PREFIXES_ALTERNATION})${STEM_ALTERNATION}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}(?:${PHRASES_ALTERNATION})${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
 export const SENSITIVE_KEY_NAME = new RegExp(`(?:${ID_NAME_SOURCE}|(?:${PHRASES_SEPARADOR_ALTERNATION}))`, 'iu');
+const BARE_TAIL_KEY = new RegExp(BARE_TAIL_SOURCE, 'iu');
 export function isSensitiveKeyName(value) {
   const text = String(value ?? '');
-  return SENSITIVE_KEY_NAME.test(withCamelMarks(text)) || isPrefixedCredentialLabel(text);
+  // A lista fechada e o prefixo arbitrário decidem como SEMPRE decidiram: nada de exceção aqui, senão
+  // `pin`/`pins` (palavra da língua na prosa e chave de banco no identificador) voltariam a passar.
+  if (SENSITIVE_KEY_NAME.test(withCamelMarks(text)) || isPrefixedCredentialLabel(text)) return true;
+  // A cauda colada sem prefixo (`senhaassinatura`, `chavepix`, `data-chavepix`) é a forma NOVA, e é só
+  // ela que consulta as famílias da língua — a mesma decisão do lado da prosa.
+  return BARE_TAIL_KEY.test(text) && !isLanguageWordForm(text);
 }
 // A marca de camelCase só pode ser dispensada quando a leitura contígua já é palavra nos DOIS
 // vocabulários. O de PROSA conhece o conector `de/da/do` (`chavedeapi` casa `chave` + `de` + `api`); o de
@@ -767,6 +832,9 @@ function isPrefixedCredentialLabel(value) {
  * credencial — é o que impede `chaveiros personalizados` e `pincel profissional` de virarem tarja.
  */
 function shapesValueTail(label, token) {
+  // Família da língua em posição de rótulo é evidência, não credencial — a mesma decisão das três
+  // posições, aplicada antes de qualquer vocabulário (o fechado casa `bearer` DENTRO de `pallbearer`).
+  if (isLanguageWordStrictForm(label)) return false;
   if (isWholeCredentialLabel(label) || isSensitiveKeyName(label) || isPrefixedCredentialLabel(label) ||
     isPermissiveCredentialLabel(label)) return true;
   return credentialLikeToken(token);
@@ -779,6 +847,7 @@ function shapesValue(label, token) {
   // palavra da língua que contém o radical (`Chaveiro`, `pintura`, `hairpin`), que é o caso em que tarjar
   // destruiria evidência. Era essa assimetria entre "chave" e "rótulo" que recriava a classe a cada
   // geração — Critical C2 da revisão da 1.1.37.
+  if (isLanguageWordStrictForm(label)) return false;
   if (isWholeCredentialLabel(label)) return true;
   if (isSensitiveKeyName(label)) return true;
   if (isPrefixedCredentialLabel(label)) return true;
@@ -1004,7 +1073,7 @@ function sensitivePasses(marked) {
       // O token em volta pode ser maior que o rótulo casado (`pin` dentro de `xpin`): a decisão de
       // palavra-vs-identificador tem de ser tomada no texto original, não no pedaço isolado.
       const token = tokenAround(wholeText, offset, 1);
-      if (isWholeCredentialLabel(token)) return redactCredentialLabelTail(match);
+      if (isWholeCredentialLabel(token) && !isLanguageWordStrictForm(token)) return redactCredentialLabelTail(match);
       const value = match.trim().split(/\s+/u).at(-1) ?? '';
       // Na CAUDA (sem separador) o valor tem de TER CARA DE CREDENCIAL quando o rótulo não é
       // reconhecido: um adjetivo comprido depois de uma palavra da língua (`A loja vende chaveiros
