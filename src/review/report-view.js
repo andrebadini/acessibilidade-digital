@@ -798,6 +798,9 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
 function renderFilters(document, view, root, status) {
   const wrapper = document.createElement('div');
   wrapper.setAttribute('class', 'report-filters');
+  // `aria-label` só vale em elemento com PAPEL que aceite nome acessível: em `div` genérico o atributo é
+  // PROIBIDO, e o axe 4.13.0 reprova — medido na aba do relatório do próprio produto (rodada 83).
+  wrapper.setAttribute('role', 'group');
   wrapper.setAttribute('aria-label', 'Filtros do relatório vivo');
   const active = new Map();
   const visibleCheckIds = new Set();

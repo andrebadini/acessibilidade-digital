@@ -933,6 +933,10 @@ test('live report puts the decision summary before compact navigation and expose
   assert.equal(root.querySelectorAll('[role="status"][aria-live="polite"]').length, 1);
   const liveStatus = root.querySelector('[role="status"]');
   assert.equal(liveStatus.parentNode.getAttribute('class'), 'report-filters');
+  // O nome acessível do agrupador de filtros precisa de um PAPEL que o aceite: `aria-label` em `div`
+  // genérico é atributo PROIBIDO — medido pelo axe 4.13.0 na aba do relatório do próprio produto (rodada 83). `role="group"` é o papel certo para um conjunto de filtros rotulado.
+  assert.equal(liveStatus.parentNode.getAttribute('role'), 'group');
+  assert.equal(liveStatus.parentNode.getAttribute('aria-label'), 'Filtros do relatório vivo');
   assert.match(liveStatus.textContent, /verificações visíveis/iu);
   const positiveMetric = root.querySelector('[data-report-metric="passed"]');
   assert.ok(positiveMetric);
@@ -1124,7 +1128,12 @@ test('live filters expose visible Portuguese labels and apply WCAG levels', asyn
   const { model, summary } = await fixture();
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
   const root = renderReportView({ view, document: new Document(), onExport() {} });
-  const groups = root.querySelectorAll('.report-filters [role="group"]');
+  // O agrupador EXTERNO também é `role="group"` (nome acessível "Filtros do relatório vivo"); os grupos
+  // de dimensão são os FILHOS dele. O DOM mínimo deste teste não entende combinador de filho, então a
+  // seleção é estrutural (filhos diretos do agrupador), não por seletor composto.
+  const filtersWrapper = root.querySelector('[role="group"]');
+  assert.equal(filtersWrapper.getAttribute('aria-label'), 'Filtros do relatório vivo');
+  const groups = [...filtersWrapper.children].filter(child => child.getAttribute('role') === 'group');
 
   assert.deepEqual(groups.map(group => group.getAttribute('aria-label')), [
     'Filtrar por impacto',

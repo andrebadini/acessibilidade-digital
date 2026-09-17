@@ -2619,3 +2619,25 @@ Segunda leva de conserto da revisão da 1.1.37. Tudo o que segue foi medido nos 
 - **Auditoria ao vivo no Google, do pacote, sem pixels**: 0 falhas confirmadas (0 ocorrências), 1 recomendação/alerta, **3 suspeitas a confirmar (4 ocorrências)**, 9 resultados positivos, **109 no checklist**, cobertura **28,5%** (denominador 130), índice **9,0/10**, **PDF de 18 páginas**, quatro exportações `complete`.
 - **Integridade dos artefatos** (instrumento próprio, `artcheck133.py`): 146 `itemResults`, **146 ids únicos com título não vazio**, **0 ids/títulos ausentes no HTML e no PDF**, **notas editoriais 5/5 nos dois**, **0 palavras partidas**, **0 `[redacted]`** no HTML e no JSON, versão **1.1.38** declarada no artefato, 0 "Inconformidade ao item" e 112 "Verificar o item" (o PDF não imprime o checklist, como o próprio PDF declara).
 - **Gate de release**: `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` → **GREEN** (exit 0) sobre o pacote reconstruído, com o guard estático, o mapa numerado 130/146 (96/50), a identidade neutra e os artefatos HTML/JSON/PDF aprovados.
+
+## Rodada 83 — o produto sob o próprio instrumento: o axe nas superfícies do Audita
+
+**A lacuna:** o produto audita páginas de terceiros com o axe-core vendorizado (4.13.0), mas **ninguém tinha rodado o axe nas superfícies do próprio produto** — painel lateral e relatório. É a pergunta mais óbvia de um produto de acessibilidade e ela não existia em nenhum teste. Medido no Chrome real (152.0.7977.64) sobre os bytes empacotados da 1.1.38, com o mesmo axe que o produto usa:
+
+| Superfície | Violações | Incompletos | Regras aprovadas |
+|---|---|---|---|
+| Painel, tela inicial | **0** | 0 | 35 |
+| Painel, tela de resultado | **0** | 0 | 33 |
+| Relatório em aba própria | **0** | 1 (`color-contrast`) | 42 |
+| Relatório exportado (HTML entregue) | **0** | 1 (`color-contrast`) | 39 |
+
+**O achado real (Minor, corrigido nesta rodada):** `<div class="report-filters" aria-label="Filtros do relatório vivo">` — `aria-label` em `div` **genérico** é atributo **proibido** (o nome acessível não é exposto); o axe reprova com `aria-prohibited-attr`. Corrigido em `src/review/report-view.js` com `role="group"`, que é o papel certo para um conjunto rotulado de filtros; o teste de unidade fixa o papel e o nome, e o DOM mínimo do arquivo de teste passou a selecionar os grupos de dimensão **estruturalmente** (filhos diretos), porque ele não entende combinador de filho.
+
+**Dentes:** restaurado o `div` sem papel, o E2E novo **reprova** (o relatório passa de 1 para 2 pendências e a asserção recusa id não declarado); com a correção, **passa**.
+
+**Pendências declaradas, com a medição que as fecha:**
+- `color-contrast` no `<text>` do gráfico de rosca é **limitação do axe** (texto SVG sobreposto pelo anel): o contraste foi medido por fora, com a fórmula WCAG — `#003b71` contra `#ffffff` = **11,27:1**, contra `#eef4f8` = **10,16:1** e contra `#edf3f7` = **10,07:1**, acima de 4,5:1 e de 3:1 para texto grande.
+- `heading-order` apareceu **uma vez** na tela de resultado e não reproduziu: era **artefato da minha medição** (o painel foi medido no meio da troca de tela, antes de o `h1` visível entrar). Com espera pelo `h1` visível, 0 incompletos em três medições. Não é defeito do produto.
+- `--muted: #738596` sobre branco dá **3,80:1** — abaixo de 4,5:1 —, mas no CSS do relatório a cor só aparece em **bordas** (não-texto) e no **texto de controle desabilitado** (`button:disabled, select:disabled`), que a WCAG 1.4.3 isenta; nenhum texto ativo usa essa cor. Registrado para não ser "descoberto" de novo como suspeita.
+
+**Guarda permanente:** `test/e2e/product-surface-axe-mv3.test.mjs` (classificado em `REAL_CHROME_E2E`), com política de asserção declarada — **zero violações** em qualquer superfície e `incomplete` só para o `color-contrast` do `<text>` do gráfico; qualquer outro id reprova. É o primeiro teste do produto que mede a acessibilidade **do próprio produto**.
