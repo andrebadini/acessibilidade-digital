@@ -2887,3 +2887,10 @@ prosa (`pallbearer`, `cupbearer`, `allseed`, `antipass`, `assession`, `chipping`
 **360** (com a família de sufixo, insegura) para **537** palavras inocentes destruindo valor fraco — contra
 **563** da 1.1.40. É falso positivo, não vazamento, e nenhuma forma de credencial depende dele. Ficam
 preservadas as que COMEÇAM numa família de prefixo (`obsession`, `possession`) e as da lista exata.
+
+**Minor M-3 da revisão da 1.1.41 fechado pela própria troca:** a assimetria de `senhaassinaturapass` (tarja
+na chave e não na prosa) desapareceu — a forma agora é tarjada nas quatro superfícies medidas (prosa, modelo,
+chave e trecho), junto com `senhaassinaturaseed`, `senhaassinaturasession` e `senhaassinaturatoken`. No
+corpus de chaves inocentes (55 palavras) os três lidos como chave são `cupbearer`, `pallbearer` e `chipping`;
+`seedling` é tarjado em prosa/modelo/trecho mas **não** como chave — a declaração anterior o citava por
+engano (Minor M-4, corrigido na declaração).

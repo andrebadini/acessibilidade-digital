@@ -27,7 +27,9 @@ próprio revisor**: caçador estendido **7.302 → 0** de 13.824 casos; E2E dele
 prosa/modelo; `COBERTURA_PERDIDA=0` em 516.235 formas; morfologia PT **0/39**; corpus de chaves inocentes
 **3/55**; 70/70 nos testes afetados. **Preço declarado e medido da troca:** palavras inglesas que TERMINAM no
 radical (`pallbearer`, `cupbearer`, `allseed`, `antipass`, `chipping`) voltam a ser tarjadas em prosa —
-dicionário **360 → 537**, falso positivo, nunca vazamento. Pacote: fase paralela **4.180/4.178/1** (a única
+dicionário **360 → 537**, falso positivo, nunca vazamento. No corpus de chaves inocentes do revisor (55
+palavras) os três lidos como chave são **`cupbearer`, `pallbearer` e `chipping`** — `seedling` é tarjado em
+prosa, modelo e trecho, mas **não** como chave (a declaração anterior o citava por engano). Pacote: fase paralela **4.180/4.178/1** (a única
 falha é o `release-package`, que exige pacote reconstruído no momento da medição), escopo serial **57/58** (a
 única vermelha é o flake de limpeza do `axe-mv3-csp`, que passa 1/1 isolado), auditoria ao vivo **0 falhas /
 3 sob revisão humana / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, **146/146 ids e títulos** no
