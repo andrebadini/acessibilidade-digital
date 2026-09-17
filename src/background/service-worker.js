@@ -272,6 +272,17 @@ const PIXEL_SUSPENSION_KEYS = Object.freeze([
   'resumePhase', 'revokeReason', 'source',
 ]);
 
+// RASTER no modelo do commit terminal (achado D2 da revisão da 1.1.37): payload de pixel embutido —
+// `dataUrl` do artefato ou, no mapa de anúncio, `dataUrl` de segmento. É o mesmo critério que o orçamento
+// de evidências usa para omitir pixels, e é a pergunta que o commit precisa responder antes de gravar sem
+// a alça da tentativa.
+function modelCarriesRaster(model) {
+  const evidence = Array.isArray(model?.evidence) ? model.evidence : [];
+  return evidence.some(artifact => typeof artifact?.dataUrl === 'string' ||
+    (Array.isArray(artifact?.segments) &&
+      artifact.segments.some(segment => typeof segment?.dataUrl === 'string')));
+}
+
 function batchPixelPolicy(value) {
   const policy = exact(value, PIXEL_POLICY_KEYS, true);
   return policy && isCapturePolicyV1(policy) && policy.mode !== 'no-pixels' && policy.includeQuery === false
@@ -641,6 +652,22 @@ export function createPixelAttemptLifecycleV1(raw) {
     const metadata = request?.attemptHandle === null ? null : handles.get(request?.attemptHandle);
     if (!request || !AUDIT_ID.test(request.auditId ?? '') || request.expectedRevision !== 1 ||
       (request.attemptHandle !== null && (!metadata || metadata.correlation.auditId !== request.auditId))) {
+      throw new Error('TERMINAL_COMMIT_DENIED');
+    }
+    // FECHADO À FALHA, achado D2 da revisão da 1.1.37: um commit SEM a alça da tentativa não pode gravar
+    // pixels. Sem esta guarda, o modelo com raster entrava no armazenamento sem o companheiro durável de
+    // correlação — e a promessa "captura do documento B nunca atribuída à auditoria de A" ficava dependendo
+    // de o chamador lembrar de mandar a alça. Modelo sem raster (modo no-pixels, ou pixels omitidos pelo
+    // orçamento) continua commitando sem alça.
+    //
+    // FRONTEIRA DECLARADA: auditoria de VÁRIAS URLs (modelo com mais de uma página) tem uma tentativa
+    // consentida POR PÁGINA — `onPixelPageFinished` fecha a tentativa da página e zera a alça antes da
+    // próxima. Nesse caso a correlação durável do raster é a da página (marcador `prepared` + journal de
+    // captura em estado `finished`, com o `pageId` em cada artefato), e não uma tentativa terminal que não
+    // existe. O resíduo — modelo de lote sem companheiro no armazenamento — está registrado no QA; fechá-lo
+    // exige uma tentativa terminal de lote, que é mudança de ciclo de vida, não de guarda.
+    const batchModel = Array.isArray(request.model?.pages) && request.model.pages.length > 1;
+    if (metadata === null && !batchModel && modelCarriesRaster(request.model)) {
       throw new Error('TERMINAL_COMMIT_DENIED');
     }
     let committed;
@@ -1634,7 +1661,12 @@ async function buildDefaultRuntime(chromeApi, options) {
   });
   const ownedTabRegistry = createOwnedTabRegistry({
     sessionArea,
-    chromeAdapter: Object.freeze({ removeTab: tabId => chromeAdapter.removeTab(tabId) }),
+    // `getTab` entra junto com `removeTab`: a limpeza reatesta a aba viva antes de fechá-la (achado D1
+    // da revisão da 1.1.37) e o registro recusa ser construído sem essa leitura.
+    chromeAdapter: Object.freeze({
+      removeTab: tabId => chromeAdapter.removeTab(tabId),
+      getTab: tabId => chromeAdapter.getTab(tabId),
+    }),
     now: modelNow,
   });
   const urlAuditResourceCleaner = createExactUrlAuditResourceCleanerV1({

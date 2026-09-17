@@ -141,6 +141,8 @@ async function failedAudit(auditId) {
     },
     async collectPage() { throw new Error('structural collection failure'); },
     async removeTab() {},
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37).
+    async getTab(tabId) { return { id: tabId, windowId: 9 }; },
   };
   Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
     value: Object.freeze({

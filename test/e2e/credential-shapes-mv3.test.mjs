@@ -38,21 +38,33 @@ const SHAPES = [
   ['composto de três partes', 'three-parts', (secret) => `<p>novasenhaadmin: ${secret}</p>`],
   ['separador sublinhado', 'underscore', (secret) => `<p>senha_forte: ${secret}</p>`],
   ['separador ponto', 'dot-separator', (secret) => `<p>senha.mestra: ${secret}</p>`],
+  // Formas do Critical C1 e do Critical C2 da revisão da 1.1.37, medidas nos artefatos entregues: caixa
+  // misturada DENTRO do radical (regressão da geração, que as 1.1.33/1.1.35/1.1.36 tarjavam) e PREFIXO
+  // ARBITRÁRIO antes do radical (o eixo que a lista fechada não cobria). O valor é FRACO de propósito —
+  // o sentinela com dígito de doze caracteres passava pelo portão de valor e por isso não provava nada.
+  ['caixa misturada no radical', 'mixed-case', (secret) => `<p>SeNhA: ${secret}</p>`, 'weak'],
+  ['caixa misturada com frase', 'mixed-case-phrase', (secret) => `<p>SeNhA do usuário: ${secret}</p>`, 'weak-letters'],
+  ['prefixo arbitrário sem dígito', 'arbitrary-prefix', (secret) => `<p>xsenha: ${secret}</p>`, 'weak-letters'],
+  ['prefixo arbitrário com cauda', 'arbitrary-prefix-tail', (secret) => `<p>xsenhaforte: ${secret}</p>`, 'weak'],
 ];
 
 for (const [nome, slug, montar, tipo = 'digit'] of SHAPES) {
   test(`credencial em ${nome} não chega ao entregável`, { timeout: 300_000 }, async t => {
     // O sentinela padrão tem CARA DE CREDENCIAL (dígito) — é o formato que a regra de cauda de rótulo
-    // multi-palavra exige. Os tipos `letters` e `phrase` existem porque a revisão da 1.1.36 mediu que
-    // SÓ o sentinela com dígito deixava o portão de valor sem prova: uma frase-senha de 25 letras
-    // (`correcthorsebatterystaple`) e um identificador só de letras são credenciais plausíveis e
-    // precisam ser medidos.
+    // multi-palavra exige. Os tipos `letters`, `phrase` e `weak` existem porque a revisão da 1.1.36 mediu
+    // que SÓ o sentinela com dígito deixava o portão de valor sem prova: uma frase-senha de 25 letras
+    // (`correcthorsebatterystaple`), um identificador só de letras e a senha fraca mais comum de um
+    // formulário real (`abc123`, medida vazando pela revisão da 1.1.37) precisam ser medidos.
     const marca = slug.replace(/[^a-z]/gu, '').toUpperCase();
-    const secret = tipo === 'letters'
-      ? `Zqwkvbrtnmx${marca.slice(0, 6).toLowerCase()}`
-      : tipo === 'phrase'
-        ? 'correcthorsebatterystaple'
-        : `ADVSHAPE${marca.slice(0, 8)}7X`;
+    const secret = {
+      // `abc123` e `passarinho` são as duas senhas fracas que a revisão da 1.1.37 mediu vazando: valor
+      // curto com dígito e senha de 5 a 11 letras SEM dígito. Com o `src` da geração anterior elas
+      // chegam ao entregável — é o que dá dentes a estas formas.
+      weak: 'abc123',
+      'weak-letters': 'passarinho',
+      letters: `Zqwkvbrtnmx${marca.slice(0, 6).toLowerCase()}`,
+      phrase: 'correcthorsebatterystaple',
+    }[tipo] ?? `ADVSHAPE${marca.slice(0, 8)}7X`;
     const documento = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${nome}</title></head>
 <body><main><h1>Forma isolada</h1>${montar(secret)}
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">

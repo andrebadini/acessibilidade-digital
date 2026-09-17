@@ -517,6 +517,8 @@ test('integrates three controlled fixtures through runBatch and runAudit into on
     async emitProgress() {},
     async handoffReport(model) { finalHandoffs += 1; return { reviewUrl: `chrome-extension://${TEST_EXTENSION_ID}/src/review/index.html?auditId=${model.auditId}` }; },
     async removeTab(id) { removed.push(id); },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37).
+    async getTab(id) { return { id: id, windowId: 9 }; },
   };
   const sessionValues = {};
   let randomValue = 0;
@@ -690,6 +692,9 @@ test('production default merges execution checkpoints and waits for owned cleanu
     async navigateTab(id) { order.push(`navigate:${id}`); },
     async waitForStable(id) { order.push(`wait:${id}`); throw new Error('CONTROLLED_NAVIGATION_FAILURE'); },
     async probeDocumentIdentity() { throw new Error('must not probe'); },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37): mesma janela em que a
+    // auditoria cria as abas descartáveis.
+    async getTab(id) { return { id: id, windowId: 9 }; },
     async removeTab(id) { order.push(`remove:${id}`); },
     async emitProgress() {}, tryEnterFinalization() { return true; },
     async handoffReport() { return { reviewUrl: null }; },
@@ -740,6 +745,9 @@ function timedDefaultAdapter({ removalFails = false, settleDelayMs = 3, settleIm
       }, { once: true }));
     },
     async probeDocumentIdentity() { throw new Error('must not probe'); },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37): mesma janela em que a
+    // auditoria cria as abas descartáveis.
+    async getTab(id) { return { id: id, windowId: 9 }; },
     async removeTab(id) { events.push(`remove:${id}`); if (removalFails && id === 80) throw new Error('PRIVATE_REMOVE'); },
     async emitProgress() {}, tryEnterFinalization() { return true; }, async handoffReport() { return { reviewUrl: null }; },
   };
@@ -775,6 +783,8 @@ function cancelledDefaultAdapter({ removalFails = true, settlesAfterAbort = true
       events.push('remove');
       if (removalFails) throw new Error('PRIVATE_REMOVE_FAILURE');
     },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37).
+    async getTab(tabId) { return { id: tabId, windowId: 9 }; },
     async emitProgress() {},
     tryEnterFinalization() { return true; },
     async handoffReport() { return { reviewUrl: null }; },
@@ -842,6 +852,8 @@ function postObservationCancellationAdapter({ controller, removalFails = false }
       events.push('remove');
       if (removalFails) throw new Error('PRIVATE_REMOVE_FAILURE');
     },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37).
+    async getTab(tabId) { return { id: tabId, windowId: 9 }; },
     async emitProgress() {},
     tryEnterFinalization() { return true; },
     async handoffReport() { return { reviewUrl: null }; },
@@ -880,6 +892,9 @@ function canonicalCleanupBoundaryAdapter({ removalFails = false, onFinalization 
     },
     async probeDocumentIdentity() { throw new Error('must-not-probe'); },
     async getEvidenceUrl() { throw new Error('must-not-read-evidence'); },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37): mesma janela em que a
+    // auditoria cria as abas descartáveis.
+    async getTab(id) { return { id: id, windowId: 9 }; },
     async removeTab(id) {
       events.push(`remove:${id}`);
       if (removalFails) throw new Error('CONTROLLED_REMOVE_FAILURE');
@@ -939,6 +954,8 @@ function rejectedPostObservationCleanupAdapter() {
       storageUnavailable = true;
       throw new Error('PRIVATE_REMOVE_FAILURE');
     },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37).
+    async getTab(tabId) { return { id: tabId, windowId: 9 }; },
     async emitProgress() {},
     tryEnterFinalization() { return true; },
     async handoffReport() { return { reviewUrl: null }; },
@@ -1189,6 +1206,8 @@ test('default batch blocks after persistent ownership registration and removal f
     async waitForStable() { throw new Error('must not wait'); },
     async probeDocumentIdentity() { throw new Error('must not probe'); },
     async removeTab() { throw new Error('PRIVATE_REMOVE_FAILURE'); },
+    // Aba viva para a reatestação da limpeza (achado D1 da 1.1.37).
+    async getTab(tabId) { return { id: tabId, windowId: 9 }; },
     async emitProgress() {}, tryEnterFinalization() { return true; }, async handoffReport() { return { reviewUrl: null }; },
   };
   Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, { enumerable: false, value: Object.freeze({

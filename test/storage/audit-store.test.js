@@ -70,6 +70,8 @@ async function structuralFailureAudit(auditId) {
     },
     async collectPage() { throw new Error('structural collection failure'); },
     async removeTab() {},
+    // Aba viva coerente com a janela em que a auditoria cria a aba descartável (achado D1 da 1.1.37).
+    async getTab(tabId) { return { id: tabId, windowId: 9 }; },
   };
   Object.defineProperty(adapter, AUDIT_EXECUTION_INTERNAL, {
     value: Object.freeze({

@@ -1764,6 +1764,10 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       };
     },
     removeTab(tabId) { return invoke(chromeApi, chromeApi.tabs, 'remove', tabId); },
+    // Leitura VIVA de uma aba para a reatestação da limpeza (`owned-tabs.js`): devolve o registro do
+    // navegador, e a ausência da aba chega ao chamador como rejeição — que é o sinal de "não há o que
+    // fechar" (achado D1 da revisão da 1.1.37).
+    async getTab(tabId) { return invoke(chromeApi, chromeApi.tabs, 'get', tabId); },
   };
   const internal = ObjectCreate(null);
   defineDataProperty(internal, 'sessionArea', chromeApi.storage?.session, true, false, false);

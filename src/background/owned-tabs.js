@@ -200,6 +200,9 @@ function isSafeInventoryMismatch(error) {
 export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
   if (!sessionArea || typeof sessionArea.get !== 'function' || typeof sessionArea.set !== 'function' ||
     typeof sessionArea.remove !== 'function' || !chromeAdapter || typeof chromeAdapter.removeTab !== 'function' ||
+    // `getTab` é OBRIGATÓRIO: sem reatestação viva o registro não tem como provar que o id ainda é a aba
+    // que a auditoria criou, e um adaptador que não saiba responder isso não pode fechar aba nenhuma.
+    typeof chromeAdapter.getTab !== 'function' ||
     typeof now !== 'function') throw denied();
 
   const keyFor = ownershipId => `${V2_PREFIX}${ownershipId}`;
@@ -269,6 +272,20 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
     return persist(key, { ...confirmed.record, state: toState, updatedAt: trustedTime(now()) });
   };
 
+  // REATESTAÇÃO VIVA, imediatamente antes de cada efeito destrutivo. O journal prova qual aba a auditoria
+  // REGISTROU; ele não prova que o id de hoje ainda é aquela aba — o Chrome recicla `tabId` e o registro
+  // pode ter sido reescrito por quem alcança `chrome.storage.session`. Sem esta leitura, a limpeza fechava
+  // a aba 99 de um journal adulterado (achado D1 da revisão da 1.1.37), isto é, "limpeza só de abas
+  // próprias" dependia de o journal não ser tocado. A janela e o id vêm do PRÓPRIO registro, então o que a
+  // reatestação garante é: o id ainda é uma aba viva E ela vive na janela em que a auditoria a criou.
+  const liveTabState = async record => {
+    let live;
+    try { live = await chromeAdapter.getTab(record.tabId); } catch { return 'absent'; }
+    if (!live || typeof live !== 'object' || live.id !== record.tabId) return 'mismatch';
+    if (live.windowId !== record.windowId) return 'mismatch';
+    return 'match';
+  };
+
   const cleanupV2 = async (current, input) => {
     const { key, record } = current;
     if (record.state === 'removed') throw denied();
@@ -279,10 +296,14 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
     const beforeEffect = await read(pending.ownershipId);
     if (!beforeEffect.record) throw denied();
     compare(beforeEffect.record, { ...input, fromState: 'cleanup-pending' });
-    try {
-      await chromeAdapter.removeTab(beforeEffect.record.tabId);
-    } catch {
-      return frozen(beforeEffect.record);
+    const live = await liveTabState(beforeEffect.record);
+    if (live === 'mismatch') throw denied('mismatch');
+    if (live === 'match') {
+      try {
+        await chromeAdapter.removeTab(beforeEffect.record.tabId);
+      } catch {
+        return frozen(beforeEffect.record);
+      }
     }
     const afterEffect = await read(pending.ownershipId);
     if (!afterEffect.record) throw denied();
@@ -298,7 +319,11 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
     const beforeEffect = exactV1(property.value, record.ownerId);
     if (!beforeEffect || beforeEffect.auditId !== record.auditId || !sameLegacyRecord(beforeEffect, record)) return 0;
     if (record.state !== 'removed') {
-      try { await chromeAdapter.removeTab(record.tabId); } catch { throw denied('cleanup'); }
+      const live = await liveTabState(record);
+      if (live === 'mismatch') throw denied('mismatch');
+      if (live === 'match') {
+        try { await chromeAdapter.removeTab(record.tabId); } catch { throw denied('cleanup'); }
+      }
     }
     let current;
     try { property = storageProperty(await sessionArea.get(key), key); } catch { throw denied('storage'); }

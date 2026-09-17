@@ -578,7 +578,12 @@ test('R3-A canonical audit cleanup composes real 160-character services with R1 
         exportLaunch: createExportLaunchAuthority({ chromeApi, sessionArea: area, auditStore: store, reportLaunch,
           epochNow: () => EPOCH, modelNow: () => NOW, randomBytes }),
         reportLaunch,
-        ownedDisposableTabStore: createOwnedTabRegistry({ sessionArea: area, chromeAdapter: { removeTab: unusedNative }, now: () => NOW }),
+        ownedDisposableTabStore: createOwnedTabRegistry({
+          sessionArea: area,
+          // Reatestação viva da limpeza (achado D1 da 1.1.37): a aba viva responde pela janela registrada.
+          chromeAdapter: { removeTab: unusedNative, getTab: async tabId => ({ id: tabId, windowId: 1 }) },
+          now: () => NOW,
+        }),
       };
       const blobRegistry = createBlobUrlRegistryV1({ sessionArea: area, isOwnerAlive: async () => false, revokeInOwner: unusedNative });
       await blobRegistry.register({ auditId, blobUrl, ownerDocumentId: 'owner-document' });

@@ -59,12 +59,12 @@ const LABEL_CONTINUATION = String.raw`(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){
 // meio: `sen\u200bha:` é o mesmo rótulo que `senha:` para quem lê, e o tarjador não o via. Eles saem da
 // cópia de trabalho (e do texto entregue, que é derivado dela) — são invisíveis por definição.
 const INVISIBLE_MARKS = /[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/gu;
+// `markCamelBoundaries` fica junto do vocabulário (o teste de leitura contígua depende dele) e é chamado
+// daqui: nenhum acidente de avaliação de módulo, porque nenhuma regex acima chama esta função.
 export function withCamelMarks(value) {
   const text = String(value ?? '').replace(INVISIBLE_MARKS, '');
   if (text.length === 0 || text.includes(CAMEL_MARK)) return text;
-  return text
-    .replace(/(?<=[\p{Ll}\p{N}])(?=\p{Lu})/gu, CAMEL_MARK)
-    .replace(/(?<=\p{Lu}{2})(?=\p{Ll})/gu, CAMEL_MARK);
+  return markCamelBoundaries(text);
 }
 export function stripCamelMarks(value) {
   return String(value ?? '').replace(CAMEL_MARK_GLOBAL, '');
@@ -208,6 +208,32 @@ const PHRASE_SEPARATOR_ONLY_SOURCE = String.raw`${WORD_HEAD}(?:${PHRASES_SEPARAD
 const BARE_PASS_SOURCE = String.raw`${WORD_HEAD}(?<!by)(?<!com)pass${WORD_TAIL}`;
 const CREDENTIAL_RADICAL_SOURCE = WORD_RADICAL_SOURCE;
 const COMPOUND_CREDENTIAL_SOURCE = PHRASE_RADICAL_SOURCE;
+// A MARCA de camelCase é decidida TOKEN A TOKEN: ela entra só onde a leitura CONTÍGUA do token ainda não
+// é palavra do vocabulário com borda de palavra. `senhaAtual` e `chaveDeApi` precisam da marca (o radical
+// termina onde a maiúscula começa e a leitura contígua `senhaatual`/`chavedeapi` não fecha a borda);
+// `SeNhA` NÃO pode recebê-la, porque a marca parte `senha` em três pedaços e a caixa misturada DENTRO do
+// radical — que a página escreve e as gerações 1.1.33, 1.1.35 e 1.1.36 tarjavam — voltava ao entregável
+// (Critical C1 da revisão da 1.1.37). Sem a marca, quem casa `SeNhA` é a própria regex `iu` do
+// vocabulário, e o texto entregue continua com a caixa original: a alternativa (uma terceira leitura em
+// minúsculas) foi medida e revertida na 1.1.37 porque devolvia a evidência em minúsculas.
+const CONTIGUOUS_CREDENTIAL_WORD = new RegExp(
+  `^(?:${WORD_RADICAL_SOURCE}|${PHRASE_RADICAL_SOURCE}|${PHRASE_SEPARATOR_ONLY_SOURCE}|${BARE_PASS_SOURCE})$`, 'iu');
+const CAMEL_TOKEN_RUN = /[\p{L}\p{N}\u0001]+/gu;
+const HAS_UPPER = /\p{Lu}/u;
+function markCamelBoundaries(text) {
+  // Sem maiúscula não há transição a marcar: é o caminho da maioria absoluta das chaves e dos atributos,
+  // e ele sai antes das duas varreduras (o custo medido do tarjador não sobe com esta mudança).
+  if (!HAS_UPPER.test(text)) return text;
+  const marked = text
+    .replace(/(?<=[\p{Ll}\p{N}])(?=\p{Lu})/gu, CAMEL_MARK)
+    .replace(/(?<=\p{Lu}{2})(?=\p{Ll})/gu, CAMEL_MARK);
+  if (!marked.includes(CAMEL_MARK)) return text;
+  return marked.replace(CAMEL_TOKEN_RUN, token => {
+    if (!token.includes(CAMEL_MARK)) return token;
+    const plain = stripCamelMarks(token);
+    return CONTIGUOUS_CREDENTIAL_WORD.test(plain) ? plain : token;
+  });
+}
 // `auth` nu casava a família inteira `author*`/`authority*` — 314 tokens do próprio produto, entre
 // eles `authorityExpiresAt`, `authorizedAt` e `firstAuthorization` (A7 da revisão da 1.1.26). As
 // formas de credencial continuam tarjadas (`auth`, `authorization`, `authentication`, `authToken`,
@@ -618,24 +644,47 @@ function identifierValue(token) {
   if ((core.match(/\d/gu) ?? []).length >= 4) return true;
   return length >= 8 && /\d|[^\p{L}\p{N}\s]/u.test(core);
 }
+// PREFIXO ARBITRÁRIO antes do radical, com o radical ENCERRANDO o token: é a forma do identificador que a
+// lista fechada não cobre (`xsenha`, `absenha`, `xsenhaforte`), e era por ela que uma senha fraca
+// (`abc123`, `passarinho`) chegava ao entregável — Critical C2 da revisão da 1.1.37. O corte é o
+// COMPRIMENTO do radical, e ele é medido, não escolhido: com radicais de 5+ letras a regra custa 19
+// palavras do dicionário do sistema (`betoken`, `forbearer`, `obsession`, `unsecret`…, todas compostas em
+// inglês de radical longo) e ZERO palavra do português; com radicais de 4 ou menos o custo sobe para 112
+// palavras e aparecem as que a língua usa de verdade (`spin`, `linseed`, `chauth`, `obsessão`,
+// `possessão`), que a regra de borda existe para preservar. Por isso `pin`, `pins`, `pwd`, `seed`, `cvv`,
+// `cvc`, `puk`, `cpf`, `cnpj`, `otp`, `mfa`, `2fa`, `csrf`, `xsrf` e `auth` continuam exigindo prefixo da
+// LISTA FECHADA. A medição está em `test/core/credential-class-metric.test.js` (preço declarado).
+const LONG_STEMS_ALTERNATION = WORD_STEMS.filter(stem => [...stem].length >= 5).map(escapeLiteral).join('|');
+const PREFIXED_CREDENTIAL_LABEL = new RegExp(String.raw`(?<![\p{L}\p{N}])[\p{L}\p{N}]{1,12}` +
+  String.raw`(?:${LONG_STEMS_ALTERNATION})` +
+  // Cauda FECHADA depois do radical (`xsenhaforte`, `xsenhadousuario`): o radical não encerra o token,
+  // mas o que vem depois dele é uma parte conhecida, não letra livre — sem isso `xsenhaforte` continuava
+  // vazando com valor fraco (medido nesta rodada, 8 combinações).
+  String.raw`(?:(?:d|de|da|do)?(?:(?:${TAILS_ALTERNATION})s?|(?:${LONG_STEMS_ALTERNATION})|(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')}))){0,2}` +
+  String.raw`(?!\p{L})`, 'iu');
+function isPrefixedCredentialLabel(value) {
+  return PREFIXED_CREDENTIAL_LABEL.test(String(value ?? ''));
+}
 /**
  * Portão das regras de CAUDA (rótulo e valor sem separador): aqui o valor fraco SÓ vale quando o rótulo é
  * reconhecido (palavra do vocabulário ou identificador de credencial). Fora disso, exige valor com cara de
  * credencial — é o que impede `chaveiros personalizados` e `pincel profissional` de virarem tarja.
  */
 function shapesValueTail(label, token) {
-  if (isWholeCredentialLabel(label) || isSensitiveKeyName(label)) return true;
+  if (isWholeCredentialLabel(label) || isSensitiveKeyName(label) || isPrefixedCredentialLabel(label)) return true;
   return credentialLikeToken(token);
 }
 
 function shapesValue(label, token) {
   // Rótulo reconhecido — palavra do vocabulário OU identificador de credencial que o vocabulário de
-  // chave conhece (`novasenha`, `senha_forte`, `sessionid`) — é ATRIBUIÇÃO: o valor sai inteiro, fraco
-  // ou forte. O portão de valor existe só para a palavra da língua que contém o radical (`Chaveiro`,
-  // `pintura`, `hairpin`), que é o caso em que tarjar destruiria evidência. Era essa assimetria entre
-  // "chave" e "rótulo" que recriava a classe a cada geração — Critical C2 da revisão da 1.1.37.
+  // chave conhece (`novasenha`, `senha_forte`, `sessionid`) OU radical com prefixo arbitrário
+  // (`xsenha`) — é ATRIBUIÇÃO: o valor sai inteiro, fraco ou forte. O portão de valor existe só para a
+  // palavra da língua que contém o radical (`Chaveiro`, `pintura`, `hairpin`), que é o caso em que tarjar
+  // destruiria evidência. Era essa assimetria entre "chave" e "rótulo" que recriava a classe a cada
+  // geração — Critical C2 da revisão da 1.1.37.
   if (isWholeCredentialLabel(label)) return true;
   if (isSensitiveKeyName(label)) return true;
+  if (isPrefixedCredentialLabel(label)) return true;
   return identifierValue(token);
 }
 /**

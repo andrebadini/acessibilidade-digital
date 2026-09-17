@@ -237,6 +237,7 @@ export async function runUrlAudit(rawArgs = {}) {
   let probeDocumentIdentity;
   let probeSensitiveCaptureSignals;
   let removeTab;
+  let getTab;
   let baseGetEvidenceUrl;
   let baseGetFinalUrl;
   let legacyEffects;
@@ -244,6 +245,7 @@ export async function runUrlAudit(rawArgs = {}) {
     internals = internalContract(args.chromeAdapter);
     probeDocumentIdentity = requiredAdapterMethod(args.chromeAdapter, 'probeDocumentIdentity');
     removeTab = requiredAdapterMethod(args.chromeAdapter, 'removeTab');
+    getTab = requiredAdapterMethod(args.chromeAdapter, 'getTab');
     if (!resuming) {
       createTab = requiredAdapterMethod(args.chromeAdapter, 'createTab');
       navigateTab = requiredAdapterMethod(args.chromeAdapter, 'navigateTab');
@@ -262,7 +264,7 @@ export async function runUrlAudit(rawArgs = {}) {
   } catch { throw new TypeError('URL_AUDIT_DENIED'); }
   const ownedTabs = createOwnedTabRegistry({
     sessionArea: internals.sessionArea,
-    chromeAdapter: Object.freeze({ removeTab }),
+    chromeAdapter: Object.freeze({ removeTab, getTab }),
     now: args.now,
   });
   const inventory = await createInstalledCoreRuleInventory();
@@ -1802,6 +1804,9 @@ async function runAuditExecutionInternal({
   const waitForStable = requiredAdapterMethod(chromeAdapter, 'waitForStable');
   const probeDocumentIdentity = requiredAdapterMethod(chromeAdapter, 'probeDocumentIdentity');
   const removeTab = requiredAdapterMethod(chromeAdapter, 'removeTab');
+  // Reatestação viva da limpeza (achado D1 da revisão da 1.1.37): sem esta leitura o registro de
+  // propriedade não distingue a aba da auditoria de um id reciclado pelo Chrome.
+  const getTab = requiredAdapterMethod(chromeAdapter, 'getTab');
   const baseGetEvidenceUrl = optionalAdapterMethod(chromeAdapter, 'getEvidenceUrl');
   const baseGetFinalUrl = optionalAdapterMethod(chromeAdapter, 'getFinalUrl');
   const legacyEffects = captureLegacyEffects(chromeAdapter);
@@ -1827,7 +1832,7 @@ async function runAuditExecutionInternal({
   });
   const ownedTabs = createOwnedTabRegistry({
     sessionArea: internals.sessionArea,
-    chromeAdapter: Object.freeze({ removeTab }),
+    chromeAdapter: Object.freeze({ removeTab, getTab }),
     now,
   });
   const inventory = await createInstalledCoreRuleInventory();

@@ -998,6 +998,12 @@ export function createAuthorizedAuditStarter(input) {
       });
       await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, pending, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
       const latest = latestState(candidate.auditId, candidate.model.session.status, modelNow);
+      // FECHADO À FALHA, achado D2 da revisão da 1.1.37: consentimento de pixel REIVINDICADO
+      // (`consentId` não nulo) sem a alça da tentativa é estado inconsistente — o commit terminal gravaria
+      // raster sem a correlação durável que amarra a captura à tentativa consentida. Quem prepara a alça
+      // (`pixelAttemptLifecycle.prepareResume`) é a MESMA trilha que devolve o `consentId`; aqui só se
+      // recusa seguir quando os dois discordam.
+      if (liveRecord.consentId !== null && !liveRecord.attemptHandle) throw new Error('TERMINAL_COMMIT_DENIED');
       const committed = await pixelAttemptLifecycle.commitTerminal({
         auditId: candidate.auditId, model: candidate.model, checkpoint: candidate.checkpoint,
         latestState: latest, expectedRevision: 1, attemptHandle: liveRecord.attemptHandle,

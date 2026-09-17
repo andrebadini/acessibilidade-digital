@@ -28,14 +28,36 @@ function createSessionArea() {
   };
 }
 
+function recordedWindow(sessionArea, tabId) {
+  for (const value of Object.values(sessionArea.values ?? {})) {
+    if (!value || typeof value !== 'object') continue;
+    if (Object.getOwnPropertyDescriptor(value, 'tabId')?.value === tabId) {
+      return Object.getOwnPropertyDescriptor(value, 'windowId')?.value;
+    }
+  }
+  return undefined;
+}
+
 function fixture() {
   const sessionArea = createSessionArea();
   const calls = [];
+  // Estado VIVO do navegador simulado para a reatestação da limpeza (achado D1 da revisão da 1.1.37):
+  // por padrão a aba viva concorda com o journal (mesma janela registrada); os testes de identidade
+  // reescrevem `liveWindows` (id reciclado em OUTRA janela) ou `closedTabs` (aba já fechada).
+  const liveWindows = new Map();
+  const closedTabs = new Set();
   const adapter = {
     removeError: false,
     async removeTab(tabId) {
       calls.push(tabId);
       if (this.removeError) throw new Error('PRIVATE_REMOVE_DETAIL');
+      closedTabs.add(tabId);
+    },
+    async getTab(tabId) {
+      if (closedTabs.has(tabId)) throw new Error('NO_TAB');
+      const windowId = liveWindows.has(tabId) ? liveWindows.get(tabId) : recordedWindow(sessionArea, tabId);
+      if (!Number.isSafeInteger(windowId)) throw new Error('NO_TAB');
+      return { id: tabId, windowId };
     },
   };
   let tick = 0;
@@ -43,7 +65,7 @@ function fixture() {
     sessionArea, chromeAdapter: adapter,
     now: () => new Date(Date.UTC(2026, 7, 29, 10, 0, tick++)).toISOString(),
   });
-  return { sessionArea, adapter, calls, owned };
+  return { sessionArea, adapter, calls, owned, liveWindows, closedTabs };
 }
 
 const created = {
@@ -117,6 +139,41 @@ test('failed cleanup leaves a V2 cleanup-pending journal without exposing remove
   assert.equal(pending.state, 'cleanup-pending');
   assert.deepEqual(calls, [41]);
   assert.equal((await owned.get('owner-a')).state, 'cleanup-pending');
+});
+
+// REATESTAÇÃO VIVA (achado D1 da revisão da 1.1.37): o journal prova qual aba a auditoria REGISTROU; a
+// limpeza só pode fechar o id se o navegador confirmar, AGORA, que ele ainda é aquela aba (mesma janela).
+// O caso medido pelo revisor foi um journal reescrito com `tabId` alheio: `clearAudit` fechava a aba 99.
+test('não fecha aba cujo id vivo não reatesta a mesma janela do registro', async () => {
+  const { calls, owned, liveWindows } = fixture();
+  await owned.registerCreated(created);
+  // O Chrome reciclou o id: 41 agora é uma aba de OUTRA janela.
+  liveWindows.set(41, 7);
+  assert.equal(await owned.clearAudit('audit-a'), 0);
+  assert.deepEqual(calls, [], 'nenhum removeTab pode acontecer sem reatestação');
+  assert.equal((await owned.get('owner-a')).state, 'cleanup-pending');
+});
+
+test('journal adulterado com id alheio não fecha a aba de terceiro', async () => {
+  const { sessionArea, calls, owned, liveWindows } = fixture();
+  await owned.registerCreated(created);
+  // Adulteração CONSISTENTE do journal (todos os campos batem entre si) apontando para a aba 99, que é de
+  // outra janela. Antes da reatestação, `clearAudit` fechava a aba 99 do usuário — foi o achado medido.
+  sessionArea.values['audita:owned-tab:v2:owner-a'] = {
+    ...sessionArea.values['audita:owned-tab:v2:owner-a'], tabId: 99, windowId: 8,
+  };
+  liveWindows.set(99, 4);
+  assert.equal(await owned.clearAudit('audit-a'), 0);
+  assert.deepEqual(calls, [], 'a aba de terceiro não pode ser fechada por journal adulterado');
+});
+
+test('aba já ausente é limpeza satisfeita sem efeito e sem retry infinito', async () => {
+  const { calls, owned, closedTabs } = fixture();
+  await owned.registerCreated(created);
+  closedTabs.add(41); // o usuário fechou a aba antes da limpeza
+  assert.equal(await owned.clearAudit('audit-a'), 1);
+  assert.deepEqual(calls, []);
+  assert.equal((await owned.get('owner-a')).state, 'removed');
 });
 
 test('clearAudit cleans only proven V2 owners for the requested audit', async () => {
@@ -283,6 +340,9 @@ test('does not delete a V1 record replaced after tab cleanup even when audit and
       calls.push(tabId);
       sessionArea.values[key] = replacement;
     },
+    // A aba viva concorda com o journal (mesma janela): este teste mede a troca do REGISTRO durante o
+    // efeito, não a reatestação de identidade — que tem testes próprios abaixo.
+    async getTab(tabId) { return { id: tabId, windowId: 8 }; },
   };
   const registry = createOwnedTabRegistry({
     sessionArea, chromeAdapter: adapter, now: () => '2026-08-29T10:00:00.000Z',

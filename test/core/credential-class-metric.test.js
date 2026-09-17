@@ -143,6 +143,22 @@ const CONCATENACOES = [
   'novasenhaadmin', 'chaveacessouser', 'senhadobanco',
 ];
 const ROTULOS = ['mfa:', '2fa:', 'tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
+// A OUTRA METADE DO PORTÃO, medida pela revisão da 1.1.37 (Critical C2 e Important I2). O sentinela
+// `ADVSEN<n>X` tem DÍGITO e doze caracteres, então o portão de valor — que exigia dígito, símbolo ou
+// comprimento — passava em toda forma sem provar nada sobre senha fraca. Os valores abaixo são os que a
+// revisão mediu chegando ao entregável: `abc123` e senhas de 5 a 11 letras sem dígito (`passarinho`,
+// `flamingo`) e uma de 11 letras do próprio revisor. Cada RÓTULO abaixo vazou em alguma geração.
+const VALORES_FRACOS = ['abc123', 'passarinho', 'flamingo', 'Zqwkvbrtnmx'];
+const ROTULOS_FRACOS = [
+  // palavras e frases do vocabulário
+  'senha', 'senha_forte', 'senhaAtual', 'sessionId', 'apiKey',
+  // concatenações com prefixo/cauda de credencial (fechadas na 1.1.38)
+  'novasenha', 'minhasenhaforte', 'novasenhaadmin', 'redefinirsenha', 'trocarsenha', 'senhaforte',
+  // PREFIXO ARBITRÁRIO antes do radical: o eixo que a lista fechada não cobre (`xsenha`, `xsenhaforte`)
+  'xsenha', 'xsenhaforte', 'absenha',
+  // CAIXA MISTURADA dentro do radical (Critical C1 da revisão da 1.1.37: regressão da geração)
+  'SeNhA', 'SeNhAfOrTe', 'SeNhA do usuário', 'ChAvE de API',
+];
 const CAUDAS = [
   ['cauda depois de vazio', `<p>senha: ${S('40')}<br>${S('41')}</p>`],
   ['cauda depois de quebra de linha', `<p>token: ${S('42')}\n${S('43')}</p>`],
@@ -252,6 +268,44 @@ const PROSA = [
   'O passeio de barco passou pelo cais e o passageiro embarcou.',
 ];
 
+test('valor fraco com rótulo reconhecido não sobrevive em nenhum caminho', t => {
+  // Esta é a asserção que a revisão da 1.1.37 mostrou faltar (I2): com o sentinela de doze caracteres COM
+  // dígito, o portão de valor podia estar fechado para o sentinela e aberto para a senha real. Aqui o
+  // valor é fraco de propósito (`abc123`, `passarinho`, `flamingo`) e o rótulo é reconhecido de propósito
+  // (palavra, concatenação com lista fechada, PREFIXO ARBITRÁRIO e caixa misturada). Nenhum rótulo pode
+  // transformar valor fraco em prosa.
+  const vazamentos = [];
+  for (const rotulo of ROTULOS_FRACOS) {
+    for (const valor of VALORES_FRACOS) {
+      const texto = `${rotulo}: ${valor}`;
+      const trecho = sanitizeHtmlSnippetSource(`<p>${texto}</p>`);
+      const json = sanitizeJsonData({ texto }).texto;
+      for (const [caminho, saida] of [['trecho', trecho], ['json', json]]) {
+        if (saida.includes(valor)) vazamentos.push(`${texto} (${caminho})`);
+      }
+    }
+  }
+  t.diagnostic(`combinações=${ROTULOS_FRACOS.length * VALORES_FRACOS.length} vazamentos=${vazamentos.length}`);
+  assert.deepEqual(vazamentos, [], `valor fraco chegou ao entregável em ${vazamentos.length} combinações`);
+});
+
+test('o preço do prefixo arbitrário é declarado e medido', () => {
+  // O outro lado da correção do C2: reconhecer radical com prefixo arbitrário (`xsenha`) custa palavra da
+  // língua que TERMINA no radical. O corte é o comprimento do radical (>= 5): `pin`, `seed`, `pwd`,
+  // `cvv`, `otp`, `cpf`, `auth` e os de duas letras ficam FORA, e é isso que preserva `spin`, `hairpin`,
+  // `pushpin`, `linseed`, `chauth` e `obsessão`. A lista abaixo é o preço, medido: se algum virar tarja, a
+  // fronteira escorregou.
+  for (const frase of ['spin: 12', 'The hairpin: 12 units', 'Pushpin: 8 unidades', 'O seed do banco é 12',
+    'O tokenizador é interno', 'Chaveiro: R$ 30,00', 'Pingente: prata', 'Espinha de peixe: 12',
+    'Pintura: látex acrílico', 'Secretaria de Saúde: 12 unidades', 'A obsessão do time é o produto']) {
+    assert.equal(redactSensitiveText(frase), frase, `"${frase}" é palavra da língua e não pode ser tarjada`);
+  }
+  // E o lado oposto: o prefixo arbitrário com radical LONGO é rótulo, com valor fraco ou forte.
+  for (const frase of ['xsenha: abc123', 'xsenhaforte: passarinho', 'absenha: flamingo']) {
+    assert.match(redactSensitiveText(frase), /\[redacted\]/u, `"${frase}" é rótulo de credencial`);
+  }
+});
+
 test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t => {
   // Não vacuidade: a lista precisa ser larga o bastante para valer como métrica da classe.
   assert.ok(FORMAS.length >= 30, `a lista de formas encolheu: ${FORMAS.length}`);
@@ -260,8 +314,9 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
   // O total de COMBINAÇÕES (forma x caminho) é o número que os documentos citam, e por isso ele é
   // calculado aqui em vez de escrito à mão: uma lista que encolher derruba esta asserção.
   const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length) * 3 + CONCATENACOES.length * 2
-    + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + (URLS.length + URLS_CHAVE.length) * 2;
-  t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length} combinações=${combinacoes}`);
+    + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + (URLS.length + URLS_CHAVE.length) * 2
+    + ROTULOS_FRACOS.length * VALORES_FRACOS.length * 2;
+  t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length} fracos=${ROTULOS_FRACOS.length * VALORES_FRACOS.length} combinações=${combinacoes}`);
   assert.ok(combinacoes >= 210, `a métrica encolheu: ${combinacoes} combinações`);
   const vazamentos = [];
   for (const [nome, html] of [...FORMAS, ...IDIOMA, ...CARTAO, ...SEM_ACENTO]) {

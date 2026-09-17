@@ -1142,6 +1142,16 @@ function fakeAdapter(options = {}) {
       events.push(`remove-tab:${String(id)}`);
       if (options.removeTabFailure) throw new Error('detalhe privado de fechamento');
     },
+    // Aba VIVA para a reatestação da limpeza (`owned-tabs.js`, achado D1 da revisão da 1.1.37): o
+    // navegador simulado devolve a janela do REGISTRO de propriedade daquele id — estado consistente — e o
+    // id sem registro nenhum responde como aba ausente.
+    async getTab(id) {
+      for (const [key, value] of Object.entries(sessionValues)) {
+        if (!key.startsWith('audita:owned-tab:') || !value || typeof value !== 'object') continue;
+        if (value.tabId === id && Number.isSafeInteger(value.windowId)) return { id, windowId: value.windowId };
+      }
+      throw new Error('NO_TAB');
+    },
   };
   if (options.trackCaptureCalls) {
     adapter.captureFullPage = async (...args) => {

@@ -1231,7 +1231,10 @@ test('single-URL cleanup removes only the exact disposable owner even when an au
   let clock = 0;
   const registry = createOwnedTabRegistry({
     sessionArea: area,
-    chromeAdapter: { async removeTab(tabId) { removedTabs.push(tabId); } },
+    chromeAdapter: {
+      async removeTab(tabId) { removedTabs.push(tabId); },
+      async getTab(tabId) { return { id: tabId, windowId: 9 }; },
+    },
     now: () => new Date(1_788_000_000_000 + clock++).toISOString(),
   });
   const auditId = 'audit-two-owned-tabs';
@@ -1263,7 +1266,10 @@ test('URL cleanup accepts cleanup always only with an exact attached-copy correl
   const removedTabs = [];
   const registry = createOwnedTabRegistry({
     sessionArea: area,
-    chromeAdapter: { async removeTab(tabId) { removedTabs.push(tabId); } },
+    chromeAdapter: {
+      async removeTab(tabId) { removedTabs.push(tabId); },
+      async getTab(tabId) { return { id: tabId, windowId: 9 }; },
+    },
     now: () => '2026-09-01T12:00:00.000Z',
   });
   const auditId = 'audit-attached-copy-cleaner';
@@ -2529,6 +2535,10 @@ test('default worker carries one tokenized URL from the Side Panel to a persiste
   draft.auditId = auditId;
   draft.integrity.canonicalModelHash = 'pending';
   draft.integrity.evidenceManifestHash = 'pending';
+  // O modo deste teste é `no-pixels`: um modelo que ainda carregasse `dataUrl` contradiria a política
+  // declarada — e o commit terminal passou a RECUSAR raster sem a alça da tentativa (achado D2 da revisão
+  // da 1.1.37). O raster sai ANTES do enriquecimento, para os hashes fecharem sobre o modelo real.
+  for (const artifact of draft.evidence ?? []) delete artifact.dataUrl;
   const model = await enrichAuditForReport(draft, {
     now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '0.1.0', rulesVersion: inventory.rulesVersion,
