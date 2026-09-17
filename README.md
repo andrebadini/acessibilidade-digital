@@ -4,7 +4,29 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.36 preparada — sem revisão independente ainda.** A revisão da **1.1.35** deu **2 Critical,
+**Versão 1.1.37 preparada — sem revisão independente ainda.** A revisão da **1.1.36** deu **2 Critical,
+4 Important, 5 Minor e 8 observações** e **reprovou** o artefato — confirmando o que o incremento tinha de
+real (a correção do sublinhado/ponto/barra tarja o lugar certo em **60/60** formas multi-parte, contra
+45/60 no lugar errado nas gerações anteriores) e medindo quatro bloqueios, todos regressões minhas. O
+Critical C1 era o **portão de valor**: com valor **só de letras** (`correcthorsebatterystaple`), oito das
+dez formas do Critical anterior voltavam a vazar. O C2 era o **radical no meio do token**
+(`minhasenhaforte`, `novasenhaadmin`), que vazava qualquer valor. O Important I1 era o outro lado:
+`pintura.png`, `secretaria-saude` e `Chaveiro: A1B2C3` eram destruídos no caminho de chave. O I4 era uma
+falha **determinística** que eu havia declarado como flake de carga (`normalize-snapshot.test.js:590`).
+
+A 1.1.37 responde com quatro mudanças: o portão de valor aceita comprimento de segredo (12+), 4+ dígitos
+ou 8+ caracteres com cara de credencial; o radical no **meio** do token é coberto por composto de três
+partes e por prefixo curto com cauda; o vocabulário de **chave** volta às **listas fechadas** (palavra
+inteira, radical + cauda, prefixo/cauda + radical, radical + continuação), preservando `pintura.png`,
+`pincel`, `secretaria-saude` e `hairpin` nos dois caminhos enquanto `sessionid`, `senha_forte`,
+`data-senhaforte` e `userpin` seguem tarjados; e o gate de `id`/rótulo de autor volta ao predicado de
+**prosa**, com a cauda exigindo espaço ou separador (um token sozinho não é rótulo com valor). O E2E de
+credencial ganha seis formas que dão dentes ao incremento — valor só de letras, frase-senha de 25 letras,
+radical no meio, três partes e separadores `_` e `.` —, e a métrica, três formas de três partes. Preço
+declarado: `novasenha: abc123` deixa de ser tarjado (valor curto e fraco).
+
+**Versão 1.1.36 — revisada: 2 Critical, 4 Important, 5 Minor e 8 observações**, todos fechados na 1.1.37.
+A revisão da **1.1.35** deu **2 Critical,
 1 Important, 3 Minor e 6 observações** e **reprovou** o artefato. Ela confirmou por medição própria, com
 controle positivo na mesma página, que o desenho por contexto fechou o que a 1.1.34 tinha aberto (as 12
 formas de concatenação foram de 12/12 vazando para **0/12**; a prosa destruída, de 8/19 para **0/19**),

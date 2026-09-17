@@ -1,5 +1,21 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.37, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.37.zip` (`b6a1a8c0…44de`), **sem revisão independente ainda**.
+> Fecha o veredito da 1.1.36 inteiro (2 Critical, 4 Important, 5 Minor, 8 observações). **5** de novo, na
+> quarta rodada da mesma classe, e a lição agora é sobre prova: a revisão mediu que o **meu E2E passava
+> 17/17 com o `src/` da geração anterior** — um teste que passa com o código antigo não é prova do
+> incremento. As seis formas novas reprovam **4 de 6 contra a 1.1.36** e **2 de 6 contra a 1.1.35**, e é
+> isso que dá dentes à correção. No produto: o portão de valor aceita comprimento de segredo (12+), 4+
+> dígitos ou 8+ com cara de credencial; o radical no **meio** do token é coberto por composto de três
+> partes e prefixo curto com cauda; o vocabulário de **chave** volta às **listas fechadas**, preservando
+> `pintura.png`, `pincel`, `secretaria-saude` e `hairpin`; e o gate de `id`/rótulo de autor volta ao
+> predicado de **prosa**, com a cauda exigindo espaço ou separador — a falha **determinística** que eu
+> havia declarado como flake de carga (`normalize-snapshot.test.js`) está fechada. **10** continua
+> **Atendido**; **11** ganha o preço declarado do lado do falso negativo (`novasenha: abc123` deixa de ser
+> tarjado) e a limitação do CSV; **12** segue medindo a partir da árvore de teste do commit. **8** segue
+> **Parcial** por decisão do usuário, fora do caminho de bloqueio.
+
 > **Incremento 1.1.36, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.36.zip` (`8fffa961…56f5`), **sem revisão independente ainda**.
 > Fecha o veredito da 1.1.35 inteiro (2 Critical, 1 Important, 3 Minor, 6 observações). **5** de novo, e a
@@ -282,11 +298,11 @@ transforma leitura de código em teste de comportamento.
 
 ## O que impede declarar produção agora
 
-0. **Estado em 1.1.36, para não ler o histórico como se fosse o presente.** Os critérios 1 a 7, 9, 10,
-   11 e 12 estão **Atendidos** com a evidência medida nos bytes empacotados da 1.1.36; o **8** continua
+0. **Estado em 1.1.37, para não ler o histórico como se fosse o presente.** Os critérios 1 a 7, 9, 10,
+   11 e 12 estão **Atendidos** com a evidência medida nos bytes empacotados da 1.1.37; o **8** continua
    **Parcial** porque depende de uma pessoa de fora, mas **por decisão do usuário (2026-09-16) deixou de
-   ser portão de produção**; e a **revisão independente da 1.1.36** é o único portão que falta — o veredito
-   anterior, da 1.1.35, deu 2 Critical e 1 Important, todos fechados aqui. Os itens 3
+   ser portão de produção**; e a **revisão independente da 1.1.37** é o único portão que falta — o veredito
+   anterior, da 1.1.36, deu 2 Critical e 4 Important, todos fechados aqui. Os itens 3
    e 5 abaixo descrevem o estado de 1.1.19/1.1.22 e ficam como histórico do caminho, não como pendência
    de agora: o teste do caminho imutável com recibo parcial **foi escrito** (`test/export/report-export.test.js`,
    com mutação provando o portão nos dois sentidos).
