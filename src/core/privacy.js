@@ -444,15 +444,17 @@ function languageFamilyExemption(plain) {
   const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
   if (prefix === null) return false;
   const before = plain.slice(0, prefix.index);
+  const after = plain.slice(prefix.index + prefix[0].length);
   // Só as LETRAS que vêm logo depois da família são a flexão: `secretaria-saude` e `pintura.png` são a
   // palavra da língua seguida de um separador (`ia`, `ura`), enquanto `chaveirpix` e `chaveirotoken` são
-  // conteúdo colado.
-  const remainder = /^[\p{L}]*/u.exec(plain.slice(prefix.index + prefix[0].length))[0];
-  // A palavra da língua é SÓ a família e a sua flexão: qualquer sinal de credencial antes ou depois
-  // (`senha-chaveir`, `pix-chaveir`, `chaveirpix`, `chaveirotoken`) tira a exceção.
-  return LANGUAGE_INFLECTIONS.includes(remainder) &&
-    !SENSITIVE_KEY.test(before) && !SENSITIVE_KEY.test(remainder) &&
-    !CREDENTIAL_QUALIFIER_SIGNAL.test(before) && !CREDENTIAL_QUALIFIER_SIGNAL.test(remainder);
+  // conteúdo colado. O que sobra DEPOIS da flexão (`-saude`, `-senha`, `.png`) também é conferido: sem
+  // isso `chaveir-senha` passava por ser "a família mais a flexão vazia".
+  const inflection = /^[\p{L}]*/u.exec(after)[0];
+  const rest = after.slice(inflection.length);
+  // A palavra da língua é SÓ a família e a sua flexão: qualquer sinal de credencial antes, no meio ou
+  // depois (`senha-chaveir`, `pix-chaveir`, `chaveir-senha`, `chaveirpix`, `chaveirotoken`) tira a exceção.
+  return LANGUAGE_INFLECTIONS.includes(inflection) &&
+    ![before, rest].some(part => SENSITIVE_KEY.test(part) || CREDENTIAL_QUALIFIER_SIGNAL.test(part));
 }
 /**
  * Verdadeiro quando o token é forma de palavra da língua (exata ou de família medida) e por isso NÃO
@@ -466,20 +468,13 @@ export function isLanguageWordForm(value) {
   return languageFamilyExemption(plain);
 }
 /**
- * Mesma decisão, restrita às famílias de PREFIXO, para o vocabulário de CHAVE/IDENTIFICADOR: lá o
- * SUFIXO é forma de credencial (`userpin`, `cardpin`, `authtoken`, `mytoken` terminam no radical), e
- * poupá-lo devolveria o vazamento que o vocabulário de chave existe para fechar. O preço declarado é
- * `pallbearer`/`cupbearer`/`chipping` continuarem sendo lidos como chave (3 de 55 no corpus do revisor,
- * o mesmo resíduo da 1.1.40), porque quem os casa é a lista FECHADA, que não consulta família nenhuma.
+ * Mesma decisão para os portões ESTRITOS (valor de atributo e nome de atributo do trecho), que decidem se
+ * o valor sai inteiro. Usa as mesmas famílias de prefixo e a mesma guarda medida.
  */
 export function isLanguageWordStrictForm(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
   if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return true;
   return languageFamilyExemption(plain);
-}
-export function isLanguageWordHead(value) {
-  const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
-  return LANGUAGE_FAMILY_PREFIX.test(plain);
 }
 /**
  * Rótulo de credencial pelo vocabulário PERMISSIVO, excluídas as palavras da língua medidas. É o que a
@@ -552,10 +547,13 @@ const BARE_TAIL_KEY = new RegExp(BARE_TAIL_SOURCE, 'iu');
 // `session-info`, `token-de-acesso`) — nelas o texto do autor continua na evidência.
 export function isPairedCredentialIdentity(value) {
   const text = String(value ?? '');
-  // Identificador de credencial pelo vocabulário de chave, menos as famílias da língua (`chaveiro`,
-  // `pintura`, `tokenizacao`). A POSIÇÃO autoriza olhar o conteúdo; a FORMA do conteúdo decide (ver
-  // `looksLikeFieldValue`), porque prosa da página não é valor de campo.
-  return isSensitiveKeyName(text) && !isLanguageWordForm(text);
+  // Identificador de credencial pelo vocabulário de chave, menos as FAMÍLIAS da língua (`chaveiro`,
+  // `pintura`, `tokenizacao`) — e só elas: a lista EXATA de palavras (`pin`, `pins`, `hairpin`) existe
+  // para a prosa, e usá-la aqui deixava `id="pin"` entregar o valor (medido no e2e do revisor, f09).
+  // A POSIÇÃO autoriza olhar o conteúdo; a FORMA do conteúdo decide (ver `looksLikeFieldValue`), porque
+  // prosa da página não é valor de campo.
+  const plain = text.replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
+  return isSensitiveKeyName(text) && !languageFamilyExemption(plain);
 }
 // Forma de VALOR de campo: curto, poucas palavras e sem pontuação de frase. Separa
 // `<div id="senha">borboleta</div>` (valor, tarja) de `<div id="sessao">Sessão das 19h no cinema.</div>`

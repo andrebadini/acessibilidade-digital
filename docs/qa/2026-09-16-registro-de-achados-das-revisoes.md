@@ -515,3 +515,19 @@ Os dois foram fechados na **1.1.42** com as sondas do próprio revisor.
 | M-2 | Minor | Rótulo em `name`/`aria-label`/`autocomplete`/`title`/`data-*` e em nós irmãos ainda entrega o valor | **aberto, declarado** | Pré-existente nas duas gerações; o par cobre `id`/`classe` (a posição que as duas revisões mediram). `name`/`autocomplete` são preservados de propósito (identidade do elemento) — decisão registrada |
 | M-3 | Minor | Assimetria: `senhaassinaturapass` tarja na chave e não na prosa | **corrigido** na 1.1.42 | Medido depois da troca: a forma é tarjada nas quatro superfícies (prosa, modelo, chave, trecho), junto com `senhaassinaturaseed`/`senhaassinaturasession`/`senhaassinaturatoken` |
 | M-4 | Minor | A declaração do resíduo citava `seedling`, mas o terceiro do corpus 3/55 é `chipping` | **corrigido** (declaração) | A lista do resíduo no teste da métrica passa a nomear as palavras medidas |
+
+## Revisão da 1.1.42 → veredito 1 Critical e 4 Minor (o Critical fecha na 1.1.43)
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.42.md`. A revisão confirmou a integridade do pacote
+byte a byte contra `git archive 1f0abb6`, o caçador 0/1.728 e 0/13.824, o E2E do revisor anterior 19/19, os
+falsos positivos PT-BR zerados, a morfologia PT 0/39, o dicionário 537/360/563 exato, a métrica 11/11, o E2E
+novo 6/6, o `key-axis` 1/1, o gate GREEN e a auditoria ao vivo com integridade 146/146 — e mediu o Critical
+abaixo, fechado na **1.1.43**.
+
+| # | Sev. | Achado | Desfecho | Evidência |
+|---|---|---|---|---|
+| C1 | **Critical** | O par identificador→valor foi **estreitado além do necessário** (radical de 5+ letras + cauda de 3+): `id="senha"`, `class="password"`, `id="apikey"`, `id="token"`, `id="minhasenha"`, `class="secret"`, `id="pin"`, `id="credencial"` deixavam de descartar o conteúdo — **160.397 formas reabertas** no corpus de 198.360 do revisor (1.1.41: 6.707; 1.1.42: 167.104), com o valor saindo no modelo guardado e nos artefatos HTML/JSON em Chrome real | **corrigido** na 1.1.43 | O par volta ao **vocabulário de chave inteiro** (menos famílias) e quem decide é a **forma do conteúdo** (`looksLikeFieldValue`), no trecho por fragmento e no modelo (inclusive no caminho colunar, cujo texto vem de `descendantText`): **0 reabertos** nos 198.360 (id e classe) com `VAZA=6.707`, **idêntico à 1.1.41**; **0 reabertos** nas seis superfícies do corpus de 64.064 (19.139 fechados em prosa, 6.412 em chave JSON/URL/trecho, 14.653 em `aria-label`); E2E do revisor **13/13** e **19/19** com `vazou_em=(nenhuma)` |
+| M-1 | Minor | A guarda "simétrica" da família só olhava o que vem DEPOIS do prefixo: 2.038 formas novas na prosa contra a 1.1.40 e 4.797 reabertas em `id` contra a 1.1.41 | **corrigido** na 1.1.43 | A guarda confere os dois lados e o que sobra **depois da flexão**, com terminações medidas no corpus PT-BR do revisor e os 55 qualificadores realistas: prosa **2.038 → 10** (rótulos artificiais `pix-<família>`) e `id` **4.797 → 0** reabertos |
+| M-2 | Minor | O par ainda apagava 16 palavras do dicionário (`secretive`, `tokenless`, `sessionary`…) | **corrigido** na 1.1.43 | **0** texto destruído no dicionário (a 1.1.41 destruía 93) e corpus PT-BR de 70 palavras com `NOVOS=[]`, preservando `sessao`, `password`, `chavear`, `chavena`, `secretas`, `cookie-banner`, `map-pin`, `session-info` e `token-de-acesso` |
+| M-3 | Minor | `isLanguageWordHead` era export morto | **corrigido** na 1.1.43 | Removido, com o comentário obsoleto da forma estrita corrigido |
+| M-4 | Minor | Números que não reproduzem: escopo serial (declarado 57/58, medido 55/58), a falha da fase paralela não foi o `release-package`, e `GANHA=5.661` não reproduz (5.764) | **declarado** | A diferença é **carga**, não código: as falhas mudam de arquivo entre execuções e passam isoladas (`url-pixel-consent-mv3` 10/10, `annotation-map` 26/26, `axe-mv3-csp` 1/1). A declaração passa a citar os dois universos (5.661 nos meus, 5.764 nos dele) |

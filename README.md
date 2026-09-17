@@ -4,7 +4,34 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.42 preparada — sem revisão independente ainda.** A revisão da **1.1.41** confirmou tudo o
+**Versão 1.1.43 preparada — sem revisão independente ainda.** A revisão da **1.1.42** confirmou a
+integridade do pacote byte a byte, o caçador 0/1.728 e 0/13.824, o E2E do revisor 19/19, os falsos positivos
+PT-BR zerados, a morfologia PT 0/39, o dicionário 537/360/563 exato, a métrica 11/11, o E2E novo 6/6, o
+`key-axis` 1/1, o gate GREEN e a auditoria ao vivo com integridade 146/146 — e mediu **1 Critical e 4 Minor**.
+O Critical era o par identificador→valor **estreitado além do necessário** na 1.1.42: exigindo radical de 5+
+letras e cauda de 3+, ele deixava `id="senha"`, `class="password"`, `id="apikey"`, `id="token"`,
+`id="minhasenha"`, `class="secret"`, `id="pin"` e `id="credencial"` entregarem o conteúdo — **160.397 formas
+reabertas** no corpus de 198.360 do revisor (a 1.1.41 tinha 6.707).
+
+A 1.1.43 devolve ao par o **vocabulário de chave inteiro** (menos as famílias da língua) e coloca a decisão na
+**forma do conteúdo** (`looksLikeFieldValue`: curto, até 4 palavras, sem pontuação de frase) — no trecho, por
+fragmento de texto com pilha de contexto, e no modelo, inclusive no **caminho colunar**, onde o texto vem de
+`descendantText` e o portão via vazio. Fecha também os quatro Minors: a guarda da família passou a conferir
+**os dois lados e o que sobra depois da flexão** (com terminações medidas no corpus PT-BR do revisor e os 55
+qualificadores realistas: prosa `NOVOS vs 1.1.40` de 2.038 para 10, `id` de 4.797 para 0 reabertos contra a
+1.1.41), o par deixou de apagar **qualquer** palavra do dicionário (0, contra 93 da 1.1.41), o export morto
+`isLanguageWordHead` saiu e o comentário obsoleto da forma estrita foi corrigido. **Números que não
+reproduzem ficam declarados:** o escopo serial deu 57/58 aqui e 55/58 no revisor (a diferença é carga — as
+flakes mudam de arquivo e passam isoladas) e `COBERTURA_GANHA` é 5.661 nos meus universos e 5.764 nos dele.
+**Medições da 1.1.43:** suíte **4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o
+zip), escopo serial no pacote **57/58**, gate **GREEN**, auditoria ao vivo **0 falhas / 3 suspeitas (4
+ocorrências) / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, **146/146 ids e títulos** no HTML e no
+PDF, notas 5/5, 0 palavras partidas, 0 `[redacted]`; e as sondas do revisor: **0 reabertos** nos corpora de
+198.360 e 64.064 formas, precisão com **0** texto destruído, caçador 0/13.824 e 880 formas realistas com 0 em
+prosa/modelo.
+
+**Versão 1.1.42.** A revisão da **1.1.41** mediu 1 Critical e 1 Important (família de sufixo e par
+identificador→valor), fechados na 1.1.42 com o redesenho da fronteira. A revisão da **1.1.41** confirmou tudo o
 que aquela geração tinha de real (integridade do pacote byte a byte, métrica 11/11 com não vacuidade,
 morfologia PT 20→0, dicionário 563→360, caçador do revisor 336→0, E2E novo 6/6, key-axis 1/1, fase paralela
 4.180/4.179/0/1, escopo serial 58/58, gate GREEN, auditoria ao vivo com todos os números e 146/146 ids e

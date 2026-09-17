@@ -1,6 +1,30 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
-> **Incremento 1.1.42, e o que ele muda aqui.** Artefato corrente
+> **Incremento 1.1.43, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.43.zip` (`da5889de…ec2c`), **sem revisão independente ainda**.
+> Fecha o **Critical** e os quatro **Minor** da revisão da 1.1.42. O Critical era o par
+> identificador→valor **estreitado além do necessário** na 1.1.42 (radical de 5+ letras + cauda de 3+):
+> `id="senha"`, `class="password"`, `id="apikey"`, `id="token"`, `id="minhasenha"`, `class="secret"`,
+> `id="pin"` e `id="credencial"` voltavam a entregar o conteúdo (160.397 formas reabertas no corpus de
+> 198.360 do revisor; a 1.1.41 tinha 6.707). A 1.1.43 devolve ao par o **vocabulário de chave inteiro**
+> (menos famílias) e põe a decisão na **forma do conteúdo** (`looksLikeFieldValue`: curto, até 4 palavras,
+> sem pontuação de frase) — no trecho, por fragmento de texto com pilha de contexto, e no modelo,
+> inclusive no **caminho colunar**, onde o texto vem de `descendantText` e o portão via vazio. Fecha
+> também os Minor: a guarda da família passou a conferir **os dois lados e o que sobra depois da flexão**
+> (prosa `NOVOS vs 1.1.40` 2.038 → 10, `id` 4.797 → 0 reabertos), o par deixou de apagar **qualquer**
+> palavra do dicionário (0, contra 93 da 1.1.41), o export morto `isLanguageWordHead` saiu, e os números que
+> não reproduzem ficam **declarados** (escopo serial 57/58 aqui e 55/58 no revisor; a falha da fase
+> paralela muda de arquivo entre execuções e passa isolada; `COBERTURA_GANHA` é 5.661 nos meus universos e
+> 5.764 nos dele). **Medições:** suíte **4.180/4.178/1** (a única falha é o `release-package` antes de
+> reconstruir o zip), escopo serial no pacote **57/58**, gate **GREEN**, auditoria ao vivo **0 falhas / 3
+> suspeitas (4 ocorrências) / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10** com versão **1.1.43** e
+> quatro exportações `complete`, integridade **146/146 ids e títulos no HTML e no PDF**, notas 5/5, 0
+> palavras partidas e 0 `[redacted]`; e as sondas do revisor: caçador **0/13.824**, **0 reabertos** nos
+> corpora de 198.360 e de 64.064, **0** texto destruído no dicionário, morfologia PT **0/39**, falsos
+> positivos PT-BR `NOVOS=[]`, 880 formas realistas com **0** em prosa/modelo. **8** segue **Parcial** por
+> decisão do usuário, fora do caminho de bloqueio.
+
+> **Incremento 1.1.42, e o que ele muda aqui.** Artefato
 > `release/audita-acessibilidade-1.1.42.zip` (`4d960106…787e`), **sem revisão independente ainda**.
 > Fecha o **Critical** e o **Important** da revisão da 1.1.41 — os dois eram **regressão da 1.1.41**. O
 > Critical era a família de **SUFIXO**: como as palavras de sufixo (`token`, `pin`, `bearer`, `session`,

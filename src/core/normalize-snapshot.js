@@ -739,9 +739,17 @@ function normalizeColumnar(raw) {
   const executableMemo = new Map();
   const privateTextMemo = new Map();
   const parentOfRecord = record => byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
+  // Texto do próprio registro e dos descendentes, SEM a maquinaria de privacidade (que depende desta
+  // decisão): é o que permite exigir forma de VALOR para o identificador de credencial tornar o texto
+  // privado. Sem isto o portão via texto vazio no caminho colunar e o valor seguia para o modelo.
+  const ownTextSignal = (record, depth = 0) => {
+    const parts = [record.rawText ?? ''];
+    if (depth < 8) for (const child of childrenByRecord.get(record) || []) parts.push(ownTextSignal(child, depth + 1));
+    return cleanText(parts.join(' '));
+  };
   const privateTextAncestors = ancestorsOfMatching(
     records,
-    record => privateTextElement(record.tagName, record.attributes, `${record.text ?? ''} ${record.visibleText ?? ''}`.trim()),
+    record => privateTextElement(record.tagName, record.attributes, ownTextSignal(record)),
     parentOfRecord,
   );
   const inExecutableSubtree = record => {
@@ -765,7 +773,7 @@ function normalizeColumnar(raw) {
     const visited = new Set();
     while (current && !visited.has(current)) {
       visited.add(current);
-      if (privateTextElement(current.tagName, current.attributes, `${current.text ?? ''} ${current.visibleText ?? ''}`.trim())) {
+      if (privateTextElement(current.tagName, current.attributes, ownTextSignal(current))) {
         privateTextMemo.set(record, true);
         return true;
       }
@@ -779,7 +787,7 @@ function normalizeColumnar(raw) {
     const visited = new Set();
     while (current && !visited.has(current)) {
       visited.add(current);
-      if (privateTextElement(current.tagName, current.attributes, `${current.text ?? ''} ${current.visibleText ?? ''}`.trim())) return true;
+      if (privateTextElement(current.tagName, current.attributes, ownTextSignal(current))) return true;
       current = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
     }
     return false;
@@ -907,7 +915,7 @@ function normalizeColumnar(raw) {
   const redactedNodes = ordered.map(record => redactPlaceholderText(redactNormalizedNode(outputByRecord.get(record), {
     executable: inExecutableSubtree(record),
     privateText: inPrivateTextSubtree(record),
-    privateTextRoot: privateTextElement(record.tagName, record.attributes, `${record.text ?? ''} ${record.visibleText ?? ''}`.trim()) && !hasPrivateTextAncestor(record),
+    privateTextRoot: privateTextElement(record.tagName, record.attributes, ownTextSignal(record)) && !hasPrivateTextAncestor(record),
     privateTextDescendant: hasPrivateTextAncestor(record),
     privateTextAncestor: privateTextAncestors.has(record),
     // O controle nativo mantém o nome; o nó de texto privado só mantém o nome VAZIO (ver

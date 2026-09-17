@@ -2908,3 +2908,52 @@ No HTML entregue, os seis blocos didáticos aparecem com os rótulos do próprio
 "Por que está …" (109), "Como interpretar" (122), "O que verificar" (109), "Pessoas que usam…" (52) e
 "Requer revisão humana" (118), com a frase de limites ("não é nota, certificação … declaração de
 conformidade") presente.
+
+## Rodada 89 — a revisão da 1.1.42 REPROVOU (1 Critical e 4 Minor): o par volta ao vocabulário de chave com portão de forma de valor, e a 1.1.43 fecha
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.42.md`. A revisão confirmou por medição própria tudo o que
+a geração tinha de real (pacote byte a byte contra `git archive 1f0abb6`, caçador 0/1.728 e estendido
+0/13.824, E2E do revisor 19/19, falsos positivos PT-BR `NOVOS=[]`, morfologia 0/39, dicionário 537/360/563,
+métrica 11/11, E2E novo 6/6, key-axis 1/1, gate GREEN, auditoria ao vivo completa e integridade 146/146) e
+mediu **1 Critical e 4 Minor**.
+
+**C1 — o par identificador→valor foi estreitado além do necessário.** A forma nova exigia radical de 5+
+letras + 3+ caracteres, então `id="senha"`, `class="password"`, `id="apikey"`, `id="token"`,
+`id="minhasenha"`, `class="secret"`, `id="pin"` e `id="credencial"` deixavam de autorizar o descarte do
+conteúdo: **160.397 formas reabertas** no corpus de 198.360 do revisor (a 1.1.41 tinha 6.707 e a 1.1.42,
+167.104) e o valor saía no modelo guardado e nos artefatos HTML/JSON em Chrome real. Isto é exatamente o eixo
+que a rodada 88 tinha começado a fechar; a 1.1.43 o fecha por completo.
+
+**A 1.1.43 fecha os cinco achados:**
+- **C1:** o par volta a aceitar o **vocabulário de chave inteiro** (menos as famílias da língua) e quem decide
+  é a **forma do conteúdo** — `looksLikeFieldValue` (curto, até 4 palavras, sem pontuação de frase), aplicado
+  no trecho (por fragmento de texto, com pilha de contexto) e no modelo (texto do nó, inclusive no caminho
+  colunar, onde o texto vem de `descendantText` e o portão via vazio antes). Medido com as sondas do revisor:
+  **REABERTOS vs 1.1.41 = 0** nos 198.360 rótulos (id e classe), `VAZA=6.707` — **idêntico à 1.1.41** — e
+  **0 reabertos** nas seis superfícies do corpus de 64.064 (com 19.139 fechados em prosa, 6.412 em chave
+  JSON, URL e trecho, e 14.653 em `aria-label`); E2E dele **13/13** com `vazou_em=(nenhuma)` nos dez casos
+  reabertos e **19/19** no de ataque.
+- **M-1 (guarda só olhava o que vem depois do prefixo):** a guarda da família passou a conferir **os dois
+  lados** e o que sobra **depois da flexão**, com a lista fechada de terminações medida no corpus PT-BR do
+  revisor e a lista de 55 qualificadores realistas: prosa `NOVOS vs 1.1.40` de **2.038 → 10** (as 10 são
+  rótulos artificiais `pix-<família>`) e id de **4.797 → 0** reabertos contra a 1.1.41.
+- **M-2 (o par apagava 16 palavras do dicionário):** **0** texto destruído no dicionário (a 1.1.41 destruía
+  93) e o corpus PT-BR de 70 palavras com `NOVOS=[]`, preservando `sessao`, `password`, `chavear`, `chavena`,
+  `secretas`, `cookie-banner`, `map-pin`, `session-info` e `token-de-acesso`.
+- **M-3:** o export morto `isLanguageWordHead` foi removido e o comentário obsoleto da forma estrita
+  corrigido.
+- **M-4 (números que não reproduzem):** declarados honestamente. O escopo serial medido por mim nesta rodada
+  deu **57/58** (a vermelha é o flake de limpeza do `axe-mv3-csp`, que passa 1/1 isolado) e o revisor mediu
+  **55/58**, com uma segunda flake em `url-pixel-consent-mv3` (10/10 isolado) — a diferença é **carga**, não
+  código. A fase paralela agregada confere (**4.180/4.178/1/1 pulado**) mas a falha não é estável entre
+  execuções: na minha deu `release-package` (que exige pacote reconstruído) e na dele, `annotation-map`
+  (26/26 isolado). E `COBERTURA_GANHA=5.661` é o número dos **meus** universos; nos universos dele dá
+  **5.764** — a declaração passa a citar os dois.
+
+**Medições da 1.1.43:** suíte **4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o
+zip); escopo serial no pacote **57/58**; gate **GREEN**; auditoria ao vivo **0 falhas / 3 suspeitas (4
+ocorrências) / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, versão **1.1.43**, quatro exportações
+`complete`; integridade **146 itens, 146/146 ids e títulos no HTML e no PDF**, notas 5/5, 0 palavras
+partidas, 0 `[redacted]`; e as sondas do revisor: caçador **0/13.824**, corpus de 198.360 **0 reabertos**,
+corpus de 64.064 **0 reabertos**, precisão **0** texto destruído no dicionário, morfologia PT **0/39**,
+falsos positivos PT-BR `NOVOS=[]`, 880 formas realistas com **0** em prosa/modelo.
