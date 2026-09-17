@@ -1,6 +1,27 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
-> **Incremento 1.1.38, e o que ele muda aqui.** Artefato corrente
+> **Incremento 1.1.39, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.39.zip` (`4ada4e9a…896c`), **sem revisão independente ainda**.
+> Fecha os três Important da revisão da 1.1.38 — e o primeiro deles era **regressão do meu próprio
+> conserto do C1**: o vocabulário de CHAVE perdeu o conector `de/da/do` (30.550 formas, 23/28 nomes
+> realistas vazando em URL, chave JSON e seletor) porque a marca de camelCase era dispensada pela leitura
+> contígua do vocabulário de PROSA. Agora a marca só é dispensada quando **os dois** vocabulários
+> reconhecem a forma contígua, a marca só fica quando **acrescenta** reconhecimento, e o conector entra no
+> vocabulário de chave — medido com as sondas do próprio revisor: **`COBERTURA_PERDIDA=0 / GANHA=0`** em
+> 341.164 formas, URL/JSON/seletor com zero vazamentos. O I-3 (C2 nas chaves) fecha com **chave de
+> atribuição** no vocabulário de prosa (chave JSON com decodificação, consulta/hash de URL, nome de
+> atributo) e vocabulário **fechado** onde a string é identificador — é o que preserva `pintura.png`,
+> `secretaria-saude` e `Chaveiro` —, mais as **caudas qualificadoras medidas** (383 → 86 vazando, **0**
+> delas cobertas na 1.1.36) e o nome acessível passando pelo tarjador completo (57 → 10); o caçador do
+> revisor foi de **329 para 154** vazamentos em 1.260 casos, com **nenhuma** palavra nova no dicionário. O
+> I-2(b) fecha o fail-open da limpeza: leitura de aba impossível **não** é "aba ausente" — nada fecha e o
+> registro fica em `cleanup-pending`. **Resíduo declarado:** journal forjado com `tabId` **e** `windowId`
+> que casam (o vínculo por documento é frágil sob navegação e o atacante já executa código na extensão).
+> **10** segue **Atendido**; **11** ganha os resíduos declarados; **12** ganha as medições do pacote
+> (paralela **4.221/4.220/0/1**, escopo serial e Google ao vivo). **8** segue **Parcial** por decisão do
+> usuário, fora do caminho de bloqueio.
+
+ Artefato corrente
 > `release/audita-acessibilidade-1.1.38.zip` (`c3228127…fb0d`), **sem revisão independente ainda**.
 > Fecha os dois Critical, o Important da métrica e os dois achados de privacidade da revisão da 1.1.37
 > (2 Critical, 7 Important, 6 Minor, 6 observações). **5** de novo, na quinta rodada da mesma classe, e o

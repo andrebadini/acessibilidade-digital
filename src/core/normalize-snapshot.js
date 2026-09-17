@@ -265,24 +265,16 @@ function hasAxString(value) {
 
 /**
  * O nome acessível de um nó de TEXTO PRIVADO (`div[role=textbox][contenteditable]`, `textarea`) pode ser
- * preservado? A pergunta é da fronteira de privacidade, e a resposta é falha-segura:
- * — nome VAZIO é sempre preservado: a string vazia não carrega informação, e é a vazio que permite à regra
- *   apontar o defeito real de 5.13.10 (componente sem nome) em vez de ficar em "não coletado";
- * — nome NÃO VAZIO só é preservado quando a própria árvore de acessibilidade PROVA origem declarada: uma
- *   fonte com valor vencedor do tipo `attribute` (`aria-label`, `title`, `placeholder`…) ou
- *   `relatedElement` (`label` nativo, `aria-labelledby`, já filtrado por privacidade antes daqui);
- * — nome vindo do CONTEÚDO (`type: 'contents'`) NUNCA é preservado: ali o nome É o texto digitado.
- * Sem fontes observáveis, não preserva: ausência de prova não é prova de declaração.
+ * preservado na redação? Só quando ele é VAZIO. Nome vazio não carrega informação — e é a vaziez que
+ * permite à regra apontar o defeito real de 5.13.10 (componente sem nome) em vez de ficar em "não
+ * coletado". Nome NÃO vazio continua retirado por POLÍTICA, e a política está medida: a árvore de
+ * acessibilidade do Chrome reporta as MESMAS fontes para um contenteditable com e sem texto digitado
+ * (`relatedElement`/`aria-labelledby`, sem nenhuma fonte `contents`), então nada na medição prova que o
+ * nome não venha do conteúdo — e o conteúdo é o que a pessoa digitou. O teste E2E do 5.9.1 fixa essa
+ * fronteira ("a name that may come from contents must stay redacted").
  */
-const DECLARED_NAME_ATTRIBUTES = new Set(['aria-label', 'aria-placeholder', 'placeholder', 'title', 'alt']);
-function declaredAccessibleName(axName) {
-  if (axString(axName) === '') return true;
-  const sources = Array.isArray(axName?.sources) ? axName.sources : [];
-  if (sources.length === 0) return false;
-  const winning = sources.filter(source => source && source.superseded !== true && source.value !== undefined);
-  if (winning.some(source => source.type === 'contents')) return false;
-  return winning.some(source => source.type === 'relatedElement' ||
-    (source.type === 'attribute' && DECLARED_NAME_ATTRIBUTES.has(String(source.attribute ?? '').toLowerCase())));
+function preservableAccessibleName(node) {
+  return node.accessibleName === '';
 }
 
 const TEXT_BLOCK_TAGS = new Set(['article', 'aside', 'blockquote', 'dd', 'div', 'dt', 'figcaption', 'li', 'main', 'p', 'section', 'td', 'th']);
@@ -442,10 +434,7 @@ function normalizeSimplified(raw) {
       const value = editable ? '' : axString(ax.value);
       if (role) normalized.axRole = role;
       if (role === 'heading' && observedAxHeadingLevel(ax) !== undefined) normalized.headingLevel = observedAxHeadingLevel(ax);
-      if (hasAxString(ax.name)) {
-        normalized.accessibleName = projectAccessibleText(name);
-        normalized.accessibleNameDeclared = declaredAccessibleName(ax.name);
-      }
+      if (hasAxString(ax.name)) normalized.accessibleName = projectAccessibleText(name);
       if (description) normalized.accessibleDescription = projectAccessibleText(description);
       if (value) normalized.axValue = projectAccessibleText(value);
     }
@@ -500,9 +489,8 @@ function normalizeSimplified(raw) {
     privateTextDescendant: hasPrivateTextAncestor(node),
     privateTextAncestor: privateTextAncestors.has(node),
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(node.tagName) ||
-      node.accessibleNameDeclared === true,
+      preservableAccessibleName(node),
   })));
-  for (const node of redactedNodes) delete node.accessibleNameDeclared;
   return assertSnapshotV1({
     schemaVersion: 1,
     document: {
@@ -854,10 +842,7 @@ function normalizeColumnar(raw) {
       const value = editable ? '' : axString(ax.value);
       if (role) node.axRole = role;
       if (role === 'heading' && observedAxHeadingLevel(ax) !== undefined) node.headingLevel = observedAxHeadingLevel(ax);
-      if (hasAxString(ax.name)) {
-        node.accessibleName = projectAccessibleText(name);
-        node.accessibleNameDeclared = declaredAccessibleName(ax.name);
-      }
+      if (hasAxString(ax.name)) node.accessibleName = projectAccessibleText(name);
       if (description) node.accessibleDescription = projectAccessibleText(description);
       if (value) node.axValue = projectAccessibleText(value);
     }
@@ -894,12 +879,11 @@ function normalizeColumnar(raw) {
     privateTextRoot: privateTextElement(record.tagName, record.attributes) && !hasPrivateTextAncestor(record),
     privateTextDescendant: hasPrivateTextAncestor(record),
     privateTextAncestor: privateTextAncestors.has(record),
-    // Nome declarado sobrevive à redação do texto privado; nome vindo do conteúdo, não (ver
-    // `declaredAccessibleName`). O controle nativo mantém o comportamento anterior.
+    // O controle nativo mantém o nome; o nó de texto privado só mantém o nome VAZIO (ver
+    // `preservableAccessibleName`), o que dá à regra de 5.13.10 a vaziez observada sem entregar conteúdo.
     preserveAccessibleText: ['input', 'select', 'textarea'].includes(record.tagName) ||
-      outputByRecord.get(record)?.accessibleNameDeclared === true,
+      preservableAccessibleName(outputByRecord.get(record) ?? {}),
   })));
-  for (const node of redactedNodes) delete node.accessibleNameDeclared;
 
   // A container's aggregate text must not be measured again using its own colors.
   // Derive only a finite provenance flag, after removing private/executable text.

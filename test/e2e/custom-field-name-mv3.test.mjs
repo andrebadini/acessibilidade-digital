@@ -19,8 +19,11 @@ const pagina = (corpo, titulo) => `<!doctype html><html lang="pt-BR"><head><meta
 const CASOS = [
   ['campo customizado sem nome', '<div role="textbox" contenteditable="true" aria-label=""></div>', 'failed', 1],
   ['campo customizado sem declaração de nome', '<div role="textbox" contenteditable="true"></div>', 'failed', 1],
+  // Nome NÃO vazio em nó de texto privado continua RETIRADO por política (a árvore do Chrome reporta as
+  // mesmas fontes com e sem texto digitado: nada prova que o nome não venha do conteúdo). O item fica em
+  // revisão humana — e a VAZIEZ, que é o que a regra precisa para apontar 5.13.10, é preservada.
   ['campo customizado nomeado por elemento declarado',
-    '<span id="rot">Nome</span><div role="textbox" contenteditable="true" aria-labelledby="rot"></div>', 'passed', 0],
+    '<span id="rot">Nome</span><div role="textbox" contenteditable="true" aria-labelledby="rot"></div>', 'cantTell', 0],
   ['campo customizado com nome retido por privacidade',
     '<div id="priv" contenteditable="true">rascunho</div><div role="textbox" contenteditable="true" aria-labelledby="priv"></div>', 'cantTell', 0],
   ['botão nativo sem nome', '<button id="b"></button>', 'failed', 1],

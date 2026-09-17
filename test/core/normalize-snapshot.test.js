@@ -590,9 +590,13 @@ test('keeps declared accessible names on private custom fields and never the con
     snapshot.nodes.find(node => node.backendNodeId === backendNodeId));
   assert.equal(Object.hasOwn(semNome, 'accessibleName'), true, 'a vazio do nome precisa ser observável');
   assert.equal(semNome.accessibleName, '');
-  assert.equal(declarado.accessibleName, 'Nome do campo');
+  // POLÍTICA para nó de texto privado: nome NÃO vazio continua retirado, declarado ou não — a árvore de
+  // acessibilidade do Chrome reporta as mesmas fontes com e sem texto digitado, então nada prova que o
+  // nome não venha do conteúdo (o E2E do 5.9.1 fixa essa fronteira).
+  assert.equal(Object.hasOwn(declarado, 'accessibleName'), false, 'nome não vazio em nó privado é retirado');
   assert.equal(Object.hasOwn(porConteudo, 'accessibleName'), false, 'nome vindo do conteúdo não pode ser preservado');
   assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(digitado));
+  assert.doesNotMatch(JSON.stringify(snapshot), /Nome do campo/u, 'o nome retirado não pode sobreviver em nenhum campo');
   // O texto e o valor continuam removidos em todos os nós privados — a correção não reabre conteúdo.
   for (const node of [semNome, declarado, porConteudo]) {
     assert.equal(node.text, '');
