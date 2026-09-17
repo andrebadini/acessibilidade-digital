@@ -2894,3 +2894,17 @@ chave e trecho), junto com `senhaassinaturaseed`, `senhaassinaturasession` e `se
 corpus de chaves inocentes (55 palavras) os três lidos como chave são `cupbearer`, `pallbearer` e `chipping`;
 `seedling` é tarjado em prosa/modelo/trecho mas **não** como chave — a declaração anterior o citava por
 engano (Minor M-4, corrigido na declaração).
+
+**Inspeção visual da entrega da 1.1.42 (lista de "antes do candidato de produção").** Página 1 do PDF
+entregue conferida **a olho** (rasterizada com `sips` a partir dos bytes exportados pela auditoria ao vivo do
+pacote): título, URL do escopo, "Sumário executivo e limitações críticas", estado da auditoria, a cobertura
+automática **com a fórmula e a negação explícita de nota/certificação**, os quatro grupos com número, rótulo e
+cor (0 não conformidades, 1 recomendação/alerta, 3 suspeitas a confirmar, 9 resultados positivos), as quatro
+formas de entrega e o bloco de limitações com os códigos de diagnóstico — tudo íntegro, sem corte de texto e
+sem sinal dependente só de cor. Estrutura das páginas 4, 9 e 18 conferida por extração de texto: blocos
+didáticos presentes ("Pessoas que usam…", "Registro original…", "Como tratar…"), matriz de itens com
+classificação (Requisito x Recomendação ABNT) e mapeamento WCAG, e o anexo de evidências com seletor e hash.
+No HTML entregue, os seis blocos didáticos aparecem com os rótulos do próprio produto: "O que foi …" (13),
+"Por que está …" (109), "Como interpretar" (122), "O que verificar" (109), "Pessoas que usam…" (52) e
+"Requer revisão humana" (118), com a frase de limites ("não é nota, certificação … declaração de
+conformidade") presente.
