@@ -123,6 +123,24 @@ const ATRIBUTOS = [
   ['aria-label com valor', `<div aria-label="senha ${S('53')}">x</div>`],
   ['aria-description com valor', `<div aria-description="senha ${S('54')}">x</div>`],
 ];
+// Chaves de credencial de URL em TODAS as grafias do padrão: o pré-filtro da 1.1.34 gerava só a forma
+// colada e deixava `?saml_response=` fora da varredura — falso negativo medido na rodada 74.
+const URLS_CHAVE = [
+  ['consulta ?saml_response=', `/p?saml_response=${S('130')}`],
+  ['consulta ?samlresponse=', `/p?samlresponse=${S('131')}`],
+  ['consulta ?saml-response=', `/p?saml-response=${S('132')}`],
+  ['consulta ?refresh_token=', `/p?refresh_token=${S('133')}`],
+  ['consulta ?id-token=', `/p?id-token=${S('134')}`],
+];
+// Rótulos de várias palavras SEM acento: a lista de pré-filtro pegava só a primeira variante da primeira
+// parte (`número` sem `numero`), e a página que escreve sem acento ficava fora da varredura.
+const SEM_ACENTO = [
+  ['numero de seguranca', `<p>numero de seguranca: ${S('135')}</p>`],
+  ['codigo de barras', `<p>codigo de barras: ${S('136')}</p>`],
+  ['digito verificador', `<p>digito verificador: ${S('137')}</p>`],
+  ['linha digitavel', `<p>linha digitavel: ${S('138')}</p>`],
+  ['codigo de verificacao', `<p>codigo de verificacao: ${S('139')}</p>`],
+];
 const URLS = [
   ['consulta ?code=', `/p?code=${S('60')}`], ['consulta ?assertion=', `/p?assertion=${S('61')}`],
   ['hash #code=', `/p#code=${S('62')}`], ['hash #assertion=', `/p#assertion=${S('63')}`],
@@ -198,12 +216,12 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
   assert.ok(CARTAO.length >= 9, `a lista de cartão/boleto encolheu: ${CARTAO.length}`);
   // O total de COMBINAÇÕES (forma x caminho) é o número que os documentos citam, e por isso ele é
   // calculado aqui em vez de escrito à mão: uma lista que encolher derruba esta asserção.
-  const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length) * 3
-    + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + URLS.length * 2;
-  t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length} combinações=${combinacoes}`);
+  const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length) * 3
+    + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + (URLS.length + URLS_CHAVE.length) * 2;
+  t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length} combinações=${combinacoes}`);
   assert.ok(combinacoes >= 210, `a métrica encolheu: ${combinacoes} combinações`);
   const vazamentos = [];
-  for (const [nome, html] of [...FORMAS, ...IDIOMA, ...CARTAO]) {
+  for (const [nome, html] of [...FORMAS, ...IDIOMA, ...CARTAO, ...SEM_ACENTO]) {
     const sentinela = html.match(/ADVSEN\d+X/u)?.[0] ?? '';
     assert.ok(sentinela, `a forma "${nome}" precisa de sentinela própria`);
     const trecho = sanitizeHtmlSnippetSource(html);
@@ -222,7 +240,7 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
     if (sanitizeHtmlSnippetSource(`<p>${rotulo} ${sentinela}</p>`).includes(sentinela)) vazamentos.push(`${rotulo} (trecho)`);
     if (sanitizeJsonData({ texto: `${rotulo} ${sentinela}` }).texto.includes(sentinela)) vazamentos.push(`${rotulo} (json)`);
   }
-  for (const [nome, url] of URLS) {
+  for (const [nome, url] of [...URLS, ...URLS_CHAVE]) {
     const sentinela = url.match(/ADVSEN\d+X/u)[0];
     if (redactSensitiveText(`https://exemplo.test${url}`).includes(sentinela)) vazamentos.push(`${nome} (url-texto)`);
     if (sanitizeJsonData({ texto: `https://exemplo.test${url}` }).texto.includes(sentinela)) vazamentos.push(`${nome} (url-json)`);

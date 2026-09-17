@@ -206,13 +206,20 @@ export function isSensitiveKey(value) {
 // rótulo pode morder, e as regexes caras de fronteira não precisam varrer o texto. Sem ele o tarjador do
 // modelo ficava 3× mais lento que a geração anterior; com ele o custo volta ao da 1.1.33 e a semântica
 // não muda, porque a lista é a mesma fonte do vocabulário.
+// As chaves de URL entram nas TRÊS grafias que o padrão aceita (colada, com `_` e com `-`): gerar só a
+// forma colada deixava `?saml_response=` fora do pré-filtro — e o pré-filtro é a porta: sem ele a
+// varredura cara nem roda. Falso negativo medido na rodada 74.
+const URL_KEY_HINTS = URL_CREDENTIAL_KEY_SOURCE.split('|').flatMap(part => [
+  part.replace(/\[-_\]\?/gu, ''), part.replace(/\[-_\]\?/gu, '_'), part.replace(/\[-_\]\?/gu, '-'), part,
+]);
 const STEM_HINT = new RegExp([
   ...WORD_STEMS, ...WHOLE_WORD_STEMS, 'pass',
-  // A PRIMEIRA parte de cada radical de várias palavras: `api` cobre `api_key`, `linha` cobre
-  // `linha digitável`, `código` cobre `código de barras`. As partes seguintes não entram porque
-  // `de` apareceria em quase toda frase e o pré-filtro perderia a função.
-  ...PHRASE_STEMS.map(parts => parts[0][0]),
-  ...URL_CREDENTIAL_KEY_SOURCE.split('|').map(part => part.replace(/\[.*?\]|\(.*?\)/gu, '')),
+  // A PRIMEIRA parte de cada radical de várias palavras, em TODAS as variantes (com e sem acento):
+  // `api` cobre `api_key`, `linha` cobre `linha digitável`, `código`/`codigo` cobrem `código de barras`.
+  // As partes seguintes não entram porque `de` apareceria em quase toda frase e o pré-filtro perderia a
+  // função.
+  ...PHRASE_STEMS.flatMap(parts => parts[0]),
+  ...URL_KEY_HINTS,
 ].map(escapeLiteral).join('|'), 'iu');
 // Codificação também conta como candidato: `sen&#104;a`, `sen\u0068a` e `sen%68a` escondem o rótulo do
 // pré-filtro literal, e são justamente as formas que as revisões da 1.1.28 e da 1.1.29 mediram.
