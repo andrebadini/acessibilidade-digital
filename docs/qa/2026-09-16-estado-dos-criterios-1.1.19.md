@@ -22,6 +22,13 @@
 > positivos / 109 no checklist / 28,5% / 9,0 de 10** com versão **1.1.44** e quatro exportações `complete`,
 > integridade **146/146 ids e títulos no HTML e no PDF**, notas 5/5, 0 palavras partidas e 0 `[redacted]`.
 > **8** segue **Parcial** por decisão do usuário, fora do caminho de bloqueio.
+>
+> **Decisão de produto declarada (17/09/2026):** em identificador **ambíguo** (`id`/`classe` que contém
+> radical de credencial) o produto **escolhe a privacidade** — o conteúdo do elemento é tratado como
+> valor, sem heurística de forma. O preço é medido e declarado (20 de 25 ids do corpus PT-BR do revisor,
+> 15 deles rótulo de credencial de verdade; 99 palavras do dicionário) em
+> `docs/qa/2026-09-17-decisao-identificador-ambiguo.md`, com as fixtures contraditórias das revisões da
+> 1.1.40, 1.1.42 e 1.1.43 e o critério de tratamento de achados futuros neste eixo.
 
 > **Incremento 1.1.43, e o que ele muda aqui.** Artefato
 > `release/audita-acessibilidade-1.1.43.zip` (`da5889de…ec2c`), **sem revisão independente ainda**.
