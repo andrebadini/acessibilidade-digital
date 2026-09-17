@@ -146,6 +146,10 @@ const CREDENTIAL_PREFIXES = Object.freeze([
   'bank', 'banco', 'device', 'phone', 'celular', 'data', 'master', 'admin', 'super', 'root', 'api',
   'auth', 'oauth', 'session', 'cookie', 'secret', 'chave', 'senha', 'token', 'pass', 'pin', 'conta',
   'acesso', 'client', 'server', 'service', 'default', 'banho', 'conta', 'senha', 'chave', 'token',
+  // Verbos e ordinais que a revisão da 1.1.37 mediu como prefixo de rótulo concatenado.
+  'redefinir', 'trocar', 'alterar', 'confirmar', 'definir', 'criar', 'gerar', 'informar', 'digitar',
+  'validar', 'atualizar', 'recuperar', 'resetar', 'primeira', 'primeiro', 'segunda', 'segundo',
+  'terceira', 'terceiro', 'antiga', 'antigo',
 ]);
 const STEMS_ALTERNATION = WORD_STEMS.map(escapeLiteral).join('|');
 const PHRASES_ALTERNATION = PHRASE_STEMS.map(parts => parts
@@ -359,9 +363,14 @@ function mayCarryCredential(value) {
   // O pré-filtro olha o texto SEM os caracteres invisíveis e SEM as tags: `sen\u200bha` e
   // `<b>sen</b>ha` escondem o radical de uma comparação literal, e eram justamente por onde as evasões
   // passavam (rodada 74 e Important da revisão da 1.1.34).
+  // `SeNhA` tem o radical intercalado em maiúsculas: a comparação literal não o vê, e a versão em
+  // minúsculas o devolve contíguo. Sem esta linha o pré-filtro recusava a string inteira e a caixa
+  // misturada vazava — Critical C1 da revisão da 1.1.37.
+  const lower = text.toLowerCase();
   return STEM_HINT.test(text) || ENCODED_HINT.test(text) ||
     STEM_HINT.test(text.replace(INVISIBLE_MARKS, '')) ||
-    STEM_HINT.test(text.replace(/<[^<>]*>/gu, ''));
+    STEM_HINT.test(text.replace(/<[^<>]*>/gu, '')) ||
+    STEM_HINT.test(lower) || STEM_HINT.test(lower.replace(INVISIBLE_MARKS, ''));
 }
 
 // Um rótulo de valor não exige fronteira de palavra de nenhum lado — nem `\b` à esquerda, nem `\b` à
@@ -609,8 +618,25 @@ function identifierValue(token) {
   if ((core.match(/\d/gu) ?? []).length >= 4) return true;
   return length >= 8 && /\d|[^\p{L}\p{N}\s]/u.test(core);
 }
+/**
+ * Portão das regras de CAUDA (rótulo e valor sem separador): aqui o valor fraco SÓ vale quando o rótulo é
+ * reconhecido (palavra do vocabulário ou identificador de credencial). Fora disso, exige valor com cara de
+ * credencial — é o que impede `chaveiros personalizados` e `pincel profissional` de virarem tarja.
+ */
+function shapesValueTail(label, token) {
+  if (isWholeCredentialLabel(label) || isSensitiveKeyName(label)) return true;
+  return credentialLikeToken(token);
+}
+
 function shapesValue(label, token) {
-  return isWholeCredentialLabel(label) || identifierValue(token);
+  // Rótulo reconhecido — palavra do vocabulário OU identificador de credencial que o vocabulário de
+  // chave conhece (`novasenha`, `senha_forte`, `sessionid`) — é ATRIBUIÇÃO: o valor sai inteiro, fraco
+  // ou forte. O portão de valor existe só para a palavra da língua que contém o radical (`Chaveiro`,
+  // `pintura`, `hairpin`), que é o caso em que tarjar destruiria evidência. Era essa assimetria entre
+  // "chave" e "rótulo" que recriava a classe a cada geração — Critical C2 da revisão da 1.1.37.
+  if (isWholeCredentialLabel(label)) return true;
+  if (isSensitiveKeyName(label)) return true;
+  return identifierValue(token);
 }
 /**
  * O TOKEN inteiro em volta do rótulo casado. O vocabulário de prosa é permissivo de propósito (o radical
@@ -636,11 +662,11 @@ function tailPasses(text) {
     // medida na revisão da 1.1.32).
     .replace(new RegExp(String.raw`(${VALUE_LABEL_ADJACENT_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
       (match, label, space, token, offset, whole) =>
-        (valueLikeToken(token) && shapesValue(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
+        (valueLikeToken(token) && shapesValueTail(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
           ? `${label}${space}[redacted]` : match))
     .replace(new RegExp(String.raw`(${VALUE_LABEL_TAIL_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
       (match, label, space, token, offset, whole) =>
-        (strongValueToken(token) && shapesValue(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
+        (strongValueToken(token) && shapesValueTail(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
           ? `${label}${space}[redacted]` : match));
 }
 export function redactCredentialLabelTail(value) {
@@ -822,12 +848,18 @@ function sensitivePasses(marked) {
       // era por aqui que o identificador de raiz editável virava `[redacted]` em vez de ser descartado
       // (falha determinística medida pela revisão da 1.1.36 em `normalize-snapshot.test.js`).
       if (!/[\s:=]|->|=>|\u2192/u.test(match)) return match;
+      // Com separador quem decide é a regra do separador (que tem o portão de valor); a cauda existe para
+      // o caso SEM separador. Sem esta guarda, `Chaveiro: A1B2C3` voltava a ser tarjado pela cauda.
+      if (/[:=]|->|=>|\u2192/u.test(match)) return match;
       // O token em volta pode ser maior que o rótulo casado (`pin` dentro de `xpin`): a decisão de
       // palavra-vs-identificador tem de ser tomada no texto original, não no pedaço isolado.
       const token = tokenAround(wholeText, offset, 1);
       if (isWholeCredentialLabel(token)) return redactCredentialLabelTail(match);
       const value = match.trim().split(/\s+/u).at(-1) ?? '';
-      return shapesValue(token, value)
+      // Na CAUDA (sem separador) o valor tem de TER CARA DE CREDENCIAL quando o rótulo não é
+      // reconhecido: um adjetivo comprido depois de uma palavra da língua (`A loja vende chaveiros
+      // personalizados.`) é prosa, e o comprimento sozinho a tarjava — Important I1 da revisão da 1.1.37.
+      return shapesValueTail(token, value)
         ? `${match.slice(0, match.length - value.length)}[redacted]`
         : match;
     })
@@ -837,9 +869,13 @@ export function redactSensitiveText(value) {
   if (!mayCarryCredential(value)) return String(value ?? '');
   const marked = withCamelMarks(value);
   let text = sensitivePasses(marked);
-  // Segunda leitura, sem marcas: `SeNhA:` é o mesmo rótulo que `senha:` para quem lê, e a marca que
-  // resolve `senhaAtual` quebra a palavra no meio dele. Roda só quando houve marca a inserir.
+  // Segunda leitura, sem marcas: `senhaAtual` precisa da marca, mas a marca quebra a palavra quando a
+  // página mistura a caixa DENTRO do radical.
   if (marked.includes(CAMEL_MARK)) text = sensitivePasses(stripCamelMarks(text));
+  // A caixa misturada DENTRO do radical (`SeNhA`) continua ABERTA: a leitura em minúsculas foi tentada e
+  // revertida porque devolvia o texto entregue em minúsculas (alterando evidência) e quebrava 14 testes.
+  // O conserto exige mapear a tarja de volta para o texto original — está registrado na trilha como
+  // pendência declarada, com a reprodução e a causa medidas.
   return stripCamelMarks(text);
 }
 
