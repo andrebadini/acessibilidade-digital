@@ -198,3 +198,28 @@ Li as impressas 22 e 23 direto do PDF fornecido (índice físico = impressa + 9)
 5.9.7 é **requisito** e pede que **todos possam perceber**. Duas consequências: (a) como requisito, uma reprovação ali chega ao relatório com a frase legal de não conformidade — o que dá a dimensão exata do achado Critical da revisão da 1.1.16; (b) como o texto exige percepção, e percepção depende de contraste, tamanho, posição e do recurso que apresenta a marcação, nenhuma observação de texto pode **aprovar** o item. Foi por isso que os dois ramos passaram a `cantTell`, e não apenas o ramo da ausência.
 
 Isto é leitura direta da norma, não interpretação de segunda mão: as duas citações acima foram extraídas do PDF cujo SHA-256 é `1c3ee66b…`, o mesmo registrado na meta.
+
+## Conferência de 17/09/2026 — as pendências de integração de 5.9.7 e 5.9.8 estão FECHADAS
+
+Um ponto de retomada antigo ainda listava duas "lacunas de integração" nesta família. Conferidas no código
+atual, com linha: **as duas estão fechadas** e não devem ser reabertas sem RED novo e reproduzível.
+
+- **5.9.7 (obrigatoriedade).** O coletor **produz** os dois campos que a regra lê:
+  `src/collector/page-collector.js:449` grava `required` (quando definido) e `requiredIndicator` (quando
+  `required === true`, via `requiredMarkerNear`); e `src/core/rules/forms.js:361-367` consome
+  `field.required` e `field.requiredIndicator`. A regra **não produz `failed` por desenho** — os dois grupos
+  viram **suspeita concreta por campo** no grupo de revisão humana, porque nada do que se mede ali prova
+  percepção (marcação ausente nas fontes observadas pode existir fora delas), e o comentário da própria
+  regra registra a medição que motivou a mudança. `required` (atributo) **não** é tratado como prova de
+  indicação perceptível.
+- **5.9.8 (finalidade).** A regra `inputPurpose` (`src/core/rules/forms.js:468`, registrada em `:544`) **não
+  espera** um campo `inputPurpose` do coletor: a única fonte observada de finalidade é a declaração
+  `autocomplete` do próprio campo (`declaredPurpose`), e nome, tipo de entrada e texto ao redor **nunca** são
+  usados como prova de dado pessoal — campo que não declara nada fica em `cantTell`, com a limitação
+  explícita, em vez de virar falha.
+- **O que continua pendente de verdade nesta família** (e não é defeito): ampliar a automação de **5.9.1**
+  exige um produtor de evidência **visual** suficiente, que ainda não existe — a correção anterior removeu a
+  inferência incorreta (nome acessível não prova identificação visual) e passou a pendência a **um** `cantTell`
+  agregado, sem multiplicar por campo; e o nome acessível vazio de **campo customizado**
+  (`div role=textbox contenteditable`) pode ser removido pelo normalizador por privacidade, o que mantém a
+  regra de nome em `cantTell` — cobertura pendente, com a fronteira de privacidade preservada.
