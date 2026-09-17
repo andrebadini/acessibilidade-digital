@@ -1,5 +1,18 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.31, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.31.zip` (`28a53946…32ba`), **sem revisão independente ainda**.
+> Fecha o veredito da 1.1.30 inteiro (1 Critical, 3 Important, 5 Minor). Para os critérios, **5** de novo:
+> a classe continuava aberta em 24 formas, e a mais grave era de idioma — o rótulo só aceitava ASCII nos
+> tokens do sufixo, então `Cartão de crédito:` e `senha do usuário:` não acendiam o sinal. Entram as
+> letras acentuadas (`[\p{L}\p{N}]{1,24}`), a "cara de valor" volta a aceitar comprimento de segredo e
+> símbolo (por token, descontando a pontuação final de frase) e o sinal passa a exigir valor com cara de
+> valor **ou** token final do acumulado, o que preserva prosa comum (`A senha deve ter 8 caracteres`,
+> `Chave da API: consulte o manual.`) sem reabrir as formas com valor. **11** ganha também a resposta ao
+> Minor reincidente: a métrica da classe virou teste do repositório
+> (`test/core/credential-class-metric.test.js`), com comando reproduzível. **10** volta a **Atendido**;
+> **8** continua **Parcial**, porque depende de pessoa de fora.
+
 > **Incremento 1.1.30, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.30.zip` (`0c690ba3…f6ae2`), **sem revisão independente ainda**.
 > Fecha o veredito da 1.1.29 inteiro (1 Critical, 7 Important, 5 Minor). Para os critérios, **5** é a

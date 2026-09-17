@@ -221,9 +221,8 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
     textStream = `${textStream} ${decoded}`;
     if (!tainted && hasCredentialValueSignal(textStream)) tainted = true;
     if (tainted) {
-      // O fragmento que trouxe o próprio sinal preserva o rótulo e tarja o valor; quando o sinal veio
-      // de antes, o fragmento inteiro É o valor.
-      // O fragmento que trouxe o sinal é tarjado a partir do texto DECODIFICADO: o rótulo pode estar
+      // O fragmento que trouxe o sinal preserva o rótulo e tarja o valor; quando o sinal veio de antes,
+      // o fragmento inteiro É o valor. A tarja parte do texto DECODIFICADO: o rótulo pode estar
       // escondido em entidade (`sen&#104;a`) ou em escape (`sen\u0068a`), e tarjar a forma crua não
       // encontraria nada. O trecho entregue passa a mostrar a forma normalizada, que é o que a página
       // significa.
@@ -239,7 +238,9 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       }
       return;
     }
-    output += sanitizeText(fragment);
+    // A regra de cauda vale também quando o sinal não acendeu: um fragmento com rótulo e valor sem
+    // separador (`<b>senha</b> …` no mesmo nó) é tarjado sem precisar contaminar o resto do trecho.
+    output += sanitizeText(redactCredentialLabelTail(fragment));
   };
   while (position < html.length) {
     const opening = html.indexOf('<', position);

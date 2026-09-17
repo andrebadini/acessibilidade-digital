@@ -4,35 +4,32 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.30 preparada — sem revisão independente ainda.** A revisão da **1.1.29** saiu com
-**1 Critical, 7 Important, 5 Minor e 5 observações**, e o diagnóstico dela é o que importa: a 1.1.29 era
-melhor que a 1.1.28 em tudo o que foi medido (**zero regressões**, 34 formas fechadas contra 14 abertas,
-os dois Important da 1.1.28 fechados), mas a **classe do C1 continuava aberta em 15 formas** — 12 de
-trecho, 2 de URL e 1 de nome acessível —, cada uma entregando a credencial a quatro superfícies. E a causa
-apontada era de desenho, não de cobertura: em `snippet.js` a decisão sobre o texto acumulado acontecia
-**depois** de o fragmento com o valor já ter sido emitido, e a espera por valor era consumida por
-**estrutura** (comentário HTML, elemento vazio, elemento vazio com atributos, elemento vazio não-void),
-nunca por conteúdo.
+**Versão 1.1.31 preparada — sem revisão independente ainda.** A revisão da **1.1.30** deu **1 Critical,
+3 Important, 5 Minor e 5 observações**. Ela confirmou o que importava: o mecanismo mudou de verdade (a
+decisão passou a ser por conteúdo, antes de emitir, e a espera por valor deixou de existir), **17 formas
+fecharam**, 31 controles próprios foram tarjados, e suíte, gates, integridade do pacote e artefato
+entregue estão corretos. Mas a classe continuava aberta em **24 formas**, e o achado mais grave era de
+**idioma**: `VALUE_LABEL_SOURCE` só aceitava `[A-Za-z0-9]` nos tokens do sufixo, então **`Cartão de
+crédito:`**, `Número do cartão de crédito:`, `senha do usuário:` e `Chave de segurança:` não acendiam o
+sinal — e um número de cartão inteiro chegava a quatro superfícies. A revisão também pegou uma
+**regressão minha**: ao trocar a classe de símbolo por uma lista fechada, perdi o comprimento de segredo
+(`\S{12,}`) e o símbolo em geral, e valores só de letras (`correcthorsebattery`) ou com `!`/`.` voltaram a
+passar — formas que a 1.1.29 tarjava. E mediu o outro lado: o sinal acendia em prosa legítima
+(`A senha deve ter 8 caracteres`, `Sua sessão expira em 30 minutos`) e apagava o resto do trecho, com a
+perda **fixada em teste** por mim.
 
-A 1.1.30 troca o mecanismo por **marcação por conteúdo**: assim que o texto acumulado — com entidades e
-escapes decodificados em até três passagens, incluindo `&#104;` e `\u0068` — mostra sinal de credencial
-(rótulo com separador, rótulo com sufixo colado ou separado por espaço, ou rótulo com cauda com cara de
-valor), **tudo o que vier depois no trecho perde texto e atributos, sem destarjar**. Não há mais espera
-para consumir, então nenhuma forma de marcação pode enganá-la. Fecha também o **nome acessível** pelo
-fallback de DOM (o `name` saía tarjado e a `description` entregava o valor) e as **chaves de URL
-percent-encoded** (`?co%64e=`).
+A 1.1.31 fecha os três: os tokens do rótulo aceitam letras acentuadas (`[\p{L}\p{N}]{1,24}`), a "cara de
+valor" volta a aceitar comprimento de segredo e símbolo — decidida **por token** e descontando a
+pontuação final de frase, de modo que `Segredo.Forte` é valor e `Digite sua senha atual.` é prosa —, e o
+sinal passa a exigir que o token depois do rótulo tenha cara de valor **ou** seja o último do acumulado
+(o valor pode continuar no nó seguinte, `senha: Wwa<br>Wwb`, ou depois de quebra de linha). Com isso as
+frases comuns ficam intactas e as formas com valor continuam fechando; as asserções que fixavam a perda
+voltaram a afirmar preservação de prosa.
 
-O preço está declarado e medido, não escondido: depois do primeiro sinal, o resto do trecho perde o texto
-— inclusive parágrafos seguintes —, e `?code=BR` de promoção ou `/code/1234` de rota inocente passam a ser
-tarjados. É a direção fail-closed: o relatório continua com seletor, nome acessível e captura, e o sinal
-só acende quando há rótulo de credencial (na auditoria real do Google, zero `[redacted]` e snippets
-idênticos aos da 1.1.28).
-
-A prova de não vacuidade é por mutação: com os sanitizadores da 1.1.29, o E2E do produto reprova nomeando
-`relatório, modelo e revisão guardados, artefato html, artefato json`; com a correção, passa. A métrica de
-aceitação tem **125 combinações** — todas as formas medidas pelas quatro revisões mais variações próprias
-— em quatro caminhos (trecho, JSON, nome acessível, URL), com **zero segredos sobreviventes** e os
-controles de prosa preservados.
+E a **métrica da classe virou teste do repositório** — `node --test test/core/credential-class-metric.test.js`
+—, com as formas de todas as revisões em cinco grupos (formas de trecho, rótulos, caudas divididas,
+atributos e URLs), verificadas em até três caminhos, mais o nome acessível do fallback e os controles de
+prosa. Era a resposta ao último Minor reincidente: a métrica não podia ser um número sem comando.
 
 Os seis E2E de escopo citados nas versões anteriores são **percurso obrigatório**
 (`mandatory-journey-mv3`), exportação da página atual, impressão executiva, layout de impressão,
