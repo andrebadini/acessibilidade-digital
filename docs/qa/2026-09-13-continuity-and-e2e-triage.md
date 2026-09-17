@@ -2641,3 +2641,21 @@ Segunda leva de conserto da revisão da 1.1.37. Tudo o que segue foi medido nos 
 - `--muted: #738596` sobre branco dá **3,80:1** — abaixo de 4,5:1 —, mas no CSS do relatório a cor só aparece em **bordas** (não-texto) e no **texto de controle desabilitado** (`button:disabled, select:disabled`), que a WCAG 1.4.3 isenta; nenhum texto ativo usa essa cor. Registrado para não ser "descoberto" de novo como suspeita.
 
 **Guarda permanente:** `test/e2e/product-surface-axe-mv3.test.mjs` (classificado em `REAL_CHROME_E2E`), com política de asserção declarada — **zero violações** em qualquer superfície e `incomplete` só para o `color-contrast` do `<text>` do gráfico; qualquer outro id reprova. É o primeiro teste do produto que mede a acessibilidade **do próprio produto**.
+
+### Rodada 83 (continuação) — as pendências de formulário do briefing estavam VENCIDAS, e agora têm prova ponta a ponta
+
+O briefing de retomada registrava duas lacunas de integração na família de formulários: (a) "5.9.7: collector produz `record.form.required`; regra espera `field.required` e `requiredIndicator`"; (b) "5.9.8: regra espera `inputPurpose`, que não é produzido". **Medido antes de mexer (o hábito que evita consertar o que não está quebrado): as duas estão fechadas no código corrente.**
+
+- **Coletor**: `src/collector/page-collector.js` grava `required` (estado calculado, com o token ARIA tendo precedência e valor ARIA malformado deliberadamente **não observado**) e `requiredIndicator` (a marcação declarada ao lado do campo) **no registro do nó** — não só em `record.form.required`, que continua existindo como observação nativa crua para consumidores de campo. `normalize-snapshot.js` preserva as duas chaves, e a evidência coletada confirma o atributo: o trecho do campo é `<input id="email" name="email" type="email" autocomplete="email" required="">`.
+- **Regra 5.9.7** (`required-field-identification`): com `required` e sem marcação observada, devolve **`cantTell` com 1 alvo** e motivo `missing-required-identification` — suspeita por campo, **nunca** "Inconformidade" (a percepção não é medida automaticamente; a marcação pode estar fora das fontes observadas).
+- **Regra 5.9.8** (`input-purpose`): a finalidade observável é o **próprio atributo `autocomplete`** do campo (nome, `type` e texto ao redor não são usados como prova). Medidas as três ramificações que decidem se a regra está viva, em Chrome real, com fixture servida e auditoria ponta a ponta:
+
+| Fixture | Resultado medido da regra | Item 5.9.8 |
+|---|---|---|
+| Todos os campos com token válido (`name`, `email`, `tel`) | **`passed`**, 0 alvos | `passed` |
+| Um campo sem declaração (`type="tel"` sem `autocomplete`) | **`cantTell`**, 0 alvos | `cantTell` |
+| Um campo com token inválido (`autocomplete="nao-existe"`) | **`failed`**, 1 alvo, motivo `invalid-or-missing-autocomplete` | `failed` |
+
+**Guarda permanente:** `test/e2e/form-required-and-purpose-mv3.test.mjs` (classificado em `REAL_CHROME_E2E`, 4 casos, ~5 s) fixa as quatro medições acima. Sem ele, uma mudança futura no coletor poderia matar a 5.9.8 em silêncio — o item cairia no checklist como "não observado" e a diferença não apareceria em nenhum teste, que é exatamente o risco que o briefing apontava.
+
+O que **continua pendente** na família de formulários, sem mudança nesta rodada: o produtor de evidência visual suficiente para ampliar a automação de 5.9.1 (a inferência incorreta foi removida na 1.1.38 e a automação **não** está concluída) e a cobertura de nome vazio em campo customizado `contenteditable` (o normalizador pode remover o nome por privacidade; a regra fica `cantTell`).
