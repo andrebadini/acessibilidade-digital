@@ -3157,9 +3157,10 @@ do teste registra a armadilha para quem mexer depois.
   **1,3 s** (era `WAIT_TIMEOUT` de 31 s com a fronteira larga);
 - painel **260/260**;
 - suíte completa: fase paralela **0 falhas** (1 pulado) e fase serial **111 testes, 101 passam, 10 falham** —
-  o conjunto de falhas caiu de **12 para 10**, as duas fechadas são exatamente as do cancelamento, e **nenhuma
-  falha nova** apareceu; as 10 são **9 em `test/e2e/sidepanel-flow-mv3.test.mjs`** (o arquivo do incremento
-  paralelo, cujo percurso de pixel é o defeito de raiz ainda aberto) mais a flake declarada `axe-mv3-csp`;
+  o conjunto de falhas caiu de **12 para 10**, as duas fechadas são o caso do cancelamento durante a pausa e o
+  bloco que o contém (`URL pixel modes pause, …`), e **nenhuma falha nova** apareceu; as 10 são **9 em
+  `test/e2e/sidepanel-flow-mv3.test.mjs`** (o arquivo do incremento paralelo, cujo percurso de pixel é o
+  defeito de raiz ainda aberto) mais a flake declarada `axe-mv3-csp`;
 - pacote `audita-acessibilidade-1.1.47.zip`, **199 arquivos**, digest
   `2bb01b211cbf79d21fd9692f680931014d4762161d4731ab796298cade9347ac`, versão **1.1.47** no manifesto;
 - gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**;

@@ -600,4 +600,4 @@ falhou do outro lado, porque na revogação o painel **tem** `auditId` (medido c
 extensão: `{screen:"running", auditId:"c08060c6-…"}` no bootstrap ocioso). A fronteira correta é o **pedido do
 usuário** (`cancellationRequested`), e com ela os dois lados passam: mensagem na revogação, neutro no
 cancelamento. O conjunto de falhas da fase serial caiu de **12 para 10** entre as duas medições do mesmo dia, as
-duas fechadas são exatamente as do cancelamento e **nenhuma falha nova** apareceu.
+duas fechadas são o caso do cancelamento e o bloco que o contém, e **nenhuma falha nova** apareceu.
