@@ -210,7 +210,11 @@ const PROSA_NAO_ROTULO = [
 // caminho de CHAVE (identificador colado: `data-hairpin`, `hairpin`) e é PRESERVADA em prosa — a revisão
 // da 1.1.34 mediu que a regra genérica de prefixo destruía `The hairpin: 12 units` sem cobrir o que
 // importava (`sessionid`, `senhaforte`), que agora têm prefixo/cauda de credencial próprios.
-const PRECO_DECLARADO = ['hairpin', 'pushpin', 'backspin', 'userpin'];
+// O preço mudou de lado outra vez na 1.1.37: `hairpin`/`pushpin`/`backspin` são PALAVRA da língua e ficam
+// preservadas nos DOIS caminhos (a revisão da 1.1.36 mediu `pintura.png` e `secretaria-saude` destruídos
+// e `hairpin` era o preço declarado antigo). O caminho de chave passou a exigir lista fechada
+// (`userpin` = prefixo `user` + radical, `sessionid` = radical + cauda `id`).
+const PRECO_DECLARADO = ['userpin', 'sessionid', 'senha_forte', 'data-senhaforte'];
 // Palavras medidas uma a uma pela revisão da 1.1.33: contêm radical e NÃO podem ser rótulo.
 const PALAVRAS_FALSAS = [
   'chaveiro', 'chaveta', 'chaveamento', 'secretaria', 'secretário', 'secretariado', 'secreto',
@@ -330,7 +334,12 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
     assert.equal(isSensitiveValue(palavra), false, `"${palavra}" contém radical curto e não é rótulo de valor`);
   }
   for (const palavra of PRECO_DECLARADO) {
-    assert.equal(isSensitiveKeyName(palavra), true, `"${palavra}" é o preço declarado do caminho de CHAVE e precisa estar medido`);
+    assert.equal(isSensitiveKeyName(palavra), true, `"${palavra}" é identificador de credencial e precisa ser tarjado como chave`);
+  }
+  // E o outro lado, medido pela revisão da 1.1.36: palavra da língua que contém o radical não pode ser
+  // destruída no caminho de chave.
+  for (const palavra of ['pintura.png', 'pintura', 'pincel', 'secretaria-saude', 'hairpin', 'pushpin', 'backspin']) {
+    assert.equal(isSensitiveKeyName(palavra), false, `"${palavra}" é palavra/identificador inocente e não pode ser tarjada como chave`);
   }
   // E o outro lado do preço: em PROSA a palavra terminada em radical curto é preservada, com o caso que a
   // revisão da 1.1.34 mediu.

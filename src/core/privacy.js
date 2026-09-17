@@ -322,7 +322,12 @@ export function isWholeCredentialLabel(value) {
  * que a 1.1.33 tarjava e a revisão da 1.1.34 mediu que a 1.1.34 tinha perdido. O custo é tarjar uma
  * chave a mais; o custo do outro lado era o valor da credencial chegar ao entregável.
  */
-export const SENSITIVE_KEY_NAME = new RegExp(`(?:${KEY_NAME_SOURCE})`, 'iu');
+// CHAVE/IDENTIFICADOR: aqui as listas fechadas valem, e a diferença é deliberada em relação à prosa. Um
+// identificador é uma palavra ou um composto de partes conhecidas (`sessionid`, `senha_forte`,
+// `data-senhaforte`, `novasenha`, `userpin`), e NÃO uma palavra da língua que contém o radical
+// (`pintura`, `pincel`, `secretaria-saude` eram destruídas por isso — Important I1 da revisão da 1.1.36).
+const ID_NAME_SOURCE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?<![\p{L}\p{N}])${STEM_ALTERNATION}(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){1,3}|(?:${PREFIXES_ALTERNATION})${STEM_ALTERNATION}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}(?:${PHRASES_ALTERNATION})${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
+export const SENSITIVE_KEY_NAME = new RegExp(`(?:${ID_NAME_SOURCE}|(?:${PHRASES_SEPARADOR_ALTERNATION}))`, 'iu');
 export function isSensitiveKeyName(value) {
   return SENSITIVE_KEY_NAME.test(withCamelMarks(String(value ?? '')));
 }
@@ -813,6 +818,10 @@ function sensitivePasses(marked) {
   return text
     .replace(TAIL_CANDIDATE, (match, offset, wholeText) => {
       if (match.includes('[redacted]')) return match;
+      // Um TOKEN só, sem espaço nem separador, não é rótulo com valor: não há o que tarjar, e
+      // era por aqui que o identificador de raiz editável virava `[redacted]` em vez de ser descartado
+      // (falha determinística medida pela revisão da 1.1.36 em `normalize-snapshot.test.js`).
+      if (!/[\s:=]|->|=>|\u2192/u.test(match)) return match;
       // O token em volta pode ser maior que o rótulo casado (`pin` dentro de `xpin`): a decisão de
       // palavra-vs-identificador tem de ser tomada no texto original, não no pedaço isolado.
       const token = tokenAround(wholeText, offset, 1);
@@ -944,7 +953,9 @@ function contentEditableControl(node) {
 
 function safeIdRefs(value) {
   const tokens = String(value ?? '').trim().split(/\s+/u).filter(Boolean);
-  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !isSensitiveKeyName(token))
+  // Identificador declarado pelo autor que CARREGA radical de credencial é descartado com o predicado de
+  // PROSA: o identificador do teste tem o radical no fim de um pedaço e precisa sumir, não virar `[redacted]`.
+  return tokens.length > 0 && tokens.every(token => /^[a-z_][a-z0-9_.:-]*$/iu.test(token) && !SENSITIVE_KEY.test(withCamelMarks(token)))
     ? tokens.join(' ')
     : '';
 }
@@ -955,8 +966,11 @@ function safeIdRefs(value) {
 const MAX_AUTHORED_LABEL = 512;
 function safeAuthoredLabel(value) {
   const label = String(value ?? '').trim().replace(/\s+/gu, ' ');
+  // O gate é o predicado de PROSA (`SENSITIVE_KEY`): o identificador de teste tem o radical no fim de um
+  // pedaço do identificador e precisa ser DESCARTADO, não tarjado — era a diferença que a revisão da
+  // 1.1.36 mediu como falha determinística em `normalize-snapshot.test.js`.
   return label.length > 0 && label.length <= MAX_AUTHORED_LABEL &&
-    !/[\u0000-\u001F\u007F]/u.test(label) && !isSensitiveKeyName(label)
+    !/[\u0000-\u001F\u007F]/u.test(label) && !SENSITIVE_KEY.test(withCamelMarks(label))
     ? label
     : '';
 }

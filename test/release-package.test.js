@@ -17,7 +17,7 @@ const packageName = 'audita-acessibilidade-1.1.37.zip';
 // fresh build alone was not enough: an independent review replaced release/audita-acessibilidade-1.1.19.zip
 // with garbage bytes and the suite stayed green, because the digest never touched the delivered
 // file. That is the same hole that let the 1.1.15 artifact be overwritten unnoticed.
-const deliveredPackageSha256 = '613e64f8611144658065152b7f9be1d89b83ca88a2d69b8c78f0a296c11b7d9e';
+const deliveredPackageSha256 = 'b6a1a8c05a30ee5f894986a35760518243cce794e683f39ad51a08d64cc044de';
 // The artifact the independent review approved, kept in release/ so the evidence of what was
 // reviewed survives even though the source has moved past it and it is no longer reproducible from
 // HEAD. It stays reconstructible from its own commit, 49d70ca, which was verified by rebuilding.
