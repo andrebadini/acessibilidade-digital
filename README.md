@@ -4,8 +4,60 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.32 preparada — sem revisão independente ainda.** A revisão da **1.1.31** deu **2 Critical,
-4 Important, 5 Minor e 5 observações**, e o diagnóstico dela é o que importa. Ela confirmou o conserto de
+**Versão 1.1.33 preparada — sem revisão independente ainda.** A revisão da **1.1.32** deu **1 Critical,
+3 Important, 4 Minor e 6 observações**, e três dos quatro bloqueios eram **regressões minhas**, todas da
+mesma família: consertei um caso e quebrei outro. O Critical era pré-existente e de vocabulário — `PIN`,
+`CVV`/`CVC`, `PUK`, `seed` de 2FA, `Número de segurança`, `Linha digitável` e `Código de barras` de boleto
+não estavam no vocabulário compartilhado e chegavam inteiros a quatro superfícies. O primeiro Important era
+meu: uma guarda que eu escrevi para não tarjar marcação (`&& !/[<>]/u.test(token)`) fez o tarjador de cauda
+**desistir**, e `<div title="senha X">` e `<p><b>senha</b> X</p>` saíam **intactos** — na 1.1.31 saíam
+tarjados. O segundo era pior: o scanner da cauda multi-palavra aceitava palavra de 12+ letras como valor, e
+**15 de 29 frases realistas** passaram a ser tarjadas (`A senha expira em 12/03 e pode ser trocada no
+portal.` → `A [redacted]`), inclusive uma que os meus próprios documentos declaravam intacta. O terceiro era
+de ferramenta: `npm test` abortava com `TEST_PLAN_UNCLASSIFIED_E2E` porque o E2E novo não estava no plano.
+
+A 1.1.33 fecha os quatro. O vocabulário de cartão e boleto entra na fonte única. Para a guarda, a resposta
+certa **não** era desistir: é **pular a marcação** entre o rótulo e o valor, o que fecha os dois casos ao
+mesmo tempo. O predicado da cauda multi-palavra passa a exigir **6+ caracteres com dígito ou símbolo** — o
+preço declarado é que `cartão de crédito correcthorsebattery` (frase-senha só de letras) deixa de ser
+reconhecida pela cauda multi-palavra e continua sendo pelo rótulo adjacente e por qualquer separador. E o
+E2E novo está registrado no plano.
+
+O Critical da 1.1.33 quase ficou **sem prova**, e quem mostrou foi a mutação que eu rodo antes de cada
+revisão: rodando a métrica da classe com o `privacy.js` da geração anterior, os
+quatro testes **passavam** — a lista não continha as formas de cartão e boleto, então o "0 vazamentos" valia
+para a geração anterior, não para o defeito. A métrica ganhou o grupo de **cartão e boleto** (nove formas) e
+quatro controles de prosa que falam do dado sem trazer valor; com os bytes da 1.1.32 ela reprova nomeando
+**24 vazamentos** e reprova a metade positiva do teste de sinal, e com os da 1.1.33 passa. O E2E de forma
+isolada ganhou as duas formas medidas nos artefatos (`CVV`, `Linha digitável`). O total de combinações
+passou a ser **calculado e afirmado pelo teste** — **57 formas, 222 combinações** —, porque o número que os
+documentos citavam antes era escrito à mão e não batia com a lista (era ele o Minor reincidente das revisões
+da 1.1.29 e da 1.1.30).
+
+E a fase serial do primeiro pacote da 1.1.33 pegou **uma regressão minha que a métrica não veria**: o
+vocabulário de cartão entrou como `pins?`, **sem fronteira de palavra**, e como a chave sensível casa
+substring, o "pin" dentro de "ship**pin**g" virou rótulo de credencial. O E2E do item **5.9.8** reprovou,
+porque `autocomplete="shipping street-address"` saía do snapshot como `shipping [redacted]` e um campo
+legítimo virava falha. Não era caso de teste: `Pintura: látex acrílico`, `Opinião do cliente: ótima`,
+`Pincel: cerda sintética` e `Espinha de peixe: 12` também eram tarjadas. O conserto tem fronteira de palavra
+para o rótulo isolado (`PIN: 4712`, `Pins: 12`, `meu_pin: 4712`) e formas compostas explícitas
+(`pin-code`, `pin_code`, `pinCode`, `pincode`, `PIN CODE`), e o controle é um corpus de **17 palavras que
+contêm radical curto e não são rótulo** mais sete frases — sem ele, estreitar o radical não teria prova. O
+pacote medido antes disso (`6f26a822`) **foi substituído antes de qualquer revisão**, e o artefato corrente
+é `6b1f2733…ee20`.
+
+Medido nesses bytes: gate de release GREEN; suíte com **4.209 testes na fase paralela (4.207 passam, 1
+falha — o teste de bitmap que passa 26/26 isolado —, 1 pulado)**; **fase serial completa na raiz extraída do
+zip, 74 testes com 65 passando e as 9 falhas todas no arquivo do outro incremento**; E2E de forma isolada
+com **6 passando e 2 reprovando** quando o sanitizador da geração anterior é restaurado (as duas formas de
+cartão e boleto); métrica da classe em **0 de 57 formas**; e auditoria ao vivo no Google, do pacote, em modo
+sem pixels: **0 falhas confirmadas, 1 recomendação/alerta, 2 suspeitas a confirmar, 9 resultados positivos,
+109 verificações no checklist, cobertura 28,5%, índice 9,0/10, PDF de 17 páginas**, quatro exportações
+`complete`, **146/146 ids e títulos no HTML e no PDF**, notas editoriais 5/5 nos dois, 0 palavras partidas e
+**0 `[redacted]`** no HTML e no JSON.
+
+A revisão da **1.1.31** deu **2 Critical, 4 Important, 5 Minor e 5 observações**, e o diagnóstico dela é o que
+importa. Ela confirmou o conserto de
 idioma ponta a ponta (com fixture isolada, os bytes da 1.1.30 entregam `Cartão de crédito:` em quatro
 superfícies e os da 1.1.31 não entregam nenhuma), mas mostrou que a classe continuava aberta em **10 das 24
 formas** medidas antes, mais quatro famílias novas — e encontrou o **quinto vocabulário privado** do

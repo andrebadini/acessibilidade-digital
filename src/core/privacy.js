@@ -88,7 +88,7 @@ function valueLikeToken(token) {
   if ([...core].length >= 12) return true;
   return /[^\p{L}\p{N}\s]/u.test(core);
 }
-const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)|pins?|cvv|cvc|puk|seed|linha[\s\-_]?digit[áa]vel|n[úu]mero[\s\-_]?de[\s\-_]?seguran[çc]a|c[óo]digo[\s\-_]?de[\s\-_]?barras|c[óo]digo[\s\-–—]+de[\s\-–—]+(?:verifica[çc][ãa]o|acesso|seguran[çc]a|recupera[çc][ãa]o|autentica[çc][ãa]o|confirma[çc][ãa]o)|frase[\s\-–—]+de[\s\-–—]+recupera[çc][ãa]o`;
+const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)|(?<![\p{L}\p{N}])pin(?:s)?(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])pin[-_ ]?(?:c[óo]digo|code)|cvv|cvc|puk|seed|linha[\s\-_]?digit[áa]vel|n[úu]mero[\s\-_]?de[\s\-_]?seguran[çc]a|c[óo]digo[\s\-_]?de[\s\-_]?barras|c[óo]digo[\s\-–—]+de[\s\-–—]+(?:verifica[çc][ãa]o|acesso|seguran[çc]a|recupera[çc][ãa]o|autentica[çc][ãa]o|confirma[çc][ãa]o)|frase[\s\-–—]+de[\s\-–—]+recupera[çc][ãa]o`;
 export const SENSITIVE_KEY = new RegExp(
   `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
 

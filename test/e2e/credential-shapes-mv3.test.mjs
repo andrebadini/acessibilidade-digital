@@ -16,6 +16,10 @@ const SHAPES = [
   ['forma qualificada em português', 'qualified-pt', (secret) => `<p>Código de verificação: ${secret}</p>`],
   ['cauda sem separador', 'tail', (secret) => `<p>cartão de crédito ${secret}</p>`],
   ['atributo no seletor', 'selector-attribute', (secret) => `<input id="alvo" title="senha ${secret}">`],
+  // Formas do Critical da 1.1.32 (vocabulário de cartão e boleto), medidas aqui para terem prova nos
+  // artefatos entregues e não só na unidade: são as duas que a revisão viu chegando inteiras.
+  ['CVV do cartão', 'card-cvv', (secret) => `<p>CVV: ${secret}</p>`],
+  ['linha digitável do boleto', 'boleto-linha', (secret) => `<p>Linha digitável: ${secret}</p>`],
 ];
 
 for (const [nome, slug, montar] of SHAPES) {

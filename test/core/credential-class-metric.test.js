@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
+import { SENSITIVE_KEY, decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
 import { sanitizeHtmlSnippetSource } from '../../src/core/evidence/snippet.js';
 import { computeAccessibleText } from '../../src/core/accessibility/accessible-name.js';
 import { buildStableSelector } from '../../src/core/evidence/selector.js';
@@ -68,6 +68,27 @@ const IDIOMA = [
   ['senha com traço', `<p>senha - ${S('97')}</p>`],
   ['cartão pela cauda', `<p>cartão de crédito ${S('98')}</p>`],
 ];
+// Formas de CARTÃO e BOLETO medidas pela revisão da 1.1.32: o vocabulário compartilhado não conhecia
+// PIN, CVV/CVC, PUK, seed de 2FA, número de segurança, linha digitável nem código de barras, e esses
+// rótulos entregavam o valor em quatro superfícies. Cada rótulo entra com valor com cara de valor, e a
+// não vacuidade é por mutação: com o `privacy.js` da geração anterior esta lista REPROVA.
+const CARTAO = [
+  ['PIN', `<p>PIN: ${S('100')}</p>`],
+  ['PIN do cartão', `<p>PIN do cartão: ${S('101')}</p>`],
+  ['CVV', `<p>CVV ${S('102')}</p>`],
+  ['CVC', `<p>CVC: ${S('103')}</p>`],
+  ['PUK', `<p>PUK: ${S('104')}</p>`],
+  ['seed de 2FA', `<p>seed: ${S('105')}</p>`],
+  ['número de segurança', `<p>Número de segurança: ${S('106')}</p>`],
+  ['linha digitável', `<p>Linha digitável: ${S('107')}</p>`],
+  ['código de barras', `<p>Código de barras: ${S('108')}</p>`],
+  // Formas de rótulo de PIN, porque a fronteira da palavra é parte da correção: `pins?` sem fronteira
+  // casava o "pin" DENTRO de "shipping" e tarjava `autocomplete="shipping street-address"` (achado pelo
+  // E2E do 5.9.8, não por esta métrica — o corpus de prosa não tinha palavra com o radical embutido).
+  ['PIN com hífen', `<p>pin-code: ${S('109')}</p>`],
+  ['PIN em camelCase', `<p>pinCode: ${S('110')}</p>`],
+  ['PIN em maiúsculas com espaço', `<p>PIN CODE: ${S('111')}</p>`],
+];
 const ROTULOS = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
 const CAUDAS = [
   ['cauda depois de vazio', `<p>senha: ${S('40')}<br>${S('41')}</p>`],
@@ -89,6 +110,19 @@ const URLS = [
   ['hash #access_token=', `/p#access_token=${S('66')}`], ['scope #code=', `https://exemplo.test/p#code=${S('67')}`],
 ];
 
+// Palavras da língua que CONTÊM um radical curto do vocabulário e não são rótulo de credencial. O caso
+// medido: `pins?` casava o "pin" dentro de "shipping" e a declaração `autocomplete="shipping
+// street-address"` era tarjada — o E2E do 5.9.8 reprovou, e a causa era esta. A lista é o controle de
+// não vacuidade da fronteira: sem ela, estreitar o radical para tirar o falso positivo não tem prova.
+const NAO_ROTULO = [
+  'shipping', 'pintura', 'pincel', 'pintor', 'pintinho', 'pintado', 'opinião', 'espinha',
+  'pingente', 'pinguim', 'pino', 'spin', 'pinky', 'pinta', 'papiro', 'passeio', 'passageiro',
+];
+const PROSA_NAO_ROTULO = [
+  'shipping street-address', 'Pintura: látex acrílico', 'Opinião do cliente: ótima',
+  'Pincel: cerda sintética', 'Espinha de peixe: 12', 'Pingente: prata', 'O pinguim nada no gelo.',
+];
+
 // Prosa legítima: o sinal de credencial NÃO pode acender, e o texto tem de sair intacto.
 // As frases que a revisão da 1.1.31 mediu como falso positivo depois do alargamento do rótulo: elas
 // precisam estar neste corpus, senão o controle de prosa não cobre o que os documentos declaram.
@@ -99,6 +133,10 @@ const PROSA_IDIOMA = [
   'Senha do usuário: redefinida ontem.', 'Chave da API: consulte o manual.',
   'Senha da conta: alterada em 12/03', 'A senha deve ter 8 caracteres',
   'Sua sessão expira em 30 minutos', 'Digite sua senha atual.', 'Sessão expirada.',
+  // Controles das formas de cartão/boleto acrescentadas na 1.1.33: o vocabulário novo não pode tarjar
+  // a frase que FALA do dado sem trazer valor.
+  'O PIN do cartão chega por carta.', 'Sua seed de recuperação é mostrada uma vez.',
+  'A linha digitável do boleto tem 47 dígitos.', 'O código de barras fica no rodapé do boleto.',
 ];
 const PROSA = [
   'A sessão de perguntas discutiu o cartão de crédito como tema e a chave do problema.',
@@ -106,12 +144,19 @@ const PROSA = [
   'O passeio de barco passou pelo cais e o passageiro embarcou.',
 ];
 
-test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', () => {
+test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t => {
   // Não vacuidade: a lista precisa ser larga o bastante para valer como métrica da classe.
   assert.ok(FORMAS.length >= 30, `a lista de formas encolheu: ${FORMAS.length}`);
   assert.ok(ROTULOS.length >= 12 && ATRIBUTOS.length >= 5 && URLS.length >= 8);
+  assert.ok(CARTAO.length >= 9, `a lista de cartão/boleto encolheu: ${CARTAO.length}`);
+  // O total de COMBINAÇÕES (forma x caminho) é o número que os documentos citam, e por isso ele é
+  // calculado aqui em vez de escrito à mão: uma lista que encolher derruba esta asserção.
+  const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length) * 3
+    + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + URLS.length * 2;
+  t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length} combinações=${combinacoes}`);
+  assert.ok(combinacoes >= 210, `a métrica encolheu: ${combinacoes} combinações`);
   const vazamentos = [];
-  for (const [nome, html] of [...FORMAS, ...IDIOMA]) {
+  for (const [nome, html] of [...FORMAS, ...IDIOMA, ...CARTAO]) {
     const sentinela = html.match(/ADVSEN\d+X/u)?.[0] ?? '';
     assert.ok(sentinela, `a forma "${nome}" precisa de sentinela própria`);
     const trecho = sanitizeHtmlSnippetSource(html);
@@ -161,6 +206,24 @@ test('o nome acessível do fallback de DOM não devolve a credencial', () => {
   assert.doesNotMatch(`${comAx.name}|${comAx.description}`, new RegExp(sentinela, 'u'));
 });
 
+test('palavra da língua com radical curto embutido não vira rótulo de credencial', () => {
+  // A fronteira do radical é uma decisão de cobertura com dois lados, e este é o lado que o E2E do 5.9.8
+  // mediu: `pins?` sem fronteira casava o "pin" de "shipping". Sem esta asserção, a correção da fronteira
+  // fica sem controle — e foi exatamente assim que o defeito passou pela métrica na primeira medição.
+  for (const palavra of NAO_ROTULO) {
+    assert.equal(SENSITIVE_KEY.test(palavra), false, `"${palavra}" contém radical curto e não é rótulo`);
+  }
+  for (const frase of PROSA_NAO_ROTULO) {
+    assert.equal(redactSensitiveText(frase), frase, `"${frase}" é prosa e não pode ser tarjada`);
+    assert.doesNotMatch(sanitizeHtmlSnippetSource(`<p>${frase}</p>`), /\[redacted\]/u, `"${frase}" é prosa`);
+  }
+  // E o outro lado do mesmo radical: as formas de rótulo de PIN continuam acendendo.
+  for (const rotulo of ['PIN: 4712', 'Pins: 12', 'pin-code: 4712', 'pinCode: 4712', 'PIN CODE: 4712']) {
+    assert.equal(SENSITIVE_KEY.test(rotulo), true, `"${rotulo}" é rótulo de credencial`);
+    assert.match(redactSensitiveText(rotulo), /\[redacted\]/u, `"${rotulo}" precisa ser tarjado`);
+  }
+});
+
 test('o sinal de credencial não acende em prosa legítima e o texto sai intacto', () => {
   for (const texto of [...PROSA, ...PROSA_IDIOMA]) {
     assert.doesNotMatch(sanitizeHtmlSnippetSource(`<p>${texto}</p>`), /\[redacted\]/u, `"${texto}" é prosa, não credencial`);
@@ -172,7 +235,9 @@ test('o sinal de credencial não acende em prosa legítima e o texto sai intacto
   }
   for (const texto of ['senha ZQXJKVBWPMTLRNHS', 'senha Segredo.Forte', 'chave Segredo!Forte',
     'Cartão de crédito: 4111 2222 3333 4444', 'senha do usuário: ZQXJKVBWPMTLRNHS', 'Senha atual: ZQXJKVBWPMTLRNHS',
-    '{"senha": "ZQXJKVBWPMTLRNHS"}', 'senha:', 'chave =', 'token -> ZQXJKVBWPMTLRNHS']) {
+    '{"senha": "ZQXJKVBWPMTLRNHS"}', 'senha:', 'chave =', 'token -> ZQXJKVBWPMTLRNHS',
+    'CVV: 123', 'PUK: 12345678', 'PIN: 4712', 'Número de segurança: 123',
+    'Linha digitável: 00190.00009 03309.224285 00000.000008 1 1234']) {
     assert.equal(hasCredentialValueSignal(texto), true, `"${texto}" precisa acender o sinal`);
   }
   assert.equal(redactCredentialLabelTail('senha ZQXJKVBWPMTLRNHS'), 'senha [redacted]');
