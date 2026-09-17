@@ -227,7 +227,7 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       // encontraria nada. O trecho entregue passa a mostrar a forma normalizada, que é o que a página
       // significa.
       if (hasCredentialValueSignal(decoded)) {
-        const sanitized = sanitizeText(redactCredentialLabelTail(decoded));
+        const sanitized = sanitizeText(decoded);
         // O valor pode continuar depois de uma quebra de linha DENTRO do fragmento (`token: A\nB`): o
         // tarjador para na quebra, então o resto depois do marcador também cai.
         const marker = sanitized.lastIndexOf('[redacted]');
@@ -240,7 +240,7 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
     }
     // A regra de cauda vale também quando o sinal não acendeu: um fragmento com rótulo e valor sem
     // separador (`<b>senha</b> …` no mesmo nó) é tarjado sem precisar contaminar o resto do trecho.
-    output += sanitizeText(redactCredentialLabelTail(fragment));
+    output += sanitizeText(fragment);
   };
   while (position < html.length) {
     const opening = html.indexOf('<', position);

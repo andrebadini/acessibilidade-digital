@@ -4,32 +4,33 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.31 preparada — sem revisão independente ainda.** A revisão da **1.1.30** deu **1 Critical,
-3 Important, 5 Minor e 5 observações**. Ela confirmou o que importava: o mecanismo mudou de verdade (a
-decisão passou a ser por conteúdo, antes de emitir, e a espera por valor deixou de existir), **17 formas
-fecharam**, 31 controles próprios foram tarjados, e suíte, gates, integridade do pacote e artefato
-entregue estão corretos. Mas a classe continuava aberta em **24 formas**, e o achado mais grave era de
-**idioma**: `VALUE_LABEL_SOURCE` só aceitava `[A-Za-z0-9]` nos tokens do sufixo, então **`Cartão de
-crédito:`**, `Número do cartão de crédito:`, `senha do usuário:` e `Chave de segurança:` não acendiam o
-sinal — e um número de cartão inteiro chegava a quatro superfícies. A revisão também pegou uma
-**regressão minha**: ao trocar a classe de símbolo por uma lista fechada, perdi o comprimento de segredo
-(`\S{12,}`) e o símbolo em geral, e valores só de letras (`correcthorsebattery`) ou com `!`/`.` voltaram a
-passar — formas que a 1.1.29 tarjava. E mediu o outro lado: o sinal acendia em prosa legítima
-(`A senha deve ter 8 caracteres`, `Sua sessão expira em 30 minutos`) e apagava o resto do trecho, com a
-perda **fixada em teste** por mim.
+**Versão 1.1.32 preparada — sem revisão independente ainda.** A revisão da **1.1.31** deu **2 Critical,
+4 Important, 5 Minor e 5 observações**, e o diagnóstico dela é o que importa. Ela confirmou o conserto de
+idioma ponta a ponta (com fixture isolada, os bytes da 1.1.30 entregam `Cartão de crédito:` em quatro
+superfícies e os da 1.1.31 não entregam nenhuma), mas mostrou que a classe continuava aberta em **10 das 24
+formas** medidas antes, mais quatro famílias novas — e encontrou o **quinto vocabulário privado** do
+produto: o gerador de seletor CSS, só em inglês, que transformava `title="senha …"` em
+`input[title="senha …"]` e mandava o valor ao relatório, ao modelo e aos artefatos.
 
-A 1.1.31 fecha os três: os tokens do rótulo aceitam letras acentuadas (`[\p{L}\p{N}]{1,24}`), a "cara de
-valor" volta a aceitar comprimento de segredo e símbolo — decidida **por token** e descontando a
-pontuação final de frase, de modo que `Segredo.Forte` é valor e `Digite sua senha atual.` é prosa —, e o
-sinal passa a exigir que o token depois do rótulo tenha cara de valor **ou** seja o último do acumulado
-(o valor pode continuar no nó seguinte, `senha: Wwa<br>Wwb`, ou depois de quebra de linha). Com isso as
-frases comuns ficam intactas e as formas com valor continuam fechando; as asserções que fixavam a perda
-voltaram a afirmar preservação de prosa.
+Duas outras coisas que a revisão mediu merecem registro. A primeira é que a **minha prova de não vacuidade
+era falsa para aquele incremento**: restaurar os sanitizadores da versão anterior e rodar o E2E de
+exportação **passava**, porque a marcação por conteúdo é monotônica e um crédito reconhecido antes mascara
+as formas seguintes no mesmo contêiner. A segunda é que a abertura do rótulo para aceitar acento criou
+**sete tarjas novas em prosa realista** — `Segredo de justiça: o processo tramita em sigilo.` entre elas —,
+inclusive uma frase que os meus próprios documentos declaravam intacta. E, no meio disso, a revisão expôs
+um defeito meu de escape: ao reescrever o tarjador de cauda num template literal comum, `\s` virou `s` e a
+função ficou **no-op silencioso**.
 
-E a **métrica da classe virou teste do repositório** — `node --test test/core/credential-class-metric.test.js`
-—, com as formas de todas as revisões em cinco grupos (formas de trecho, rótulos, caudas divididas,
-atributos e URLs), verificadas em até três caminhos, mais o nome acessível do fallback e os controles de
-prosa. Era a resposta ao último Minor reincidente: a métrica não podia ser um número sem comando.
+A 1.1.32 fecha tudo isso: a janela do rótulo aceita quatro palavras (com parênteses e hífen), entram as
+formas qualificadas em português (`código de verificação`, `frase de recuperação`), a cauda sem separador
+ganha um **scanner de tokens** (o regex não consegue exigir "token com cara de valor" com janela
+preguiçosa, porque o motor se compromete com a primeira segmentação), o gerador de seletor passa a usar o
+vocabulário compartilhado, e a tarja do rótulo com separador passa a decidir pelo **valor** — valor com
+cara de valor ou token único —, o que preserva prosa (`Segredo de justiça:`, `Senha do usuário: mínimo de
+8 caracteres.`, `Chave da API: consulte o manual.`) sem reabrir credencial. A não vacuidade passou a ter
+duas provas com dentes: a métrica inclui as formas de idioma no grupo de vazamento (com os bytes da 1.1.31
+ela reprova com 23 vazamentos) e um **E2E de forma isolada** (`credential-shapes-mv3`, uma página por
+forma) reprova 4 das 6 formas contra os bytes da 1.1.31.
 
 Os seis E2E de escopo citados nas versões anteriores são **percurso obrigatório**
 (`mandatory-journey-mv3`), exportação da página atual, impressão executiva, layout de impressão,

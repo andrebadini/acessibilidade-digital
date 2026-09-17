@@ -4,6 +4,7 @@ import test from 'node:test';
 import { decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
 import { sanitizeHtmlSnippetSource } from '../../src/core/evidence/snippet.js';
 import { computeAccessibleText } from '../../src/core/accessibility/accessible-name.js';
+import { buildStableSelector } from '../../src/core/evidence/selector.js';
 
 // A MÉTRICA DA CLASSE, num arquivo só e com comando reproduzível:
 //   node --test test/core/credential-class-metric.test.js
@@ -53,6 +54,20 @@ const FORMAS = [
   ['V29 entidade de letra', `<p>sen&#104;a: ${S('40')}</p>`],
   ['V29 escape unicode', `<p>sen\\u0068a: ${S('41')}</p>`],
 ];
+// Formas de IDIOMA e de JANELA DE RÓTULO medidas pela revisão da 1.1.31: acento nos tokens do sufixo,
+// rótulo com parênteses, rótulo de quatro palavras e as formas qualificadas em português.
+const IDIOMA = [
+  ['cartão de crédito com valor', `<p>Cartão de crédito: ${S('90')}</p>`],
+  ['número do cartão do titular', `<p>Número do cartão de crédito do titular: ${'4111 1111 1111 1111'.replace(/1111 /gu, 'ADVSEN91X ')}</p>`],
+  ['dados do cartão', `<p>Dados do cartão de crédito ${S('91')}</p>`],
+  ['senha do usuário do sistema', `<p>senha do usuário do sistema: ${S('92')}</p>`],
+  ['código de verificação', `<p>Código de verificação: ${S('93')}</p>`],
+  ['frase de recuperação', `<p>frase de recuperação: ${S('94')}</p>`],
+  ['senha entre parênteses', `<p>Senha (provisória): ${S('95')}</p>`],
+  ['chave entre parênteses', `<p>Chave (API): ${S('96')}</p>`],
+  ['senha com traço', `<p>senha - ${S('97')}</p>`],
+  ['cartão pela cauda', `<p>cartão de crédito ${S('98')}</p>`],
+];
 const ROTULOS = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
 const CAUDAS = [
   ['cauda depois de vazio', `<p>senha: ${S('40')}<br>${S('41')}</p>`],
@@ -75,6 +90,16 @@ const URLS = [
 ];
 
 // Prosa legítima: o sinal de credencial NÃO pode acender, e o texto tem de sair intacto.
+// As frases que a revisão da 1.1.31 mediu como falso positivo depois do alargamento do rótulo: elas
+// precisam estar neste corpus, senão o controle de prosa não cobre o que os documentos declaram.
+const PROSA_IDIOMA = [
+  'Senha do usuário: mínimo de 8 caracteres.', 'Segredo de justiça: o processo tramita em sigilo.',
+  'Segredo de justiça: processo 1234.', 'Chave de proteção: aciona o disjuntor.',
+  'Token de verificação: enviado por SMS.', 'Palavra-passe provisória: entregue no balcão.',
+  'Senha do usuário: redefinida ontem.', 'Chave da API: consulte o manual.',
+  'Senha da conta: alterada em 12/03', 'A senha deve ter 8 caracteres',
+  'Sua sessão expira em 30 minutos', 'Digite sua senha atual.', 'Sessão expirada.',
+];
 const PROSA = [
   'A sessão de perguntas discutiu o cartão de crédito como tema e a chave do problema.',
   'A senha do teste é forte.', 'Senha da conta', 'Chave da API', 'Digite sua senha',
@@ -86,7 +111,7 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', () =
   assert.ok(FORMAS.length >= 30, `a lista de formas encolheu: ${FORMAS.length}`);
   assert.ok(ROTULOS.length >= 12 && ATRIBUTOS.length >= 5 && URLS.length >= 8);
   const vazamentos = [];
-  for (const [nome, html] of FORMAS) {
+  for (const [nome, html] of [...FORMAS, ...IDIOMA]) {
     const sentinela = html.match(/ADVSEN\d+X/u)?.[0] ?? '';
     assert.ok(sentinela, `a forma "${nome}" precisa de sentinela própria`);
     const trecho = sanitizeHtmlSnippetSource(html);
@@ -113,6 +138,18 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', () =
   assert.deepEqual(vazamentos, [], `a credencial sobreviveu em: ${vazamentos.join(', ')}`);
 });
 
+test('o seletor CSS não carrega o valor do atributo de rótulo (quinto vocabulário, fechado na 1.1.32)', () => {
+  // O gerador de seletor tinha o QUINTO vocabulário do produto, só em inglês: com `title="senha X"` o
+  // seletor saía `input[title="senha X"]` e o valor ia inteiro para o relatório, o modelo e os artefatos.
+  const sentinela = S('85');
+  for (const atributo of ['title', 'alt', 'aria-label', 'data-testid', 'placeholder']) {
+    const seletor = JSON.stringify(buildStableSelector({ tagName: 'INPUT', attributes: { [atributo]: `senha ${sentinela}` } }));
+    assert.doesNotMatch(seletor, new RegExp(sentinela, 'u'), `o seletor não pode carregar ${atributo}`);
+  }
+  // E a evidência legítima continua: um atributo sem credencial permanece no seletor.
+  assert.match(JSON.stringify(buildStableSelector({ tagName: 'INPUT', attributes: { title: 'Endereço' } })), /Endereço/u);
+});
+
 test('o nome acessível do fallback de DOM não devolve a credencial', () => {
   const sentinela = S('80');
   const node = { tagName: 'DIV', attributes: { title: `chave ${sentinela}` }, children: [], text: '' };
@@ -125,11 +162,14 @@ test('o nome acessível do fallback de DOM não devolve a credencial', () => {
 });
 
 test('o sinal de credencial não acende em prosa legítima e o texto sai intacto', () => {
-  for (const texto of PROSA) {
+  for (const texto of [...PROSA, ...PROSA_IDIOMA]) {
     assert.doesNotMatch(sanitizeHtmlSnippetSource(`<p>${texto}</p>`), /\[redacted\]/u, `"${texto}" é prosa, não credencial`);
     assert.equal(hasCredentialValueSignal(texto), false, `"${texto}" não pode acender o sinal`);
   }
   // E o outro lado: as formas que PRECISAM acender continuam acendendo, com a largura da 1.1.29.
+  for (const texto of PROSA_IDIOMA) {
+    assert.equal(hasCredentialValueSignal(texto), false, `"${texto}" é prosa, não credencial`);
+  }
   for (const texto of ['senha ZQXJKVBWPMTLRNHS', 'senha Segredo.Forte', 'chave Segredo!Forte',
     'Cartão de crédito: 4111 2222 3333 4444', 'senha do usuário: ZQXJKVBWPMTLRNHS', 'Senha atual: ZQXJKVBWPMTLRNHS',
     '{"senha": "ZQXJKVBWPMTLRNHS"}', 'senha:', 'chave =', 'token -> ZQXJKVBWPMTLRNHS']) {

@@ -1,4 +1,8 @@
-const SENSITIVE = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
+import { SENSITIVE_KEY } from '../privacy.js';
+// QUINTO vocabulário do produto, e o único que ainda era só em inglês: com ele, um `title="senha …"`
+// virava seletor CSS e o valor ia inteiro para o relatório, o modelo e os artefatos (Critical da revisão
+// da 1.1.31). Passa a usar o mesmo vocabulário compartilhado do resto do produto.
+const SENSITIVE = SENSITIVE_KEY;
 const SEMANTIC_ATTRIBUTES = Object.freeze(['data-testid', 'data-test', 'aria-label', 'name', 'role', 'title', 'alt']);
 
 /** CSS.escape-compatible escaping without depending on a browser global. */

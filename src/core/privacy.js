@@ -58,6 +58,18 @@ export const URL_CREDENTIAL_KEY = new RegExp(String.raw`^(?:${URL_CREDENTIAL_KEY
 // são valores (símbolo no MEIO do token), enquanto `atual.` é prosa (o ponto é a pontual final da
 // frase). Comprimento de segredo (12+) e dígito continuam valendo, e é isso que restaura
 // `senha ZQXJKVBWPMTLRNHS`, que a 1.1.29 tarjava e a 1.1.30 havia perdido.
+// Rótulo de VÁRIAS palavras (`cartão de crédito`, `senha do usuário do sistema`) exige token FORTE:
+// comprimento de segredo, ou 6+ caracteres com dígito/símbolo. Com o critério largo, prosa como
+// `A senha deve ter 8 caracteres` voltaria a acender (o token `8`).
+function strongValueToken(token) {
+  const text = String(token ?? '');
+  const core = text.replace(/[.!?,;:\u2026"')\]}]+$/u, '');
+  if ([...core].length >= 12) return true;
+  // Número de cartão: o primeiro token é curto, mas é claramente valor (`4111 2222 …`).
+  if ((core.match(/\d/gu) ?? []).length >= 4) return true;
+  return [...core].length >= 6 && /\d|[^\p{L}\p{N}\s]/u.test(core);
+}
+
 function valueLikeToken(token) {
   const text = String(token ?? '');
   if (text.length === 0) return false;
@@ -66,7 +78,7 @@ function valueLikeToken(token) {
   if ([...core].length >= 12) return true;
   return /[^\p{L}\p{N}\s]/u.test(core);
 }
-const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)`;
+const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)|c[óo]digo[\s\-–—]+de[\s\-–—]+(?:verifica[çc][ãa]o|acesso|seguran[çc]a|recupera[çc][ãa]o|autentica[çc][ãa]o|confirma[çc][ãa]o)|frase[\s\-–—]+de[\s\-–—]+recupera[çc][ãa]o`;
 export const SENSITIVE_KEY = new RegExp(
   `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
 
@@ -87,7 +99,7 @@ const URL_CREDENTIAL_SEGMENT = new RegExp(
 // Rota com a chave percent-encoded (`#/authorize/co%64e/X`): uma segunda passada decodifica o segmento.
 const URL_CREDENTIAL_SEGMENT_ENCODED = /([#/])([^/?#\s]*%[0-9a-f]{2}[^/?#\s]*)\/([^/?#\s]*)/giu;
 const VALUE_LABEL_ADJACENT_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|password|authorization|${URL_CREDENTIAL_KEY_SOURCE}|${SENSITIVE_WORD_SOURCE})[\p{L}\p{N}]{0,24}`;
-const VALUE_LABEL_SOURCE = String.raw`${VALUE_LABEL_ADJACENT_SOURCE}(?:[\s]+[\p{L}\p{N}]{1,24}){0,2}`;
+const VALUE_LABEL_SOURCE = String.raw`${VALUE_LABEL_ADJACENT_SOURCE}(?:[\s\-–—]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,6}?`;
 // O valor vai até o fim da linha, sem teto, sem terminador e sem alternativa entre aspas. Duas
 // revisões seguidas mediram a mesma classe por caminhos diferentes: a 1.1.26 tinha o teto de 120
 // caracteres e o `;` devolvendo a cauda; a 1.1.27 tirou o teto mas manteve `<` como parada e a
@@ -102,7 +114,7 @@ const VALUE_SOURCE = String.raw`\S[^\n]*`;
 // (`&quot;`, `&#34;`, `&#x22;`) — porque `{"senha": "X"}` e `{&quot;senha&quot;: &quot;X&quot;}` são a
 // mesma credencial, e era exatamente a aspa entre o rótulo e o `:` que fazia essas formas passarem
 // depois do primeiro conserto (medido na revisão da 1.1.28).
-const VALUE_SEPARATOR_SOURCE = String.raw`(\s*(?:(?:<[^<>]{0,200}>)|&(?:amp;)?(?:quot|#0*34|#x0*22);|&(?:amp;)?(?:nbsp|#0*160|#x0*a0);|\\*['"]|\s){0,20}(?:&(?:amp;)?(?:#0*58|#x0*3a|colon);|%3a|%3d|[:=]|->|=>|→)\s*)`;
+const VALUE_SEPARATOR_SOURCE = String.raw`(\s*(?:(?:<[^<>]{0,200}>)|&(?:amp;)?(?:quot|#0*34|#x0*22);|&(?:amp;)?(?:nbsp|#0*160|#x0*a0);|\\*['"]|\\[tnrfv]|\s){0,20}(?:&(?:amp;)?(?:#0*58|#x0*3a|colon);|%3a|%3d|[:=]|->|=>|→)\s*)`;
 // Um fragmento de texto que TERMINA no rótulo com o separador está esperando o valor no nó
 // seguinte (`<p>senha: <code>…</code></p>`, `<th>chave:</th><td>…</td>`). O sanitizador de trecho
 // usa este predicado para tratar o que vem depois como valor, em vez de confiar que rótulo e valor
@@ -113,7 +125,7 @@ const ANY_CREDENTIAL_LABEL_VALUE = new RegExp(
 const DANGLING_CREDENTIAL_LABEL = new RegExp(
   `(?:${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}$`, 'iu');
 const ANY_CREDENTIAL_LABEL_TAIL = new RegExp(
-  `(?:${VALUE_LABEL_ADJACENT_SOURCE})[\\s]+(\\S+)`, 'iu');
+  `(?:${VALUE_LABEL_ADJACENT_SOURCE})[\\s]*[-\u2013\u2014:]*[\\s]*(\\S+)`, 'iu');
 const DANGLING_VALUE_LABEL = new RegExp(`(?:${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}$`, 'iu');
 export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
@@ -279,10 +291,60 @@ export function backgroundImageKind(value) {
  * prévia de anúncio (I1 da revisão da 1.1.28). A regra exige conteúdo DEPOIS da palavra, então
  * `Digite sua senha` continua intacto — o rótulo puro não é segredo.
  */
+// Candidato a cauda: rótulo seguido de ruído de separador e um token. A decisão é do tarjador.
+const TAIL_CANDIDATE = new RegExp(
+  String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE})[\s]*[-–—:]*[\s]*\S+`, 'giu');
+
 export function redactCredentialLabelTail(value) {
-  return String(value ?? '').replace(
-    new RegExp(`(${VALUE_LABEL_ADJACENT_SOURCE})(\\s+)(\\S+)`, 'giu'),
-    (match, label, space, token) => (valueLikeToken(token) ? `${label}${space}[redacted]` : match));
+  // `String.raw` é obrigatório aqui: dentro de um template literal comum, `\s` vira `s` e o padrão deixa
+  // de casar em silêncio — foi o que aconteceu quando esta função foi reescrita, e o sintoma foi o
+  // tarjador virar no-op sem nenhum teste reprovar.
+  return String(value ?? '')
+    .replace(new RegExp(String.raw`(${VALUE_LABEL_ADJACENT_SOURCE})([\s]*[-–—:]*[\s]*)(\S+)`, 'giu'),
+      (match, label, space, token) =>
+        (valueLikeToken(token) && !/[<>]/u.test(token) && !match.includes('[redacted]')
+          ? `${label}${space}[redacted]`
+          : match))
+    .replace(new RegExp(String.raw`(${VALUE_LABEL_SOURCE})([\s]*[-–—:]*[\s]*)(\S+)`, 'giu'),
+      (match, label, space, token) =>
+        (strongValueToken(token) && !/[<>]/u.test(token) && !match.includes('[redacted]')
+          ? `${label}${space}[redacted]`
+          : match));
+}
+
+
+
+// Rótulo de VÁRIAS palavras seguido de valor: o regex não consegue expressar "token com cara de valor"
+// com a janela preguiçosa (o motor se compromete com a primeira segmentação), então a decisão é feita
+// por um scanner de tokens — para cada palavra de credencial, tenta janelas de 0 a 6 palavras e testa o
+// token seguinte com o predicado. É isso que fecha `cartão de crédito S3GR…` sem reabrir
+// `A senha deve ter 8 caracteres`.
+const LABEL_WORD = new RegExp(String.raw`^[(\[]?[\p{L}\p{N}]{1,24}[)\]]?$`, 'u');
+const SEPARATOR_NOISE = /^[-–—:]+$/u;
+function spacedLabelTailIndex(text) {
+  const tokens = [...String(text ?? '').matchAll(/\S+/gu)].map(match => ({ value: match[0], index: match.index }));
+  const firstWord = new RegExp(`^(?:${VALUE_LABEL_ADJACENT_SOURCE})$`, 'iu');
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (!firstWord.test(tokens[index].value)) continue;
+    for (let end = index; end < tokens.length && end - index <= 6; end += 1) {
+      let next = end + 1;
+      if (next < tokens.length && SEPARATOR_NOISE.test(tokens[next].value)) next += 1;
+      if (next < tokens.length && strongValueToken(tokens[next].value)) return tokens[index].index;
+      if (end + 1 >= tokens.length || !LABEL_WORD.test(tokens[end + 1].value)) break;
+    }
+  }
+  return -1;
+}
+function spacedLabelTailSignal(text) {
+  return spacedLabelTailIndex(text) >= 0;
+}
+// Depois do rótulo de várias palavras, a linha inteira sai tarjada — mesma decisão do rótulo com
+// separador, e é o que impede `cartão de crédito S3GR…` de chegar ao entregável pelo caminho JSON.
+function redactSpacedLabelTail(text) {
+  const position = spacedLabelTailIndex(text);
+  if (position < 0) return text;
+  const endOfLine = text.indexOf('\n', position);
+  return `${text.slice(0, position)}[redacted]${endOfLine < 0 ? '' : text.slice(endOfLine)}`;
 }
 
 /**
@@ -313,8 +375,12 @@ export function hasCredentialValueSignal(value) {
     if (rest.trim() === '' || /^[\r\n\u2028\u2029]/u.test(rest)) return true;
   }
   if (DANGLING_CREDENTIAL_LABEL.test(text)) return true;
-  const withTail = ANY_CREDENTIAL_LABEL_TAIL.exec(text);
-  return Boolean(withTail) && valueLikeToken(withTail[1]);
+  // Percorre TODAS as ocorrências: com a janela preguiçosa, a primeira pode ser `senha deve` e só uma
+  // posterior (`cartão de crédito` + valor) ser a credencial.
+  for (const match of text.matchAll(new RegExp(ANY_CREDENTIAL_LABEL_TAIL.source, 'giu'))) {
+    if (valueLikeToken(match[1])) return true;
+  }
+  return spacedLabelTailSignal(text);
 }
 
 /** Verdadeiro quando o texto termina em rótulo de credencial com o separador, sem o valor. */
@@ -325,13 +391,39 @@ export function endsWithCredentialLabel(value) {
 export function redactSensitiveText(value) {
   return String(value ?? '')
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
-    .replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}${VALUE_SOURCE}`, 'giu'), '$1$2[redacted]')
+    // Tarja com DUAS condições, e é isso que separa credencial de prosa: o primeiro token depois do
+    // separador tem cara de valor, OU o resto depois do separador é um token só (o valor inteiro, sem
+    // frase). `senha: abc` cai na segunda; `Segredo de justiça: o processo tramita em sigilo.` não cai em
+    // nenhuma, e por isso sobrevive — antes, o alargamento do rótulo para aceitar acento passou a tarjar
+    // sete frases realistas (Important da revisão da 1.1.31).
+    .replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}(${VALUE_SOURCE})`, 'giu'),
+      (match, label, separator, value) => {
+        const tokens = value.trim().split(/\s+/u).filter(Boolean);
+        const first = tokens[0] ?? '';
+        const singleToken = tokens.length === 1;
+        // `chave: ABC 123 DEF 456` é valor com o primeiro token sem dígito: dois tokens com cara de valor
+        // já bastam. Prosa com um número solto (`mínimo de 8 caracteres`) tem só um.
+        const valueLikeTokens = tokens.filter(token => valueLikeToken(token)).length;
+        // Rótulo de UMA palavra (`passphrase: uma frase secreta longa`, `senha: p4ss;word`) é atribuição:
+        // o valor inteiro sai. Rótulo DESCRITIVO de várias palavras (`Senha do usuário: mínimo de 8
+        // caracteres.`) costuma ser prosa SOBRE a credencial, e aí só sai com valor com cara de valor —
+        // foi essa a diferença medida pela revisão da 1.1.31 entre `passphrase:` e `Senha do usuário:`.
+        const descriptiveLabel = !new RegExp(`^(?:${VALUE_LABEL_ADJACENT_SOURCE})$`, 'iu').test(label);
+        if (!descriptiveLabel) return `${label}${separator}[redacted]`;
+        return valueLikeToken(first) || singleToken || valueLikeTokens >= 2
+          ? `${label}${separator}[redacted]`
+          : match;
+      })
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@')
     .replace(/([?&;#])([^=&\s#]+)=([^&#\s]*)/gu, (match, separator, key, value) =>
       (credentialKey(key) ? `${separator}${key}=[redacted]` : match))
     .replace(URL_CREDENTIAL_SEGMENT, '$1$2[redacted]')
     .replace(URL_CREDENTIAL_SEGMENT_ENCODED, (match, separator, key, value) =>
-      (credentialKey(key) ? `${separator}${key}/[redacted]` : match));
+      (credentialKey(key) ? `${separator}${key}/[redacted]` : match))
+    // Rótulo SEM separador (`senha abc123`, `cartão de crédito S3GR…`, `senha - S3GR…`): a mesma regra
+    // de cauda do nome acessível, para o caminho JSON não ficar mais frouxo que o do trecho.
+    .replace(TAIL_CANDIDATE, match => (match.includes('[redacted]') ? match : redactCredentialLabelTail(match)))
+    .replace(/[\s\S]+/u, match => redactSpacedLabelTail(match));
 }
 
 // Uma string que CONTÉM marcação é fonte de HTML, não prosa: nela vale a regra estrita de cauda
@@ -371,13 +463,13 @@ const MARKUP_BEARING = /<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?>/iu;
 function redactStringValue(value) {
   const redacted = redactSensitiveText(value);
   if (!MARKUP_BEARING.test(redacted)) return redacted;
-  const withTailRule = redactCredentialLabelTail(redacted);
-  // Rótulo e valor separados por MARCAÇÃO (`<b>senha</b> X`) não são vistos pelo tarjador de valores,
-  // que exige o separador colado: a projeção sem tags (e sem entidades) é quem decide, e nesse caso a
-  // string inteira cai — é string do autor que carrega credencial, não prosa do relatório.
-  if (withTailRule.includes('[redacted]')) return withTailRule;
+  if (redacted.includes('[redacted]')) return redacted;
+  // Rótulo e valor separados por MARCAÇÃO (`<b>senha</b> X`) não são vistos pelo tarjador de valores: a
+  // decisão vem da PROJEÇÃO sem tags e sem entidades, e nesse caso a string inteira cai — é string do
+  // autor que carrega credencial, não prosa do relatório. Sem sinal, a string passa intacta: era o
+  // tarjador aplicado à marcação que matava `Digite sua senha atual.` e `Sessão expirada.`.
   const projection = decodeForMatching(redacted.replace(/<[^<>]*>/gu, ' '));
-  return hasCredentialValueSignal(projection) ? '[redacted]' : withTailRule;
+  return hasCredentialValueSignal(projection) ? '[redacted]' : redacted;
 }
 
 export function sanitizeJsonData(value, ancestors = new WeakSet()) {

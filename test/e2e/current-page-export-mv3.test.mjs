@@ -33,6 +33,13 @@ ${CREDENTIAL.slice(4)}</p>
 <pre id="credential-entity">{&quot;senha&quot;: &quot;${CREDENTIAL}&quot;}</pre>
 <div id="credential-attribute" data-note="chave: ${CREDENTIAL}">Nota do autor</div>
 <p id="adv-a1"><b>senha</b>: ${CREDENTIAL}</p>
+<p id="adv-idioma">Cartão de crédito: ${CREDENTIAL}</p>
+<p id="adv-janela">Número do cartão de crédito do titular: 4111 1111 1111 1111</p>
+<p id="adv-parenteses">Senha (provisória): ${CREDENTIAL}</p>
+<p id="adv-qualificado">Código de verificação: ${CREDENTIAL}</p>
+<p id="adv-recuperacao">frase de recuperação: ${CREDENTIAL}</p>
+<p id="adv-cauda">cartão de crédito ${CREDENTIAL}</p>
+<input id="adv-seletor" title="senha ${CREDENTIAL}">
 <p id="adv-a2">senha<!-- nota -->: ${CREDENTIAL}</p>
 <p id="adv-a3">senha:<img alt="i">${CREDENTIAL}</p>
 <p id="adv-a4">senha:<span></span>${CREDENTIAL}</p>
