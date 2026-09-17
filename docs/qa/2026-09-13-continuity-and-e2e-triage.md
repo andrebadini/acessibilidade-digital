@@ -2957,3 +2957,15 @@ ocorrências) / 9 positivos / 109 no checklist / 28,5% / 9,0 de 10**, versão **
 partidas, 0 `[redacted]`; e as sondas do revisor: caçador **0/13.824**, corpus de 198.360 **0 reabertos**,
 corpus de 64.064 **0 reabertos**, precisão **0** texto destruído no dicionário, morfologia PT **0/39**,
 falsos positivos PT-BR `NOVOS=[]`, 880 formas realistas com **0** em prosa/modelo.
+
+**Verificação de pertinência e separação de contagens nos artefatos da 1.1.43** (item da lista "antes do
+candidato de produção": *verificar falsos positivos, falsos negativos e separação entre ocorrência e
+checklist*). Medido por instrumento próprio nos quatro arquivos exportados pela auditoria ao vivo do pacote:
+o **HTML entregue** traz os quatro grupos **separados e com número** — **0** não conformidades, **1**
+recomendação/alerta, **3** suspeitas a confirmar, **9** resultados positivos — e **109** verificações no
+checklist separado; o **JSON** carrega **146 `itemResults`** e 134 resultados de regra; as frases de
+inconformidade somam **0** ("Inconformidade ao item …") contra **112** de verificação pendente ("Verificar o
+item …"), ou seja, **nenhuma suspeita é apresentada como infração confirmada**; o **PDF tem 18 páginas**
+(o defeito histórico de 700+ páginas e 753 verificações humanas não se reproduz) e o **CSV tem 119 linhas**,
+sendo a exportação de ocorrências. A conferência fecha também o que a meta pede sobre não multiplicar
+pendências por elemento: o checklist é único (109), não 109 × elementos.
