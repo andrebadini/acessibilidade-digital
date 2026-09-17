@@ -138,6 +138,9 @@ const CONCATENACOES = [
   'senhamestra', 'senhadaconta', 'senhadocliente', 'senhatemporaria', 'senhaexpirada', 'senhabloqueada',
   'tokenprivado', 'tokensessao', 'tokenapi', 'chaveprivada', 'chavepublica', 'chavemestra',
   'cookiesessao', 'banhopin', 'loginpin',
+  // Composto de TRÊS partes, com o radical no meio do token: a regra de borda sozinha não cobre e a
+  // minha sonda mediu o vazamento antes de congelar a 1.1.36.
+  'novasenhaadmin', 'chaveacessouser', 'senhadobanco',
 ];
 const ROTULOS = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
 const CAUDAS = [

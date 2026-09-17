@@ -29,14 +29,30 @@ const SHAPES = [
   ['PIN prefixado minúsculo', 'userpin-lower', (secret) => `<p>userpin: ${secret}</p>`],
   ['PIN em composto maiúsculo', 'pin-pad', (secret) => `<p>PINpad: ${secret}</p>`],
   ['PIN em nome de atributo', 'data-userpin', (secret) => `<div data-userpin="${secret}">x</div>`],
+  // Formas que a revisão da 1.1.36 mediu SEM prova: o portão de valor só era exercitado por sentinela
+  // COM dígito, e nenhuma forma tinha separador `_`/`.`/`/`. Com o `src` da 1.1.35 estes cinco casos
+  // reprovam (é o que dá dentes ao portão de valor e à continuação de identificador).
+  ['valor só de letras em rótulo colado', 'letters-only', (secret) => `<p>novaSenha: ${secret}</p>`, 'letters'],
+  ['frase-senha longa em rótulo colado', 'passphrase', (secret) => `<p>novaSenha: ${secret}</p>`, 'phrase'],
+  ['radical no meio do token', 'middle-stem', (secret) => `<p>minhasenhaforte: ${secret}</p>`],
+  ['composto de três partes', 'three-parts', (secret) => `<p>novasenhaadmin: ${secret}</p>`],
+  ['separador sublinhado', 'underscore', (secret) => `<p>senha_forte: ${secret}</p>`],
+  ['separador ponto', 'dot-separator', (secret) => `<p>senha.mestra: ${secret}</p>`],
 ];
 
-for (const [nome, slug, montar] of SHAPES) {
+for (const [nome, slug, montar, tipo = 'digit'] of SHAPES) {
   test(`credencial em ${nome} não chega ao entregável`, { timeout: 300_000 }, async t => {
-    // O sentinela precisa ter CARA DE CREDENCIAL (dígito), e não só ser comprido: a regra de cauda de
-    // rótulo multi-palavra exige 6+ caracteres COM dígito ou símbolo, justamente para não tarjar palavra
-    // comprida de prosa. Um sentinela só de letras não é uma credencial plausível e mediria a regra errada.
-    const secret = `ADVSHAPE${slug.replace(/[^a-z]/gu, '').toUpperCase().slice(0, 8)}7X`;
+    // O sentinela padrão tem CARA DE CREDENCIAL (dígito) — é o formato que a regra de cauda de rótulo
+    // multi-palavra exige. Os tipos `letters` e `phrase` existem porque a revisão da 1.1.36 mediu que
+    // SÓ o sentinela com dígito deixava o portão de valor sem prova: uma frase-senha de 25 letras
+    // (`correcthorsebatterystaple`) e um identificador só de letras são credenciais plausíveis e
+    // precisam ser medidos.
+    const marca = slug.replace(/[^a-z]/gu, '').toUpperCase();
+    const secret = tipo === 'letters'
+      ? `Zqwkvbrtnmx${marca.slice(0, 6).toLowerCase()}`
+      : tipo === 'phrase'
+        ? 'correcthorsebatterystaple'
+        : `ADVSHAPE${marca.slice(0, 8)}7X`;
     const documento = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${nome}</title></head>
 <body><main><h1>Forma isolada</h1>${montar(secret)}
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">

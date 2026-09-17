@@ -53,7 +53,7 @@ const WORD_SEP = String.raw`(?:\u0001|[\s\-_–—])`;
 // `session-id`. Sem ela o extrator de cauda casava só o radical, tratava o resto do identificador como
 // valor e tarjava o LUGAR ERRADO, deixando o segredo literal (`senha[redacted] VALOR`) — Critical C2 da
 // revisão da 1.1.35, medido nas quatro gerações.
-const LABEL_CONTINUATION = String.raw`(?:(?:\u0001|[-_.\/])[\p{L}\p{N}]{1,24}){0,2}`;
+const LABEL_CONTINUATION = String.raw`(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){0,3}`;
 
 // Caracteres invisíveis (hífen suave, larguras zero, controles de direção, BOM) quebram o radical no
 // meio: `sen\u200bha:` é o mesmo rótulo que `senha:` para quem lê, e o tarjador não o via. Eles saem da
@@ -186,7 +186,13 @@ const STEMS_COM_GUARDAS = WORD_STEMS.map(stem => {
 const STEM_ALTERNATION = String.raw`(?:(?:${STEMS_COM_GUARDAS})|(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})|(?:${PHRASES_ALTERNATION}))`;
 const HEAD_EDGE = String.raw`(?<![\p{L}\p{N}])`;
 const TAIL_EDGE = String.raw`(?!\p{L})`;
-const KEY_NAME_CORE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}[\p{L}\p{N}]{0,24}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}${STEM_ALTERNATION}${LABEL_CONTINUATION}${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
+// COMPOSTO de três partes: prefixo/cauda de credencial ANTES do radical, com o radical no meio do token
+// (`novasenhaadmin`, `chaveacessouser`). A regra de borda sozinha não cobre esse caso — o radical não
+// toca nenhuma borda —, e a minha própria sonda mediu o vazamento antes de congelar. As partes continuam
+// sendo as listas fechadas, o que preserva `Chaveiro` (`chave` + `iro`, sem cauda depois do radical),
+// `tokenizador`, `Secretaria` e `shipping`.
+const COMPOSTA_SOURCE = String.raw`(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})[\p{L}\p{N}]{0,12}(?:${STEMS_ALTERNATION})[\p{L}\p{N}]{0,12}|[\p{L}\p{N}]{1,6}(?:${STEMS_ALTERNATION})(?:${TAILS_ALTERNATION}|${STEMS_ALTERNATION})${TAIL_EDGE}`;
+const KEY_NAME_CORE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}[\p{L}\p{N}]{0,24}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}${STEM_ALTERNATION}${LABEL_CONTINUATION}${TAIL_EDGE}|${COMPOSTA_SOURCE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
 // As frases que só valem com SEPARADOR (`conta corrente`, `certificado digital`) ficam FORA do
 // vocabulário de cauda: `conta corrente 12345-6` é prosa sobre o dado, `Conta corrente: 12345-6` é o
 // rótulo dele. Sem esta separação a frase voltava a destruir prosa pela regra de cauda.
@@ -378,6 +384,9 @@ const VALUE_LABEL_ADJACENT_SOURCE = String.raw`(?:${SENSITIVE_WORD_SOURCE})${LAB
 // A janela do rótulo descritivo vai até OITO palavras: a revisão da 1.1.33 mediu sete palavras entre o
 // rótulo e o valor chegando às quatro superfícies (`chave de acesso ao sistema principal da conta X`).
 const VALUE_LABEL_SOURCE = String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE}|${PHRASE_SEPARATOR_ONLY_SOURCE})(?:[\s\-–—\u0001]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,6}?`;
+// A janela das regras de CAUDA (sem separador) NÃO inclui as frases que só valem com separador:
+// `conta corrente 12345-6` é prosa e era destruída no caminho MODELO (Important I2 da revisão da 1.1.36).
+const VALUE_LABEL_TAIL_SOURCE = String.raw`${VALUE_LABEL_ADJACENT_SOURCE}(?:[\s\-–—\u0001]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,6}?`;
 // O valor vai até o fim da linha, sem teto, sem terminador e sem alternativa entre aspas. Duas
 // revisões seguidas mediram a mesma classe por caminhos diferentes: a 1.1.26 tinha o teto de 120
 // caracteres e o `;` devolvendo a cauda; a 1.1.27 tirou o teto mas manteve `<` como parada e a
@@ -580,8 +589,23 @@ const TAIL_CANDIDATE = new RegExp(
  * e `tokenizador: interno` (palavras da língua) voltam a ser evidência. Rótulo que É palavra do
  * vocabulário mantém a semântica de atribuição (`senha: abc` sai inteiro).
  */
+/**
+ * Portão de valor para rótulo que NÃO é palavra do vocabulário (`novasenha:`, `Chaveiro:`). Aceita
+ * comprimento de segredo (12+), número de cartão (4+ dígitos) ou 8+ caracteres com cara de credencial.
+ *
+ * O piso de 8 caracteres é o preço declarado: `Chaveiro: A1B2C3` (6 caracteres, 3 dígitos) volta a ser
+ * evidência, e `novasenha: abc123` (idem) deixa de ser tarjado — os dois lados foram medidos pela
+ * revisão da 1.1.36 (Important I1 do falso positivo e Critical C1 do valor só de letras).
+ */
+function identifierValue(token) {
+  const core = valueCore(token);
+  const length = [...core].length;
+  if (length >= 12) return true;
+  if ((core.match(/\d/gu) ?? []).length >= 4) return true;
+  return length >= 8 && /\d|[^\p{L}\p{N}\s]/u.test(core);
+}
 function shapesValue(label, token) {
-  return isWholeCredentialLabel(label) || credentialLikeToken(token);
+  return isWholeCredentialLabel(label) || identifierValue(token);
 }
 /**
  * O TOKEN inteiro em volta do rótulo casado. O vocabulário de prosa é permissivo de propósito (o radical
@@ -609,7 +633,7 @@ function tailPasses(text) {
       (match, label, space, token, offset, whole) =>
         (valueLikeToken(token) && shapesValue(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
           ? `${label}${space}[redacted]` : match))
-    .replace(new RegExp(String.raw`(${VALUE_LABEL_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
+    .replace(new RegExp(String.raw`(${VALUE_LABEL_TAIL_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
       (match, label, space, token, offset, whole) =>
         (strongValueToken(token) && shapesValue(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
           ? `${label}${space}[redacted]` : match));
@@ -654,8 +678,16 @@ function spacedLabelTailSignal(text) {
 function redactSpacedLabelTail(text) {
   const position = spacedLabelTailIndex(text);
   if (position < 0) return text;
+  // Tarja o VALOR, não o rótulo: o esquema seguido de rótulo e separador saía como `[redacted]` inteiro, perdendo a evidência
+  // do rótulo (Minor M1 da revisão da 1.1.36). O extrator de cauda já sabe preservar o rótulo.
+  const head = text.slice(0, position);
+  const tail = text.slice(position);
+  const redacted = redactCredentialLabelTail(tail);
+  // Quando o extrator de cauda consegue tarjar SÓ o valor, o rótulo fica como evidência; quando não
+  // consegue (frases de várias palavras, como `cartão de crédito X`), vale a regra revisada: a linha cai.
+  if (redacted !== tail) return `${head}${redacted}`;
   const endOfLine = text.indexOf('\n', position);
-  return `${text.slice(0, position)}[redacted]${endOfLine < 0 ? '' : text.slice(endOfLine)}`;
+  return `${head}[redacted]${endOfLine < 0 ? '' : text.slice(endOfLine)}`;
 }
 
 /**
@@ -719,7 +751,10 @@ const HAS_URL_SHAPE = /[?&;#]/u;
 const HAS_USERINFO_SHAPE = /@/u;
 function sensitivePasses(marked) {
   let text = marked
-    .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
+    .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, (match, scheme, space, token) =>
+      // O esquema seguido de rótulo e separador tem o rótulo depois dele: tarjar o rótulo deixava o valor intacto e
+      // perdia o rótulo (Minor M1 da revisão da 1.1.36). Só tarja quando o que segue é valor.
+      (/[:=]$/u.test(token) ? match : `${scheme}${space}[redacted]`))
     // Tarja com DUAS condições, e é isso que separa credencial de prosa: o primeiro token depois do
     // separador tem cara de valor, OU o resto depois do separador é um token só (o valor inteiro, sem
     // frase). `senha: abc` cai na segunda; `Segredo de justiça: o processo tramita em sigilo.` não cai em
@@ -744,11 +779,11 @@ function sensitivePasses(marked) {
           if (wholeLabel) return `${label}${separator}[redacted]`;
           // Rótulo que NÃO é palavra do vocabulário (`novasenha:`, `Chaveiro:`) só tarja com valor com
           // cara de credencial — é o preço declarado do recall.
-          return credentialLikeToken(first) ? `${label}${separator}[redacted]` : match;
+          return shapesValue(label, first) ? `${label}${separator}[redacted]` : match;
         }
         // Rótulo descritivo de várias palavras: prosa SOBRE a credencial só sai com valor com cara de
         // valor (ou um token só), e rótulo identificador exige o mesmo que acima.
-        if (!wholeLabel) return credentialLikeToken(first) ? `${label}${separator}[redacted]` : match;
+        if (!wholeLabel) return shapesValue(label, first) ? `${label}${separator}[redacted]` : match;
         return valueLikeToken(first) || singleToken || valueLikeTokens >= 2
           ? `${label}${separator}[redacted]`
           : match;
@@ -783,7 +818,7 @@ function sensitivePasses(marked) {
       const token = tokenAround(wholeText, offset, 1);
       if (isWholeCredentialLabel(token)) return redactCredentialLabelTail(match);
       const value = match.trim().split(/\s+/u).at(-1) ?? '';
-      return credentialLikeToken(value)
+      return shapesValue(token, value)
         ? `${match.slice(0, match.length - value.length)}[redacted]`
         : match;
     })
