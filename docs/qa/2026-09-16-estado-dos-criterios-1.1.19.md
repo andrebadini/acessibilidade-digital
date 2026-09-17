@@ -23,6 +23,9 @@
 > títulos no HTML e no PDF, notas 5/5, 0 palavras partidas, 0 `[redacted]`. **Preço declarado e medido da
 > troca:** palavras inglesas que TERMINAM num radical (`pallbearer`, `allseed`, `antipass`, `chipping`)
 > voltam a ser tarjadas em prosa — dicionário **360 → 537** (1.1.40: 563), falso positivo, nunca vazamento.
+> No corpus de chaves inocentes do revisor os três lidos como chave são `cupbearer`, `pallbearer` e
+> `chipping` (`seedling` é tarjado em prosa/modelo/trecho, não como chave), e o Minor M-3 da revisão
+> (assimetria de `senhaassinaturapass`) fecha junto: a forma é tarjada nas quatro superfícies.
 > **8** segue **Parcial** por decisão do usuário, fora do caminho de bloqueio.
 
 > **Incremento 1.1.41, e o que ele muda aqui.** Artefato
