@@ -1,5 +1,23 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.38, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.38.zip` (`c3228127…fb0d`), **sem revisão independente ainda**.
+> Fecha os dois Critical, o Important da métrica e os dois achados de privacidade da revisão da 1.1.37
+> (2 Critical, 7 Important, 6 Minor, 6 observações). **5** de novo, na quinta rodada da mesma classe, e o
+> que mudou foi o método: a marca de camelCase passou a ser decidida **por token** (a leitura contígua
+> decide se a marca entra), então `SeNhA: abc123` sai como `SeNhA: [redacted]` **sem baixar a caixa do
+> texto entregue** — a alternativa em minúsculas segue revertida e registrada; o **prefixo arbitrário**
+> antes do radical (`xsenha`, `xsenhaforte`) entra no portão de valor com o radical encerrando o token e
+> comprimento ≥ 5, custando **39 palavras do dicionário** (todas compostas inglesas de radical longo,
+> zero do português) e devolvendo **0 vazamentos em 72 combinações de valor fraco** onde havia 56; e o E2E
+> de formas ganha 4 formas fracas que **reprovam 4 de 4 contra o `src` da geração anterior**. Na
+> privacidade, a limpeza **reatesta a aba viva** antes de fechar (D1) e o commit terminal **recusa raster
+> sem a alça da tentativa** (D2) — com a fronteira do lote declarada e medida (o E2E
+> `batch-pixel-consent-mv3` reprova sem ela). **10** segue **Atendido** com o resíduo do lote declarado;
+> **11** ganha o preço do prefixo (+39 palavras no dicionário) e a métrica de 543 combinações; **12**
+> segue medindo a partir da árvore de teste do commit. **8** segue **Parcial** por decisão do usuário,
+> fora do caminho de bloqueio.
+
 > **Incremento 1.1.37, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.37.zip` (`b6a1a8c0…44de`), **sem revisão independente ainda**.
 > Fecha o veredito da 1.1.36 inteiro (2 Critical, 4 Important, 5 Minor, 8 observações). **5** de novo, na

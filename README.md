@@ -4,26 +4,36 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.37 preparada — sem revisão independente ainda.** A revisão da **1.1.36** deu **2 Critical,
-4 Important, 5 Minor e 8 observações** e **reprovou** o artefato — confirmando o que o incremento tinha de
-real (a correção do sublinhado/ponto/barra tarja o lugar certo em **60/60** formas multi-parte, contra
-45/60 no lugar errado nas gerações anteriores) e medindo quatro bloqueios, todos regressões minhas. O
-Critical C1 era o **portão de valor**: com valor **só de letras** (`correcthorsebatterystaple`), oito das
-dez formas do Critical anterior voltavam a vazar. O C2 era o **radical no meio do token**
-(`minhasenhaforte`, `novasenhaadmin`), que vazava qualquer valor. O Important I1 era o outro lado:
-`pintura.png`, `secretaria-saude` e `Chaveiro: A1B2C3` eram destruídos no caminho de chave. O I4 era uma
-falha **determinística** que eu havia declarado como flake de carga (`normalize-snapshot.test.js:590`).
+**Versão 1.1.38 preparada — sem revisão independente ainda.** A revisão da **1.1.37** deu **2 Critical,
+7 Important, 6 Minor e 6 observações** e **reprovou** o artefato — confirmando o que a geração tinha de real
+(o sublinhado/ponto/barra tarja o lugar certo; `conta corrente 12345-6` sobrevive; entidades, escapes,
+percent-encoding, invisíveis e marcação fecham; o E2E de credencial finalmente tem dentes) e medindo duas
+regressões minhas na **mesma classe** que já reprovou cinco gerações. O Critical C1 era a **caixa misturada
+dentro do radical** (`SeNhA: abc123`, `SeNhAfOrTe: abc123`, `SeNhA do usuário: abc123`), que as 1.1.33,
+1.1.35 e 1.1.36 tarjavam e a 1.1.37 deixou passar. O C2 era o **valor fraco**: `novasenha:`, `xsenha:`,
+`minhasenhaforte:`, `novasenhaadmin:`, `redefinirsenha:`, `trocarsenha:` devolviam senhas de 8 a 11 letras
+(`passarinho`) e valores como `abc123`. O Important I2 mostrou que a **métrica era cega por construção**: o
+sentinela `ADVSEN${n}X` sempre tem dígito. E os dois achados de privacidade (D1: a limpeza confiava no
+`tabId` do journal sem reatestar a aba viva; D2: o commit terminal aceitava a alça da tentativa nula e
+gravava pixels sem correlação durável) ficaram abertos.
 
-A 1.1.37 responde com quatro mudanças: o portão de valor aceita comprimento de segredo (12+), 4+ dígitos
-ou 8+ caracteres com cara de credencial; o radical no **meio** do token é coberto por composto de três
-partes e por prefixo curto com cauda; o vocabulário de **chave** volta às **listas fechadas** (palavra
-inteira, radical + cauda, prefixo/cauda + radical, radical + continuação), preservando `pintura.png`,
-`pincel`, `secretaria-saude` e `hairpin` nos dois caminhos enquanto `sessionid`, `senha_forte`,
-`data-senhaforte` e `userpin` seguem tarjados; e o gate de `id`/rótulo de autor volta ao predicado de
-**prosa**, com a cauda exigindo espaço ou separador (um token sozinho não é rótulo com valor). O E2E de
-credencial ganha seis formas que dão dentes ao incremento — valor só de letras, frase-senha de 25 letras,
-radical no meio, três partes e separadores `_` e `.` —, e a métrica, três formas de três partes. Preço
-declarado: `novasenha: abc123` deixa de ser tarjado (valor curto e fraco).
+A 1.1.38 fecha os quatro eixos. A marca de camelCase passa a ser decidida **por token**: ela só entra onde a
+leitura contígua do token ainda não é palavra do vocabulário com borda (`senhaAtual`, `chaveDeApi`) e **não**
+entra em `SeNhA` — quem casa a caixa misturada é a própria regex `iu` do vocabulário, e o texto entregue
+mantém a caixa original (`SeNhA: abc123` → `SeNhA: [redacted]`). O **prefixo arbitrário** antes do radical
+(`xsenha`, `xsenhaforte`) entra no portão de valor por predicado próprio, com o radical **encerrando o
+token** e **comprimento ≥ 5** — custo medido no dicionário: **39 palavras novas tarjadas em `palavra:
+abc123`**, todas compostas inglesas de radical longo (`betoken`, `obsession`, `unsecret`…), **zero palavra
+do português** e zero tarja perdida; `spin`, `hairpin`, `pushpin`, `linseed`, `chauth`, `obsessão` e
+`possessão` continuam preservados. A métrica da classe ganha **72 combinações de valor fraco** (19 rótulos ×
+4 valores × 2 caminhos; total **543**) e o E2E de formas ganha **4 formas com valor fraco**, que **reprovam
+4 de 4 contra o `src` da geração anterior**. Na privacidade, a limpeza **reatesta a aba viva** antes de
+fechar (id vivo em outra janela ⇒ nenhum efeito; aba já fechada ⇒ limpeza satisfeita sem efeito) e o commit
+terminal **recusa raster sem a alça da tentativa**. Fronteira declarada e medida: a auditoria de várias URLs
+tem tentativa consentida **por página**, então o commit de lote segue sem companheiro no armazenamento — sem
+essa fronteira o E2E `batch-pixel-consent-mv3` reprova, com ela passa. Custo do tarjador remedido: **1,02×**
+em prosa real (89.520 linhas) e **0,44×** no corpus denso de radicais. Preço do dicionário atualizado para os
+bytes desta versão: **33** no caminho de chave, **101** no predicado estrito de valor, **576** no de prosa.
 
 **Versão 1.1.36 — revisada: 2 Critical, 4 Important, 5 Minor e 8 observações**, todos fechados na 1.1.37.
 A revisão da **1.1.35** deu **2 Critical,
