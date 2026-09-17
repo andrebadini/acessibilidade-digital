@@ -2969,3 +2969,12 @@ item …"), ou seja, **nenhuma suspeita é apresentada como infração confirmad
 (o defeito histórico de 700+ páginas e 753 verificações humanas não se reproduz) e o **CSV tem 119 linhas**,
 sendo a exportação de ocorrências. A conferência fecha também o que a meta pede sobre não multiplicar
 pendências por elemento: o checklist é único (109), não 109 × elementos.
+
+**Conferência pontual do catálogo contra o PDF da norma (17/09/2026).** Com `pypdf` sobre
+`ABNT-NBR-17225-Acessibilidade-Digital.pdf` (79 páginas), a busca pelos itens no sumário confirma título e
+classificação dos casos amostrados: **5.9.1 "Rótulo de campo – Requisito"**, **5.1.3 "Elemento em foco
+parcialmente visível – Requisito"**, **5.9.7 "Campos obrigatórios – Requisito"** e **5.9.8 "Tipo de dado
+determinado – Requisito"** — exatamente como o catálogo
+(`src/core/normative/nbr17225.js`) os declara, com as mesmas palavras e a mesma obrigatoriedade. É conferência
+**pontual**, não substitui a conferência dos 146 itens já registrada; serve para mostrar que o catálogo
+continua alinhado ao PDF fornecido depois das mudanças desta sessão.
