@@ -142,6 +142,10 @@ const PROSA_NAO_ROTULO = [
   // A janela de rótulo (M1): seis palavras entre o rótulo e o valor ainda precisam ser cobertas.
   'chave de acesso ao sistema principal da conta ZQXJKVBWPMTLRNHS',
 ];
+// PREÇO DECLARADO da fronteira de palavra: palavras que TERMINAM num radical curto com duas letras ou
+// mais de prefixo viram rótulo. A lista existe para o preço ser medido, não escondido — e é o motivo de
+// `spin` (uma letra de prefixo) ficar preservado e `hairpin` não.
+const PRECO_DECLARADO = ['hairpin', 'pushpin', 'backspin', 'mypassword', 'userpin'];
 // Palavras medidas uma a uma pela revisão da 1.1.33: contêm radical e NÃO podem ser rótulo.
 const PALAVRAS_FALSAS = [
   'chaveiro', 'chaveta', 'chaveamento', 'secretaria', 'secretário', 'secretariado', 'secreto',
@@ -247,6 +251,9 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
   // fica sem controle — e foi exatamente assim que o defeito passou pela métrica na primeira medição.
   for (const palavra of [...NAO_ROTULO, ...PALAVRAS_FALSAS]) {
     assert.equal(SENSITIVE_KEY.test(palavra), false, `"${palavra}" contém radical curto e não é rótulo`);
+  }
+  for (const palavra of PRECO_DECLARADO) {
+    assert.equal(SENSITIVE_KEY.test(palavra), true, `"${palavra}" é o preço declarado da fronteira e precisa estar medido`);
   }
   for (const frase of PROSA_NAO_ROTULO) {
     assert.equal(redactSensitiveText(frase), frase, `"${frase}" é prosa e não pode ser tarjada`);
