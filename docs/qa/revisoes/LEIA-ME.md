@@ -37,8 +37,10 @@ A **1.1.46** fechou o C-1 e o C-2, verificados pelo próprio revisor com as sond
 196/196/196 e `NOVOS vs 1.1.44 = 0`; resíduo `secreto*` 0 de 182). A **1.1.47** fecha o que o I-1 exigia do lado
 do produto: a revogação deixou de ser silenciosa — o painel passa a explicar por que a auditoria não prossegue e
 aponta o modo sem pixels —, com oráculo novo em Chrome real (`current-page-pixel-abort-mv3`) que **reprova**
-contra os bytes empacotados da 1.1.46 e passa nesta árvore. A causa raiz do percurso (ordenação do registro de
-bootstrap em `authorized-audit-starter.js`) segue com o incremento paralelo dono do arquivo.
+contra os bytes empacotados da 1.1.46 e passa nesta árvore. A **causa raiz da revogação continua não medida** e o
+arquivo (`authorized-audit-starter.js`) é do incremento paralelo; a hipótese de ordenação do bootstrap que o
+projeto declarava antes foi **refutada pela própria revisão da 1.1.45** (as chamadas rodam antes de `execute()`,
+e sem sinal sensível não há pausa alguma).
 
 ## Histórico do estado (até a 1.1.37)
 

@@ -177,6 +177,12 @@ prova. O achado fica com o incremento dono do arquivo, agora com causa raiz e ra
 
 ## CORREÇÃO DE 17/09/2026 (rodada 92) — o diagnóstico declarado acima estava ERRADO, e a revisão final mediu o comportamento real
 
+**Retratação, para quem lê o documento de cima para baixo:** a causa declarada acima ("ordem do bootstrap",
+com o registro publicado depois da suspensão) também **não** confere — a própria revisão leu a árvore e mediu
+que as duas chamadas rodam **antes** de `execute()`. O que existe é uma **revogação**, sem pausa alguma, e a
+causa dela **continua não medida** (detalhes na última seção deste documento). O trecho acima fica como está,
+como registro do erro.
+
 A revisão final integrada (subagente `ad8456dd`) mediu as três superfícies que este documento pede — tela do
 painel, pacotes da porta e `chrome.storage.session` — em **dois fixtures**, e o percurso **depende do
 fixture**. O que este documento afirmava ("não começa", "a confirmação nunca aparece", "a pausa é criada sem
@@ -282,7 +288,14 @@ observada** — é a mesma revogação silenciosa que a revisão descreveu, agor
 telas observadas: [{"tela":"running"…},{"tela":"reconnecting"…},{"tela":"initial"…}]
 ```
 
-**O que continua fora deste incremento:** a **causa raiz** (a ordenação em `authorized-audit-starter.js` que
-publica o registro de bootstrap depois da suspensão) segue com o incremento paralelo dono do arquivo. O que
-mudou é a consequência visível: uma página sem sinal sensível em modo de pixel já **não** volta ao neutro em
-silêncio — o painel diz o que aconteceu e aponta o modo sem pixels.
+**O que continua fora deste incremento — e a causa que a revisão REFUTOU.** A **causa raiz da revogação
+continua não medida**. A hipótese que este documento declarava (a "ordem do bootstrap", com
+`registerPendingBootstrap`/`publishRegisteredBootstrap` publicando o registro **depois** da suspensão) foi
+**refutada pela revisão final da 1.1.45**, que leu a árvore: em `beginAuthorizedAudit` as duas chamadas (linhas
+2326 e 2356) rodam **antes** de `execute()` (2385), que é onde o portão de privacidade pausa — a ordem estava
+invertida. O que a revisão mediu no lugar: sem sinal sensível a auditoria é **revogada**
+(`session:"revoked"`, `target-capability:"invalidated"`), **sem** `active-audit-job`, **sem**
+`panel-bootstrap` e **sem** `pixel-capture` — não é "pausa sem registro", **não há pausa alguma**. Quem for
+consertar precisa medir a **revogação**, não a ordem do bootstrap. O arquivo é do incremento paralelo. O que a
+1.1.47 mudou é a consequência visível: uma página sem sinal sensível em modo de pixel já **não** volta ao neutro
+em silêncio — o painel diz o que aconteceu e aponta o modo sem pixels.

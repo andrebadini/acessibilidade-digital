@@ -3173,7 +3173,12 @@ do teste registra a armadilha para quem mexer depois.
   JSON); o instrumento de integridade mediu **146 itens**, **146/146 ids e títulos no HTML e no PDF**, notas
   editoriais **5/5** nos dois, **0 palavras partidas** e **0 `[redacted]`**.
 
-**O que continua fora deste incremento:** a **causa raiz** — a ordenação em `authorized-audit-starter.js` que
-publica o registro de bootstrap **depois** da suspensão por consentimento — segue com o incremento paralelo dono
-do arquivo, e é o que faz o percurso de pixel da página atual não começar numa página sem sinal sensível. O que
-a 1.1.47 muda é a consequência visível: **já não há retorno silencioso ao neutro**.
+**O que continua fora deste incremento — e uma retratação.** A **causa raiz continua não medida**. A hipótese
+que este projeto declarou antes (a "ordem do bootstrap": o registro publicado **depois** da suspensão por
+consentimento) foi **refutada pela revisão final da 1.1.45**, que leu a árvore — `registerPendingBootstrap`
+(2326) e `publishRegisteredBootstrap` (2356) rodam **antes** de `execute()` (2385), onde o portão de privacidade
+pausa. O que a revisão mediu: sem sinal sensível a auditoria é **revogada** (`session:"revoked"`,
+`target-capability:"invalidated"`), **sem** `active-audit-job`, **sem** `panel-bootstrap` e **sem**
+`pixel-capture` — não é "pausa sem registro", **não há pausa alguma**. Quem for consertar precisa medir a
+**revogação**. O arquivo é do incremento paralelo. O que a 1.1.47 muda é a consequência visível: **já não há
+retorno silencioso ao neutro**.

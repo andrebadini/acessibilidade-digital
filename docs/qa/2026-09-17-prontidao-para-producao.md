@@ -22,7 +22,7 @@ fechados na **1.1.46** (verificados pelo próprio revisor) e o **Important I-1**
 | 7 | Conclusões ABNT respeitam obrigatoriedade, alternativas e limites | **Atendido** | 146 itens (96 requisitos + 50 recomendações) conferidos contra o PDF da norma; amostra conferida nos dois sentidos; 5.9.7 não produz `failed` por desenho |
 | 8 | Interface e relatório claros para leigos | **Parcial por decisão do usuário** | os seis blocos didáticos estão no relatório entregue; não houve teste com pessoa de fora, e o usuário decidiu que isso não bloqueia (2026-09-16) |
 | 9 | Recursos obrigatórios implementados | **Atendido** | rastreabilidade recurso a recurso registrada nos critérios (campo de URL, auditoria da página aberta, refazer, progresso, relatório em aba, filtros, agrupamento por item, destaques, personas, anúncios estimados com aviso honesto, menu de contexto como atalho, lote, vocabulário e checagens pt-BR, quatro exportações, sem login) |
-| 10 | Sem falha Critical/Important conhecida | **Atendido com ressalva declarada** | a classe de credencial foi **aprovada** na 1.1.44; os 2 Critical da revisão final da 1.1.45 foram fechados na **1.1.46** (`NOVOS vs 1.1.44 = 0` no corpus de 896 formas; resíduo `secreto*` **0/182**). O **I-1** exigia que a revogação do modo de pixel **nunca** terminasse em silêncio: a **1.1.47** entrega a mensagem explícita e o oráculo que a mede nos dois sentidos (§2). **Ressalva:** a **causa raiz** do percurso (ordenação do registro de bootstrap em `authorized-audit-starter.js`, arquivo do incremento paralelo) continua aberta e declarada — numa página **sem** sinal sensível o percurso de pixel da página atual ainda não começa; o que mudou é que ele **explica** por que não começou |
+| 10 | Sem falha Critical/Important conhecida | **Atendido com ressalva declarada** | a classe de credencial foi **aprovada** na 1.1.44; os 2 Critical da revisão final da 1.1.45 foram fechados na **1.1.46** (`NOVOS vs 1.1.44 = 0` no corpus de 896 formas; resíduo `secreto*` **0/182**). O **I-1** exigia que a revogação do modo de pixel **nunca** terminasse em silêncio: a **1.1.47** entrega a mensagem explícita e o oráculo que a mede nos dois sentidos (§2). **Ressalva:** numa página **sem** sinal sensível a auditoria ainda é **revogada** — o percurso de pixel da página atual não chega a começar —, e a **causa raiz dessa revogação continua não medida** (a hipótese de ordenação do bootstrap foi **refutada** pela revisão; ver §2). O arquivo é do incremento paralelo. O que a 1.1.47 mudou é que a falha **explica** por que não começou |
 | 11 | Achados menores documentados | **Atendido** | `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` com desfecho por achado, de 1.1.16 a 1.1.45 |
 | 12 | Versão empacotada testada em Chrome real | **Atendido** | suíte completa: fase paralela **4.225 testes, 4.224 passam, 0 falham, 1 pulado**; fase serial **111 testes, 101 passam, 10 falham** — **9** delas em `test/e2e/sidepanel-flow-mv3.test.mjs` (arquivo do incremento paralelo) e **1** a flake declarada `axe-mv3-csp`; o conjunto caiu de **12 para 10** contra a medição anterior do mesmo dia, sem nenhuma falha nova. Escopo de 13 arquivos na raiz extraída do zip: **59/59**. Gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**. Auditoria ao vivo do pacote no Google e integridade dos quatro artefatos: §3.1 |
 
@@ -54,11 +54,17 @@ preenchido** pelos pacotes de progresso; o que separa os dois desfechos é o **p
 (`cancellationRequested`). O detalhamento está em `docs/qa/2026-09-17-percurso-pixels-pagina-atual.md` (seção
 "CONSERTO … 1.1.47") e na rodada 93 de `docs/qa/2026-09-13-continuity-and-e2e-triage.md`.
 
-**O que continua aberto, com dono declarado.** A causa raiz é de **ordenação**: em
-`src/background/authorized-audit-starter.js` o registro `audita:panel-bootstrap:v1:<windowId>` (pré-condição
-para o trabalhador entregar a pausa de consentimento ao painel) é publicado **depois** da suspensão. É arquivo
-**congelado** do incremento paralelo "Página atual sem interação visível"; editá-lo por cima violaria a regra de
-nunca editar os mesmos arquivos em paralelo. Correção e prova exigida estão escritas em
+**O que continua aberto, com dono declarado — e o que a revisão REFUTOU sobre a causa.** A causa raiz continua
+**não medida**. A hipótese que este dossiê declarava antes ("o registro `audita:panel-bootstrap:v1:<windowId>` é
+publicado depois da suspensão") foi **refutada pela revisão final da 1.1.45**, que leu a árvore: em
+`beginAuthorizedAudit` o `registerPendingBootstrap` (linha 2326) e o `publishRegisteredBootstrap` (2356) rodam
+**antes** de `execute()` (2385), que é onde o portão de privacidade pausa — a ordem estava **invertida**. O que
+a revisão mediu no lugar: sem sinal sensível a auditoria é **revogada** (`session:"revoked"`,
+`target-capability:"invalidated"`), **sem** `active-audit-job`, **sem** `panel-bootstrap` e **sem**
+`pixel-capture` — não é "pausa sem registro": **não há pausa alguma**. Quem for consertar precisa medir a
+**revogação** (o que a dispara), não a ordem do bootstrap. O arquivo `src/background/authorized-audit-starter.js`
+é **congelado** do incremento paralelo "Página atual sem interação visível"; editá-lo por cima violaria a regra
+de nunca editar os mesmos arquivos em paralelo. O histórico do diagnóstico, com a retratação, está em
 `docs/qa/2026-09-17-percurso-pixels-pagina-atual.md`.
 
 ## 3. Resíduos declarados (medidos; nenhum é vazamento)
@@ -110,8 +116,9 @@ item a item.
 
 ## 4. O que falta para "produção", em uma frase
 
-Falta **uma** coisa funcional que não é deste incremento — o conserto de ordenação em
-`authorized-audit-starter.js`, arquivo congelado do incremento paralelo, que faz o percurso de pixel da página
-atual não começar numa página sem sinal sensível (a falha **silenciosa** já está fechada) — e **uma** formalidade:
-a re-verificação independente deste artefato. Fora isso, o produto está construído, medido e documentado — e
+Falta **uma** coisa funcional que não é deste incremento — entender e corrigir a **revogação** que faz o
+percurso de pixel da página atual não começar numa página sem sinal sensível, dentro de
+`authorized-audit-starter.js`, arquivo congelado do incremento paralelo (a falha **silenciosa** já está fechada, e
+a hipótese de ordenação antes declarada aqui foi **refutada** pela revisão) — e **uma** formalidade: a
+re-verificação independente deste artefato. Fora isso, o produto está construído, medido e documentado — e
 **nada foi publicado**: distribuição exige autorização específica do usuário.
