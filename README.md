@@ -4,7 +4,34 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.44 preparada — sem revisão independente ainda.** A revisão da **1.1.43** confirmou a
+**Versão 1.1.45.** A revisão independente da **1.1.44** **APROVOU** o artefato — 0 Critical, 0 Important
+bloqueante e 6 Minor — e é a **primeira aprovação da classe de credencial depois de nove reprovações**. Ela
+mediu por conta própria: 17 formas de valor em 7 seções (`0/18` em todas), 198.360 identificadores × id/classe ×
+4 formas de valor (todas com `VAZA=6.707` e **0 reabertos** contra a 1.1.41 e a 1.1.42), 64.064 rótulos em 8
+superfícies (**0 reabertos**, com 19.139 fechados em prosa, 6.412 em cada uma de chave JSON/URL/trecho-id/
+trecho-classe e 14.653 em `aria-label`), caçador 1.728 e 13.824 (**0**), 880 + 7.040 formas realistas, 31 casos
+estruturais com profundidades até 30, e o percurso completo em Chrome 152 (grade 8/8, grade2 7/7, ataque 19/19,
+reabertos 13/13, `key-axis` 1/1 e o E2E do autor 6/6) — **sem encontrar um vazamento**. Só três resíduos na
+varredura dela, todos idênticos à 1.1.41 e inalcançáveis pelo `DOM.getOuterHTML`. O preço declarado do lado da
+precisão reproduziu **exatamente** (20 de 25 ids PT-BR, dicionário 99 contra 93, partição 15/5).
+
+A **1.1.45** fecha os seis Minor: **m-1** era regressão real — a lista de flexões da família não tinha
+`io`/`ios` e a marca de camelCase engolia a flexão, então `secretario`, `secretarios`, `secretariaDeSaude`,
+`tokenizacaoDeTexto` e `chaveiroDeLatão` perdiam o texto; agora a flexão é a **maior terminação medida que
+começa** o resto depois da família (`io`, `ia`, `o`, `acao`), com o remanescente ainda sob o teste de sinal —
+as cinco formas preservam e `chaveir-senha`/`chaveirpix`/`pix-chaveir` seguem selados; de quebra
+`obsession`/`possession` passaram a ser preservadas (o `io` cobre o `-ion` inglês) e o resíduo inglês caiu de 12
+para 10 palavras. **m-2** declarou o resíduo antes subdeclarado (6.623 formas com prefixo e 6.515 com cauda das
+próprias listas — `novaSenhaPix`, `fraseSecreta`, `assinaturaDigital`, `numeroConta` —, mesmo número da 1.1.41).
+**m-3/m-4** corrigiram as declarações de número: a falha da fase paralela sem `.git` é `preview-runtime-parity`
+(e não o `release-package`, que passa) e o escopo serial tem três medições (56/58 autor, 58/58 e 57/58
+revisores, com a única vermelha na flake `axe-mv3-csp`, que passa isolada). **m-5/m-6** corrigiram a partição
+15/5 do preço de precisão e retiraram `title` da lista de resíduos (está coberto no entregue). **Medições da
+1.1.45:** suíte **4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o zip), escopo
+serial **57/58**, gate **GREEN**, auditoria ao vivo **0 falhas / 9 positivos / 109 no checklist**, versão
+**1.1.45**, integridade 146/146 ids e títulos, notas 5/5, 0 palavras partidas e 0 `[redacted]`.
+
+**Versão 1.1.44.** A revisão da **1.1.43** mediu 2 Critical + 1 Important + 6 Minor, fechados na 1.1.44. A revisão da **1.1.43** confirmou a
 integridade do pacote, os 0 reabertos nas seis superfícies dos 64.064, a prosa 2.038→10, o id 4.797→0, o
 caçador 0/1.728 e 0/13.824, a morfologia 0/39, as chaves inocentes 3/55, a métrica 11/11 não vácua, os E2E
 19/19, 13/13 e 6/6, o `key-axis` 1/1, o gate GREEN e a auditoria ao vivo — e mediu **2 Critical, 1 Important e

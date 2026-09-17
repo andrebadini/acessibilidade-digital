@@ -57,3 +57,22 @@ com tarja em todos os casos estruturais, e os E2E de gate, ataque e reabertos co
    medição nas duas direções) ou registrar o número — não reintroduzir heurística de forma.
 3. Se o achado propuser decidir por léxico, exige **fonte lexical embarcada** e medição de custo: é incremento
    próprio, não conserto de revisão.
+
+## Resíduo do lado do RECALL, medido pela revisão da 1.1.44 (m-2)
+
+O número `VAZA=6.707` do corpus de 198.360 identificadores estava **subdeclarado**: destes,
+**6.623 têm prefixo da própria lista do produto** (`nova`, `novo`, `frase`, `pergunta`, …) e **6.515 têm
+cauda da própria lista** (`pix`, `digital`, `conta`, …). Exemplos medidos que **não** são reconhecidos como
+chave e por isso entregam o conteúdo do elemento: `novaSenhaPix`, `novaChavePix`, `novoTokenPix`,
+`fraseSecreta`, `perguntaSecreta`, `assinaturaDigital`, `numeroConta`. **Não é regressão:** a 1.1.41 tem
+exatamente o mesmo número (6.707), e nenhuma das duas listas os fecha — a forma é `prefixo + radical + cauda`
+em camelCase, e a decisão de marca por token não a reconhece. Fica **declarado** (0 menções antes desta
+rodada) e é candidato a incremento próprio, com medição nas duas direções.
+
+## Outros resíduos declarados e conferidos (m-6)
+
+`title` foi declarado como resíduo aberto nas rodadas anteriores, mas a revisão da 1.1.44 mediu que ele **está
+coberto no entregue** — sai da lista de resíduos. Seguem abertos e declarados: rótulo em `name`/`aria-label`/
+`autocomplete`/`data-*` e em nós irmãos; formas literais `id="sen&#104;a"`/`id="sen\nha"` (inalcançáveis: o
+`DOM.getOuterHTML` do produto decodifica antes do sanitizador) e `id="sen%68a"` (não é a palavra) — idênticas
+à 1.1.41; `codigo*`/`conta*`; `api.key`; `private_key`; `chave·de·api`; separadores exóticos.

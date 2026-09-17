@@ -427,7 +427,8 @@ const LANGUAGE_INFLECTIONS = Object.freeze(['', 'a', 'as', 'o', 'os', 'e', 'es',
   'im', 'ins', 'is', 'inho', 'inha', 'inhos', 'inhas', 'ão', 'ões', 'acao', 'ação', 'acoes', 'ações',
   'ado', 'ada', 'ador', 'adores', 'oso', 'osa', 'osos', 'osas', 'ivo', 'iva', 'ivos', 'ivas', 'atico',
   'ura', 'uras', 'el', 'éis', 'ente', 'entes', 'or', 'ores', 'aria', 'arias', 'ário', 'ários',
-  'amento', 'amentos', 'izacao', 'ização', 'izações', 'zinho', 'zinha', 'zinhos', 'zinhas']);
+  'amento', 'amentos', 'izacao', 'ização', 'izações', 'zinho', 'zinha', 'zinhos', 'zinhas',
+  'io', 'ios']);
 // 53 qualificadores REALISTAS de credencial medidos pelos revisores (o corpus de 55 caudas das revisões da
 // 1.1.38/1.1.40/1.1.41 tem itens que já estão na lista fechada do produto), somados a ela. Servem para os
 // DOIS lados da família: o que vem ANTES dela (`pix-chaveir`, `senha-chaveir`) e o que vem depois
@@ -446,16 +447,16 @@ function languageFamilyExemption(plain) {
   if (prefix === null) return false;
   const before = plain.slice(0, prefix.index);
   const after = plain.slice(prefix.index + prefix[0].length);
-  // Só as LETRAS que vêm logo depois da família são a flexão: `secretaria-saude` e `pintura.png` são a
-  // palavra da língua seguida de um separador (`ia`, `ura`), enquanto `chaveirpix` e `chaveirotoken` são
-  // conteúdo colado. O que sobra DEPOIS da flexão (`-saude`, `-senha`, `.png`) também é conferido: sem
-  // isso `chaveir-senha` passava por ser "a família mais a flexão vazia".
-  const inflection = /^[\p{L}]*/u.exec(after)[0];
-  const rest = after.slice(inflection.length);
-  // A palavra da língua é SÓ a família e a sua flexão: qualquer sinal de credencial antes, no meio ou
-  // depois (`senha-chaveir`, `pix-chaveir`, `chaveir-senha`, `chaveirpix`, `chaveirotoken`) tira a exceção.
-  return LANGUAGE_INFLECTIONS.includes(inflection) &&
-    ![before, rest].some(part => SENSITIVE_KEY.test(part) || CREDENTIAL_QUALIFIER_SIGNAL.test(part));
+  // A flexão é a MAIOR terminação medida que começa o que vem depois da família: em `secretario` é `io`, em
+  // `secretaria-saude` é `ia` (e o que sobra, `-saude`, é conferido), em `chaveiroDeLatão` é `o` com
+  // `delatão` sobrando, e em `tokenizacaoDeTexto` é `acao` com `detexto` sobrando. O que sobra depois da
+  // flexão também passa pelo teste de sinal: sem isso `chaveir-senha` passava por "família + flexão vazia".
+  const candidatas = LANGUAGE_INFLECTIONS.filter(flexao => after.startsWith(flexao))
+    .sort((a, b) => b.length - a.length);
+  // A palavra da língua é SÓ a família e a sua flexão: qualquer sinal de credencial antes, no meio ou depois
+  // (`senha-chaveir`, `pix-chaveir`, `chaveir-senha`, `chaveirpix`, `chaveirotoken`) tira a exceção.
+  const limpo = parte => !SENSITIVE_KEY.test(parte) && !CREDENTIAL_QUALIFIER_SIGNAL.test(parte);
+  return candidatas.some(flexao => limpo(before) && limpo(after.slice(flexao.length)));
 }
 /**
  * Verdadeiro quando o token é forma de palavra da língua (exata ou de família medida) e por isso NÃO

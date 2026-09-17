@@ -3033,3 +3033,45 @@ foco – Recomendação"** e **5.9.11 "Prevenção de erro – Recomendação"**
 de foco – Requisito"** batem com `REQUIREMENT`. É conferência **pontual** (quatro itens, dois de cada lado),
 somada às quatro já registradas (5.9.1, 5.1.3, 5.9.7, 5.9.8) e à conferência dos 146 itens de rodadas
 anteriores; serve para mostrar que o catálogo continua alinhado ao PDF depois das mudanças desta sessão.
+
+## Rodada 91 — a revisão da 1.1.44 **APROVOU** (0 Critical, 0 Important bloqueante, 6 Minor): a classe de credencial fecha depois de nove reprovações
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.44.md`. **É a primeira aprovação da classe** desde o
+começo da série. A revisão mediu por conta própria: integridade do pacote (digest `b466cc3d…0755`, 199
+arquivos, 0 fora do commit, 0 divergências byte a byte contra `git archive 3f6e38b`); `v143-shapes` **0/18 nas
+17 formas de valor** e nas sete seções; `v143-recall-198k` com **`VAZA=6.707` invariante** às formas de valor e
+**0 reabertos** contra a 1.1.41 e a 1.1.42, em id e classe; `v143-context-stack` com tarja em todos os casos
+estruturais **e nas 12 profundidades** que ela estendeu; `p03` com **0 reabertos nas oito superfícies**
+(19.139 fechados em prosa, 6.412 em cada uma de chave JSON, URL, trecho-id e trecho-classe, e 14.653 em
+`aria-label`); E2E em Chrome 152 com grade **8/8**, grade2 **7/7**, ataque **19/19**, reabertos **13/13**,
+`key-axis` **1/1** e o E2E do autor **6/6**, todos `(nenhuma)`; caçador **0/1.728** e **0/13.824**; morfologia
+**0/39**; chaves inocentes **3/55**; **colunar × simplificado agora se comportam igual**; e o preço declarado
+reproduz **exatamente** (20/25 ids, dicionário 99 contra 93, partição 15/5). Só **três resíduos** apareceram na
+varredura estrutural dela — `id="sen&#104;a"`, `id="sen\nha"` e `id="sen%68a"`, todos **idênticos à 1.1.41** e
+inalcançáveis pelo `DOM.getOuterHTML` do produto.
+
+**Seis Minor, nenhum bloqueante, nenhum vazamento** — e a 1.1.45 fecha todos:
+- **m-1 (regressão real, não declarada):** a lista fechada de flexões não tinha `io`/`ios` e a marca de
+  camelCase engolia a flexão, então `secretario`, `secretarios`, `secretariaDeSaude`, `tokenizacaoDeTexto` e
+  `chaveiroDeLatão` perdiam o texto (a 1.1.40/41/42 preservavam). **Corrigido**: a flexão passou a ser a maior
+  terminação medida que **começa** o que vem depois da família (`io` em `secretario`, `ia` em
+  `secretaria-saude`, `o` em `chaveiroDeLatão`, `acao` em `tokenizacaoDeTexto`), com o que sobra depois dela
+  ainda passando pelo teste de sinal. Medido: as cinco formas **preservam**, e `chaveir-senha`, `chaveirpix`,
+  `pix-chaveir` e `token-de-acesso` continuam selados. Efeito colateral **bom**: `obsession` e `possession`
+  passaram a ser preservadas (a flexão `io` cobre o `-ion` inglês) — a lista de resíduo inglês caiu de 12 para
+  10 palavras, com o teste atualizado para a verdade medida.
+- **m-2 (resíduo subdeclarado):** o `VAZA=6.707` tem **6.623 formas com prefixo** e **6.515 com cauda** das
+  próprias listas do produto (`novaSenhaPix`, `novaChavePix`, `novoTokenPix`, `fraseSecreta`,
+  `perguntaSecreta`, `assinaturaDigital`, `numeroConta`) — **não é regressão** (a 1.1.41 tem o mesmo número) e
+  ficou **declarado** no documento de decisão, com exemplos e contagens (antes: 0 menções).
+- **m-3 e m-4 (números):** a falha da fase paralela sem `.git` é `preview-runtime-parity` (não o
+  `release-package`, que passa) e o escopo serial tem **três medições**: 56/58 (autor, com um
+  `CONTEXT_PROOF_DENIED`), 58/58 (revisor da 1.1.43) e 57/58 (revisor da 1.1.44, só a flake
+  `axe-mv3-csp`, que passa 1/1 isolada) — as duas declarações passaram a citar isso.
+- **m-5 (partição 15/5 embaralhada)** e **m-6 (`title` declarado aberto mas coberto no entregue)**: registro e
+  documento de decisão corrigidos.
+
+**Medições da 1.1.45:** suíte **4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o
+zip); escopo serial no pacote **57/58** (só a flake `axe-mv3-csp`); gate **GREEN**; auditoria ao vivo
+**0 falhas / 9 positivos / 109 no checklist / versão 1.1.45**; integridade **0 palavras partidas, 0
+`[redacted]`**, notas 5/5, 146/146 ids e títulos.

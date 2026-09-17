@@ -1,6 +1,33 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
-> **Incremento 1.1.44, e o que ele muda aqui.** Artefato corrente
+> **Incremento 1.1.45, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.45.zip` (`9df21c05…36a1`). **A revisão independente da 1.1.44
+> APROVOU** — 0 Critical, 0 Important bloqueante, 6 Minor — e é a **primeira aprovação da classe de
+> credencial** depois de nove reprovações: ela mediu, por conta própria, 17 formas de valor × 7 seções,
+> 198.360 identificadores × id/classe × 4 formas (todas com `VAZA=6.707` e **0 reabertos**), 64.064 rótulos ×
+> 8 superfícies (**0 reabertos**), o caçador 1.728 e 13.824 (**0**), 880 + 7.040 formas realistas, 31 casos
+> estruturais com profundidades até 30, e o percurso E2E completo em Chrome 152 (grade 8/8, ataque 19/19,
+> reabertos 13/13, `key-axis` 1/1, E2E do autor 6/6), **sem achar um vazamento**. Só três resíduos na varredura
+> dela, todos idênticos à 1.1.41 e inalcançáveis pelo `DOM.getOuterHTML`. A **1.1.45** fecha os seis Minor:
+> **m-1** era regressão real (a lista de flexões não tinha `io`/`ios` e a marca de camelCase engolia a flexão —
+> `secretario`, `secretarios`, `secretariaDeSaude`, `tokenizacaoDeTexto`, `chaveiroDeLatão` perdiam o texto;
+> agora a flexão é a maior terminação medida que começa o resto depois da família, e as cinco formas
+> preservam sem reabrir `chaveir-senha`/`chaveirpix`/`pix-chaveir`); **m-2** declarou o resíduo subdeclarado
+> (6.623 formas com prefixo e 6.515 com cauda das próprias listas — mesmo número da 1.1.41); **m-3/m-4**
+> corrigiram os nomes e as três medições do escopo serial (56/58 autor, 58/58 e 57/58 revisores) e o nome da
+> falha da fase paralela (`preview-runtime-parity`, não `release-package`); **m-5/m-6** corrigiram a partição
+> 15/5 do preço de precisão e retiraram `title` da lista de resíduos (está coberto no entregue). De quebra,
+> `obsession`/`possession` passaram a ser preservadas e o resíduo inglês caiu de 12 para 10 palavras.
+> **Medições da 1.1.45:** suíte **4.180/4.178/1** (a única falha é o `release-package` antes de reconstruir o
+> zip), escopo serial **57/58** (só a flake `axe-mv3-csp`, 1/1 isolada), gate **GREEN**, auditoria ao vivo
+> **0 falhas / 9 positivos / 109 no checklist**, versão **1.1.45**, integridade 146/146, notas 5/5, 0 palavras
+> partidas, 0 `[redacted]`. **10** segue **Atendido**: não há Critical/Important conhecido na classe, e os
+> resíduos declarados (identificador ambíguo, rótulos em `name`/`aria-label`/nós irmãos, formas literais
+> inalcançáveis, prosa `pix-<família>`, radicais curtos) estão medidos e registrados. O item aberto restante do
+> produto é o **percurso da página atual em modo de pixel**, que pertence ao incremento paralelo.
+> **8** segue **Parcial** por decisão do usuário, fora do caminho de bloqueio.
+
+> **Incremento 1.1.44, e o que ele muda aqui.** Artefato
 > `release/audita-acessibilidade-1.1.44.zip` (`b466cc3d…0755`), **sem revisão independente ainda**.
 > Fecha os **2 Critical, 1 Important e 6 Minor** da revisão da 1.1.43 — a **nona** reprovação da classe de
 > credencial. A revisão mostrou que decidir pela **forma do conteúdo** (`looksLikeFieldValue`, da 1.1.43) não
