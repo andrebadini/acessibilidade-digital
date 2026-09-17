@@ -337,11 +337,15 @@ transforma leitura de código em teste de comportamento.
 
 ## O que impede declarar produção agora
 
-0. **Estado em 1.1.37, para não ler o histórico como se fosse o presente.** Os critérios 1 a 7, 9, 10,
-   11 e 12 estão **Atendidos** com a evidência medida nos bytes empacotados da 1.1.37; o **8** continua
-   **Parcial** porque depende de uma pessoa de fora, mas **por decisão do usuário (2026-09-16) deixou de
-   ser portão de produção**; e a **revisão independente da 1.1.37** é o único portão que falta — o veredito
-   anterior, da 1.1.36, deu 2 Critical e 4 Important, todos fechados aqui. Os itens 3
+0. **Estado em 1.1.39, para não ler o histórico como se fosse o presente.** Os critérios 1 a 7, 9, 10,
+   11 e 12 estão **Atendidos** com a evidência medida nos bytes empacotados da 1.1.39 (fase paralela
+   4.221/4.220/0/1, escopo serial 52/52, auditoria ao vivo no Google com 0 falhas/1 alerta/3 suspeitas/9
+   positivos/109 no checklist/28,5%/9,0 de 10, PDF de 18 páginas, 146/146 ids e títulos, gate GREEN); o **8**
+   continua **Parcial** porque depende de uma pessoa de fora, mas **por decisão do usuário (2026-09-16)
+   deixou de ser portão de produção**; e a **revisão independente da 1.1.39** é o único portão que falta —
+   os vereditos anteriores deram 2 Critical e 7 Important (1.1.37) e 3 Important (1.1.38), **todos
+   fechados**, com um resíduo declarado e medido (journal de posse forjado com `tabId` e `windowId` que
+   casam). Os itens 3
    e 5 abaixo descrevem o estado de 1.1.19/1.1.22 e ficam como histórico do caminho, não como pendência
    de agora: o teste do caminho imutável com recibo parcial **foi escrito** (`test/export/report-export.test.js`,
    com mutação provando o portão nos dois sentidos).
