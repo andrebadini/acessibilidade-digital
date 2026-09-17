@@ -408,6 +408,52 @@ const LANGUAGE_PREFIX_FAMILIES = Object.freeze([
   'espinh', 'opini', 'secretar', 'secretári', 'secretos', 'tokeniz', 'obsess', 'possess',
 ]);
 const LANGUAGE_FAMILY_PREFIX = new RegExp(String.raw`(?:^|[^\p{L}\p{N}])(?:${LANGUAGE_PREFIX_FAMILIES.join('|')})`, 'u');
+// Depois da família pode vir uma DESINÊNCIA da língua (`chaveiro`, `chaveta`, `chaveamento`, `pintura`,
+// `secretaria`) ou uma CAUDA/radical de credencial (`chaveirpix`, `chaveirapix`, `chaveiracpf`,
+// `chaveirlogin`). A guarda tira a desinência e recusa a exceção quando o que sobra é radical OU cauda de
+// credencial — medido na revisão da 1.1.42 (p06): 2.038 formas que a 1.1.40 tarjava e a 1.1.42 entregava.
+// A exceção de família vale para a PALAVRA da língua e as suas flexões medidas — nunca para o que vem
+// depois da família quando isso é conteúdo (`chaveirpix`, `chaveirapix`, `chaveiracpf`, `chaveirlogin`,
+// `chaveirotoken`, `pinturasenha`). A lista de terminações é FECHADA e curta de propósito: o que não for
+// palavra da língua cai na regra permissiva, que é o lado seguro. Medido na revisão da 1.1.42 (p06):
+// 2.038 formas concatenadas que a 1.1.40 tarjava e a 1.1.42 entregava na prosa.
+// TERMINAÇÕES medidas no corpus PT-BR do revisor (70 palavras: `chaveiro`, `chaveirinho`, `chaveta`,
+// `chaveamento`, `pintura`, `pintor`, `pincel`, `pincéis`, `pincelada`, `pintado`, `pintinho`, `pingente`,
+// `pinguim`, `espinho`, `espinhoso`, `opinião`, `opiniatico`, `secretaria`, `secretário`, `secreto`,
+// `secretariado`, `tokenizacao`, `tokenizador`, `obsessão`, `possessão`, `possessivo`…) mais as flexões de
+// número das mesmas famílias. A lista é FECHADA: o que não for palavra da língua cai na regra permissiva,
+// que é o lado seguro.
+const LANGUAGE_INFLECTIONS = Object.freeze(['', 'a', 'as', 'o', 'os', 'e', 'es', 'ia', 'ias', 'iado',
+  'im', 'ins', 'is', 'inho', 'inha', 'inhos', 'inhas', 'ão', 'ões', 'acao', 'ação', 'acoes', 'ações',
+  'ado', 'ada', 'ador', 'adores', 'oso', 'osa', 'osos', 'osas', 'ivo', 'iva', 'ivos', 'ivas', 'atico',
+  'ura', 'uras', 'el', 'éis', 'ente', 'entes', 'or', 'ores', 'aria', 'arias', 'ário', 'ários',
+  'amento', 'amentos', 'izacao', 'ização', 'izações', 'zinho', 'zinha', 'zinhos', 'zinhas']);
+// Qualificadores REALISTAS de credencial medidos pelos revisores (o corpus de 55 caudas das revisões da
+// 1.1.38/1.1.40/1.1.41), além da lista fechada do produto. Servem para os DOIS lados da família: o que
+// vem ANTES dela (`pix-chaveir`, `senha-chaveir`) e o que vem depois (`chaveirpix`).
+const CREDENTIAL_QUALIFIERS = Object.freeze(['assinatura', 'pix', 'whatsapp', 'chat', 'telegram',
+  'cobranca', 'recebimento', 'email', 'login', 'conta', 'pessoal', 'trabalho', 'wifi', 'roteador',
+  'producao', 'teste', 'cliente', 'titular', 'sistema', 'portal', 'servidor', 'backup', 'nuvem',
+  'suporte', 'financeiro', 'comercial', 'marketing', 'rh', 'fiscal', 'contabil', 'juridico', 'medico',
+  'paciente', 'aluno', 'professor', 'escola', 'faculdade', 'governo', 'prefeitura', 'corporate',
+  'intranet', 'vpn', 'proxy', 'gateway', 'firewall', 'docker', 'kubernetes', 'aws', 'azure', 'github',
+  'gitlab', 'jira', 'slack']);
+const CREDENTIAL_QUALIFIER_SIGNAL = new RegExp(
+  String.raw`(?:${CREDENTIAL_QUALIFIERS.join('|')}|${TAILS_ALTERNATION})`, 'iu');
+function languageFamilyExemption(plain) {
+  const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
+  if (prefix === null) return false;
+  const before = plain.slice(0, prefix.index);
+  // Só as LETRAS que vêm logo depois da família são a flexão: `secretaria-saude` e `pintura.png` são a
+  // palavra da língua seguida de um separador (`ia`, `ura`), enquanto `chaveirpix` e `chaveirotoken` são
+  // conteúdo colado.
+  const remainder = /^[\p{L}]*/u.exec(plain.slice(prefix.index + prefix[0].length))[0];
+  // A palavra da língua é SÓ a família e a sua flexão: qualquer sinal de credencial antes ou depois
+  // (`senha-chaveir`, `pix-chaveir`, `chaveirpix`, `chaveirotoken`) tira a exceção.
+  return LANGUAGE_INFLECTIONS.includes(remainder) &&
+    !SENSITIVE_KEY.test(before) && !SENSITIVE_KEY.test(remainder) &&
+    !CREDENTIAL_QUALIFIER_SIGNAL.test(before) && !CREDENTIAL_QUALIFIER_SIGNAL.test(remainder);
+}
 /**
  * Verdadeiro quando o token é forma de palavra da língua (exata ou de família medida) e por isso NÃO
  * pode ser tratado como rótulo de credencial pela regra permissiva. É a mesma decisão nas três
@@ -417,11 +463,7 @@ const LANGUAGE_FAMILY_PREFIX = new RegExp(String.raw`(?:^|[^\p{L}\p{N}])(?:${LAN
 export function isLanguageWordForm(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
   if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return true;
-  // A família de PREFIXO só poupa quando o que vem DEPOIS dela não carrega radical: `chaveiro` e
-  // `tokenizacao` são palavra da língua, `chaveirotoken` e `pinturasenha` são credencial concatenada.
-  const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
-  if (prefix !== null && !SENSITIVE_KEY.test(plain.slice(prefix.index + prefix[0].length))) return true;
-  return false;
+  return languageFamilyExemption(plain);
 }
 /**
  * Mesma decisão, restrita às famílias de PREFIXO, para o vocabulário de CHAVE/IDENTIFICADOR: lá o
@@ -433,9 +475,7 @@ export function isLanguageWordForm(value) {
 export function isLanguageWordStrictForm(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
   if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return true;
-  const prefix = LANGUAGE_FAMILY_PREFIX.exec(plain);
-  if (prefix !== null && !SENSITIVE_KEY.test(plain.slice(prefix.index + prefix[0].length))) return true;
-  return false;
+  return languageFamilyExemption(plain);
 }
 export function isLanguageWordHead(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
@@ -510,11 +550,22 @@ const BARE_TAIL_KEY = new RegExp(BARE_TAIL_SOURCE, 'iu');
 // que só CONTÉM o radical com desinência curta (`chavear`, `chavena`, `secretas`), palavra exata do
 // vocabulário (`password`, `pin`, `sessao`) e frase com separador (`cookie-banner`, `map-pin`,
 // `session-info`, `token-de-acesso`) — nelas o texto do autor continua na evidência.
-const PAIRED_IDENTITY = new RegExp(
-  String.raw`(?<![\p{L}\p{N}])[\p{L}\p{N}]{0,3}(?:${LONG_STEMS_ALTERNATION})[\p{L}\p{N}]{3,24}(?![\p{L}])`, 'iu');
 export function isPairedCredentialIdentity(value) {
   const text = String(value ?? '');
-  return PAIRED_IDENTITY.test(text) && !isLanguageWordForm(text);
+  // Identificador de credencial pelo vocabulário de chave, menos as famílias da língua (`chaveiro`,
+  // `pintura`, `tokenizacao`). A POSIÇÃO autoriza olhar o conteúdo; a FORMA do conteúdo decide (ver
+  // `looksLikeFieldValue`), porque prosa da página não é valor de campo.
+  return isSensitiveKeyName(text) && !isLanguageWordForm(text);
+}
+// Forma de VALOR de campo: curto, poucas palavras e sem pontuação de frase. Separa
+// `<div id="senha">borboleta</div>` (valor, tarja) de `<div id="sessao">Sessão das 19h no cinema.</div>`
+// (prosa da página, preservada) — a precisão que a revisão da 1.1.42 mediu (p04), sem reabrir os casos do
+// e2e de identificador nem os do e2e do revisor da 1.1.40.
+export function looksLikeFieldValue(value) {
+  const text = String(value ?? '').replace(/\s+/gu, ' ').trim();
+  if (text === '' || text.length > 64) return false;
+  if (/[.!?;:]\s*$/u.test(text)) return false;
+  return text.split(' ').length <= 4;
 }
 export function isSensitiveKeyName(value) {
   const text = String(value ?? '');

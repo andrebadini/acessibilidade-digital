@@ -3,6 +3,7 @@ import { escapeCssIdentifier } from './evidence/selector.js';
 import {
   backgroundImageKind,
   isPairedCredentialIdentity,
+  looksLikeFieldValue,
   redactCredentialLabelTail,
   redactNormalizedNode,
   sanitizeEvidenceUrl,
@@ -197,9 +198,12 @@ function credentialIdentityAttributes(tagName, attributes) {
   }
   return false;
 }
-function privateTextElement(tagName, attributes) {
-  return tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName)) ||
-    credentialIdentityAttributes(tagName, attributes);
+function privateTextElement(tagName, attributes, text = '') {
+  // Identificador de credencial só torna o texto privado quando o texto TEM FORMA DE VALOR de campo: a
+  // prosa da página num elemento com id/classe que apenas contém um radical (`<div id="sessao">Sessão das
+  // 19h…</div>`) continua na evidência — precisão medida na revisão da 1.1.42 (p04).
+  if (tagName === 'textarea' || (editableElement(tagName, attributes) && !['input', 'select'].includes(tagName))) return true;
+  return credentialIdentityAttributes(tagName, attributes) && looksLikeFieldValue(text);
 }
 
 function markPrivateReferenceConsumers(nodes, privateReferenceIds) {
@@ -470,7 +474,8 @@ function normalizeSimplified(raw) {
   const byId = new Map(nodes.map(node => [node.nodeId, node]));
   for (const node of nodes) if (node.parentId && byId.has(node.parentId)) byId.get(node.parentId).children.push(node.nodeId);
   const executableById = new Map(nodes.map(node => [node.nodeId, EXECUTABLE_TEXT_PARENTS.has(node.tagName)]));
-  const privateTextById = new Map(nodes.map(node => [node.nodeId, privateTextElement(node.tagName, node.attributes)]));
+  const privateTextById = new Map(nodes.map(node => [node.nodeId,
+    privateTextElement(node.tagName, node.attributes, `${node.text ?? ''} ${node.visibleText ?? ''}`.trim())]));
   const parentOfNode = node => node.parentId ? byId.get(node.parentId) : null;
   const privateTextAncestors = ancestorsOfMatching(nodes, node => privateTextById.get(node.nodeId), parentOfNode);
   const inExecutableSubtree = node => {
@@ -736,7 +741,7 @@ function normalizeColumnar(raw) {
   const parentOfRecord = record => byDocumentAndIndex.get(`${record.documentIndex}:${record.parentIndex}`);
   const privateTextAncestors = ancestorsOfMatching(
     records,
-    record => privateTextElement(record.tagName, record.attributes),
+    record => privateTextElement(record.tagName, record.attributes, `${record.text ?? ''} ${record.visibleText ?? ''}`.trim()),
     parentOfRecord,
   );
   const inExecutableSubtree = record => {
@@ -760,7 +765,7 @@ function normalizeColumnar(raw) {
     const visited = new Set();
     while (current && !visited.has(current)) {
       visited.add(current);
-      if (privateTextElement(current.tagName, current.attributes)) {
+      if (privateTextElement(current.tagName, current.attributes, `${current.text ?? ''} ${current.visibleText ?? ''}`.trim())) {
         privateTextMemo.set(record, true);
         return true;
       }
@@ -774,7 +779,7 @@ function normalizeColumnar(raw) {
     const visited = new Set();
     while (current && !visited.has(current)) {
       visited.add(current);
-      if (privateTextElement(current.tagName, current.attributes)) return true;
+      if (privateTextElement(current.tagName, current.attributes, `${current.text ?? ''} ${current.visibleText ?? ''}`.trim())) return true;
       current = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
     }
     return false;
@@ -902,7 +907,7 @@ function normalizeColumnar(raw) {
   const redactedNodes = ordered.map(record => redactPlaceholderText(redactNormalizedNode(outputByRecord.get(record), {
     executable: inExecutableSubtree(record),
     privateText: inPrivateTextSubtree(record),
-    privateTextRoot: privateTextElement(record.tagName, record.attributes) && !hasPrivateTextAncestor(record),
+    privateTextRoot: privateTextElement(record.tagName, record.attributes, `${record.text ?? ''} ${record.visibleText ?? ''}`.trim()) && !hasPrivateTextAncestor(record),
     privateTextDescendant: hasPrivateTextAncestor(record),
     privateTextAncestor: privateTextAncestors.has(record),
     // O controle nativo mantém o nome; o nó de texto privado só mantém o nome VAZIO (ver

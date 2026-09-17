@@ -1,4 +1,4 @@
-import { decodeForMatching, hasCredentialValueSignal, isLanguageWordStrictForm, isPairedCredentialIdentity, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, isLanguageWordStrictForm, isPairedCredentialIdentity, isSensitiveKey, looksLikeFieldValue, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -243,6 +243,11 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
   // destarjar. Prosa legítima (`cartão de crédito`, `chave do problema`, `Senha da conta`) não acende o
   // sinal, e é isso que impede o remédio de virar o novo defeito.
   let tainted = false;
+  // Elementos com IDENTIFICADOR de credencial (`id="senhaassinatura"`, `class="chavepix"`): o conteúdo
+  // deles é candidato a VALOR, e a forma do fragmento decide — valor de campo (`borboleta`) sai tarjado,
+  // prosa da página (`Sessão das 19h no cinema do bairro.`) fica. Foi a precisão que a revisão da 1.1.42
+  // mediu (p04): o par largo sozinho apagava o texto de 98 palavras do dicionário usadas como id.
+  const credentialContext = [];
   let textStream = '';
   // O acumulado SEM espaço entre fragmentos: `<b>sen</b>ha: X` é o rótulo partido por marcação, e o
   // acumulado com espaço (`sen ha: X`) não o enxerga — Important da revisão da 1.1.34. O acumulado com
@@ -256,6 +261,10 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       return;
     }
     const decoded = decodeEntities(fragment);
+    if (credentialContext.length > 0 && looksLikeFieldValue(decoded)) {
+      output += '[redacted]';
+      return;
+    }
     textStream = `${textStream} ${decoded}`;
     compactStream = `${compactStream}${decoded}`;
     if (!tainted && (hasCredentialValueSignal(textStream) || hasCredentialValueSignal(compactStream))) tainted = true;
@@ -318,6 +327,9 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       position = token.end;
       continue;
     }
+    if (parsed.closing && credentialContext.length > 0 && credentialContext.at(-1) === parsed.name) {
+      credentialContext.pop();
+    }
     if (privateStructure.length) {
       if (parsed.closing) {
         if (privateStructure.at(-1) === parsed.name) {
@@ -353,9 +365,10 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
     if (!parsed.closing && !parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
       const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));
       const contenteditable = String(values.contenteditable ?? '').trim().toLowerCase();
+      if (credentialIdentityValue) credentialContext.push(parsed.name);
       if (parsed.name === 'textarea' || (
         Object.hasOwn(values, 'contenteditable') && !['false', 'inherit'].includes(contenteditable)
-      ) || forcedPrivateRoot || credentialIdentityValue) privateStructure.push(parsed.name);
+      ) || forcedPrivateRoot) privateStructure.push(parsed.name);
     }
     if (forcedPrivateRoot && (parsed.selfClosing || VOID_ELEMENTS.has(parsed.name))) break;
     position = token.end;

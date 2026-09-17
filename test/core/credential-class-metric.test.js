@@ -550,10 +550,14 @@ const MORFOLOGIA_PT = [
 // 1.1.41, com valor saindo no modelo guardado e nos artefatos HTML/JSON. Falso positivo é o lado
 // suportável desta troca; vazamento não é. A asserção fixa os dois lados.
 const FAMILIAS_EN_RESIDUO = ['pallbearer', 'cupbearer', 'seedling', 'allseed', 'aniseed', 'birdseed',
-  'antipass', 'repass', 'assession', 'chipping'];
-// Preservadas porque COMEÇAM numa família de prefixo medida (`obsess`, `possess`) ou pela lista exata
-// (`shipping`): o lado do prefixo continua valendo, é o do sufixo que foi removido.
-const FAMILIAS_EN_PREFIXO = ['obsession', 'possession', 'shipping'];
+  'antipass', 'repass', 'assession', 'obsession', 'possession', 'chipping'];
+// `shipping` é preservada pelo PRÓPRIO vocabulário (a fronteira de palavra do radical curto já a excluía
+// antes das famílias), não por família — fica fora do resíduo.
+const VOCABULARIO_PRESERVA = ['shipping'];
+// Nenhuma palavra inglesa é preservada por família: o lado do SUFIXO foi removido (Critical da revisão da
+// 1.1.42) e o lado do PREFIXO exige que o que vem depois seja flexão da língua (`ia`, `inho`, `ura`…), o
+// que não cobre `-ion`/`-ing` do inglês. Todas as 13 acima são o preço declarado e medido da troca.
+const FAMILIAS_EN_PREFIXO = [];
 
 test('morfologia portuguesa e famílias inglesas continuam evidência, e as formas de credencial continuam tarjadas', t => {
   for (const frase of MORFOLOGIA_PT) {
@@ -569,6 +573,10 @@ test('morfologia portuguesa e famílias inglesas continuam evidência, e as form
   for (const palavra of FAMILIAS_EN_PREFIXO) {
     assert.equal(redactSensitiveText(`${palavra}: abc123`), `${palavra}: abc123`,
       `"${palavra}" é preservada pela família de PREFIXO`);
+  }
+  for (const palavra of VOCABULARIO_PRESERVA) {
+    assert.equal(redactSensitiveText(`${palavra}: abc123`), `${palavra}: abc123`,
+      `"${palavra}" é preservada pelo próprio vocabulário`);
   }
   // E o outro lado do mesmo eixo, que é o que a revisão da 1.1.41 mediu como Critical: com prefixo
   // (`xsession`, `novaseed`, `getseed`) ou com cauda colada depois do radical
