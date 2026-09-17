@@ -1,4 +1,4 @@
-import { decodeForMatching, hasCredentialValueSignal, isSensitiveAssignedKey, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -91,8 +91,8 @@ function sanitizeUrl(value) {
     if (!['http:', 'https:'].includes(url.protocol)) return null;
     url.username = '';
     url.password = '';
-    for (const key of [...url.searchParams.keys()]) if (isSensitiveAssignedKey(key)) url.searchParams.delete(key);
-    if (isSensitiveAssignedKey(url.hash) || FRAGMENT_CREDENTIAL_KEY.test(url.hash)) url.hash = '';
+    for (const key of [...url.searchParams.keys()]) if (isSensitiveKeyName(key)) url.searchParams.delete(key);
+    if (isSensitiveKeyName(url.hash) || FRAGMENT_CREDENTIAL_KEY.test(url.hash)) url.hash = '';
     if (absolute) return url.href;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
@@ -141,7 +141,7 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
     if (parsed.name === 'meta' && String(values['http-equiv']).toLowerCase() === 'refresh' && name === 'content') continue;
     // O NOME do atributo é a chave da atribuição (`senhavelha="…"`); o vocabulário fechado continua
     // valendo para os atributos que o produto preserva de propósito (`id`, `name`, `autocomplete`).
-    if (isSensitiveAssignedKey(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
+    if (isSensitiveKeyName(name) && !['id', 'name', 'autocomplete'].includes(name)) continue;
     if (editable && ['value', 'aria-valuenow', 'aria-valuetext'].includes(name)) continue;
     if (name === 'value' && (parsed.name === 'option' || isSensitiveKeyName(`${values.id || ''} ${values.name || ''} ${values.autocomplete || ''}`))) continue;
     if (parsed.name === 'option' && (name === 'selected' || name === 'aria-selected')) continue;

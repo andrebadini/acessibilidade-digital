@@ -209,6 +209,28 @@ const CHAVES_CONECTOR = [
   ['consulta ?cpfDoTitular=', `/p?cpfDoTitular=${S('186')}`],
   ['hash #chaveDeApi=', `/p#chaveDeApi=${S('187')}`],
 ];
+// CAUDA FORA DA LISTA FECHADA EM RÓTULO MINÚSCULO (Critical C1 da revisão da 1.1.39). `senhaassinatura:`,
+// `chavepix:` — radical conhecido, cauda DESCONHECIDA e sem transição de caixa: a marca de camelCase não
+// entra (não há maiúscula) e o vocabulário fechado não conhece a cauda, então o valor fraco passava e
+// chegava ao modelo e aos artefatos entregues. `SenhaAssinatura:` fechava por causa da marca — a assimetria
+// entre as duas grafias é a condição exata medida pelo revisor.
+const CAUDAS_FORA_DA_LISTA = [
+  ['senha + assinatura', `<p>senhaassinatura: borboleta</p>`],
+  ['chave + pix', `<p>chavepix: girassol</p>`],
+  ['chave + email minúsculo', `<p>chaveemail: passarinho</p>`],
+  ['senha + whatsapp', `<p>senhawhatsapp: borboleta</p>`],
+  ['token + chat', `<p>tokenchat: girassol</p>`],
+  ['Chavepix com primeira maiúscula', `<p>Chavepix: borboleta</p>`],
+  ['CHAVEPIX em caixa alta', `<p>CHAVEPIX: girassol</p>`],
+  ['prefixo arbitrário + cauda nova', `<p>xsenhapix: borboleta</p>`],
+];
+// E O OUTRO LADO, medido: as palavras da língua que o vocabulário permissivo conhece e que o vocabulário
+// fechado não — elas precisam continuar sendo EVIDÊNCIA mesmo seguidas de dois pontos e valor fraco.
+const PALAVRAS_DA_LINGUA_COM_RADICAL = [
+  'chaveiro', 'chaveta', 'chaveamento', 'secretaria', 'secretário', 'secretariado', 'secreto',
+  'obsessão', 'possessões', 'pintura', 'pincel', 'pintor', 'pintinho', 'pintado', 'pingente',
+  'pinguim', 'pino', 'pinta', 'spin', 'pinky', 'tokenizador', 'tokenizacao',
+];
 const URLS = [
   ['consulta ?code=', `/p?code=${S('60')}`], ['consulta ?assertion=', `/p?assertion=${S('61')}`],
   ['hash #code=', `/p#code=${S('62')}`], ['hash #assertion=', `/p#assertion=${S('63')}`],
@@ -329,7 +351,7 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
   // calculado aqui em vez de escrito à mão: uma lista que encolher derruba esta asserção.
   const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length) * 3 + CONCATENACOES.length * 2
     + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + (URLS.length + URLS_CHAVE.length) * 2
-    + ROTULOS_FRACOS.length * VALORES_FRACOS.length * 2 + CHAVES_CONECTOR.length;
+    + ROTULOS_FRACOS.length * VALORES_FRACOS.length * 2 + CHAVES_CONECTOR.length + CAUDAS_FORA_DA_LISTA.length;
   t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length} fracos=${ROTULOS_FRACOS.length * VALORES_FRACOS.length} combinações=${combinacoes}`);
   assert.ok(combinacoes >= 210, `a métrica encolheu: ${combinacoes} combinações`);
   const vazamentos = [];
@@ -359,6 +381,19 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
       ['json', sanitizeJsonData({ texto: `<p>${rotulo}: ${sentinela}</p>` }).texto],
     ]) {
       if (saida.includes(sentinela)) vazamentos.push(`${rotulo} (${caminho})`);
+    }
+  }
+  for (const [nome, html] of CAUDAS_FORA_DA_LISTA) {
+    const valor = html.match(/borboleta|girassol|passarinho/u)[0];
+    const trecho = sanitizeHtmlSnippetSource(html);
+    const json = sanitizeJsonData({ texto: html }).texto;
+    for (const [caminho, saida] of [['trecho', trecho], ['json', json]]) {
+      if (saida.includes(valor)) vazamentos.push(`${nome} (${caminho})`);
+    }
+  }
+  for (const palavra of PALAVRAS_DA_LINGUA_COM_RADICAL) {
+    for (const frase of [`${palavra}: R$ 30,00`, `${palavra}: 12 unidades`]) {
+      assert.equal(redactSensitiveText(frase), frase, `"${frase}" é palavra da língua e não pode ser tarjada`);
     }
   }
   for (const [nome, url] of [...URLS, ...URLS_CHAVE, ...CHAVES_CONECTOR]) {

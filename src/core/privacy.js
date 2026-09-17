@@ -163,6 +163,10 @@ const CREDENTIAL_PREFIXES = Object.freeze([
   'terceira', 'terceiro', 'antiga', 'antigo',
 ]);
 const STEMS_ALTERNATION = WORD_STEMS.map(escapeLiteral).join('|');
+// Radicais LONGOS (5+ letras): a base da regra de prefixo arbitrário (`xsenha`, `xsenhapix`). Radicais
+// curtos (`pin`, `pwd`, `seed`, `cvv`) ficam fora porque são palavra da língua com prefixo (`spin`,
+// `hairpin`, `linseed`) — a medição está no preço declarado da métrica.
+const LONG_STEMS_ALTERNATION = WORD_STEMS.filter(stem => [...stem].length >= 5).map(escapeLiteral).join('|');
 const PHRASES_ALTERNATION = PHRASE_STEMS.map(parts => parts
   .map(part => `(?:${part.map(escapeLiteral).join('|')})`)
   .join(`${WORD_SEP}?`)).join('|');
@@ -207,7 +211,11 @@ const TAIL_EDGE = String.raw`(?!\p{L})`;
 // sendo as listas fechadas, o que preserva `Chaveiro` (`chave` + `iro`, sem cauda depois do radical),
 // `tokenizador`, `Secretaria` e `shipping`.
 const COMPOSTA_SOURCE = String.raw`(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})[\p{L}\p{N}]{0,12}(?:${STEMS_ALTERNATION})[\p{L}\p{N}]{0,12}|[\p{L}\p{N}]{1,6}(?:${STEMS_ALTERNATION})(?:${TAILS_ALTERNATION}|${STEMS_ALTERNATION})${TAIL_EDGE}`;
-const KEY_NAME_CORE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}[\p{L}\p{N}]{0,24}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}${STEM_ALTERNATION}${LABEL_CONTINUATION}${TAIL_EDGE}|${COMPOSTA_SOURCE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
+// Prefixo CURTO (1-3) + radical LONGO + cauda arbitrária (`xsenhapix`): a forma que o permissivo com o
+// radical no meio não cobre sem abrir a lista de caudas. Entra no vocabulário de PROSA (o de chave não a
+// usa); o preço medido no dicionário está em `LANGUAGE_WORD_EXCEPTIONS`.
+const PREFIXED_TAIL_SOURCE = String.raw`(?<![\p{L}\p{N}])[\p{L}\p{N}]{1,3}(?:${LONG_STEMS_ALTERNATION})[\p{L}\p{N}]{2,24}(?!\p{L})`;
+const KEY_NAME_CORE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}[\p{L}\p{N}]{0,24}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}${STEM_ALTERNATION}${LABEL_CONTINUATION}${TAIL_EDGE}|${COMPOSTA_SOURCE}|${PREFIXED_TAIL_SOURCE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
 // As frases que só valem com SEPARADOR (`conta corrente`, `certificado digital`) ficam FORA do
 // vocabulário de cauda: `conta corrente 12345-6` é prosa sobre o dado, `Conta corrente: 12345-6` é o
 // rótulo dele. Sem esta separação a frase voltava a destruir prosa pela regra de cauda.
@@ -274,7 +282,11 @@ function decodeKeySafely(key) {
 }
 function credentialKey(key) {
   const decoded = decodeKeySafely(key);
-  return isSensitiveAssignedKey(decoded) || URL_CREDENTIAL_KEY.test(decoded);
+  // Chave de consulta/hash é IDENTIFICADOR do autor: vocabulário fechado + regra de prefixo, com
+  // decodificação. O vocabulário permissivo aqui destruía `?pintura=`/`?chaveiro=`/`?tokenizacao=` —
+  // Important I1 da revisão da 1.1.39 (22 de 34 palavras legítimas).
+  return isSensitiveKeyName(decoded) || isSensitiveKeyName(decodeForMatching(decoded)) ||
+    URL_CREDENTIAL_KEY.test(decoded);
 }
 export const URL_CREDENTIAL_KEY = new RegExp(String.raw`^(?:${URL_CREDENTIAL_KEY_SOURCE})$`, 'iu');
 // O que segue o rótulo precisa TER CARA DE VALOR para a cauda ser tarjada: dígito, símbolo,
@@ -345,18 +357,49 @@ export const SENSITIVE_KEY = new RegExp(
 export function isSensitiveKey(value) {
   return SENSITIVE_KEY.test(withCamelMarks(String(value ?? '')));
 }
+// PALAVRAS DA LÍNGUA QUE CONTÊM UM RADICAL — a lista é o OUTRO LADO medido da mesma regra. O vocabulário
+// permissivo conhece `chave`+`iro`, `pin`+`tura`, `token`+`izador`; quando o rótulo é reconhecido, o valor
+// sai inteiro (atribuição), e é isso que fecha a cauda fora da lista em rótulo minúsculo (`senhaassinatura:
+// borboleta` — Critical C1 da revisão da 1.1.39). Sem esta lista, as mesmas 22 palavras medidas pelos
+// revisores (1.1.33, 1.1.36 e 1.1.39) voltariam a perder o valor (`Chaveiro: R$ 30,00`). A asserção da
+// métrica percorre a lista: acrescentar um radical sem conferir colisões derruba o teste.
+const LANGUAGE_WORD_EXCEPTIONS = Object.freeze([
+  'chaveiro', 'chaveta', 'chaveamento', 'secretaria', 'secretário', 'secretariado', 'secreto',
+  'obsessão', 'possessões', 'pintura', 'pincel', 'pintor', 'pintinho', 'pintado', 'pingente',
+  'pinguim', 'pino', 'pinta', 'spin', 'pinky', 'tokenizador', 'tokenizacao',
+  // medidas nas revisões da 1.1.34 e da 1.1.36 (radical curto no fim do token)
+  'hairpin', 'pushpin', 'backspin', 'linseed', 'chauth', 'pins', 'pin',
+  // PREÇO MEDIDO da forma `prefixo curto (1-3) + radical longo + cauda` (`xsenhapix`): o dicionário do
+  // sistema (234.289 palavras) tem EXATAMENTE estas 35 palavras inglesas nessa forma, e ZERO palavras do
+  // português (o envelope de 20 palavras da língua continua preservado). As comuns entram aqui para não
+  // perder valor em página inglesa; o resto são compostos raros.
+  'asecretory', 'assessionary', 'betokener', 'coauthor', 'coauthority', 'coauthorship',
+  'nonsecretarial', 'nonsecretion', 'nonsecretive', 'nonsecretory', 'obsessional', 'obsessionist',
+  'possessional', 'possessionalism', 'possessionalist', 'possessionary', 'possessionate', 'possesssioned',
+  'possessioned', 'possessioner', 'possessionist', 'possessionless', 'possessionlessness', 'proauthor',
+  'proauthority', 'prosecretin', 'resecretion', 'subsecretarial', 'subsecretary', 'uncredentialed',
+  'uncredentialled', 'unsecretarylike', 'unsecreted', 'unsecreting', 'unsecretly', 'unsecretness',
+]);
+const LANGUAGE_WORD_EXCEPTION_SET = new Set(LANGUAGE_WORD_EXCEPTIONS);
 /**
- * CHAVE DE ATRIBUIÇÃO — o nome que está do lado esquerdo de um valor (`{"senhavelha": "…"}`, `?senhavelha=…`,
- * `senhavelha="…"`). Aqui o vocabulário é o de PROSA, e a diferença em relação ao de identificador é
- * deliberada: em posição de atribuição o nome é o ASSUNTO do valor, então vale a regra permissiva que
- * conhece radical com cauda arbitrária (`senhavelha`, `senhaemail`, `chavewifi`) — Important I-3 da revisão
- * da 1.1.38, que mediu 383 de 559 caudas realistas vazando no modelo, 297 delas tarjadas ainda na 1.1.36.
- * O vocabulário FECHADO (`isSensitiveKeyName`) continua valendo onde a string é um IDENTIFICADOR e não uma
- * atribuição — id de elemento, referência de rótulo, segmento de rota —, porque ali a palavra da língua que
- * contém o radical (`pintura.png`, `secretaria-saude`, `Chaveiro`) é evidência do autor, não segredo.
+ * Rótulo de credencial pelo vocabulário PERMISSIVO, excluídas as palavras da língua medidas. É o que a
+ * posição de ATRIBUIÇÃO usa (`rótulo: valor`) — não as superfícies de IDENTIFICADOR, onde a palavra da
+ * língua é identificador do autor e não rótulo de dado (`pintura.png`, `secretaria-saude`).
  */
-export function isSensitiveAssignedKey(value) {
-  return SENSITIVE_KEY.test(withCamelMarks(String(value ?? '')));
+export function isPermissiveCredentialLabel(value) {
+  const text = String(value ?? '').trim();
+  // Rótulo DESCRITIVO de várias palavras não entra: `Secretaria de Saúde: 12 unidades` e
+  // `Segredo de justiça: o processo tramita em sigilo.` são frases SOBRE o dado, e a decisão delas
+  // continua sendo a do portão de valor (primeiro token com cara de valor). O permissivo vale para o
+  // rótulo de UM token, que é a forma da chave concatenada (`senhaassinatura:`, `chavepix:`).
+  if (/\s/u.test(text)) return false;
+  const plain = text.replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
+  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain)) return false;
+  if (SENSITIVE_KEY.test(withCamelMarks(text))) return true;
+  // Prefixo curto + radical LONGO + cauda fora da lista (`xsenhapix`): o permissivo com o radical no meio
+  // exigiria a lista aberta de caudas, e é essa forma — prefixo de até 3 caracteres — que o dicionário
+  // mede em 35 palavras inglesas e nenhuma portuguesa. O vocabulário de CHAVE não usa esta regra.
+  return PREFIXED_TAIL_LABEL.test(text);
 }
 /**
  * Predicado ESTRITO, para VALOR de atributo: casa a palavra do vocabulário, o prefixo/cauda de
@@ -400,7 +443,8 @@ const ID_NAME_CONNECTOR = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:d|de|d
 const ID_NAME_SOURCE = String.raw`${ID_NAME_CONNECTOR}|${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?<![\p{L}\p{N}])${STEM_ALTERNATION}(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){1,3}|(?:${PREFIXES_ALTERNATION})${STEM_ALTERNATION}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}(?:${PHRASES_ALTERNATION})${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
 export const SENSITIVE_KEY_NAME = new RegExp(`(?:${ID_NAME_SOURCE}|(?:${PHRASES_SEPARADOR_ALTERNATION}))`, 'iu');
 export function isSensitiveKeyName(value) {
-  return SENSITIVE_KEY_NAME.test(withCamelMarks(String(value ?? '')));
+  const text = String(value ?? '');
+  return SENSITIVE_KEY_NAME.test(withCamelMarks(text)) || isPrefixedCredentialLabel(text);
 }
 // A marca de camelCase só pode ser dispensada quando a leitura contígua já é palavra nos DOIS
 // vocabulários. O de PROSA conhece o conector `de/da/do` (`chavedeapi` casa `chave` + `de` + `api`); o de
@@ -705,7 +749,8 @@ function identifierValue(token) {
 // `possessão`), que a regra de borda existe para preservar. Por isso `pin`, `pins`, `pwd`, `seed`, `cvv`,
 // `cvc`, `puk`, `cpf`, `cnpj`, `otp`, `mfa`, `2fa`, `csrf`, `xsrf` e `auth` continuam exigindo prefixo da
 // LISTA FECHADA. A medição está em `test/core/credential-class-metric.test.js` (preço declarado).
-const LONG_STEMS_ALTERNATION = WORD_STEMS.filter(stem => [...stem].length >= 5).map(escapeLiteral).join('|');
+// Mesma fonte, na posição de atribuição (o vocabulário de PROSA já a inclui em KEY_NAME_CORE).
+const PREFIXED_TAIL_LABEL = new RegExp(PREFIXED_TAIL_SOURCE, 'iu');
 const PREFIXED_CREDENTIAL_LABEL = new RegExp(String.raw`(?<![\p{L}\p{N}])[\p{L}\p{N}]{1,12}` +
   String.raw`(?:${LONG_STEMS_ALTERNATION})` +
   // Cauda FECHADA depois do radical (`xsenhaforte`, `xsenhadousuario`): o radical não encerra o token,
@@ -722,7 +767,8 @@ function isPrefixedCredentialLabel(value) {
  * credencial — é o que impede `chaveiros personalizados` e `pincel profissional` de virarem tarja.
  */
 function shapesValueTail(label, token) {
-  if (isWholeCredentialLabel(label) || isSensitiveKeyName(label) || isPrefixedCredentialLabel(label)) return true;
+  if (isWholeCredentialLabel(label) || isSensitiveKeyName(label) || isPrefixedCredentialLabel(label) ||
+    isPermissiveCredentialLabel(label)) return true;
   return credentialLikeToken(token);
 }
 
@@ -736,6 +782,10 @@ function shapesValue(label, token) {
   if (isWholeCredentialLabel(label)) return true;
   if (isSensitiveKeyName(label)) return true;
   if (isPrefixedCredentialLabel(label)) return true;
+  // Rótulo permissivo (radical conhecido + cauda fora da lista, sem transição de caixa): a POSIÇÃO é de
+  // atribuição, então o valor sai mesmo fraco. É o conserto do Critical C1 da revisão da 1.1.39, e as
+  // palavras da língua medidas ficam de fora por `LANGUAGE_WORD_EXCEPTIONS`.
+  if (isPermissiveCredentialLabel(label)) return true;
   return identifierValue(token);
 }
 /**
@@ -1064,7 +1114,11 @@ export function sanitizeJsonData(value, ancestors = new WeakSet()) {
       // A CHAVE de um objeto JSON é uma ATRIBUIÇÃO (`{"senhavelha": "…"}`), e é o vocabulário de atribuição
       // que decide — o fechado deixava passar 66 chaves realistas (Important I-3 da revisão da 1.1.38) e
       // também o nome de atributo do nó normalizado (`data-xsenha`).
-      if (isSensitiveAssignedKey(key) || isSensitiveAssignedKey(decodeForMatching(key))) output[key] = '[redacted]';
+      // A chave JSON volta ao vocabulário de IDENTIFICADOR (fechado): o permissivo destruía 22 de 34
+      // palavras legítimas medidas pelo revisor (`{"chaveiro": …}`, `?pintura=`, `data-tokenizacao=`) —
+      // Important I1 da revisão da 1.1.39. O que a chave ganha é a regra de PREFIXO (radical LONGO no fim
+      // do token), que fecha `xsenha`/`data-xsenha` sem tocar em `pintura`/`pincel`/`hairpin`.
+      if (isSensitiveKeyName(key) || isSensitiveKeyName(decodeForMatching(key))) output[key] = '[redacted]';
       else if (URL_ATTRIBUTE_KEYS.has(key) && typeof item === 'string') output[key] = sanitizeEvidenceUrl(item);
       else output[key] = sanitizeJsonData(item, ancestors);
     }
