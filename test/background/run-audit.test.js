@@ -1150,7 +1150,8 @@ function fakeAdapter(options = {}) {
         if (!key.startsWith('audita:owned-tab:') || !value || typeof value !== 'object') continue;
         if (value.tabId === id && Number.isSafeInteger(value.windowId)) return { id, windowId: value.windowId };
       }
-      throw new Error('NO_TAB');
+      // Contrato do adaptador (I-2 da 1.1.38): aba inexistente RESOLVE com `null`; só falha de leitura rejeita.
+      return null;
     },
   };
   if (options.trackCaptureCalls) {

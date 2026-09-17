@@ -195,6 +195,20 @@ const SEM_ACENTO = [
   ['linha digitavel', `<p>linha digitavel: ${S('138')}</p>`],
   ['codigo de verificacao', `<p>codigo de verificacao: ${S('139')}</p>`],
 ];
+// CHAVE COM CONECTOR `de/da/do` EM camelCase (I-1 da revisão da 1.1.38). O vocabulário de PROSA conhece o
+// conector; o de CHAVE, não. Como a decisão de marca por token usa o vocabulário de prosa, a marca era
+// removida e o identificador `chaveDeApi` deixava de ser reconhecido como chave — 30.550 formas perdidas e
+// 23/28 nomes realistas vazando em URL, JSON e seletor. Estas formas existem para a próxima mutação reprovar.
+const CHAVES_CONECTOR = [
+  ['consulta ?chaveDeApi=', `/p?chaveDeApi=${S('180')}`],
+  ['consulta ?chaveDaApi=', `/p?chaveDaApi=${S('181')}`],
+  ['consulta ?chaveDoBanco=', `/p?chaveDoBanco=${S('182')}`],
+  ['consulta ?senhaDeApi=', `/p?senhaDeApi=${S('183')}`],
+  ['consulta ?tokenDeAcesso=', `/p?tokenDeAcesso=${S('184')}`],
+  ['consulta ?chaveDeAcesso=', `/p?chaveDeAcesso=${S('185')}`],
+  ['consulta ?cpfDoTitular=', `/p?cpfDoTitular=${S('186')}`],
+  ['hash #chaveDeApi=', `/p#chaveDeApi=${S('187')}`],
+];
 const URLS = [
   ['consulta ?code=', `/p?code=${S('60')}`], ['consulta ?assertion=', `/p?assertion=${S('61')}`],
   ['hash #code=', `/p#code=${S('62')}`], ['hash #assertion=', `/p#assertion=${S('63')}`],
@@ -315,7 +329,7 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
   // calculado aqui em vez de escrito à mão: uma lista que encolher derruba esta asserção.
   const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length) * 3 + CONCATENACOES.length * 2
     + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + (URLS.length + URLS_CHAVE.length) * 2
-    + ROTULOS_FRACOS.length * VALORES_FRACOS.length * 2;
+    + ROTULOS_FRACOS.length * VALORES_FRACOS.length * 2 + CHAVES_CONECTOR.length;
   t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length} fracos=${ROTULOS_FRACOS.length * VALORES_FRACOS.length} combinações=${combinacoes}`);
   assert.ok(combinacoes >= 210, `a métrica encolheu: ${combinacoes} combinações`);
   const vazamentos = [];
@@ -347,7 +361,7 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
       if (saida.includes(sentinela)) vazamentos.push(`${rotulo} (${caminho})`);
     }
   }
-  for (const [nome, url] of [...URLS, ...URLS_CHAVE]) {
+  for (const [nome, url] of [...URLS, ...URLS_CHAVE, ...CHAVES_CONECTOR]) {
     const sentinela = url.match(/ADVSEN\d+X/u)[0];
     if (redactSensitiveText(`https://exemplo.test${url}`).includes(sentinela)) vazamentos.push(`${nome} (url-texto)`);
     if (sanitizeJsonData({ texto: `https://exemplo.test${url}` }).texto.includes(sentinela)) vazamentos.push(`${nome} (url-json)`);
@@ -387,6 +401,13 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
   // impede a destruição da evidência é o par (token inteiro + valor com cara de credencial).
   for (const palavra of [...NAO_ROTULO, ...PALAVRAS_FALSAS]) {
     assert.equal(isSensitiveValue(palavra), false, `"${palavra}" contém radical curto e não é rótulo de valor`);
+  }
+  // O conector em camelCase é identificador de CHAVE em todos os caminhos que o usam (JSON, nome de
+  // atributo, chave de URL, seletor) — não só em prosa.
+  for (const chave of ['chaveDeApi', 'chaveDaApi', 'senhaDeApi', 'tokenDeAcesso', 'chaveDeAcesso', 'cpfDoTitular']) {
+    assert.equal(isSensitiveKeyName(chave), true, `"${chave}" é identificador de credencial com conector`);
+    assert.equal(isSensitiveKeyName(`data-${chave}`), true, `"data-${chave}" é nome de atributo de credencial`);
+    assert.equal(sanitizeJsonData({ [chave]: S('188') })[chave] ?? '', '[redacted]', `chave JSON "${chave}" precisa tarjar o valor`);
   }
   for (const palavra of PRECO_DECLARADO) {
     assert.equal(isSensitiveKeyName(palavra), true, `"${palavra}" é identificador de credencial e precisa ser tarjado como chave`);

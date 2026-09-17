@@ -551,6 +551,56 @@ test('removes AX-derived content from a contenteditable root and every private d
   assert.equal(nestedInput.accessibleDescription, 'Descrição estática segura');
 });
 
+// COBERTURA DE NOME EM CAMPO CUSTOMIZADO sem furar a fronteira de privacidade (rodada 84). O nó de texto
+// privado (`div[role=textbox][contenteditable=true]`) perdia o nome acessível INTEIRO, inclusive quando ele
+// vem de uma DECLARAÇÃO do autor (`aria-label`, `title`, `aria-labelledby`, `label` nativo) e não do que a
+// pessoa digitou. O efeito medido: a regra de nome do componente ficava `cantTell` sem alvo, e um campo
+// customizado SEM NOME NENHUM — defeito real de 5.13.10 — não era distinguível de "nome não coletado".
+// A fronteira que este teste fixa: nome VAZIO é preservado (a string vazia não carrega informação), nome
+// NÃO VAZIO só é preservado quando as fontes da árvore de acessibilidade PROVAM origem declarada e nenhuma
+// delas é o CONTEÚDO do elemento.
+test('keeps declared accessible names on private custom fields and never the content-derived one', () => {
+  const digitado = 'TOPSECRET-conteudo-digitado';
+  const base = {
+    format: 'simplified-v1',
+    document: { url: 'https://example.test/', title: 'Nome' },
+    nodes: [
+      { backendNodeId: 1, tagName: 'div', parentBackendNodeId: null, attributes: { role: 'textbox', contenteditable: 'true' }, text: '' },
+      { backendNodeId: 2, tagName: 'div', parentBackendNodeId: null, attributes: { role: 'textbox', contenteditable: 'true' }, text: digitado },
+      { backendNodeId: 3, tagName: 'div', parentBackendNodeId: null, attributes: { role: 'textbox', contenteditable: 'true' }, text: digitado },
+    ],
+    axTree: { nodes: [
+      // 1) campo customizado SEM NOME: o Chrome manda a string vazia, e a ausência de fonte não impede
+      //    preservar a VAZIEZ — é ela que permite a regra apontar o defeito.
+      { backendDOMNodeId: 1, role: { value: 'textbox' }, name: { value: '', sources: [
+        { type: 'relatedElement', attribute: 'aria-labelledby' }, { type: 'attribute', attribute: 'aria-label' },
+        { type: 'attribute', attribute: 'title' }] } },
+      // 2) campo customizado nomeado por DECLARAÇÃO do autor: preserva.
+      { backendDOMNodeId: 2, role: { value: 'textbox' }, name: { value: 'Nome do campo', sources: [
+        { type: 'relatedElement', attribute: 'aria-labelledby' },
+        { type: 'attribute', attribute: 'aria-label', value: { type: 'computedString', value: 'Nome do campo' } },
+        { type: 'attribute', attribute: 'title', superseded: true }] } },
+      // 3) nome calculado a partir do CONTEÚDO do campo: NÃO preserva — ali o nome É o texto digitado.
+      { backendDOMNodeId: 3, role: { value: 'textbox' }, name: { value: digitado, sources: [
+        { type: 'contents' }] } },
+    ] },
+  };
+  const snapshot = normalizeSnapshot(structuredClone(base));
+  const [semNome, declarado, porConteudo] = [1, 2, 3].map(backendNodeId =>
+    snapshot.nodes.find(node => node.backendNodeId === backendNodeId));
+  assert.equal(Object.hasOwn(semNome, 'accessibleName'), true, 'a vazio do nome precisa ser observável');
+  assert.equal(semNome.accessibleName, '');
+  assert.equal(declarado.accessibleName, 'Nome do campo');
+  assert.equal(Object.hasOwn(porConteudo, 'accessibleName'), false, 'nome vindo do conteúdo não pode ser preservado');
+  assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(digitado));
+  // O texto e o valor continuam removidos em todos os nós privados — a correção não reabre conteúdo.
+  for (const node of [semNome, declarado, porConteudo]) {
+    assert.equal(node.text, '');
+    assert.equal(node.visibleText, '');
+    assert.equal(Object.hasOwn(node, 'axValue'), false);
+  }
+});
+
 test('redacts aggregated visibleText only on ancestors of private text roots in simplified and columnar snapshots', () => {
   const simplifiedSecret = 'TOPSECRET-private-ancestor-simplified';
   const simplified = normalizeSnapshot({

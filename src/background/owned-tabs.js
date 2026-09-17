@@ -275,13 +275,23 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
   // REATESTAÇÃO VIVA, imediatamente antes de cada efeito destrutivo. O journal prova qual aba a auditoria
   // REGISTROU; ele não prova que o id de hoje ainda é aquela aba — o Chrome recicla `tabId` e o registro
   // pode ter sido reescrito por quem alcança `chrome.storage.session`. Sem esta leitura, a limpeza fechava
-  // a aba 99 de um journal adulterado (achado D1 da revisão da 1.1.37), isto é, "limpeza só de abas
-  // próprias" dependia de o journal não ser tocado. A janela e o id vêm do PRÓPRIO registro, então o que a
-  // reatestação garante é: o id ainda é uma aba viva E ela vive na janela em que a auditoria a criou.
+  // a aba 99 de um journal adulterado (achado D1 da revisão da 1.1.37).
+  //
+  // TRÊS desfechos, e a diferença entre eles é a correção do Important I-2 da revisão da 1.1.38:
+  // — `match`: o id é uma aba viva na janela registrada, e o efeito acontece;
+  // — `mismatch`: existe aba viva com esse id, mas NÃO é a registrada (janela diferente, ou id reciclado);
+  //   nada é fechado e o chamador recusa;
+  // — `absent`: o adaptador RESPONDEU que a aba não existe (`getTab` devolve `null`). A limpeza está
+  //   satisfeita sem efeito — a aba já não está lá — e o registro pode ir para `removed`;
+  // — `unknown`: a LEITURA falhou (adaptador quebrado, erro transitório do navegador). Nada é fechado e o
+  //   registro NÃO pode ser dado como limpo: fica em `cleanup-pending` para nova tentativa. Antes desta
+  //   correção a exceção virava `absent`, a aba continuava aberta e o journal ia para `removed` — a
+  //   limpeza ficava dada por feita sem ter fechado nada, e `clearAudit` devolvia 1.
   const liveTabState = async record => {
     let live;
-    try { live = await chromeAdapter.getTab(record.tabId); } catch { return 'absent'; }
-    if (!live || typeof live !== 'object' || live.id !== record.tabId) return 'mismatch';
+    try { live = await chromeAdapter.getTab(record.tabId); } catch { return 'unknown'; }
+    if (live === null || live === undefined) return 'absent';
+    if (typeof live !== 'object' || live.id !== record.tabId) return 'mismatch';
     if (live.windowId !== record.windowId) return 'mismatch';
     return 'match';
   };
@@ -298,6 +308,8 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
     compare(beforeEffect.record, { ...input, fromState: 'cleanup-pending' });
     const live = await liveTabState(beforeEffect.record);
     if (live === 'mismatch') throw denied('mismatch');
+    // Leitura impossível: fail-closed, o registro fica pendente para a próxima passagem.
+    if (live === 'unknown') return frozen(beforeEffect.record);
     if (live === 'match') {
       try {
         await chromeAdapter.removeTab(beforeEffect.record.tabId);
@@ -321,6 +333,8 @@ export function createOwnedTabRegistry({ sessionArea, chromeAdapter, now }) {
     if (record.state !== 'removed') {
       const live = await liveTabState(record);
       if (live === 'mismatch') throw denied('mismatch');
+      // Leitura impossível no V1 também é fail-closed: o registro legado fica onde está.
+      if (live === 'unknown') return 0;
       if (live === 'match') {
         try { await chromeAdapter.removeTab(record.tabId); } catch { throw denied('cleanup'); }
       }

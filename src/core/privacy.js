@@ -140,6 +140,17 @@ const CREDENTIAL_TAILS = Object.freeze([
   'privada', 'privado', 'publica', 'publico', 'pública', 'público', 'api', 'redefinida', 'expirada',
   'bloqueada', 'incorreta', 'errada', 'segura', 'seguro', 'facil', 'fácil', 'dificil', 'difícil',
   'simples', 'complexa', 'valida', 'válida', 'invalida', 'inválida', 'unica', 'unico', 'única', 'único',
+  // QUALIFICADORES REALISTAS medidos pela revisão da 1.1.38 (Important I-3): 383 de 559 combinações
+  // radical × cauda realista vazavam no caminho MODELO, 297 delas tarjadas ainda na 1.1.36. A cauda é
+  // lista FECHADA de propósito: a alternativa (radical + letras livres) é o que destruía `chaveiro`,
+  // `chaveamento`, `tokenizacao` e `secretaria` — sufixos da língua (`-eiro`, `-amento`, `-izacao`,
+  // `-aria`), enquanto a cauda de uma chave de credencial é um QUALIFICADOR (`velha`, `email`, `wifi`,
+  // `roteador`, `producao`). O preço desta ampliação está medido no dicionário e no corpus de prosa.
+  'velha', 'velho', 'email', 'e-mail', 'rede', 'wifi', 'wi-fi', 'roteador', 'administrador', 'adm',
+  'primeiroacesso', 'pessoal', 'trabalho', 'empresa', 'corporate', 'internet', 'mestre', 'filho', 'pai',
+  'mae', 'mãe', 'escola', 'faculdade', 'governo', 'servidor', 'root', 'convidado', 'visitante', 'teste',
+  'producao', 'produção', 'homologacao', 'homologação', 'desenvolvimento', 'sistema', 'portal', 'app',
+  'site', 'digital', 'banco', 'acesso', 'remota', 'remoto', 'local', 'bloqueio', 'desbloqueio',
 ]);
 const CREDENTIAL_PREFIXES = Object.freeze([
   'user', 'card', 'cartao', 'meu', 'minha', 'my', 'our', 'app', 'sim', 'chip', 'account', 'login',
@@ -231,7 +242,17 @@ function markCamelBoundaries(text) {
   return marked.replace(CAMEL_TOKEN_RUN, token => {
     if (!token.includes(CAMEL_MARK)) return token;
     const plain = stripCamelMarks(token);
-    return CONTIGUOUS_CREDENTIAL_WORD.test(plain) ? plain : token;
+    const prosePlain = CONTIGUOUS_CREDENTIAL_WORD.test(plain);
+    const keyPlain = CONTIGUOUS_CREDENTIAL_KEY.test(plain);
+    if (prosePlain && keyPlain) return plain;
+    // A marca só fica quando ela ACRESCENTA reconhecimento em algum dos vocabulários. Sem esta guarda, um
+    // token que a leitura contígua já reconhece (`xSeNhA` → `xsenha` em prosa; `noVaSeNhA` → `novasenha` na
+    // chave) recebia a marca, a marca partia o radical e os dois vocabulários deixavam de reconhecê-lo —
+    // caixa misturada com prefixo arbitrário e composto com cauda voltavam a vazar. Se a marca não ajuda,
+    // a leitura contígua é preservada; se ajuda, ela entra (`chaveDeApi` precisa dela para a chave).
+    const addsRecognition = (CONTIGUOUS_CREDENTIAL_WORD.test(token) && !prosePlain) ||
+      (CONTIGUOUS_CREDENTIAL_KEY.test(token) && !keyPlain);
+    return addsRecognition ? token : plain;
   });
 }
 // `auth` nu casava a família inteira `author*`/`authority*` — 314 tokens do próprio produto, entre
@@ -253,7 +274,7 @@ function decodeKeySafely(key) {
 }
 function credentialKey(key) {
   const decoded = decodeKeySafely(key);
-  return isSensitiveKeyName(decoded) || URL_CREDENTIAL_KEY.test(decoded);
+  return isSensitiveAssignedKey(decoded) || URL_CREDENTIAL_KEY.test(decoded);
 }
 export const URL_CREDENTIAL_KEY = new RegExp(String.raw`^(?:${URL_CREDENTIAL_KEY_SOURCE})$`, 'iu');
 // O que segue o rótulo precisa TER CARA DE VALOR para a cauda ser tarjada: dígito, símbolo,
@@ -325,6 +346,19 @@ export function isSensitiveKey(value) {
   return SENSITIVE_KEY.test(withCamelMarks(String(value ?? '')));
 }
 /**
+ * CHAVE DE ATRIBUIÇÃO — o nome que está do lado esquerdo de um valor (`{"senhavelha": "…"}`, `?senhavelha=…`,
+ * `senhavelha="…"`). Aqui o vocabulário é o de PROSA, e a diferença em relação ao de identificador é
+ * deliberada: em posição de atribuição o nome é o ASSUNTO do valor, então vale a regra permissiva que
+ * conhece radical com cauda arbitrária (`senhavelha`, `senhaemail`, `chavewifi`) — Important I-3 da revisão
+ * da 1.1.38, que mediu 383 de 559 caudas realistas vazando no modelo, 297 delas tarjadas ainda na 1.1.36.
+ * O vocabulário FECHADO (`isSensitiveKeyName`) continua valendo onde a string é um IDENTIFICADOR e não uma
+ * atribuição — id de elemento, referência de rótulo, segmento de rota —, porque ali a palavra da língua que
+ * contém o radical (`pintura.png`, `secretaria-saude`, `Chaveiro`) é evidência do autor, não segredo.
+ */
+export function isSensitiveAssignedKey(value) {
+  return SENSITIVE_KEY.test(withCamelMarks(String(value ?? '')));
+}
+/**
  * Predicado ESTRITO, para VALOR de atributo: casa a palavra do vocabulário, o prefixo/cauda de
  * credencial em lista fechada e as frases — e NÃO casa o radical no meio de uma palavra da língua
  * (`Chaveiro`, `Secretaria`, `shipping`). É o que preserva `placeholder="Chaveiro de latão"` e
@@ -356,11 +390,28 @@ export function isWholeCredentialLabel(value) {
 // identificador é uma palavra ou um composto de partes conhecidas (`sessionid`, `senha_forte`,
 // `data-senhaforte`, `novasenha`, `userpin`), e NÃO uma palavra da língua que contém o radical
 // (`pintura`, `pincel`, `secretaria-saude` eram destruídas por isso — Important I1 da revisão da 1.1.36).
-const ID_NAME_SOURCE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?<![\p{L}\p{N}])${STEM_ALTERNATION}(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){1,3}|(?:${PREFIXES_ALTERNATION})${STEM_ALTERNATION}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}(?:${PHRASES_ALTERNATION})${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
+// O CONECTOR `de/da/do` também existe no caminho de CHAVE (I-1 da revisão da 1.1.38): a forma contígua
+// minúscula (`chavedeapi`, `senhadeacesso`, `cpfdotitular`) não tem transição de caixa e por isso não
+// recebe marca — quem tem de reconhecê-la é o próprio vocabulário de chave. A cauda continua sendo lista
+// FECHADA (cauda, radical ou palavra inteira), então `chaveiro`, `chaveamento`, `tokenizacao`,
+// `secretaria`, `pintura` e `pincel` seguem preservados: a cauda deles (`iro`, `amento`, `izacao`, `aria`,
+// `tura`, `cel`) não está na lista.
+const ID_NAME_CONNECTOR = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:d|de|da|do))?(?:(?:${TAILS_ALTERNATION})s?|${STEM_ALTERNATION}|${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})${TAIL_EDGE}`;
+const ID_NAME_SOURCE = String.raw`${ID_NAME_CONNECTOR}|${HEAD_EDGE}${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?:${PREFIXES_ALTERNATION}|${TAILS_ALTERNATION})${STEM_ALTERNATION}(?:(?:${TAILS_ALTERNATION})s?)?${TAIL_EDGE}|(?<![\p{L}\p{N}])${STEM_ALTERNATION}(?:(?:\u0001|[-_.\/]+)[\p{L}\p{N}]{1,24}){1,3}|(?:${PREFIXES_ALTERNATION})${STEM_ALTERNATION}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}(?:${PHRASES_ALTERNATION})${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
 export const SENSITIVE_KEY_NAME = new RegExp(`(?:${ID_NAME_SOURCE}|(?:${PHRASES_SEPARADOR_ALTERNATION}))`, 'iu');
 export function isSensitiveKeyName(value) {
   return SENSITIVE_KEY_NAME.test(withCamelMarks(String(value ?? '')));
 }
+// A marca de camelCase só pode ser dispensada quando a leitura contígua já é palavra nos DOIS
+// vocabulários. O de PROSA conhece o conector `de/da/do` (`chavedeapi` casa `chave` + `de` + `api`); o de
+// CHAVE, não — ele exige lista fechada, e é por isso que `chaveDeApi` precisa da marca para ser reconhecido
+// como identificador (`chave\u0001De\u0001Api` casa a continuação de identificador). Decidir só pelo
+// vocabulário de prosa removia a marca de 30.550 identificadores com conector, e 23 de 28 nomes realistas
+// voltavam a vazar em URL, chave JSON e seletor — Important I-1 da revisão da 1.1.38, medido no produto
+// cartesiano radicais × conectores × caudas × prefixos. Exigir os dois vocabulários mantém a caixa
+// misturada (`SeNhA`, `SeNhAfOrTe`, `ChAvE de API` casam os dois) e devolve a cobertura de chave.
+// Declarado DEPOIS de `ID_NAME_SOURCE` de propósito: a marca é decidida em tempo de chamada.
+const CONTIGUOUS_CREDENTIAL_KEY = new RegExp(`^(?:${ID_NAME_SOURCE})$`, 'iu');
 // Pré-filtro barato: se a string não contém NENHUM radical (nem as chaves de URL), nenhuma regra de
 // rótulo pode morder, e as regexes caras de fronteira não precisam varrer o texto. Sem ele o tarjador do
 // modelo ficava 3× mais lento que a geração anterior; com ele o custo volta ao da 1.1.33 e a semântica
@@ -921,10 +972,11 @@ export function redactSensitiveText(value) {
   // Segunda leitura, sem marcas: `senhaAtual` precisa da marca, mas a marca quebra a palavra quando a
   // página mistura a caixa DENTRO do radical.
   if (marked.includes(CAMEL_MARK)) text = sensitivePasses(stripCamelMarks(text));
-  // A caixa misturada DENTRO do radical (`SeNhA`) continua ABERTA: a leitura em minúsculas foi tentada e
-  // revertida porque devolvia o texto entregue em minúsculas (alterando evidência) e quebrava 14 testes.
-  // O conserto exige mapear a tarja de volta para o texto original — está registrado na trilha como
-  // pendência declarada, com a reprodução e a causa medidas.
+  // A caixa misturada DENTRO do radical (`SeNhA`) está FECHADA desde a 1.1.38, e sem baixar a caixa do
+  // texto entregue: a marca de camelCase passou a ser decidida por TOKEN (`markCamelBoundaries`), então o
+  // token que a leitura contígua já reconhece fica sem marca e quem casa `SeNhA` é a própria regex `iu` do
+  // vocabulário. Medido: 6/6 formas com a caixa preservada e 18/18 combinações de valor fraco. A leitura
+  // em minúsculas continua revertida e não deve ser reintroduzida: ela devolvia a evidência em minúsculas.
   return stripCamelMarks(text);
 }
 
@@ -1009,7 +1061,10 @@ export function sanitizeJsonData(value, ancestors = new WeakSet()) {
     if (Array.isArray(value)) return value.map(item => sanitizeJsonData(item, ancestors));
     const output = {};
     for (const [key, item] of Object.entries(value)) {
-      if (isSensitiveKeyName(key)) output[key] = '[redacted]';
+      // A CHAVE de um objeto JSON é uma ATRIBUIÇÃO (`{"senhavelha": "…"}`), e é o vocabulário de atribuição
+      // que decide — o fechado deixava passar 66 chaves realistas (Important I-3 da revisão da 1.1.38) e
+      // também o nome de atributo do nó normalizado (`data-xsenha`).
+      if (isSensitiveAssignedKey(key) || isSensitiveAssignedKey(decodeForMatching(key))) output[key] = '[redacted]';
       else if (URL_ATTRIBUTE_KEYS.has(key) && typeof item === 'string') output[key] = sanitizeEvidenceUrl(item);
       else output[key] = sanitizeJsonData(item, ancestors);
     }

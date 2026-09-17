@@ -1764,10 +1764,18 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       };
     },
     removeTab(tabId) { return invoke(chromeApi, chromeApi.tabs, 'remove', tabId); },
-    // Leitura VIVA de uma aba para a reatestação da limpeza (`owned-tabs.js`): devolve o registro do
-    // navegador, e a ausência da aba chega ao chamador como rejeição — que é o sinal de "não há o que
-    // fechar" (achado D1 da revisão da 1.1.37).
-    async getTab(tabId) { return invoke(chromeApi, chromeApi.tabs, 'get', tabId); },
+    // Leitura VIVA de uma aba para a reatestação da limpeza (`owned-tabs.js`). O contrato distingue os dois
+    // casos que `chrome.tabs.get` mistura: aba INEXISTENTE resolve com `null` (não há o que fechar) e
+    // qualquer outra falha REJEITA — o registro trata a rejeição como leitura impossível e nada fecha
+    // (achado D1/I-2 da revisão da 1.1.38: a exceção virava "aba ausente" e o journal ia para `removed`
+    // sem que aba nenhuma tivesse sido fechada).
+    async getTab(tabId) {
+      try { return await invoke(chromeApi, chromeApi.tabs, 'get', tabId); }
+      catch (error) {
+        if (/no tab with id/iu.test(String(error?.message ?? ''))) return null;
+        throw error;
+      }
+    },
   };
   const internal = ObjectCreate(null);
   defineDataProperty(internal, 'sessionArea', chromeApi.storage?.session, true, false, false);

@@ -1,4 +1,4 @@
-import { isSensitiveKeyName, SENSITIVE_KEY } from '../privacy.js';
+import { isSensitiveAssignedKey, isSensitiveKeyName, SENSITIVE_KEY } from '../privacy.js';
 // QUINTO vocabulário do produto, e o único que ainda era só em inglês: com ele, um `title="senha …"`
 // virava seletor CSS e o valor ia inteiro para o relatório, o modelo e os artefatos (Critical da revisão
 // da 1.1.31). Passa a usar o mesmo vocabulário compartilhado do resto do produto.
@@ -69,7 +69,7 @@ function idIsUnique(id, node, index) {
 function semanticSelector(node, index) {
   for (const name of SEMANTIC_ATTRIBUTES) {
     const value = typeof node?.attributes?.[name] === 'string' ? node.attributes[name].trim() : '';
-    if (!value || isSensitiveKeyName(`${name} ${value}`)) continue;
+    if (!value || isSensitiveAssignedKey(`${name} ${value}`)) continue;
     const matches = nodesFromIndex(index).filter(candidate => scopeKey(candidate) === scopeKey(node) &&
       tagOf(candidate) === tagOf(node) && candidate?.attributes?.[name] === value);
     if (matches.length <= 1) return `${tagOf(node)}[${name}="${escapeCssString(value)}"]`;

@@ -1,4 +1,4 @@
-import { redactCredentialLabelTail } from '../privacy.js';
+import { redactCredentialLabelTail, redactSensitiveText } from '../privacy.js';
 const NO_SOURCE = 'none';
 
 function normalizeText(value) {
@@ -230,10 +230,14 @@ export function computeAccessibleText(node, index, axNode) {
   // (`title`, `alt`, `aria-label`, `placeholder`). O fallback de DOM lia o atributo CRU: com
   // `title="chave X"`, o nome saía tarjado e a descrição entregava `chave X` inteiro (Important da
   // revisão da 1.1.29). A tarja de cauda é aplicada aqui, na saída, para valer em qualquer chamador.
+  // A tarja de CAUDA cobre rótulo sem separador (`senha ADV…`); o tarjador completo cobre rótulo COM
+  // separador e valor fraco (`aria-label="xsenha: passarinho"`), que ficava intacto no nome acessível —
+  // 57 rótulos medidos pela revisão da 1.1.38 na superfície de anúncio. Os dois rodam na SAÍDA, para valer
+  // em qualquer chamador, e a prosa legítima continua preservada porque o portão de valor é o mesmo.
   return {
-    name: redactCredentialLabelTail(name),
+    name: redactSensitiveText(redactCredentialLabelTail(name)),
     nameSource: axName ? 'accessibility-tree' : fallback.source,
-    description: redactCredentialLabelTail(axDescription || description.value),
+    description: redactSensitiveText(redactCredentialLabelTail(axDescription || description.value)),
     descriptionSource: axDescription ? 'accessibility-tree' : description.source
   };
 }

@@ -46,6 +46,7 @@ function fixture() {
   // reescrevem `liveWindows` (id reciclado em OUTRA janela) ou `closedTabs` (aba já fechada).
   const liveWindows = new Map();
   const closedTabs = new Set();
+  const unknownReads = new Set();
   const adapter = {
     removeError: false,
     async removeTab(tabId) {
@@ -53,10 +54,13 @@ function fixture() {
       if (this.removeError) throw new Error('PRIVATE_REMOVE_DETAIL');
       closedTabs.add(tabId);
     },
+    // Contrato do adaptador (I-2 da revisão da 1.1.38): aba INEXISTENTE resolve com `null`; LEITURA que
+    // falha rejeita. São coisas diferentes e o registro decide diferente para cada uma.
     async getTab(tabId) {
-      if (closedTabs.has(tabId)) throw new Error('NO_TAB');
+      if (unknownReads.has(tabId)) throw new Error('READ_FAILED');
+      if (closedTabs.has(tabId)) return null;
       const windowId = liveWindows.has(tabId) ? liveWindows.get(tabId) : recordedWindow(sessionArea, tabId);
-      if (!Number.isSafeInteger(windowId)) throw new Error('NO_TAB');
+      if (!Number.isSafeInteger(windowId)) return null;
       return { id: tabId, windowId };
     },
   };
@@ -65,7 +69,7 @@ function fixture() {
     sessionArea, chromeAdapter: adapter,
     now: () => new Date(Date.UTC(2026, 7, 29, 10, 0, tick++)).toISOString(),
   });
-  return { sessionArea, adapter, calls, owned, liveWindows, closedTabs };
+  return { sessionArea, adapter, calls, owned, liveWindows, closedTabs, unknownReads };
 }
 
 const created = {
@@ -165,6 +169,41 @@ test('journal adulterado com id alheio não fecha a aba de terceiro', async () =
   liveWindows.set(99, 4);
   assert.equal(await owned.clearAudit('audit-a'), 0);
   assert.deepEqual(calls, [], 'a aba de terceiro não pode ser fechada por journal adulterado');
+});
+
+// I-2 da revisão da 1.1.38: LEITURA IMPOSSÍVEL não pode ser tratada como "aba ausente". Antes desta
+// correção a exceção virava `absent`, a aba continuava aberta e o journal ia para `removed` — a limpeza
+// ficava dada por feita sem ter fechado nada, e `clearAudit` devolvia 1.
+test('leitura da aba que falha não fecha nada e mantém o registro em cleanup-pending', async () => {
+  const { calls, owned, unknownReads } = fixture();
+  await owned.registerCreated(created);
+  unknownReads.add(41);
+  const pendente = await owned.removeOwned({
+    ownershipId: 'owner-a', auditId: 'audit-a', tabId: 41, fromState: 'created',
+  });
+  assert.equal(pendente.state, 'cleanup-pending');
+  assert.deepEqual(calls, [], 'nenhum removeTab quando a leitura da aba falha');
+  assert.equal((await owned.get('owner-a')).state, 'cleanup-pending');
+});
+
+test('clearAudit recusa e preserva o pendente quando a leitura da aba falha (V1 e V2)', async () => {
+  const primeiro = fixture();
+  await primeiro.owned.registerCreated(created);
+  primeiro.unknownReads.add(41);
+  await assert.rejects(() => primeiro.owned.clearAudit('audit-a'), /OWNERSHIP_DENIED/u);
+  assert.deepEqual(primeiro.calls, []);
+  assert.equal((await primeiro.owned.get('owner-a')).state, 'cleanup-pending');
+
+  const segundo = fixture();
+  segundo.sessionArea.values['audita:owned-tab:v1:legado-leitura'] = {
+    version: 1, ownerId: 'legado-leitura', auditId: 'audit-legado-leitura', sessionCapabilityId: 'sessao',
+    tabId: 77, windowId: 8, cleanupMode: 'always', state: 'cleanup-pending',
+    createdAt: '2026-08-29T10:00:00.000Z', updatedAt: '2026-08-29T10:00:00.000Z',
+  };
+  segundo.unknownReads.add(77);
+  assert.equal(await segundo.owned.clearAudit('audit-legado-leitura'), 0);
+  assert.deepEqual(segundo.calls, []);
+  assert.equal(Object.hasOwn(segundo.sessionArea.values, 'audita:owned-tab:v1:legado-leitura'), true);
 });
 
 test('aba já ausente é limpeza satisfeita sem efeito e sem retry infinito', async () => {
