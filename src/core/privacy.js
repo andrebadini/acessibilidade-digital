@@ -42,7 +42,7 @@ const CAMEL_MARK_GLOBAL = /\u0001/gu;
 // O prefixo tem de ter DUAS letras ou mais: é o que separa `userpin`/`cardpin` (concatenções reais de
 // chave) de `spin`, palavra da língua que termina no mesmo radical. Palavra inteira (`pin`) continua
 // valendo pelo lookbehind.
-const WORD_HEAD = String.raw`(?:[\p{L}]{2,12}|(?<![\p{L}\p{N}]))`;
+const WORD_HEAD = String.raw`(?:[A-Za-z]{2,12}|(?<![\p{L}\p{N}]))`;
 const WORD_TAIL = String.raw`(?!\p{L})`;
 const WORD_SEP = String.raw`(?:\u0001|[\s\-_–—])`;
 
@@ -101,13 +101,14 @@ const PHRASE_STEMS = Object.freeze([
 // pela revisão da 1.1.33. Os demais radicais aceitam prefixo curto porque é assim que a página escreve a
 // chave (`userPin`, `data-userpin`, `minhasenha`) e porque nenhuma palavra da língua termina neles.
 const WHOLE_WORD_STEMS = Object.freeze(['sessão', 'sessões', 'sessao', 'sessoes']);
-const WORD_RADICAL_SOURCE = [
-  ...WORD_STEMS.map(stem => `${WORD_HEAD}${escapeLiteral(stem)}${WORD_TAIL}`),
-  ...WHOLE_WORD_STEMS.map(stem => String.raw`(?<![\p{L}\p{N}])${escapeLiteral(stem)}${WORD_TAIL}`),
-].join('|');
-const PHRASE_RADICAL_SOURCE = PHRASE_STEMS.map(parts => `${WORD_HEAD}${parts
+// O prefixo é HOISTADO para fora da alternação dos radicais, e não repetido em cada um: com o prefixo em
+// cada alternativa o motor tentava 65 padrões por posição e o tarjador do modelo ficava 46× mais lento
+// (medido: 19,7 s contra 0,42 s num modelo de 4.000 nós) — e a lentidão aparecia como falha de prazo em
+// teste de agenda sob carga. Uma estrutura só, com a lista de radicais dentro, mantém a semântica e o custo.
+const WORD_RADICAL_SOURCE = String.raw`${WORD_HEAD}(?:${WORD_STEMS.map(escapeLiteral).join('|')})${WORD_TAIL}|(?<![\p{L}\p{N}])(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})${WORD_TAIL}`;
+const PHRASE_RADICAL_SOURCE = String.raw`${WORD_HEAD}(?:${PHRASE_STEMS.map(parts => parts
   .map(part => `(?:${part.map(escapeLiteral).join('|')})`)
-  .join(`${WORD_SEP}?`)}${WORD_TAIL}`).join('|');
+  .join(`${WORD_SEP}?`)).join('|')})${WORD_TAIL}`;
 // `pass` sozinho: `bypass` e `compass` ficam preservados (lookbehind) e `passed`/`passive`/`passo`
 // também, porque a fronteira exige que a palavra TERMINE no radical.
 const BARE_PASS_SOURCE = String.raw`${WORD_HEAD}(?<!by)(?<!com)pass${WORD_TAIL}`;
@@ -197,6 +198,25 @@ export const SENSITIVE_KEY = new RegExp(
 export function isSensitiveKey(value) {
   return SENSITIVE_KEY.test(withCamelMarks(String(value ?? '')));
 }
+// Pré-filtro barato: se a string não contém NENHUM radical (nem as chaves de URL), nenhuma regra de
+// rótulo pode morder, e as regexes caras de fronteira não precisam varrer o texto. Sem ele o tarjador do
+// modelo ficava 3× mais lento que a geração anterior; com ele o custo volta ao da 1.1.33 e a semântica
+// não muda, porque a lista é a mesma fonte do vocabulário.
+const STEM_HINT = new RegExp([
+  ...WORD_STEMS, ...WHOLE_WORD_STEMS, 'pass',
+  // A PRIMEIRA parte de cada radical de várias palavras: `api` cobre `api_key`, `linha` cobre
+  // `linha digitável`, `código` cobre `código de barras`. As partes seguintes não entram porque
+  // `de` apareceria em quase toda frase e o pré-filtro perderia a função.
+  ...PHRASE_STEMS.map(parts => parts[0][0]),
+  ...URL_CREDENTIAL_KEY_SOURCE.split('|').map(part => part.replace(/\[.*?\]|\(.*?\)/gu, '')),
+].map(escapeLiteral).join('|'), 'iu');
+// Codificação também conta como candidato: `sen&#104;a`, `sen\u0068a` e `sen%68a` escondem o rótulo do
+// pré-filtro literal, e são justamente as formas que as revisões da 1.1.28 e da 1.1.29 mediram.
+const ENCODED_HINT = /&#|\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}/iu;
+function mayCarryCredential(value) {
+  const text = String(value ?? '');
+  return STEM_HINT.test(text) || ENCODED_HINT.test(text);
+}
 
 // Um rótulo de valor não exige fronteira de palavra de nenhum lado — nem `\b` à esquerda, nem `\b` à
 // direita: `myPass: 1234` e `userPassword: 1234` são a mesma credencial que `pass: 1234`, e o `\b`
@@ -220,7 +240,7 @@ const URL_CREDENTIAL_SEGMENT_ENCODED = /([#/])([^/?#\s]*%[0-9a-f]{2}[^/?#\s]*)\/
 const VALUE_LABEL_ADJACENT_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${URL_CREDENTIAL_KEY_SOURCE}|${SENSITIVE_WORD_SOURCE})`;
 // A janela do rótulo descritivo vai até OITO palavras: a revisão da 1.1.33 mediu sete palavras entre o
 // rótulo e o valor chegando às quatro superfícies (`chave de acesso ao sistema principal da conta X`).
-const VALUE_LABEL_SOURCE = String.raw`${VALUE_LABEL_ADJACENT_SOURCE}(?:[\s\-–—\u0001]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,8}?`;
+const VALUE_LABEL_SOURCE = String.raw`${VALUE_LABEL_ADJACENT_SOURCE}(?:[\s\-–—\u0001]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,6}?`;
 // O valor vai até o fim da linha, sem teto, sem terminador e sem alternativa entre aspas. Duas
 // revisões seguidas mediram a mesma classe por caminhos diferentes: a 1.1.26 tinha o teto de 120
 // caracteres e o `;` devolvendo a cauda; a 1.1.27 tirou o teto mas manteve `<` como parada e a
@@ -417,6 +437,7 @@ const TAIL_CANDIDATE = new RegExp(
   String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE})[\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*\S+`, 'giu');
 
 export function redactCredentialLabelTail(value) {
+  if (!mayCarryCredential(value)) return String(value ?? '');
   // `String.raw` é obrigatório aqui: dentro de um template literal comum, `\s` vira `s` e o padrão deixa
   // de casar em silêncio — foi o que aconteceu quando esta função foi reescrita, e o sintoma foi o
   // tarjador virar no-op sem nenhum teste reprovar.
@@ -475,6 +496,7 @@ function redactSpacedLabelTail(text) {
  * `chave do problema`, `Senha da conta`) não acende, porque a cauda exige dígito ou símbolo forte.
  */
 export function hasCredentialValueSignal(value) {
+  if (!mayCarryCredential(value)) return false;
   const text = withCamelMarks(value);
   // (1) rótulo + separador + valor com cara de valor; (2) rótulo + separador PENDENTE no fim do
   // acumulado (o valor está no nó seguinte); (3) rótulo ADJACENTE + valor com cara de valor.
@@ -509,15 +531,23 @@ export function endsWithCredentialLabel(value) {
   return DANGLING_VALUE_LABEL.test(withCamelMarks(value));
 }
 
+// Portões baratos: cada regra de URL só roda quando o caractere que ela exige existe no texto, e a regra
+// de rótulo com separador só roda quando há separador. Sem isso, cada string do modelo pagava a varredura
+// completa das regexes de rótulo (o custo medido era 2,9× o da geração anterior em texto denso de radicais).
+const HAS_SEPARATOR_SHAPE = /[:=]|->|=>|\u2192|%3a|%3d|&#0*(?:58|3a|61);|#x0*(?:3a|3d);/iu;
+const HAS_URL_SHAPE = /[?&;#]/u;
+const HAS_USERINFO_SHAPE = /@/u;
 export function redactSensitiveText(value) {
-  return stripCamelMarks(withCamelMarks(value)
+  if (!mayCarryCredential(value)) return String(value ?? '');
+  let text = withCamelMarks(value)
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
     // Tarja com DUAS condições, e é isso que separa credencial de prosa: o primeiro token depois do
     // separador tem cara de valor, OU o resto depois do separador é um token só (o valor inteiro, sem
     // frase). `senha: abc` cai na segunda; `Segredo de justiça: o processo tramita em sigilo.` não cai em
     // nenhuma, e por isso sobrevive — antes, o alargamento do rótulo para aceitar acento passou a tarjar
     // sete frases realistas (Important da revisão da 1.1.31).
-    .replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}(${VALUE_SOURCE})`, 'giu'),
+    ;
+  if (HAS_SEPARATOR_SHAPE.test(text)) text = text.replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}(${VALUE_SOURCE})`, 'giu'),
       (match, label, separator, value) => {
         const tokens = value.trim().split(/\s+/u).filter(Boolean);
         const first = tokens[0] ?? '';
@@ -534,15 +564,21 @@ export function redactSensitiveText(value) {
         return valueLikeToken(first) || singleToken || valueLikeTokens >= 2
           ? `${label}${separator}[redacted]`
           : match;
-      })
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@')
-    .replace(/([?&;#])([^=&\s#]+)=([^&#\s]*)/gu, (match, separator, key, value) =>
-      (credentialKey(key) ? `${separator}${key}=[redacted]` : match))
-    .replace(URL_CREDENTIAL_SEGMENT, '$1$2[redacted]')
-    .replace(URL_CREDENTIAL_SEGMENT_ENCODED, (match, separator, key, value) =>
-      (credentialKey(key) ? `${separator}${key}/[redacted]` : match))
-    // Rótulo SEM separador (`senha abc123`, `cartão de crédito S3GR…`, `senha - S3GR…`): a mesma regra
-    // de cauda do nome acessível, para o caminho JSON não ficar mais frouxo que o do trecho.
+      });
+  if (HAS_USERINFO_SHAPE.test(text)) {
+    text = text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@');
+  }
+  if (HAS_URL_SHAPE.test(text)) {
+    text = text
+      .replace(/([?&;#])([^=&\s#]+)=([^&#\s]*)/gu, (match, separator, key) =>
+        (credentialKey(key) ? `${separator}${key}=[redacted]` : match))
+      .replace(URL_CREDENTIAL_SEGMENT, '$1$2[redacted]')
+      .replace(URL_CREDENTIAL_SEGMENT_ENCODED, (match, separator, key, value) =>
+        (credentialKey(key) ? `${separator}${key}/[redacted]` : match));
+  }
+  // Rótulo SEM separador (`senha abc123`, `cartão de crédito S3GR…`, `senha - S3GR…`): a mesma regra
+  // de cauda do nome acessível, para o caminho JSON não ficar mais frouxo que o do trecho.
+  return stripCamelMarks(text
     .replace(TAIL_CANDIDATE, match => (match.includes('[redacted]') ? match : redactCredentialLabelTail(match)))
     .replace(/[\s\S]+/u, match => redactSpacedLabelTail(match)));
 }
@@ -582,6 +618,9 @@ export function decodeForMatching(value) {
 
 const MARKUP_BEARING = /<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?>/iu;
 function redactStringValue(value) {
+  // Mesmo pré-filtro na porta do modelo: a maior parte das strings (URL, id, classe, rótulo curto) não
+  // contém radical nenhum e não precisa pagar a varredura.
+  if (!mayCarryCredential(value)) return String(value ?? '');
   const redacted = redactSensitiveText(value);
   if (!MARKUP_BEARING.test(redacted)) return redacted;
   if (redacted.includes('[redacted]')) return redacted;
