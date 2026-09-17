@@ -21,7 +21,15 @@ commit `358ed4a` (os commits posteriores tocam apenas `docs/qa/`). Chrome for Te
 | 11 | Achados menores documentados | **Atendido** | `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` com desfecho por achado, de 1.1.16 a 1.1.45 |
 | 12 | Versão empacotada testada em Chrome real | **Atendido** | suíte 4.180/4.178/1 (a única falha é o teste de empacotamento antes de reconstruir o zip), escopo serial 57/58 no zip (a vermelha é flake de limpeza do harness, 1/1 isolada), gate GREEN, auditoria ao vivo e integridade 146/146 |
 
-## 2. O que **não** está pronto: o percurso de pixel na página atual
+## 2. O que **não** está pronto: revogação silenciosa no modo de pixel (corrigido por medição da revisão final)
+
+**Correção de 17/09/2026 (rodada 92):** a descrição anterior ("o percurso não começa") estava **errada**. A
+revisão final mediu dois fixtures: **com** sinal sensível na página o percurso de pixel na página atual
+**começa, pausa, confirma e conclui** (com o registro de bootstrap e a suspensão criados corretamente); **sem**
+sinal sensível ele é **revogado em silêncio** — a sessão fica `"revoked"`, nenhuma suspensão é criada e o
+painel volta ao neutro **sem mensagem**. O defeito remanescente é, portanto, **falha silenciosa no percurso de
+um modo oferecido na interface**, na fronteira do incremento paralelo.
+
 
 - **Sintoma:** com `element-only` ou `full-evidence`, "Auditar a página atual" leva a tela a `running` e, em
   menos de um segundo, ao neutro ou a `reconnecting`; a confirmação de captura nunca aparece e nenhum trabalho

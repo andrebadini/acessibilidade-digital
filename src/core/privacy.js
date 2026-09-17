@@ -375,7 +375,7 @@ const LANGUAGE_WORD_EXCEPTIONS = Object.freeze([
   'obsessão', 'possessões', 'pintura', 'pincel', 'pintor', 'pintinho', 'pintado', 'pingente',
   'pinguim', 'pino', 'pinta', 'spin', 'pinky', 'tokenizador', 'tokenizacao',
   // medidas nas revisões da 1.1.34 e da 1.1.36 (radical curto no fim do token)
-  'hairpin', 'pushpin', 'backspin', 'linseed', 'chauth', 'pins', 'pin',
+  'hairpin', 'pushpin', 'backspin', 'linseed', 'chauth', 'pins', 'pin', 'secretos',
   // PREÇO MEDIDO da forma `prefixo curto (1-3) + radical longo + cauda` (`xsenhapix`): o dicionário do
   // sistema (234.289 palavras) tem EXATAMENTE estas 35 palavras inglesas nessa forma, e ZERO palavras do
   // português (o envelope de 20 palavras da língua continua preservado). As comuns entram aqui para não
@@ -405,7 +405,7 @@ const LANGUAGE_WORD_EXCEPTION_SET = new Set(LANGUAGE_WORD_EXCEPTIONS);
 // prosa — é falso positivo, não vazamento, e nenhuma forma de credencial depende dele.
 const LANGUAGE_PREFIX_FAMILIES = Object.freeze([
   'chaveir', 'chaveta', 'chaveament', 'pintur', 'pintor', 'pincel', 'pincé', 'pingent', 'pingu',
-  'espinh', 'opini', 'secretar', 'secretári', 'secretos', 'tokeniz', 'obsess', 'possess',
+  'espinh', 'opini', 'secretar', 'secretári', 'tokeniz', 'obsess', 'possess',
 ]);
 const LANGUAGE_FAMILY_PREFIX = new RegExp(String.raw`(?:^|[^\p{L}\p{N}])(?:${LANGUAGE_PREFIX_FAMILIES.join('|')})`, 'u');
 // Depois da família pode vir uma DESINÊNCIA da língua (`chaveiro`, `chaveta`, `chaveamento`, `pintura`,

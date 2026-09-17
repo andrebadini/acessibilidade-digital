@@ -173,3 +173,49 @@ prova. O achado fica com o incremento dono do arquivo, agora com causa raiz e ra
 **Prova exigida do conserto:** E2E em Chrome real que, na página atual e em `element-only` **e**
 `full-evidence`, veja `[data-action="confirm-pixel-capture"]` aparecer, confirme e chegue a `result`; ele deve
 **reprovar** contra os bytes atuais (o oráculo que falta).
+
+
+## CORREÇÃO DE 17/09/2026 (rodada 92) — o diagnóstico declarado acima estava ERRADO, e a revisão final mediu o comportamento real
+
+A revisão final integrada (subagente `ad8456dd`) mediu as três superfícies que este documento pede — tela do
+painel, pacotes da porta e `chrome.storage.session` — em **dois fixtures**, e o percurso **depende do
+fixture**. O que este documento afirmava ("não começa", "a confirmação nunca aparece", "a pausa é criada sem
+registro") **não confere**:
+
+**(a) Página COM sinal sensível** (`type="password"` + `data-audita-private`), `element-only`, página atual —
+**o percurso começa, pausa, confirma e conclui**:
+
+```
+t=1s  tela=running  confirmar=true  status="Auditoria pausada. Confirme a captura de imagens ou cancele a auditoria."
+      storage={job:"privacy-paused", session:"privacy-paused", bootstrap:"consumed",
+               pixel:{state:"paused", cats:["password","private-marker"]}}
+t=1s  >>> CONFIRMOU
+t=2s  tela=result  botões=[OPEN_REPORT, NEW_AUDIT, SHOW_PAGE_MARKERS, SELECT_OCCURRENCE, HIGHLIGHT_PAGE_OCCURRENCE, …]
+      storage={session:"result", bootstrap:"consumed"}
+```
+
+O registro de bootstrap **existe** (`state:"consumed"` com o `auditId` correto) junto com a suspensão
+(`audita:pixel-capture:v1:<auditId>`, `state:"paused"`, categorias `["password","private-marker"]`).
+
+**(b) Página SEM sinal sensível** (a fixture que este documento usava: `img` sem alt + `button` sem nome),
+em `element-only` e `full-evidence` — a auditoria é **REVOGADA EM SILÊNCIO**:
+
+```
+t=1s  tela=reconnecting  status="Reconectando o painel à página atual."   storage={session:"revoked"}
+t=2s  tela=initial       status="Escolha como iniciar a auditoria."       storage={session:"revoked"}
+```
+
+O despejo de `chrome.storage.session` mostra a sessão em `"revoked"` e a capacidade de alvo em
+`"invalidated"`, e **não existe** `audita:active-audit-job`, `audita:panel-bootstrap` nem
+`audita:pixel-capture` — nenhuma suspensão chega a ser criada, e **o usuário não recebe mensagem alguma**.
+
+**Classificação corrigida do item:** o defeito remanescente não é "o percurso não começa", é **revogação
+silenciosa, sem mensagem, quando a página não tem sinal sensível** — um Important de produto (falha silenciosa
+no percurso principal de um modo oferecido na interface), na fronteira do incremento paralelo
+(`authorized-audit-starter.js`, arquivo congelado por ele). O que **este** incremento fez: corrigiu o Critical
+da classe de credencial introduzido na 1.1.45 (a fresta da flexão, na 1.1.46), registrou a medição do revisor
+e **não** reivindica o conserto do starter.
+
+**Prova exigida do conserto (inalterada e agora com oráculo do revisor):** E2E em Chrome real, na página atual,
+em `element-only` **e** `full-evidence`, com uma fixture **sem** sinal sensível, exigindo ou a confirmação de
+captura, ou uma mensagem explícita de por que a auditoria não prossegue — nunca o retorno silencioso ao neutro.
