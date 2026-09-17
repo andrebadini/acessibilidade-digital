@@ -422,7 +422,15 @@ const LANGUAGE_STRICT_FAMILY_SUFFIX = new RegExp(String.raw`(?:${LANGUAGE_STRICT
  */
 export function isLanguageWordForm(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
-  return LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain) || LANGUAGE_FAMILY_SUFFIX.test(plain);
+  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain)) return true;
+  const suffix = LANGUAGE_FAMILY_SUFFIX.exec(plain);
+  // A palavra da língua TERMINA no radical (`pallbearer`, `allseed`, `antipass`), mas uma CREDENCIAL
+  // também pode terminar nele (`senhaassinaturatoken`, `senhapixpin`, `senhaassinaturaseed`,
+  // `xsenhaseed`): o sufixo só poupa quando o que vem ANTES dele não carrega radical de credencial. A
+  // revisão da 1.1.41 mediu **982** formas concatenadas passando por essa fresta (e a prosa regredia em
+  // relação à 1.1.40 nelas); com a guarda, 100 continuam abertas e todas são de radical CURTO (`puk…`),
+  // que já vazavam na 1.1.40 e nas gerações anteriores.
+  return suffix !== null && !SENSITIVE_KEY.test(plain.slice(0, suffix.index));
 }
 /**
  * Mesma decisão, restrita às famílias de PREFIXO, para o vocabulário de CHAVE/IDENTIFICADOR: lá o
@@ -433,8 +441,12 @@ export function isLanguageWordForm(value) {
  */
 export function isLanguageWordStrictForm(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
-  return LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain) ||
-    LANGUAGE_STRICT_FAMILY_SUFFIX.test(plain);
+  if (LANGUAGE_WORD_EXCEPTION_SET.has(plain) || LANGUAGE_FAMILY_PREFIX.test(plain)) return true;
+  const suffix = LANGUAGE_STRICT_FAMILY_SUFFIX.exec(plain);
+  // Mesma guarda da forma permissiva: a credencial também TERMINA nesses radicais
+  // (`senhaassinaturaseed`, `senhaassinaturasession`, `senhaassinaturapass`, `xsenhasession`), e é o
+  // portão ESTRITO que decide se o valor sai inteiro.
+  return suffix !== null && !SENSITIVE_KEY.test(plain.slice(0, suffix.index));
 }
 export function isLanguageWordHead(value) {
   const plain = String(value ?? '').replace(CAMEL_MARK_GLOBAL, '').toLowerCase();

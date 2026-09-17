@@ -576,7 +576,13 @@ test('morfologia portuguesa e famílias inglesas continuam evidência, e as form
     'cliente', 'titular', 'sistema', 'portal', 'servidor', 'backup', 'nuvem', 'suporte', 'financeiro',
     'comercial', 'marketing', 'rh', 'fiscal', 'contabil', 'juridico', 'medico', 'paciente', 'aluno',
     'professor', 'escola', 'faculdade', 'governo', 'prefeitura', 'corporate', 'intranet', 'vpn', 'proxy',
-    'gateway', 'firewall', 'docker', 'kubernetes', 'aws', 'azure', 'github', 'gitlab', 'jira', 'slack'];
+    'gateway', 'firewall', 'docker', 'kubernetes', 'aws', 'azure', 'github', 'gitlab', 'jira', 'slack',
+    // CAUDAS QUE SÃO ELAS MESMAS RADICAIS/PALAVRAS DE FAMÍLIA (`senhaassinaturatoken`, `senhapixpin`,
+    // `senhaassinaturaseed`): são a fresta que a revisão da 1.1.41 mediu — 982 formas concatenadas
+    // poupadas pela exceção de sufixo, com a prosa regredindo em relação à 1.1.40. A guarda de prefixo
+    // fecha a fresta, e estas caudas dão dentes ao teste contra a geração anterior.
+    'token', 'tokenToken', 'pin', 'pins', 'seed', 'session', 'pass', 'bearer', 'spin', 'pping',
+    'seedphrase', 'sessionid', 'bearertoken', 'passphrase'];
   // Radicais CURTOS (`pin`, `puk`, `seed`, `cvv`, `otp`, `cpf`, `cnpj`, `pins`) são palavra da língua com
   // prefixo na prosa (`spin`, `hairpin`, `linseed`, `bypass`) e por isso a regra de chave composta exige
   // radical LONGO — o resíduo de chave deles é medido aqui e não pode CRESCER (era 540 de 1.265 formas na
