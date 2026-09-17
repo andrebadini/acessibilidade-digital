@@ -566,3 +566,20 @@ fechados na **1.1.45**:
 | m-4 | Minor | Escopo serial declarado 56/58 e medido 57/58 | **declarado com as três medições** | 56/58 (autor), 58/58 (revisor da 1.1.43) e 57/58 (revisor da 1.1.44), com a única vermelha na flake `axe-mv3-csp`, que passa 1/1 isolada |
 | m-5 | Minor | O registro embaralhava a partição 15/5 dos 20 ids e listava seis onde dizia cinco | **corrigido** | A partição medida pelo revisor está no registro, com os nomes |
 | m-6 | Minor | `title` era declarado resíduo aberto, mas está coberto no entregue | **corrigido** | Saiu da lista de resíduos; seguem declarados `name`/`aria-label`/`autocomplete`/`data-*` e nós irmãos, as formas literais inalcançáveis e os resíduos de prosa/chave já conhecidos |
+
+
+## Revisão final integrada da 1.1.45 → veredito **NÃO PRONTO** (2 bloqueios medidos)
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.45.md`. A revisão mediu o produto inteiro contra os 12
+critérios e deu **1,2,3,4,5,6,7,12 Atendidos**, **8 Parcial por decisão do usuário**, **9 Atendido com uma
+parcial**, **11 Atendido com ressalva** e **10 Não atendido** por dois bloqueios:
+
+| # | Sev. | Achado | Desfecho |
+|---|---|---|---|
+| C-1 | **Critical** | Regressão introduzida pela própria 1.1.45 (conserto do m-1): a exceção de família escolhia a maior flexão e `<família><flexão><radical iniciado por S>` voltava a entregar o conteúdo (`chaveiroSenha` = `chaveir` + `os` + `enha`). Nos bytes empacotados: 478/478/268 vazando contra 196/196/196 da 1.1.44 | **corrigido na 1.1.46** e verificado pelo próprio revisor: corpus de 896 formas em **196/196/196** com **`NOVOS vs 1.1.44 = 0`**, e os dois E2E ponta a ponta sem nenhum sentinela nos quatro artefatos |
+| C-2 | **Critical** | Mesma classe: a entrada `secretos` da lista de prefixos consumia o `s` inicial de `senha`/`segredo`/`session`/`seed`, deixando `enha` limpo — 32 formas residuais (`secretoSenha`, `secretoSegredo`, …) | **corrigido na 1.1.46**: `secretos` saiu dos prefixos e entrou na lista EXATA (casamento inteiro). Sonda dirigida do revisor: **RESIDUO = 0 de 182** |
+| I-1 | **Important** | O diagnóstico declarado do percurso de pixel **não confere**: com sinal sensível o percurso **funciona** (pausa, confirma e chega a `result`); **sem** sinal sensível a sessão é **revogada em silêncio** (`revoked`, `invalidated`, sem `pixel-capture`, sem bootstrap e **sem mensagem**), e o modo **padrão** do painel é `full-evidence` | **declarado e reclassificado**: é falha silenciosa no percurso de um modo oferecido na interface, na fronteira do incremento paralelo (`authorized-audit-starter.js`). O documento do percurso e o dossiê de prontidão foram corrigidos com a medição do revisor, e a prova exigida passa a ser "ou a confirmação, ou uma mensagem explícita — nunca o retorno silencioso ao neutro" |
+| M-1 | Minor | `printedId` duplicado: 146 itens com 145 ids impressos únicos (o HTML cita `5.12.1` e o modelo guarda `5.1.12`) | **delimitado e documentado**: a **própria norma** diverge — a seção 5 numera `5.12.1 Espaçamento entre as linhas` (impressa 27) e o **Anexo C** imprime `5.1.12` (índice 70). O catálogo guarda os dois (`id` da seção e `printedId` do anexo) e a nota editorial registra "5.1.12 no Anexo C"; a matriz usa o id da seção |
+| M-2 | Minor | Números do dossiê que não reproduzem (suíte 4.180/4.177/2 com as duas passando isoladas; escopo serial completo 106/98/8; 91 palavras em vez de 99; 24 quebras em hífen legítimo) | **declarado**: o dossiê passa a citar a medição do revisor ao lado da do autor, e a distinção "quebra em hífen legítima" × "palavra partida" fica explícita |
+| M-3 | Minor | Clareza para leigos: "Limitações registradas (6)" com 5 marcadores, códigos em CAPS, termos em inglês, "Nome acessível: ." | **backlog declarado** (critério 8 é Parcial por decisão do usuário); os itens entram na lista de melhorias de apresentação |
+| M-4 | Minor | "Validações brasileiras" não existe com esse nome nem como validador de CPF/CNPJ | **declarado**: o produto tem vocabulário e checagens pt-BR, NBR 17225, Libras e CDC, mas **não** um validador de CPF/CNPJ; a rastreabilidade do critério 9 passa a dizer exatamente isso |
