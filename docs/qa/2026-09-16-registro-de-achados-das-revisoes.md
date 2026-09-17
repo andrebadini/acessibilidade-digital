@@ -601,3 +601,28 @@ extensão: `{screen:"running", auditId:"c08060c6-…"}` no bootstrap ocioso). A 
 usuário** (`cancellationRequested`), e com ela os dois lados passam: mensagem na revogação, neutro no
 cancelamento. O conjunto de falhas da fase serial caiu de **12 para 10** entre as duas medições do mesmo dia, as
 duas fechadas são o caso do cancelamento e o bloco que o contém, e **nenhuma falha nova** apareceu.
+
+## Re-verificação da 1.1.47 → **I-1 ATENDIDO** (1 Minor novo, não bloqueante)
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.47.md`. O revisor mediu o artefato congelado (**zip 199
+arquivos, digest `2bb01b21…47ac`**, **199/199 byte a byte** contra `git archive ee9eb80`, manifesto 1.1.47) e
+confirmou que os dois commits posteriores (`5cab932`, `f4ca492`) são só documentação — o diff de
+`src test scripts manifest.json release` é vazio.
+
+| Verificação pedida | Medida do revisor |
+| --- | --- |
+| Oráculo binário (página **sem** sinal sensível, sonda própria, 40 amostras/20 s) | 1.1.47: `full-evidence` → `running(92 %)` → `reconnecting` → **`unavailable` + mensagem em 1,5 s**; `element-only` → **mensagem em 1,0 s** — estáveis, nunca o neutro silencioso. **Não vacuidade**: os mesmos bytes na **1.1.46** e na **1.1.45** dão `NEUTRO_SILENCIOSO@1,5 s` / `@1,0 s` (`running` → `[reconnecting]` → `initial`). O E2E do autor, executado por ele: **2/2 ✔** |
+| Cancelamento preservado | `url-pixel-consent-mv3` **10/10** nos bytes empacotados, com `cancel while paused…` **✔ 1,70 s** e `navigation A to B while paused…` **✔ 0,80 s**; o caminho sensível (confirmação → `result`) continua funcionando |
+| Classe de credencial | `git diff acd408b..ee9eb80 -- src/core` **vazio**; por medição: 896 formas **196/196/196 com 0 novas vs 1.1.44**, residual `secreto*` **0/182**, shapes **0/18** com `REABERTOS=0`, context-stack todo tarjado, 198.360 → **6.707** com `REABERTOS_vs_41=0` e `vs_42=0`, precisão 20/25 (preço declarado); gate `verify` **GREEN** |
+| Mensagem | diz o que aconteceu e o que fazer, o caminho sugerido **conclui em `result`** (medido), e não vaza URL, UUID nem segredo no DOM (`{"vazaUrl":false,"vazaUuid":false,"vazaSegredo":false}`), com o motivo também na `liveRegion` |
+| Causa raiz | segue **sem sustentação e retratada** em `f4ca492`; o starter **não** foi tocado (`git diff 13c97d1..ee9eb80 -- src/background/authorized-audit-starter.js` vazio) e a **revogação continua** (`audit-session-capability` `"invalidated"`, sem `active-audit-job`, sem `panel-bootstrap`, sem `pixel-capture`) |
+
+| # | Sev. | Achado | Desfecho |
+|---|---|---|---|
+| N-1 | Minor | **A mensagem não é acionável a partir da própria tela que a mostra.** Na `unavailable`, `RETRY` mantém a tela e **troca o motivo específico pelo genérico** ("Não foi possível concluir a operação local."), e "Iniciar nova auditoria" reinicia com o **mesmo modo** (a tela não renderiza o seletor) → falha de novo → mesma tela. O usuário só recupera clicando de novo no ícone da extensão, que devolve `initial` com o seletor de modo — e aí `no-pixels` conclui (`result`, auditId `6e2faa40-…`) | **registrado no backlog** (o revisor classificou Minor: o requisito do I-1 está cumprido, não há perda de dado nem promessa falsa, e há recuperação em um clique). Sugestão mínima aceita como backlog: um terceiro caminho "Escolher outro modo"/voltar a `initial` na tela de indisponibilidade, ou preservar o motivo específico no `RETRY` |
+| N-2 | Observação | Documentação e escopo: a retratação da causa (`f4ca492`) e o registro da revisão da 1.1.45 estão coerentes com a medição dele; o arquivo `test/e2e/sidepanel-flow-mv3.test.mjs` modificado no worktree é do incremento paralelo, **não** faz parte do zip (199/199 conferidos) e não foi medido | **declarado** |
+
+**Não medido pelo revisor, declarado por ele:** a suíte completa e o escopo serial da 1.1.47 (mediu o arquivo
+destacado, o E2E novo, o gate e as sondas de credencial), o fechamento do painel pelo "X" do Chrome, regiões
+fora da viewport, `deviceScaleFactor ≠ 1`, impressão física e teste com pessoa leiga — e a **causa raiz da
+revogação**, que ele confirma **não ser** a ordem do registro de bootstrap.

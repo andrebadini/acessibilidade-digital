@@ -22,7 +22,7 @@ fechados na **1.1.46** (verificados pelo próprio revisor) e o **Important I-1**
 | 7 | Conclusões ABNT respeitam obrigatoriedade, alternativas e limites | **Atendido** | 146 itens (96 requisitos + 50 recomendações) conferidos contra o PDF da norma; amostra conferida nos dois sentidos; 5.9.7 não produz `failed` por desenho |
 | 8 | Interface e relatório claros para leigos | **Parcial por decisão do usuário** | os seis blocos didáticos estão no relatório entregue; não houve teste com pessoa de fora, e o usuário decidiu que isso não bloqueia (2026-09-16) |
 | 9 | Recursos obrigatórios implementados | **Atendido** | rastreabilidade recurso a recurso registrada nos critérios (campo de URL, auditoria da página aberta, refazer, progresso, relatório em aba, filtros, agrupamento por item, destaques, personas, anúncios estimados com aviso honesto, menu de contexto como atalho, lote, vocabulário e checagens pt-BR, quatro exportações, sem login) |
-| 10 | Sem falha Critical/Important conhecida | **Atendido com ressalva declarada** | a classe de credencial foi **aprovada** na 1.1.44; os 2 Critical da revisão final da 1.1.45 foram fechados na **1.1.46** (`NOVOS vs 1.1.44 = 0` no corpus de 896 formas; resíduo `secreto*` **0/182**). O **I-1** exigia que a revogação do modo de pixel **nunca** terminasse em silêncio: a **1.1.47** entrega a mensagem explícita e o oráculo que a mede nos dois sentidos (§2). **Ressalva:** numa página **sem** sinal sensível a auditoria ainda é **revogada** — o percurso de pixel da página atual não chega a começar —, e a **causa raiz dessa revogação continua não medida** (a hipótese de ordenação do bootstrap foi **refutada** pela revisão; ver §2). O arquivo é do incremento paralelo. O que a 1.1.47 mudou é que a falha **explica** por que não começou |
+| 10 | Sem falha Critical/Important conhecida | **Atendido com ressalva declarada** (o **I-1 foi re-verificado e está ATENDIDO** em `docs/qa/revisoes/REVIEW-1.1.47.md`) | a classe de credencial foi **aprovada** na 1.1.44; os 2 Critical da revisão final da 1.1.45 foram fechados na **1.1.46** (`NOVOS vs 1.1.44 = 0` no corpus de 896 formas; resíduo `secreto*` **0/182**). O **I-1** exigia que a revogação do modo de pixel **nunca** terminasse em silêncio: a **1.1.47** entrega a mensagem explícita e o oráculo que a mede nos dois sentidos (§2). **Ressalva:** numa página **sem** sinal sensível a auditoria ainda é **revogada** — o percurso de pixel da página atual não chega a começar —, e a **causa raiz dessa revogação continua não medida** (a hipótese de ordenação do bootstrap foi **refutada** pela revisão; ver §2). O arquivo é do incremento paralelo. O que a 1.1.47 mudou é que a falha **explica** por que não começou |
 | 11 | Achados menores documentados | **Atendido** | `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` com desfecho por achado, de 1.1.16 a 1.1.45 |
 | 12 | Versão empacotada testada em Chrome real | **Atendido** | suíte completa: fase paralela **4.225 testes, 4.224 passam, 0 falham, 1 pulado**; fase serial **111 testes, 101 passam, 10 falham** — **9** delas em `test/e2e/sidepanel-flow-mv3.test.mjs` (arquivo do incremento paralelo) e **1** a flake declarada `axe-mv3-csp`; o conjunto caiu de **12 para 10** contra a medição anterior do mesmo dia, sem nenhuma falha nova. Escopo de 13 arquivos na raiz extraída do zip: **59/59**. Gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**. Auditoria ao vivo do pacote no Google e integridade dos quatro artefatos: §3.1 |
 
@@ -53,6 +53,25 @@ outro lado. Uma cópia instrumentada mediu que, na revogação, o bootstrap ocio
 preenchido** pelos pacotes de progresso; o que separa os dois desfechos é o **pedido do usuário**
 (`cancellationRequested`). O detalhamento está em `docs/qa/2026-09-17-percurso-pixels-pagina-atual.md` (seção
 "CONSERTO … 1.1.47") e na rodada 93 de `docs/qa/2026-09-13-continuity-and-e2e-triage.md`.
+
+**Veredito da re-verificação independente (17/09/2026).** O revisor mediu o artefato congelado (zip **199/199
+byte a byte** contra `git archive ee9eb80`, digest `2bb01b21…` conferido) com sondas próprias e deu **I-1
+ATENDIDO**: numa página sem sinal sensível o painel chega a `unavailable` com a mensagem em **1,5 s**
+(`full-evidence`) e **1,0 s** (`element-only`), estáveis por 20 s; contra os bytes da **1.1.46** e da **1.1.45**
+as mesmas sondas dão `NEUTRO_SILENCIOSO` — a não vacuidade foi medida nos dois sentidos, não declarada. O
+cancelamento pedido pelo usuário continua voltando ao neutro (`url-pixel-consent-mv3` **10/10**, cancelamento em
+1,70 s), o caminho sensível continua concluindo em `result`, e a classe de credencial está idêntica à 1.1.44
+aprovada (896 formas: 0 novas; `secreto*`: 0/182; 198.360: 6.707 com 0 reabertos). O relatório completo está em
+`docs/qa/revisoes/REVIEW-1.1.47.md`.
+
+**Achado novo da re-verificação — N-1 (Minor, não bloqueia, no backlog):** a mensagem **não é acionável a partir
+da própria tela que a mostra**. Na `unavailable`, `RETRY` mantém a tela e troca o motivo específico pelo genérico,
+e "Iniciar nova auditoria" reinicia com o **mesmo modo** (a tela não renderiza o seletor de modo) → falha de novo
+→ mesma tela. A recuperação existe e foi medida (clicar de novo no ícone da extensão devolve `initial` com o
+seletor, e `no-pixels` conclui em `result`), e é por isso que o revisor classificou o achado como Minor: o
+requisito do I-1 está cumprido e não há perda de dado nem promessa falsa. Sugestão mínima aceita como backlog: um
+terceiro caminho "Escolher outro modo"/voltar a `initial` na tela de indisponibilidade, ou preservar o motivo
+específico no `RETRY`.
 
 **O que continua aberto, com dono declarado — e o que a revisão REFUTOU sobre a causa.** A causa raiz continua
 **não medida**. A hipótese que este dossiê declarava antes ("o registro `audita:panel-bootstrap:v1:<windowId>` é
@@ -89,6 +108,10 @@ de nunca editar os mesmos arquivos em paralelo. O histórico do diagnóstico, co
   imprime `5.1.12`; o catálogo guarda os dois (`id` da seção e `printedId` do anexo) com nota editorial.
 - **Clareza para leigos (M-3):** "Limitações registradas (6)" com 5 marcadores, códigos em CAPS, termos em
   inglês e "Nome acessível: ." ficam no backlog de apresentação; o critério 8 é Parcial por decisão do usuário.
+- **Mensagem não acionável na própria tela (N-1, Minor da re-verificação da 1.1.47):** a tela `unavailable` não
+  oferece o caminho que a mensagem sugere ("use o modo sem pixels"); `RETRY` troca o motivo específico pelo
+  genérico e "Iniciar nova auditoria" repete o mesmo modo. A recuperação existe em um clique no ícone da
+  extensão (medida pelo revisor) e o achado fica no backlog de apresentação.
 - **"Validações brasileiras" (M-4):** o produto tem vocabulário e checagens pt-BR, NBR 17225, Libras e CDC, mas
   **não** um validador de CPF/CNPJ; a rastreabilidade do critério 9 diz exatamente isso.
 

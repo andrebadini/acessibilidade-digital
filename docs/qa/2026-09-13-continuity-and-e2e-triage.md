@@ -3182,3 +3182,20 @@ pausa. O que a revisão mediu: sem sinal sensível a auditoria é **revogada** (
 `pixel-capture` — não é "pausa sem registro", **não há pausa alguma**. Quem for consertar precisa medir a
 **revogação**. O arquivo é do incremento paralelo. O que a 1.1.47 muda é a consequência visível: **já não há
 retorno silencioso ao neutro**.
+
+### Rodada 93 (fecho) — a re-verificação independente deu **I-1 ATENDIDO**
+
+O mesmo revisor da revisão integrada final voltou sobre o artefato congelado (`ee9eb80`, zip
+`2bb01b21…47ac`, **199/199 byte a byte**) com sondas próprias e confirmou que os dois commits posteriores são só
+documentação. Veredito: **I-1 ATENDIDO** — numa página **sem** sinal sensível o painel chega a `unavailable` com
+a mensagem em **1,5 s** (`full-evidence`) e **1,0 s** (`element-only`), estáveis por 20 s, e as **mesmas sondas
+nos bytes da 1.1.46 e da 1.1.45** dão `NEUTRO_SILENCIOSO@1,5 s` / `@1,0 s` — a não vacuidade foi medida nos dois
+sentidos, não declarada. O cancelamento pedido pelo usuário continua voltando ao neutro
+(`url-pixel-consent-mv3` **10/10**, cancelamento em 1,70 s), o caminho sensível conclui em `result`, a classe de
+credencial está idêntica à 1.1.44 aprovada (896 formas: 0 novas; `secreto*`: 0/182; 198.360: 6.707 com 0
+reabertos) e o gate segue GREEN. Relatório em `docs/qa/revisoes/REVIEW-1.1.47.md`.
+
+**Achado novo, Minor e não bloqueante (N-1):** a mensagem não é acionável a partir da própria tela que a mostra
+— `RETRY` mantém a tela e troca o motivo específico pelo genérico, e "Iniciar nova auditoria" repete o mesmo
+modo; a recuperação existe em um clique no ícone da extensão (medida pelo revisor) e o achado entra no backlog de
+apresentação. **A causa raiz da revogação continua não medida** e o arquivo segue com o incremento paralelo.

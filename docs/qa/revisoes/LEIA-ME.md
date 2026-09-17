@@ -21,6 +21,7 @@ Cópias integrais dos relatórios produzidos pelos revisores independentes desta
 | `REVIEW-1.1.31.md` | diff `3c571f4..fa91745` e o zip da 1.1.31, com 900+34+45 formas próprias, corpus de 30 frases realistas e E2E de sentinela com forma isolada antes dos controles | **2 Critical, 4 Important** + 5 Minor + 5 observações — o conserto de idioma foi confirmado ponta a ponta, mas a classe continuava aberta, o seletor era o quinto vocabulário e a prova de mutação era vacuosa | `audita-acessibilidade-1.1.31.zip` (`28a53946…32ba`) |
 | `REVIEW-1.1.32.md` | diff `fa91745..d17dd8a` e o zip da 1.1.32, com universo de 801 formas, corpus de 29 e 62 frases realistas, ablação dos mecanismos novos e E2E no pacote | **1 Critical, 3 Important** + 4 Minor + 6 observações — três regressões minhas (guarda `[<>]` na cauda, scanner destruindo prosa, E2E não registrado no plano) e vocabulário de cartão/boleto ausente | `audita-acessibilidade-1.1.32.zip` (`0f0d5f38…89375`) |
 | `REVIEW-1.1.45.md` | **revisão integrada final** do produto contra os 12 critérios, no zip da 1.1.45 e na árvore do commit | **NÃO PRONTO** — 2 Critical (classe de credencial, um deles introduzido pela própria 1.1.45) + 1 Important (revogação silenciosa no modo de pixel da página atual) + 4 Minor; critérios 1-7 e 12 atendidos, 8 Parcial por decisão do usuário, 9 e 11 atendidos com ressalva, **10 não atendido** | `audita-acessibilidade-1.1.45.zip` (`9df21c05…36a1`) |
+| `REVIEW-1.1.47.md` | **re-verificação do I-1** no zip da 1.1.47 e na árvore do commit `ee9eb80`, com sondas próprias e não vacuidade contra a 1.1.46 e a 1.1.45 | **I-1 ATENDIDO** — a mensagem aparece nos dois modos de imagem numa página sem sinal sensível (1,5 s e 1,0 s), o cancelamento pedido pelo usuário volta ao neutro (`url-pixel-consent-mv3` 10/10) e a classe de credencial está idêntica à 1.1.44 aprovada; **1 Minor novo (N-1)**, não bloqueante | `audita-acessibilidade-1.1.47.zip` (`2bb01b21…47ac`) |
 
 **As revisões da 1.1.33 à 1.1.44 ainda não têm linha nesta tabela** — o índice ficou para trás. Os vereditos e o desfecho de cada achado estão em `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md`: a classe de credencial acumulou nove reprovações seguidas entre a 1.1.16 e a 1.1.43 e foi **aprovada na 1.1.44**.
 
@@ -28,19 +29,25 @@ Cópias integrais dos relatórios produzidos pelos revisores independentes desta
 
 ## Estado agora (17/09/2026)
 
-**A revisão integrada final concluída é a da 1.1.45 (`REVIEW-1.1.45.md`) e o veredito é NÃO PRONTO**, com dois
-bloqueios medidos: o **C-1** da classe de credencial — uma regressão **introduzida pela própria 1.1.45** —, o
-**C-2** da mesma classe e o **I-1** de percurso (a auditoria da página atual em modo de pixel é revogada **em
-silêncio** quando a página não tem sinal sensível; o modo padrão do painel é `full-evidence`).
+**O I-1 está ATENDIDO e re-verificado.** A revisão integrada final da 1.1.45 (`REVIEW-1.1.45.md`) deu **NÃO
+PRONTO** com dois Critical da classe de credencial — um deles **introduzido pela própria 1.1.45** — e um
+**Important** de percurso: a auditoria da página atual em modo de pixel era revogada **em silêncio** quando a
+página não tinha sinal sensível (e o modo padrão do painel é `full-evidence`).
 
-A **1.1.46** fechou o C-1 e o C-2, verificados pelo próprio revisor com as sondas dele (corpus de 896 formas em
-196/196/196 e `NOVOS vs 1.1.44 = 0`; resíduo `secreto*` 0 de 182). A **1.1.47** fecha o que o I-1 exigia do lado
-do produto: a revogação deixou de ser silenciosa — o painel passa a explicar por que a auditoria não prossegue e
-aponta o modo sem pixels —, com oráculo novo em Chrome real (`current-page-pixel-abort-mv3`) que **reprova**
-contra os bytes empacotados da 1.1.46 e passa nesta árvore. A **causa raiz da revogação continua não medida** e o
-arquivo (`authorized-audit-starter.js`) é do incremento paralelo; a hipótese de ordenação do bootstrap que o
-projeto declarava antes foi **refutada pela própria revisão da 1.1.45** (as chamadas rodam antes de `execute()`,
-e sem sinal sensível não há pausa alguma).
+A **1.1.46** fechou os dois Critical, verificados pelo próprio revisor (corpus de 896 formas em 196/196/196 e
+`NOVOS vs 1.1.44 = 0`; resíduo `secreto*` 0 de 182). A **1.1.47** fechou o que o I-1 exigia do lado do produto —
+a revogação deixou de ser silenciosa — e a **re-verificação independente** (`REVIEW-1.1.47.md`) deu **I-1
+ATENDIDO**, com não vacuidade medida contra a 1.1.46 **e** a 1.1.45 (`NEUTRO_SILENCIOSO` nos bytes antigos,
+mensagem em 1,5 s/1,0 s nos novos), `url-pixel-consent-mv3` 10/10 e a classe de credencial idêntica à 1.1.44
+aprovada. Fica **um Minor novo (N-1)**, registrado no backlog: a mensagem não é acionável a partir da própria
+tela de indisponibilidade.
+
+**O que continua aberto, declarado e com dono:** a **revogação em si** — numa página **sem** sinal sensível o
+percurso de pixel da página atual ainda não começa. A **causa continua NÃO MEDIDA** e o arquivo
+(`src/background/authorized-audit-starter.js`) é do incremento paralelo "Página atual sem interação visível". A
+hipótese de ordenação do bootstrap que o projeto declarava antes foi **refutada pela revisão da 1.1.45** (as
+chamadas de 2326/2356 rodam antes de `execute()`, 2385, e sem sinal sensível não há pausa alguma — a auditoria é
+revogada) e a documentação foi retratada em `f4ca492`.
 
 ## Histórico do estado (até a 1.1.37)
 
