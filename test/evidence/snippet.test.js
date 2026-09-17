@@ -101,8 +101,11 @@ test('redacts credential-like values that appear in snippet text nodes', () => {
   // decisão visível. Texto em outro elemento continua preservado: o tarjamento não atravessa marcação.
   assert.equal(snippet, '&lt;p&gt;authorization=[redacted]&lt;/p&gt;');
   assert.doesNotMatch(snippet, /fixture-auth|fixture-token|conteúdo público/);
+  // O preço declarado da marcação por conteúdo: o parágrafo seguinte ao sinal também é tarjado.
   assert.equal(sanitizeHtmlSnippet('<p>authorization=fixture-auth</p><p>conteúdo público</p>'),
-    '&lt;p&gt;authorization=[redacted]&lt;/p&gt;&lt;p&gt;conteúdo público&lt;/p&gt;');
+    '&lt;p&gt;authorization=[redacted]&lt;/p&gt;&lt;p&gt;[redacted]&lt;/p&gt;');
+  assert.equal(sanitizeHtmlSnippet('<p>Orientação geral</p><p>conteúdo público</p>'),
+    '&lt;p&gt;Orientação geral&lt;/p&gt;&lt;p&gt;conteúdo público&lt;/p&gt;');
 });
 
 test('drops private marker attributes and credential-like values from otherwise structural attributes', () => {
@@ -179,14 +182,23 @@ test('nenhum valor de credencial sobrevive ao trecho, nem em texto nem em atribu
     assert.equal(sobreviventes.length, 0,
       `"${nome}" não pode devolver o valor (sobreviveu ${JSON.stringify(trecho)})`);
   }
-  // O valor esperado no elemento seguinte não pode truncar o trecho: o texto público que vem DEPOIS
-  // continua sendo evidência.
+  // PREÇO DECLARADO da marcação por conteúdo: depois do primeiro sinal de credencial, o RESTO do trecho
+  // perde o texto — inclusive parágrafos seguintes. Foi a única forma de fechar a classe que quatro
+  // revisões mediram vazando por caminhos diferentes (valor no irmão seguinte, depois de `<hr>`, depois
+  // de um `<td>` vazio). O que o trecho perde em texto, o relatório preserva em seletor, nome acessível e
+  // captura; e o sinal só acende com rótulo de credencial, o que não acontece em página sem credencial
+  // (medido: zero `[redacted]` nos artefatos da auditoria real do Google).
   for (const html of [`<p>senha: <img alt="${marca('abc')}"></p><p>texto público</p>`,
     `<p>senha: <code>${marca('abc')}</code></p><p>texto público</p>`,
     `<table><tr><th>chave:</th><td>${marca('abc')}</td></tr></table><p>texto público</p>`]) {
-    assert.match(sanitizeHtmlSnippetSource(html), /texto público/u,
-      `"${html}" não pode encerrar o trecho por causa do valor esperado`);
+    const trecho = sanitizeHtmlSnippetSource(html);
+    assert.equal((trecho.match(sentinela) ?? []).length, 0, `"${html}" não pode devolver o valor`);
+    assert.doesNotMatch(trecho, /texto público/u,
+      `"${html}": depois do sinal, o resto do trecho é tarjado — é o preço declarado`);
   }
+  // E sem sinal de credencial nada é perdido: o texto público continua inteiro.
+  assert.equal(sanitizeHtmlSnippetSource('<p>chave de acesso</p><p>texto público</p>'),
+    '<p>chave de acesso</p><p>texto público</p>');
   // Controle negativo: o rótulo sem valor continua sendo evidência útil, e prosa comum passa intacta.
   assert.match(sanitizeHtmlSnippetSource('<input aria-label="Senha" type="password">'), /aria-label="Senha"/u);
   const prosa = '<p>A sessão discutiu o cartão de crédito como tema e a chave do problema.</p>';

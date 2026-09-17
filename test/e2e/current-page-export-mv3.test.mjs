@@ -32,8 +32,22 @@ ${CREDENTIAL.slice(4)}</p>
 <p id="credential-split"><span>chave</span>: <span>${CREDENTIAL}</span></p>
 <pre id="credential-entity">{&quot;senha&quot;: &quot;${CREDENTIAL}&quot;}</pre>
 <div id="credential-attribute" data-note="chave: ${CREDENTIAL}">Nota do autor</div>
+<p id="adv-a1"><b>senha</b>: ${CREDENTIAL}</p>
+<p id="adv-a2">senha<!-- nota -->: ${CREDENTIAL}</p>
+<p id="adv-a3">senha:<img alt="i">${CREDENTIAL}</p>
+<p id="adv-a4">senha:<span></span>${CREDENTIAL}</p>
+<p id="adv-a5">senha&nbsp;: ${CREDENTIAL}</p>
+<p id="adv-a6">Senha atual: ${CREDENTIAL}</p>
+<pre id="adv-a7">{&amp;quot;senha&amp;quot;: &amp;quot;${CREDENTIAL}&amp;quot;}</pre>
+<p id="adv-a9"><b>senha</b> ${CREDENTIAL}</p>
+<table><tbody><tr><th scope="row">senha:</th><td></td><td>${CREDENTIAL}</td></tr></tbody></table>
+<pre id="adv-a11">{"code": "${CREDENTIAL}"}</pre>
+<pre id="adv-a12">{"assertion": "${CREDENTIAL}"}</pre>
+<p id="adv-a13">senha:<svg></svg>${CREDENTIAL}</p>
 <a id="credential-query" href="/current?code=${CREDENTIAL}">código</a>
 <a id="credential-hash" href="/current#assertion=${CREDENTIAL}">afirmação</a>
+<a id="credential-encoded" href="/current?co%64e=${CREDENTIAL}">codificado</a>
+<div id="credential-title" title="chave ${CREDENTIAL}">Título do autor</div>
 <input id="credential-placeholder" placeholder="senha ${CREDENTIAL}" aria-label="Campo">
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
 <button id="missing-name"></button><input id="missing-label" type="text">

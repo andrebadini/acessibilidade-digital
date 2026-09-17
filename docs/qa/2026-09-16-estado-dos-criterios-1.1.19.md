@@ -1,5 +1,21 @@
 # Estado dos 12 critérios de conclusão — 1.1.19
 
+> **Incremento 1.1.30, e o que ele muda aqui.** Artefato corrente
+> `release/audita-acessibilidade-1.1.30.zip` (`0c690ba3…f6ae2`), **sem revisão independente ainda**.
+> Fecha o veredito da 1.1.29 inteiro (1 Critical, 7 Important, 5 Minor). Para os critérios, **5** é a
+> mudança: a classe do C1 — credencial da página chegando às superfícies entregues — continuava aberta em
+> 15 formas, porque no sanitizador de trecho a decisão era tomada **depois** de emitir o fragmento e a
+> espera por valor era consumida por **estrutura** (comentário, elemento vazio, elemento vazio com
+> atributos). A 1.1.30 troca o mecanismo por **marcação por conteúdo**: uma vez que o texto acumulado
+> (com entidades e escapes decodificados em até três passagens) mostra sinal de credencial, tudo o que
+> vier depois no trecho perde texto e atributos, sem destarjar. Fecha também o **nome acessível** pelo
+> fallback de DOM e as **chaves de URL percent-encoded**. A métrica de aceitação tem **125 combinações**
+> em quatro caminhos, com **zero segredos sobreviventes** e controles de prosa preservados; o preço
+> (perder o texto do trecho depois do sinal, e tarjar `?code=` de promoção) está declarado e medido, com
+> **zero custo na página real** (artefatos byte a byte idênticos aos da 1.1.29 no Google). **10** volta a
+> **Atendido**; **11** ganha os sete Important e os cinco Minors da 1.1.29, todos com desfecho; **8**
+> continua **Parcial**, porque depende de pessoa de fora.
+
 > **Incremento 1.1.29, e o que ele muda aqui.** Artefato corrente
 > `release/audita-acessibilidade-1.1.29.zip` (`6926fe17…c74bf`), **sem revisão independente ainda**.
 > Fecha o veredito da 1.1.28 inteiro. Para os critérios, **5** é onde está a mudança: a classe do C1 —

@@ -274,12 +274,12 @@ test('re-sanitizes the technical snippet at the detail boundary without losing p
 
   assert.match(detail.technical.snippet, /<a>Abrir<\/a>/u);
   assert.match(detail.technical.snippet, /href="https:\/\/example\.test\/path\?lang=pt"/u);
-  // O fragmento que contém a credencial é tarjado até o fim dele — o valor vai até o fim porque
-  // qualquer teto devolve a cauda (medido na 1.1.26) e nenhuma forma de token distingue prosa de uma
-  // frase-senha. O que NÃO pode acontecer é o trecho público sumir: ele está em outro elemento e
-  // continua no detalhe.
+  // Depois do primeiro sinal de credencial, o resto do trecho perde o texto (preço declarado da
+  // marcação por conteúdo, em `snippet.js`): o parágrafo público seguinte não sobrevive ao trecho. O que
+  // continua disponível é o resto do detalhe — seletor, nome acessível e captura —, e é isso que este
+  // teste fixa: o trecho não devolve a credencial nem finge que o trecho público está lá.
   assert.match(detail.technical.snippet, /authorization=\[redacted\]/u);
-  assert.match(detail.technical.snippet, /conteúdo público/u);
+  assert.doesNotMatch(detail.technical.snippet, /PRIVATE_|javascript:|onclick|user:pass|Bearer_|token=/iu);
   assert.doesNotMatch(detail.technical.snippet, /PRIVATE_|javascript:|onclick|user:pass|Bearer_|token=/iu);
 });
 

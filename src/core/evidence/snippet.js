@@ -1,4 +1,4 @@
-import { endsWithCredentialLabel, redactSensitiveText, SENSITIVE_KEY } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -199,49 +199,47 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
   // raiz privada, com os atributos removidos e o texto descartado, reaproveitando o maquinário que já
   // existia para campo editável. Sem isto, `<p>senha: <code>X</code></p>` e `<th>chave:</th><td>X</td>`
   // entregavam a credencial inteira (Critical medido na revisão da 1.1.27).
-  let pendingValueRedaction = false;
-  let pendingValueTail = false;
-  // O rótulo e o separador podem estar em NÓS diferentes (`<span>senha</span>: <span>X</span>`) e o
-  // valor pode ser interrompido por marcação (`senha: p4<span>X</span>`). Por isso a decisão não olha
-  // um fragmento isolado: ela olha o texto ACUMULADO, com as entidades decodificadas, e uma vez
-  // decidida continua valendo até alguém consumi-la.
+  // MARCAÇÃO POR CONTEÚDO, NÃO POR ESTRUTURA. Três revisões seguidas mediram a mesma classe vazando
+  // por caminhos diferentes (comentário, elemento vazio, elemento vazio com atributos, entidade
+  // aninhada, rótulo em outro nó), e a causa comum era a decisão depender da ESTRUTURA: a espera era
+  // consumida por um comentário, por um `<img>` ou por um `<span></span>`, e o valor seguinte ficava
+  // livre. Aqui a decisão é monotônica e vem do CONTEÚDO: assim que o texto acumulado (com entidades e
+  // escapes decodificados) mostra um sinal de credencial — rótulo com separador, ou rótulo com cauda
+  // com cara de valor —, tudo o que vier depois no trecho perde o texto e os atributos, sem nunca
+  // destarjar. Prosa legítima (`cartão de crédito`, `chave do problema`, `Senha da conta`) não acende o
+  // sinal, e é isso que impede o remédio de virar o novo defeito.
+  let tainted = false;
   let textStream = '';
-  const DECODED_ENTITIES = [
-    [/&(?:quot|#0*34|#x0*22);/giu, '"'], [/&(?:apos|#0*39|#x0*27);/giu, "'"],
-    [/&(?:amp|#0*38|#x0*26);/giu, '&'], [/&(?:nbsp|#0*160|#x0*a0);/giu, ' '],
-    [/&(?:lt|#0*60|#x0*3c);/giu, '<'], [/&(?:gt|#0*62|#x0*3e);/giu, '>'],
-  ];
-  const decodeEntities = value => DECODED_ENTITIES.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value);
+  const decodeEntities = decodeForMatching;
   const emitText = fragment => {
     if (privateStructure.length || pendingPrivateRoot) return;
-    // Fragmento só de espaço não decide nada: entre `<th>chave:</th>` e `<td>` existe um fragmento
-    // vazio, e usá-lo para recalcular a espera apagava a decisão e devolvia o valor do `<td>`.
     if (fragment.trim().length === 0) {
       output += fragment;
       return;
     }
-    if (pendingValueRedaction || pendingValueTail) {
-      pendingValueRedaction = false;
-      pendingValueTail = false;
-      output += '[redacted]';
+    const decoded = decodeEntities(fragment);
+    textStream = `${textStream} ${decoded}`;
+    if (!tainted && hasCredentialValueSignal(textStream)) tainted = true;
+    if (tainted) {
+      // O fragmento que trouxe o próprio sinal preserva o rótulo e tarja o valor; quando o sinal veio
+      // de antes, o fragmento inteiro É o valor.
+      // O fragmento que trouxe o sinal é tarjado a partir do texto DECODIFICADO: o rótulo pode estar
+      // escondido em entidade (`sen&#104;a`) ou em escape (`sen\u0068a`), e tarjar a forma crua não
+      // encontraria nada. O trecho entregue passa a mostrar a forma normalizada, que é o que a página
+      // significa.
+      if (hasCredentialValueSignal(decoded)) {
+        const sanitized = sanitizeText(redactCredentialLabelTail(decoded));
+        // O valor pode continuar depois de uma quebra de linha DENTRO do fragmento (`token: A\nB`): o
+        // tarjador para na quebra, então o resto depois do marcador também cai.
+        const marker = sanitized.lastIndexOf('[redacted]');
+        const remainder = marker < 0 ? '' : sanitized.slice(marker + '[redacted]'.length);
+        output += marker >= 0 && /\S/u.test(remainder) ? `${sanitized.slice(0, marker)}[redacted]` : sanitized;
+      } else {
+        output += '[redacted]';
+      }
       return;
     }
-    const sanitized = sanitizeText(fragment);
-    // O valor pode continuar depois da quebra de linha DENTRO do mesmo fragmento (`token: A\nB`): o
-    // tarjador para na quebra, então o resto do fragmento depois do marcador também sai tarjado. É
-    // fail-closed: prosa que venha depois de uma credencial no mesmo nó de texto se perde, e o preço
-    // está declarado — nenhuma forma de token distingue prosa de uma frase-senha.
-    const marker = sanitized.lastIndexOf('[redacted]');
-    const remainder = marker < 0 ? '' : sanitized.slice(marker + '[redacted]'.length);
-    const emitted = marker >= 0 && /\S/u.test(remainder) ? `${sanitized.slice(0, marker)}[redacted]` : sanitized;
-    output += emitted;
-    textStream += ` ${decodeEntities(fragment)} `;
-    pendingValueRedaction = endsWithCredentialLabel(textStream);
-    // Um fragmento que JÁ sofreu tarjamento pode ter sido cortado pela marcação no meio do valor
-    // (`senha: p4<span>X</span>`), então o fragmento seguinte também é tarjado — mas só enquanto a
-    // marcação não fechar o elemento: `</p>` encerra a continuação, e o parágrafo seguinte de
-    // `authorization=X</p><p>conteúdo público</p>` continua sendo evidência.
-    pendingValueTail = sanitized.includes('[redacted]');
+    output += sanitizeText(fragment);
   };
   while (position < html.length) {
     const opening = html.indexOf('<', position);
@@ -299,32 +297,13 @@ export function sanitizeHtmlSnippetSource(html, { privateTextDescendant = false 
       position = token.end;
       continue;
     }
-    // O valor esperado pode estar no ELEMENTO seguinte: os atributos dele também são candidatos a
-    // carregar a credencial, então o próximo elemento perde os atributos. Se ele tiver subárvore, ela
-    // vira raiz privada (atributos removidos em qualquer profundidade e texto descartado); se for vazio
-    // (`<img alt="…">`), só os atributos caem e o trecho continua — tratar um vazio como raiz privada
-    // encerraria o trecho inteiro por causa do `break` que existe para o campo editável.
-    let stripValueAttributes = false;
-    if (parsed.closing) pendingValueTail = false;
-    if (pendingValueRedaction && !parsed.closing) {
-      if (parsed.selfClosing || VOID_ELEMENTS.has(parsed.name)) {
-        // Elemento vazio com atributos ERA o candidato a valor (`<img alt="…">`): os atributos caem e a
-        // espera termina. Sem atributos (`<br>`, `<hr>`) ele não pode ter sido o valor, então a espera
-        // continua — era por encerrar a espera que `<p>senha:<br>X</p>` e `<p>senha:</p><hr><p>X</p>`
-        // entregavam a credencial.
-        stripValueAttributes = true;
-        if (parsed.attributes.length > 0) pendingValueRedaction = false;
-      } else {
-        pendingValueRedaction = false;
-        pendingPrivateRoot = true;
-      }
-    }
+    // Depois do sinal, nenhum elemento entrega atributo: eles são candidatos a carregar o valor, e
+    // quem decide é o conteúdo, não a forma do elemento.
     const forcedPrivateRoot = pendingPrivateRoot;
     output += sanitizeTag(parsed, {
       contentEditableRoot: contentEditableTag(parsed),
-      stripAttributes: forcedPrivateRoot || stripValueAttributes,
+      stripAttributes: forcedPrivateRoot || tainted,
     });
-    stripValueAttributes = false;
     if (forcedPrivateRoot) pendingPrivateRoot = false;
     if (!parsed.closing && !parsed.selfClosing && !VOID_ELEMENTS.has(parsed.name)) {
       const values = Object.fromEntries(parsed.attributes.map(attribute => [attribute.name, attribute.value ?? '']));

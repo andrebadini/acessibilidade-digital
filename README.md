@@ -4,31 +4,35 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.29 preparada — sem revisão independente ainda.** A revisão da **1.1.28** saiu com
-**1 Critical, 2 Important, 4 Minor e 6 observações**: ela confirmou tudo o que a 1.1.28 dizia ter fechado
-(as sete formas da 1.1.27, a exceção ancorada dos atributos, o fragmento de URL no trecho, os plurais em
-português) e mediu **zero regressões** contra as três gerações anteriores —, mas mostrou que a **classe do
-C1 continuava aberta** em oito formas de HTML comum que o fixture não cobria: `<p>senha:<br>X</p>`, o
-rótulo e o separador em nós diferentes (realce de sintaxe), o separador dentro de um `<span>`, o valor
-depois de um `<hr>`, o valor cortado no meio por uma tag, e o JSON com aspa escapada (`\"`) ou codificada
-em entidade (`&quot;`, `&#34;`). A causa: a espera exigia rótulo **e** separador no mesmo fragmento de
-texto, e qualquer elemento vazio consumia a espera.
+**Versão 1.1.30 preparada — sem revisão independente ainda.** A revisão da **1.1.29** saiu com
+**1 Critical, 7 Important, 5 Minor e 5 observações**, e o diagnóstico dela é o que importa: a 1.1.29 era
+melhor que a 1.1.28 em tudo o que foi medido (**zero regressões**, 34 formas fechadas contra 14 abertas,
+os dois Important da 1.1.28 fechados), mas a **classe do C1 continuava aberta em 15 formas** — 12 de
+trecho, 2 de URL e 1 de nome acessível —, cada uma entregando a credencial a quatro superfícies. E a causa
+apontada era de desenho, não de cobertura: em `snippet.js` a decisão sobre o texto acumulado acontecia
+**depois** de o fragmento com o valor já ter sido emitido, e a espera por valor era consumida por
+**estrutura** (comentário HTML, elemento vazio, elemento vazio com atributos, elemento vazio não-void),
+nunca por conteúdo.
 
-A 1.1.29 fecha a classe de forma estrutural: o sanitizador de trecho decide sobre o **texto acumulado**
-(com entidades decodificadas), a espera **atravessa** fragmentos, elementos vazios **sem** atributo
-(`<br>`, `<hr>`) e tags de fechamento, e o separador aceita aspa literal, escapada e codificada — com o
-elemento vazio **com** atributos consumindo a espera, porque era ele o candidato a valor. Fecha também os
-dois **Important**: a credencial que chegava pelo **nome acessível** de `placeholder`/`alt`/`title` (agora
-tarjada por cauda, exigindo cara de valor, para `Senha da conta` continuar sendo evidência) e as chaves de
-credencial de URL (`?code=`, `#code=`, `#assertion=`, rota `#/authorize/code/X`). E os Minors: rótulos com
-sufixo (`tokens:`, `senhaAtual:`, `apiKeys:`, `bearer:`, `authentication:`), a cauda do valor dividida por
-`<br>` ou quebra de linha, e o número da suíte que eu citava errado.
+A 1.1.30 troca o mecanismo por **marcação por conteúdo**: assim que o texto acumulado — com entidades e
+escapes decodificados em até três passagens, incluindo `&#104;` e `\u0068` — mostra sinal de credencial
+(rótulo com separador, rótulo com sufixo colado ou separado por espaço, ou rótulo com cauda com cara de
+valor), **tudo o que vier depois no trecho perde texto e atributos, sem destarjar**. Não há mais espera
+para consumir, então nenhuma forma de marcação pode enganá-la. Fecha também o **nome acessível** pelo
+fallback de DOM (o `name` saía tarjado e a `description` entregava o valor) e as **chaves de URL
+percent-encoded** (`?co%64e=`).
 
-A métrica da classe passou a ser **115 combinações** — todas as formas que as três revisões mediram mais
-variações próprias — com asserção de **zero segredos sobreviventes** em cada caminho (trecho, JSON, nome
-acessível, URL). A prova de não vacuidade é por mutação: com os sanitizadores da 1.1.28, o E2E do produto
-reprova nomeando `relatório, modelo e revisão guardados, artefato html, artefato json`; com a correção,
-passa.
+O preço está declarado e medido, não escondido: depois do primeiro sinal, o resto do trecho perde o texto
+— inclusive parágrafos seguintes —, e `?code=BR` de promoção ou `/code/1234` de rota inocente passam a ser
+tarjados. É a direção fail-closed: o relatório continua com seletor, nome acessível e captura, e o sinal
+só acende quando há rótulo de credencial (na auditoria real do Google, zero `[redacted]` e snippets
+idênticos aos da 1.1.28).
+
+A prova de não vacuidade é por mutação: com os sanitizadores da 1.1.29, o E2E do produto reprova nomeando
+`relatório, modelo e revisão guardados, artefato html, artefato json`; com a correção, passa. A métrica de
+aceitação tem **125 combinações** — todas as formas medidas pelas quatro revisões mais variações próprias
+— em quatro caminhos (trecho, JSON, nome acessível, URL), com **zero segredos sobreviventes** e os
+controles de prosa preservados.
 
 Os seis E2E de escopo citados nas versões anteriores são **percurso obrigatório**
 (`mandatory-journey-mv3`), exportação da página atual, impressão executiva, layout de impressão,

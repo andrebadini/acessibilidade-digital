@@ -8,8 +8,8 @@ test('declares a minimal MV3 extension shell without remote executable code', as
   const manifest = JSON.parse(await readWorkspaceFile('manifest.json'));
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.minimum_chrome_version, '116', 'sidePanel.open e runtime.getContexts exigem Chrome 116+');
-  assert.equal(manifest.version, '1.1.29');
-  assert.equal(manifest.version_name, '1.1.29');
+  assert.equal(manifest.version, '1.1.30');
+  assert.equal(manifest.version_name, '1.1.30');
   assert.equal(manifest.description, 'Auditoria independente de acessibilidade de páginas web.');
   assert.deepEqual(manifest.icons, {
     16: 'assets/icons/icon-16.png',

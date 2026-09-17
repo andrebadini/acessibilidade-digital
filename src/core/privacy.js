@@ -39,14 +39,22 @@ const BARE_PASS_SOURCE = String.raw`(?<!by)(?<!com)pass(?!ed|es|ive|ing|o|age|po
 // tarjar qualquer campo de código do produto. Medido na revisão da 1.1.28: `?code=`, `#code=`,
 // `#assertion=` e a rota `#/authorize/code/X` chegavam a cinco superfícies entregues.
 const URL_CREDENTIAL_KEY_SOURCE = String.raw`code|access[-_]?token|refresh[-_]?token|id[-_]?token|assertion|saml[-_]?response`;
-const URL_CREDENTIAL_PARAM = new RegExp(String.raw`([?&;#])((?:${URL_CREDENTIAL_KEY_SOURCE})=)[^&#\s]*`, 'giu');
-const URL_CREDENTIAL_SEGMENT = new RegExp(String.raw`([#/])((?:${URL_CREDENTIAL_KEY_SOURCE})/)[^/?#\s]*`, 'giu');
+// A chave pode vir percent-encoded (`?co%64e=`, `?%43ODE=`), e é isso que decide se o valor sai: a
+// decodificação acontece ANTES do teste, com `decodeURIComponent` protegido (entrada hostil não pode
+// derrubar o tarjador).
+function decodeKeySafely(key) {
+  try { return decodeURIComponent(String(key ?? '')); } catch { return String(key ?? ''); }
+}
+function credentialKey(key) {
+  const decoded = decodeKeySafely(key);
+  return SENSITIVE_KEY.test(decoded) || URL_CREDENTIAL_KEY.test(decoded);
+}
 export const URL_CREDENTIAL_KEY = new RegExp(String.raw`^(?:${URL_CREDENTIAL_KEY_SOURCE})$`, 'iu');
 // O que segue o rótulo precisa TER CARA DE VALOR para a cauda ser tarjada: dígito, símbolo,
 // maiúscula e minúscula misturadas ou comprimento de segredo. Sem isso, rótulos legítimos como
 // `Senha da conta` e `Chave da API` — que são nomes acessíveis de verdade, medidos nos testes do
 // normalizador — viravam `Senha [redacted]`, e o relatório perdia a evidência do rótulo.
-const VALUE_LIKE_TAIL_SOURCE = String.raw`\S*(?:\d|[^\p{L}\s]|\S{12,})\S*`;
+const VALUE_LIKE_TAIL_SOURCE = String.raw`\S*(?:\d|(?=[^\s]*[\p{L}\p{N}])[-_=@/+*#$%&|~^<>])\S*`;
 const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)`;
 export const SENSITIVE_KEY = new RegExp(
   `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
@@ -61,7 +69,11 @@ export const SENSITIVE_KEY = new RegExp(
 // MESMA credencial que a forma simples, e passavam intactos porque o separador tinha de vir colado na
 // palavra (Minor M1 da revisão da 1.1.28). O sufixo não afeta a exceção ancorada dos atributos de
 // rótulo, que usa o vocabulário de chave sem sufixo.
-const VALUE_LABEL_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|password|authorization|${SENSITIVE_WORD_SOURCE})[A-Za-z0-9]{0,24}`;
+// Segmento de rota com credencial (`#/authorize/code/X`): a chave entra no PRÓPRIO padrão para o
+// motor não consumir um segmento inocente e pular o seguinte, que era o que deixava a rota passar.
+const URL_CREDENTIAL_SEGMENT = new RegExp(
+  String.raw`([#/])((?:${URL_CREDENTIAL_KEY_SOURCE}|${SENSITIVE_WORD_SOURCE})/)([^/?#\s]*)`, 'giu');
+const VALUE_LABEL_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|password|authorization|${URL_CREDENTIAL_KEY_SOURCE}|${SENSITIVE_WORD_SOURCE})[A-Za-z0-9]{0,24}(?:[\s]+[A-Za-z0-9]{1,24}){0,2}`;
 // O valor vai até o fim da linha, sem teto, sem terminador e sem alternativa entre aspas. Duas
 // revisões seguidas mediram a mesma classe por caminhos diferentes: a 1.1.26 tinha o teto de 120
 // caracteres e o `;` devolvendo a cauda; a 1.1.27 tirou o teto mas manteve `<` como parada e a
@@ -76,11 +88,15 @@ const VALUE_SOURCE = String.raw`\S[^\n]*`;
 // (`&quot;`, `&#34;`, `&#x22;`) — porque `{"senha": "X"}` e `{&quot;senha&quot;: &quot;X&quot;}` são a
 // mesma credencial, e era exatamente a aspa entre o rótulo e o `:` que fazia essas formas passarem
 // depois do primeiro conserto (medido na revisão da 1.1.28).
-const VALUE_SEPARATOR_SOURCE = String.raw`(\s*(?:(?:<[^<>]{0,200}>)|&quot;|&#0*34;|&#x0*22;|\\?['"]|\s){0,20}(?:[:=]|->|=>|→)\s*)`;
+const VALUE_SEPARATOR_SOURCE = String.raw`(\s*(?:(?:<[^<>]{0,200}>)|&(?:amp;)?(?:quot|#0*34|#x0*22);|&(?:amp;)?(?:nbsp|#0*160|#x0*a0);|\\*['"]|\s){0,20}(?:&(?:amp;)?(?:#0*58|#x0*3a|colon);|[:=]|->|=>|→)\s*)`;
 // Um fragmento de texto que TERMINA no rótulo com o separador está esperando o valor no nó
 // seguinte (`<p>senha: <code>…</code></p>`, `<th>chave:</th><td>…</td>`). O sanitizador de trecho
 // usa este predicado para tratar o que vem depois como valor, em vez de confiar que rótulo e valor
 // moram no mesmo nó de texto — que era a forma exata que continuava vazando na 1.1.27.
+const ANY_CREDENTIAL_LABEL_VALUE = new RegExp(
+  `(?:${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}`, 'iu');
+const ANY_CREDENTIAL_LABEL_TAIL = new RegExp(
+  `(?:${VALUE_LABEL_SOURCE})[\\s]+${VALUE_LIKE_TAIL_SOURCE}`, 'iu');
 const DANGLING_VALUE_LABEL = new RegExp(`(?:${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}$`, 'iu');
 export { canonicalNavigationUrl, isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from './privacy/evidence-url.js';
 
@@ -241,6 +257,17 @@ export function redactCredentialLabelTail(value) {
     new RegExp(`(${VALUE_LABEL_SOURCE})(\\s+)(${VALUE_LIKE_TAIL_SOURCE})`, 'giu'), '$1$2[redacted]');
 }
 
+/**
+ * Sinal de credencial em TEXTO: rótulo com separador (`senha:`, `{"senha":`, `chave =`) ou rótulo com
+ * cauda com cara de valor (`senha abc123`). É o gatilho da marcação por conteúdo do sanitizador de
+ * trecho: uma vez aceso, nada depois volta a ser texto no trecho. Prosa legítima (`cartão de crédito`,
+ * `chave do problema`, `Senha da conta`) não acende, porque a cauda exige dígito ou símbolo forte.
+ */
+export function hasCredentialValueSignal(value) {
+  const text = String(value ?? '');
+  return ANY_CREDENTIAL_LABEL_VALUE.test(text) || ANY_CREDENTIAL_LABEL_TAIL.test(text);
+}
+
 /** Verdadeiro quando o texto termina em rótulo de credencial com o separador, sem o valor. */
 export function endsWithCredentialLabel(value) {
   return DANGLING_VALUE_LABEL.test(String(value ?? ''));
@@ -251,7 +278,8 @@ export function redactSensitiveText(value) {
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
     .replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}${VALUE_SOURCE}`, 'giu'), '$1$2[redacted]')
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+:[^/@\s]+@/giu, '$1[redacted]@')
-    .replace(URL_CREDENTIAL_PARAM, '$1$2[redacted]')
+    .replace(/([?&;#])([^=&\s#]+)=([^&#\s]*)/gu, (match, separator, key, value) =>
+      (credentialKey(key) ? `${separator}${key}=[redacted]` : match))
     .replace(URL_CREDENTIAL_SEGMENT, '$1$2[redacted]');
 }
 
@@ -259,10 +287,42 @@ export function redactSensitiveText(value) {
 // (`senha abc` vira `senha [redacted]`), porque foi assim que `data-note="<b>senha abc</b>"`
 // atravessava o tarjador de valores, que exige separador. Prosa comum não tem marcação e continua
 // intacta — foi a decisão que preservou o controle negativo do A1 ("A sessão discutiu o cartão…").
+const NAMED_ENTITIES = [
+  [/&(?:quot|#0*34|#x0*22);/giu, '"'], [/&(?:apos|#0*39|#x0*27);/giu, "'"],
+  [/&(?:amp|#0*38|#x0*26);/giu, '&'], [/&(?:nbsp|#0*160|#x0*a0);/giu, ' '],
+  [/&(?:lt|#0*60|#x0*3c);/giu, '<'], [/&(?:gt|#0*62|#x0*3e);/giu, '>'],
+];
+/**
+ * Decodifica entidades e escapes para PODER OLHAR o texto, nunca para reescrevê-lo: `sen&#104;a`,
+ * `sen\u0068a` e `&amp;quot;` são formas de esconder o rótulo, e um padrão que só olha a forma crua não
+ * as enxerga. Três passagens cobrem a dupla codificação medida pelas revisões.
+ */
+export function decodeForMatching(value) {
+  let text = String(value ?? '');
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = NAMED_ENTITIES
+      .reduce((current, [pattern, replacement]) => current.replace(pattern, replacement), text)
+      .replace(/&#x0*([0-9a-f]{1,6});/giu, (match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+      .replace(/&#0*([0-9]{1,7});/gu, (match, dec) => String.fromCodePoint(Number.parseInt(dec, 10)))
+      .replace(/\\u([0-9a-f]{4})/giu, (match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+      .replace(/\\x([0-9a-f]{2})/giu, (match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)));
+    if (next === text) break;
+    text = next;
+  }
+  return text;
+}
+
 const MARKUP_BEARING = /<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?>/iu;
 function redactStringValue(value) {
   const redacted = redactSensitiveText(value);
-  return MARKUP_BEARING.test(redacted) ? redactCredentialLabelTail(redacted) : redacted;
+  if (!MARKUP_BEARING.test(redacted)) return redacted;
+  const withTailRule = redactCredentialLabelTail(redacted);
+  // Rótulo e valor separados por MARCAÇÃO (`<b>senha</b> X`) não são vistos pelo tarjador de valores,
+  // que exige o separador colado: a projeção sem tags (e sem entidades) é quem decide, e nesse caso a
+  // string inteira cai — é string do autor que carrega credencial, não prosa do relatório.
+  if (withTailRule.includes('[redacted]')) return withTailRule;
+  const projection = decodeForMatching(redacted.replace(/<[^<>]*>/gu, ' '));
+  return hasCredentialValueSignal(projection) ? '[redacted]' : withTailRule;
 }
 
 export function sanitizeJsonData(value, ancestors = new WeakSet()) {
