@@ -126,3 +126,50 @@ C4 tela=result amostras=5 divergentes=0
 Ou seja: **na página atual e no modo sem pixels, a auditoria não rola, não move foco, não
 redimensiona, não dispara eventos e não muta o documento** — a página observada fica como estava.
 (Os modos com pixels não podem ser medidos nesta geração por não começarem: é o achado acima.)
+
+## Tentativa de conserto de 17/09/2026 (rodada 147): dois consertos pontuais NÃO bastaram, e a causa raiz é de ordenação no STARTER
+
+**O que foi tentado, com RED real observado antes de cada mudança:**
+
+1. `src/panel/panel-session-port.js` — adotar a correlação (`auditId`/`sessionCapabilityId`) quando um pacote
+   `privacy-paused` chega e a porta ainda **não tem** correlação (o atendimento respondeu ocioso antes de o
+   registro existir).
+2. `src/panel/panel.js` — ignorar um bootstrap OCIOSO durante uma auditoria **em curso**, porque ele recria o
+   estado neutro e cancela a auditoria.
+
+**Medições com as duas mudanças aplicadas** (Chrome 152, fixture local, sonda de linha do tempo a cada 500 ms):
+
+```
+depois do modo   tela=initial  marcado=[element-only]
++500 ms          tela=running  (começo aceito)
++1000 ms         tela=initial  marcado=[full-evidence]   <-- ainda cancelado
+```
+
+e o rastreamento da porta, com o painel já corrigido, mostra que **a pausa de consentimento nunca chega**:
+
+```
+S {"type":"bootstrap"}
+R {"type":"bootstrap-result","state":"initial","auditId":null,"sessionCapabilityId":null,"result":null}
+(nenhum pacote privacy-paused em 6 s; tela final = reconnecting)
+chaves de sessão: audit-session-capability, panel-launch:index, panel-launch:record,
+                  session-hmac-key, target-capability   <-- SEM `panel-bootstrap`
+```
+
+**Causa raiz medida:** o registro de bootstrap da janela (`audita:panel-bootstrap:v1:<windowId>`) — que é a
+**pré-condição** para o trabalhador entregar a pausa ao painel (`deliverPrivacyPaused` exige
+`readBootstrap`/`readSuspension` correlacionados) — **não existe** no momento da suspensão por consentimento.
+Em `src/background/authorized-audit-starter.js`, a sequência é: a auditoria suspende por consentimento **antes**
+de `registerPendingBootstrap` (linha 2326) e `publishRegisteredBootstrap` (linha 2356), que só rodam quando a
+execução realmente começa. Logo, no modo de pixel da página atual a pausa é criada **sem registro** e não há
+como ser entregue: a porta recebe `initial`, o painel não tem o que confirmar, e a auditoria nunca começa.
+
+**Por que não consertei:** a correção é de **ordenação no starter** — registrar/publicar o bootstrap pendente
+**antes** de qualquer suspensão por consentimento — e `authorized-audit-starter.js` está nos **arquivos
+congelados** do incremento paralelo ("Página atual sem interação visível", incrementos A/B). Editar por cima
+violaria a regra de nunca editar os mesmos arquivos em paralelo, e as duas mudanças que fiz no painel/porta,
+embora corretas em si, **não fecham o percurso** — foram **revertidas** para não entregar meio conserto sem
+prova. O achado fica com o incremento dono do arquivo, agora com causa raiz e rastro de pacotes medidos.
+
+**Prova exigida do conserto:** E2E em Chrome real que, na página atual e em `element-only` **e**
+`full-evidence`, veja `[data-action="confirm-pixel-capture"]` aparecer, confirme e chegue a `result`; ele deve
+**reprovar** contra os bytes atuais (o oráculo que falta).
