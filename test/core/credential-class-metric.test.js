@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { isSensitiveKeyName, SENSITIVE_KEY, decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
+import { isSensitiveKeyName, isSensitiveValue, SENSITIVE_KEY, decodeForMatching, hasCredentialValueSignal, redactCredentialLabelTail, redactSensitiveText, sanitizeJsonData } from '../../src/core/privacy.js';
 import { sanitizeHtmlSnippetSource } from '../../src/core/evidence/snippet.js';
 import { computeAccessibleText } from '../../src/core/accessibility/accessible-name.js';
 import { buildStableSelector } from '../../src/core/evidence/selector.js';
@@ -130,6 +130,15 @@ const CARTAO = [
   ['rótulo em escape octal', `<p>sen\\150a: ${S('159')}</p>`],
   ['certificado digital', `<p>Certificado digital: ${S('119')}</p>`],
 ];
+// CONCATENAÇÕES de radical + qualificador, a forma que a revisão da 1.1.34 mediu vazando e que a 1.1.35
+// cobre com listas fechadas. O corpus existe para a lista ser medida nas duas direções: uma cauda nova
+// fora da lista precisa aparecer aqui como vazamento.
+const CONCATENACOES = [
+  'senhasegura', 'senhafacil', 'senhaforte', 'senhafortes', 'senhaprivada', 'senhasecreta',
+  'senhamestra', 'senhadaconta', 'senhadocliente', 'senhatemporaria', 'senhaexpirada', 'senhabloqueada',
+  'tokenprivado', 'tokensessao', 'tokenapi', 'chaveprivada', 'chavepublica', 'chavemestra',
+  'cookiesessao', 'banhopin', 'loginpin',
+];
 const ROTULOS = ['tokens:', 'secrets:', 'sessions:', 'cookies:', 'senhaAtual:', 'credenciaisDeAcesso:', 'chaveDeApi:', 'bearer:', 'authentication:', 'apiKeys:', 'Senha atual:', 'chave de api:', 'credenciais de acesso:'];
 const CAUDAS = [
   ['cauda depois de vazio', `<p>senha: ${S('40')}<br>${S('41')}</p>`],
@@ -243,7 +252,7 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
   assert.ok(CARTAO.length >= 9, `a lista de cartão/boleto encolheu: ${CARTAO.length}`);
   // O total de COMBINAÇÕES (forma x caminho) é o número que os documentos citam, e por isso ele é
   // calculado aqui em vez de escrito à mão: uma lista que encolher derruba esta asserção.
-  const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length) * 3
+  const combinacoes = (FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length) * 3 + CONCATENACOES.length * 2
     + (ATRIBUTOS.length + CAUDAS.length) + ROTULOS.length * 2 + (URLS.length + URLS_CHAVE.length) * 2;
   t.diagnostic(`formas=${FORMAS.length + IDIOMA.length + CARTAO.length + SEM_ACENTO.length} combinações=${combinacoes}`);
   assert.ok(combinacoes >= 210, `a métrica encolheu: ${combinacoes} combinações`);
@@ -266,6 +275,15 @@ test('nenhuma forma de credencial sobrevive em nenhum dos quatro caminhos', t =>
     const sentinela = S('70');
     if (sanitizeHtmlSnippetSource(`<p>${rotulo} ${sentinela}</p>`).includes(sentinela)) vazamentos.push(`${rotulo} (trecho)`);
     if (sanitizeJsonData({ texto: `${rotulo} ${sentinela}` }).texto.includes(sentinela)) vazamentos.push(`${rotulo} (json)`);
+  }
+  for (const rotulo of CONCATENACOES) {
+    const sentinela = S('170');
+    for (const [caminho, saida] of [
+      ['trecho', sanitizeHtmlSnippetSource(`<p>${rotulo}: ${sentinela}</p>`)],
+      ['json', sanitizeJsonData({ texto: `<p>${rotulo}: ${sentinela}</p>` }).texto],
+    ]) {
+      if (saida.includes(sentinela)) vazamentos.push(`${rotulo} (${caminho})`);
+    }
   }
   for (const [nome, url] of [...URLS, ...URLS_CHAVE]) {
     const sentinela = url.match(/ADVSEN\d+X/u)[0];
@@ -302,8 +320,11 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
   // A fronteira do radical é uma decisão de cobertura com dois lados, e este é o lado que o E2E do 5.9.8
   // mediu: `pins?` sem fronteira casava o "pin" de "shipping". Sem esta asserção, a correção da fronteira
   // fica sem controle — e foi exatamente assim que o defeito passou pela métrica na primeira medição.
+  // O predicado que decide VALOR de atributo e palavra da língua é o ESTRITO: o vocabulário de rótulo de
+  // prosa é permissivo de propósito (radical em qualquer posição que toque uma borda do token), e quem
+  // impede a destruição da evidência é o par (token inteiro + valor com cara de credencial).
   for (const palavra of [...NAO_ROTULO, ...PALAVRAS_FALSAS]) {
-    assert.equal(SENSITIVE_KEY.test(palavra), false, `"${palavra}" contém radical curto e não é rótulo`);
+    assert.equal(isSensitiveValue(palavra), false, `"${palavra}" contém radical curto e não é rótulo de valor`);
   }
   for (const palavra of PRECO_DECLARADO) {
     assert.equal(isSensitiveKeyName(palavra), true, `"${palavra}" é o preço declarado do caminho de CHAVE e precisa estar medido`);
@@ -311,7 +332,7 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
   // E o outro lado do preço: em PROSA a palavra terminada em radical curto é preservada, com o caso que a
   // revisão da 1.1.34 mediu.
   for (const palavra of ['hairpin', 'spin', 'chaveiro', 'tokenizador']) {
-    assert.equal(SENSITIVE_KEY.test(palavra), false, `"${palavra}" é palavra da língua e não pode ser rótulo em prosa`);
+    assert.equal(isSensitiveValue(palavra), false, `"${palavra}" é palavra da língua e não pode ser rótulo de valor`);
   }
   for (const frase of ['The hairpin: 12 units', 'O tokenizador é interno', 'Chaveiro: R$ 30,00']) {
     assert.doesNotMatch(redactSensitiveText(frase), /\[redacted\]/u, `"${frase}" é prosa e não pode ser tarjada`);
@@ -322,7 +343,7 @@ test('palavra da língua com radical curto embutido não vira rótulo de credenc
   }
   // E o outro lado do mesmo radical: as formas de rótulo de PIN continuam acendendo.
   for (const rotulo of ['PIN: 4712', 'Pins: 12', 'pin-code: 4712', 'pinCode: 4712', 'PIN CODE: 4712']) {
-    assert.equal(SENSITIVE_KEY.test(rotulo), true, `"${rotulo}" é rótulo de credencial`);
+    assert.equal(isSensitiveValue(rotulo), true, `"${rotulo}" é rótulo de credencial`);
     assert.match(redactSensitiveText(rotulo), /\[redacted\]/u, `"${rotulo}" precisa ser tarjado`);
   }
 });

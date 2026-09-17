@@ -1,4 +1,4 @@
-import { decodeForMatching, hasCredentialValueSignal, isSensitiveKey, isSensitiveKeyName, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
+import { decodeForMatching, hasCredentialValueSignal, isSensitiveKey, isSensitiveKeyName, isSensitiveValue, redactCredentialLabelTail, redactSensitiveText, SENSITIVE_KEY, withCamelMarks } from '../privacy.js';
 
 // Este arquivo tinha o TERCEIRO e o QUARTO vocabulário do produto: `SENSITIVE` e `PRIVATE_ATTRIBUTE`
 // eram cópias próprias, só em inglês, e `sanitizeText` consumia um único token. Medido numa auditoria
@@ -168,7 +168,7 @@ function sanitizeTag(parsed, { contentEditableRoot = false, stripAttributes = fa
       value = sanitizeUrl(value);
       if (value === null) continue;
     }
-    if (value !== null && !['type', 'autocomplete'].includes(name) && isSensitiveKey(value) &&
+    if (value !== null && !['type', 'autocomplete'].includes(name) && isSensitiveValue(value) &&
       !(LABEL_ATTRIBUTES.has(name) && SENSITIVE_LABEL_ONLY.test(withCamelMarks(value.trim())))) continue;
     // O valor do atributo também passa pelo tarjador: a regra acima só descarta o atributo quando ele
     // MENCIONA uma palavra sensível, e um valor como `Bearer …` ou `senha: …` sem a palavra no nome

@@ -49,6 +49,11 @@ const CAMEL_MARK_GLOBAL = /\u0001/gu;
 const WORD_HEAD_PERMISSIVE = String.raw`(?:[A-Za-z]{2,12}|(?<![\p{L}\p{N}]))`;
 const WORD_TAIL = String.raw`(?!\p{L})`;
 const WORD_SEP = String.raw`(?:\u0001|[\s\-_–—])`;
+// Continuação de IDENTIFICADOR depois do radical: `senha_forte`, `senha.mestra`, `senha/mestra`,
+// `session-id`. Sem ela o extrator de cauda casava só o radical, tratava o resto do identificador como
+// valor e tarjava o LUGAR ERRADO, deixando o segredo literal (`senha[redacted] VALOR`) — Critical C2 da
+// revisão da 1.1.35, medido nas quatro gerações.
+const LABEL_CONTINUATION = String.raw`(?:(?:\u0001|[-_.\/])[\p{L}\p{N}]{1,24}){0,2}`;
 
 // Caracteres invisíveis (hífen suave, larguras zero, controles de direção, BOM) quebram o radical no
 // meio: `sen\u200bha:` é o mesmo rótulo que `senha:` para quem lê, e o tarjador não o via. Eles saem da
@@ -132,13 +137,15 @@ const CREDENTIAL_TAILS = Object.freeze([
   'principal', 'unica', 'unico', 'hash', 'value', 'values', 'consent', 'confirmacao', 'recuperacao',
   'usuario', 'usuário', 'user', 'cliente', 'titular', 'sistema', 'conta', 'portal', 'app', 'web', 'site',
   'servico', 'serviço', 'banco', 'digital', 'mestra', 'antiga', 'inicial', 'seguranca', 'segurança',
-  'privada', 'publica', 'pública', 'api', 'redefinida', 'expirada', 'bloqueada', 'incorreta', 'errada',
+  'privada', 'privado', 'publica', 'publico', 'pública', 'público', 'api', 'redefinida', 'expirada',
+  'bloqueada', 'incorreta', 'errada', 'segura', 'seguro', 'facil', 'fácil', 'dificil', 'difícil',
+  'simples', 'complexa', 'valida', 'válida', 'invalida', 'inválida', 'unica', 'unico', 'única', 'único',
 ]);
 const CREDENTIAL_PREFIXES = Object.freeze([
   'user', 'card', 'cartao', 'meu', 'minha', 'my', 'our', 'app', 'sim', 'chip', 'account', 'login',
   'bank', 'banco', 'device', 'phone', 'celular', 'data', 'master', 'admin', 'super', 'root', 'api',
   'auth', 'oauth', 'session', 'cookie', 'secret', 'chave', 'senha', 'token', 'pass', 'pin', 'conta',
-  'acesso', 'client', 'server', 'service', 'default',
+  'acesso', 'client', 'server', 'service', 'default', 'banho', 'conta', 'senha', 'chave', 'token',
 ]);
 const STEMS_ALTERNATION = WORD_STEMS.map(escapeLiteral).join('|');
 const PHRASES_ALTERNATION = PHRASE_STEMS.map(parts => parts
@@ -151,8 +158,9 @@ const WORD_RADICAL_SOURCE = [
   // palavra inteira, ou fim de palavra com prefixo de CREDENCIAL (`userpin`, `datapin`)
   String.raw`${WORD_HEAD}(?:${STEMS_ALTERNATION})${WORD_TAIL}`,
   // radical no início + cauda de credencial (`senhaforte`, `sessionid`, `tokenacesso`), inclusive com o
-  // conector de/da/do/d (`chavedapi`, `senhadousuario`)
-  String.raw`(?:${STEMS_ALTERNATION})(?:(?:d|de|da|do))?(?:${TAILS_ALTERNATION}|${STEMS_ALTERNATION})${WORD_TAIL}`,
+  // conector de/da/do/d (`chavedapi`, `senhadousuario`) e com plural na cauda (`senhafortes`). A cauda
+  // pode ser outro RADICAL, inclusive os de palavra inteira (`tokensessao`, `cookiesessao`).
+  String.raw`(?:${STEMS_ALTERNATION})(?:(?:d|de|da|do))?(?:(?:${TAILS_ALTERNATION})s?|${STEMS_ALTERNATION}|${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})${WORD_TAIL}`,
   // prefixo de credencial + radical (`cardpin`, `meupin`, `sessiontoken`)
   String.raw`(?:${PREFIXES_ALTERNATION})(?:${STEMS_ALTERNATION})${WORD_TAIL}`,
   String.raw`(?<![\p{L}\p{N}])(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})${WORD_TAIL}`,
@@ -171,7 +179,18 @@ const STEMS_COM_GUARDAS = WORD_STEMS.map(stem => {
   if (stem === 'oauth') return String.raw`(?<![\p{L}\p{N}])oauth`;
   return escapeLiteral(stem);
 }).join('|');
-const KEY_NAME_SOURCE = String.raw`(?:${WORD_HEAD_PERMISSIVE})?(?:(?:${STEMS_COM_GUARDAS})|(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})|(?:${PHRASES_ALTERNATION})|(?:${PHRASES_SEPARADOR_ALTERNATION}))[\p{L}\p{N}]{0,24}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
+// O RADICAL tem de TOCAR UMA BORDA do token: ou começa nele (`senhaforte`, `Chaveiro`) ou termina nele
+// (`novasenha`, `userpin`, `hairpin`). Com as duas bordas livres, `pin` casaria dentro de `shipping`
+// (`ship|pin|g`) e a declaração `autocomplete="shipping street-address"` voltava a ser tarjada — foi o
+// falso positivo medido pelo E2E do 5.9.8 na 1.1.33.
+const STEM_ALTERNATION = String.raw`(?:(?:${STEMS_COM_GUARDAS})|(?:${WHOLE_WORD_STEMS.map(escapeLiteral).join('|')})|(?:${PHRASES_ALTERNATION}))`;
+const HEAD_EDGE = String.raw`(?<![\p{L}\p{N}])`;
+const TAIL_EDGE = String.raw`(?!\p{L})`;
+const KEY_NAME_CORE = String.raw`${HEAD_EDGE}${STEM_ALTERNATION}[\p{L}\p{N}]{0,24}${LABEL_CONTINUATION}|[\p{L}\p{N}]{1,12}${STEM_ALTERNATION}${LABEL_CONTINUATION}${TAIL_EDGE}|(?<!by)(?<!com)pass(?![\p{L}\p{N}])`;
+// As frases que só valem com SEPARADOR (`conta corrente`, `certificado digital`) ficam FORA do
+// vocabulário de cauda: `conta corrente 12345-6` é prosa sobre o dado, `Conta corrente: 12345-6` é o
+// rótulo dele. Sem esta separação a frase voltava a destruir prosa pela regra de cauda.
+const KEY_NAME_SOURCE = String.raw`${KEY_NAME_CORE}|(?:${PHRASES_SEPARADOR_ALTERNATION})[\p{L}\p{N}]{0,24}`;
 const PHRASE_RADICAL_SOURCE = String.raw`${WORD_HEAD}(?:${PHRASES_ALTERNATION})${WORD_TAIL}`;
 const PHRASE_SEPARATOR_ONLY_SOURCE = String.raw`${WORD_HEAD}(?:${PHRASES_SEPARADOR_ALTERNATION})${WORD_TAIL}`;
 // `pass` sozinho: `bypass` e `compass` ficam preservados (lookbehind) e `passed`/`passive`/`passo`
@@ -252,7 +271,13 @@ function valueLikeToken(token) {
   if ([...core].length >= 12) return true;
   return /[^\p{L}\p{N}\s]/u.test(core);
 }
-const SENSITIVE_WORD_SOURCE = String.raw`${WORD_RADICAL_SOURCE}|${PHRASE_RADICAL_SOURCE}`;
+// RÓTULO DE PROSA: vocabulário PERMISSIVO (o radical pode estar em qualquer posição da palavra), com as
+// guardas que preservam palavra legítima. A lista fechada de prefixos/caudas da 1.1.35 vazava toda forma
+// fora dela (`novasenha`, `redefinirsenha`, `trocarsenha`, `senhasegura`) — Critical C1 da revisão da
+// 1.1.35 —, e a decisão de recall volta para o lado seguro: o preço do falso positivo é pago com um
+// predicado de VALOR mais estrito quando o rótulo não é palavra inteira do vocabulário (ver
+// `SENSITIVE_LABEL_WHOLE`), e está medido no corpus de prosa.
+const SENSITIVE_WORD_SOURCE = String.raw`${KEY_NAME_CORE}`;
 export const SENSITIVE_KEY = new RegExp(
   `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
 /**
@@ -262,6 +287,28 @@ export const SENSITIVE_KEY = new RegExp(
  */
 export function isSensitiveKey(value) {
   return SENSITIVE_KEY.test(withCamelMarks(String(value ?? '')));
+}
+/**
+ * Predicado ESTRITO, para VALOR de atributo: casa a palavra do vocabulário, o prefixo/cauda de
+ * credencial em lista fechada e as frases — e NÃO casa o radical no meio de uma palavra da língua
+ * (`Chaveiro`, `Secretaria`, `shipping`). É o que preserva `placeholder="Chaveiro de latão"` e
+ * `autocomplete="shipping street-address"` sem reabrir `title="senha X"`.
+ */
+export const SENSITIVE_VALUE = new RegExp(
+  `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${PHRASE_SEPARATOR_ONLY_SOURCE}|${URL_CREDENTIAL_KEY_SOURCE})${LABEL_CONTINUATION}`, 'iu');
+export function isSensitiveValue(value) {
+  return SENSITIVE_VALUE.test(withCamelMarks(String(value ?? '')));
+}
+/**
+ * Verdadeiro quando o rótulo casado é PALAVRA (ou frase) do vocabulário, e não uma concatenação. É o que
+ * decide a semântica do valor: rótulo que é palavra é atribuição (`senha: abc` sai inteiro); rótulo que é
+ * identificador colado (`novasenha:`, `Chaveiro:`) exige valor com cara de credencial, para a palavra da
+ * língua que contém o radical não destruir evidência (`Chaveiro: R$ 30,00`).
+ */
+const SENSITIVE_LABEL_WHOLE = new RegExp(
+  `^(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${PHRASE_SEPARATOR_ONLY_SOURCE}|${URL_CREDENTIAL_KEY_SOURCE})`, 'iu');
+export function isWholeCredentialLabel(value) {
+  return SENSITIVE_LABEL_WHOLE.test(withCamelMarks(String(value ?? '')));
 }
 /**
  * Testa CHAVE, nome de atributo ou chave de URL — identificador colado, não prosa. Aqui o radical pode
@@ -327,7 +374,7 @@ const URL_CREDENTIAL_SEGMENT_ENCODED = /([#/])([^/?#\s]*%[0-9a-f]{2}[^/?#\s]*)\/
 // O rótulo casa a PALAVRA inteira (a fronteira está no vocabulário); o sufixo `[\p{L}\p{N}]{0,24}` que
 // existia aqui era o que transformava `Chaveiro` em rótulo e é o que a 1.1.34 remove. O camelCase
 // continua coberto pela marca (`senha\u0001Atual`).
-const VALUE_LABEL_ADJACENT_SOURCE = String.raw`(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${URL_CREDENTIAL_KEY_SOURCE}|${SENSITIVE_WORD_SOURCE})`;
+const VALUE_LABEL_ADJACENT_SOURCE = String.raw`(?:${SENSITIVE_WORD_SOURCE})${LABEL_CONTINUATION}|(?:${URL_CREDENTIAL_KEY_SOURCE})${LABEL_CONTINUATION}`;
 // A janela do rótulo descritivo vai até OITO palavras: a revisão da 1.1.33 mediu sete palavras entre o
 // rótulo e o valor chegando às quatro superfícies (`chave de acesso ao sistema principal da conta X`).
 const VALUE_LABEL_SOURCE = String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE}|${PHRASE_SEPARATOR_ONLY_SOURCE})(?:[\s\-–—\u0001]+[(\[]?[\p{L}\p{N}]{1,24}[)\]]?){0,6}?`;
@@ -526,6 +573,29 @@ export function backgroundImageKind(value) {
 const TAIL_CANDIDATE = new RegExp(
   String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE})[\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*\S+`, 'giu');
 
+/**
+ * O VALOR tem de ter cara de credencial quando o rótulo NÃO é palavra do vocabulário. É o preço do
+ * recall: `novasenha:`, `senhasegura:` e `senha_forte:` (identificadores colados) continuam fechados com
+ * valor de credencial, e `Chaveiro: R$ 30,00`, `Secretaria de Saúde: 12 unidades`, `The hairpin: 12 units`
+ * e `tokenizador: interno` (palavras da língua) voltam a ser evidência. Rótulo que É palavra do
+ * vocabulário mantém a semântica de atribuição (`senha: abc` sai inteiro).
+ */
+function shapesValue(label, token) {
+  return isWholeCredentialLabel(label) || credentialLikeToken(token);
+}
+/**
+ * O TOKEN inteiro em volta do rótulo casado. O vocabulário de prosa é permissivo de propósito (o radical
+ * pode estar em qualquer posição), então o casamento pode começar no meio de uma palavra — `pin` dentro
+ * de `spin`. Quem decide se o rótulo é palavra do vocabulário é o TOKEN, não o pedaço casado.
+ */
+function tokenAround(text, offset, length) {
+  let start = offset;
+  let end = offset + length;
+  while (start > 0 && /[\p{L}\p{N}\u0001]/u.test(text[start - 1])) start -= 1;
+  while (end < text.length && /[\p{L}\p{N}\u0001]/u.test(text[end])) end += 1;
+  return text.slice(start, end);
+}
+
 // A SEGUNDA LEITURA, sem as marcas de camelCase. A marca resolve `senhaAtual` (o radical termina onde a
 // maiúscula começa), mas ela quebra a palavra no meio quando a página mistura a caixa DENTRO do radical:
 // `SeNhA:` era tarjado antes das marcas e deixou de ser. A leitura sem marcas roda só quando a primeira
@@ -536,11 +606,13 @@ function tailPasses(text) {
     // `<p><b>senha</b> X</p>` e `<div title="senha X">` desistirem e entregarem a credencial (regressão
     // medida na revisão da 1.1.32).
     .replace(new RegExp(String.raw`(${VALUE_LABEL_ADJACENT_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
-      (match, label, space, token) =>
-        (valueLikeToken(token) && !match.includes('[redacted]') ? `${label}${space}[redacted]` : match))
+      (match, label, space, token, offset, whole) =>
+        (valueLikeToken(token) && shapesValue(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
+          ? `${label}${space}[redacted]` : match))
     .replace(new RegExp(String.raw`(${VALUE_LABEL_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
-      (match, label, space, token) =>
-        (strongValueToken(token) && !match.includes('[redacted]') ? `${label}${space}[redacted]` : match));
+      (match, label, space, token, offset, whole) =>
+        (strongValueToken(token) && shapesValue(tokenAround(whole, offset, label.length), token) && !match.includes('[redacted]')
+          ? `${label}${space}[redacted]` : match));
 }
 export function redactCredentialLabelTail(value) {
   if (!mayCarryCredential(value)) return String(value ?? '');
@@ -616,16 +688,22 @@ function signalPasses(text) {
   // Percorre TODAS as ocorrências: com a janela preguiçosa, a primeira pode ser `senha deve` e só uma
   // posterior (`cartão de crédito` + valor) ser a credencial.
   for (const match of text.matchAll(new RegExp(ANY_CREDENTIAL_LABEL_TAIL.source, 'giu'))) {
-    if (valueLikeToken(match[1])) return true;
+    const label = match[0].slice(0, match[0].length - match[1].length);
+    if (valueLikeToken(match[1]) && shapesValue(tokenAround(text, match.index, label.length), match[1])) return true;
   }
   return spacedLabelTailSignal(text);
 }
 
 export function hasCredentialValueSignal(value) {
   if (!mayCarryCredential(value)) return false;
-  const marked = withCamelMarks(value);
-  if (signalPasses(marked)) return true;
-  return marked === String(value ?? '') ? false : signalPasses(String(value ?? ''));
+  // O sinal é DERIVADO das mesmas decisões do tarjador: sinal ⟺ alguma tarja acontece (ou o rótulo
+  // está pendente no fim do acumulado, com o valor no nó seguinte). Antes havia dois caminhos com
+  // predicados diferentes, e `Pingente: prata` acendia o sinal sem que nada fosse tarjado — o trecho
+  // inteiro caía por um sinal que o tarjador não reconhecia (falso positivo medido pela revisão da
+  // 1.1.35 na classe do `hairpin`).
+  return redactSensitiveText(value).includes('[redacted]') ||
+    redactCredentialLabelTail(value).includes('[redacted]') ||
+    DANGLING_CREDENTIAL_LABEL.test(withCamelMarks(value));
 }
 
 /** Verdadeiro quando o texto termina em rótulo de credencial com o separador, sem o valor. */
@@ -649,7 +727,7 @@ function sensitivePasses(marked) {
     // sete frases realistas (Important da revisão da 1.1.31).
     ;
   if (HAS_SEPARATOR_SHAPE.test(text)) text = text.replace(new RegExp(`(${VALUE_LABEL_SOURCE})${VALUE_SEPARATOR_SOURCE}(${VALUE_SOURCE})`, 'giu'),
-      (match, label, separator, value) => {
+      (match, label, separator, value, offset, whole) => {
         const tokens = value.trim().split(/\s+/u).filter(Boolean);
         const first = tokens[0] ?? '';
         const singleToken = tokens.length === 1;
@@ -661,7 +739,16 @@ function sensitivePasses(marked) {
         // caracteres.`) costuma ser prosa SOBRE a credencial, e aí só sai com valor com cara de valor —
         // foi essa a diferença medida pela revisão da 1.1.31 entre `passphrase:` e `Senha do usuário:`.
         const descriptiveLabel = !new RegExp(`^(?:${VALUE_LABEL_ADJACENT_SOURCE})$`, 'iu').test(label);
-        if (!descriptiveLabel) return `${label}${separator}[redacted]`;
+        const wholeLabel = isWholeCredentialLabel(tokenAround(whole, offset, label.length));
+        if (!descriptiveLabel) {
+          if (wholeLabel) return `${label}${separator}[redacted]`;
+          // Rótulo que NÃO é palavra do vocabulário (`novasenha:`, `Chaveiro:`) só tarja com valor com
+          // cara de credencial — é o preço declarado do recall.
+          return credentialLikeToken(first) ? `${label}${separator}[redacted]` : match;
+        }
+        // Rótulo descritivo de várias palavras: prosa SOBRE a credencial só sai com valor com cara de
+        // valor (ou um token só), e rótulo identificador exige o mesmo que acima.
+        if (!wholeLabel) return credentialLikeToken(first) ? `${label}${separator}[redacted]` : match;
         return valueLikeToken(first) || singleToken || valueLikeTokens >= 2
           ? `${label}${separator}[redacted]`
           : match;
@@ -689,7 +776,17 @@ function sensitivePasses(marked) {
   // Rótulo SEM separador (`senha abc123`, `cartão de crédito S3GR…`, `senha - S3GR…`): a mesma regra
   // de cauda do nome acessível, para o caminho JSON não ficar mais frouxo que o do trecho.
   return text
-    .replace(TAIL_CANDIDATE, match => (match.includes('[redacted]') ? match : redactCredentialLabelTail(match)))
+    .replace(TAIL_CANDIDATE, (match, offset, wholeText) => {
+      if (match.includes('[redacted]')) return match;
+      // O token em volta pode ser maior que o rótulo casado (`pin` dentro de `xpin`): a decisão de
+      // palavra-vs-identificador tem de ser tomada no texto original, não no pedaço isolado.
+      const token = tokenAround(wholeText, offset, 1);
+      if (isWholeCredentialLabel(token)) return redactCredentialLabelTail(match);
+      const value = match.trim().split(/\s+/u).at(-1) ?? '';
+      return credentialLikeToken(value)
+        ? `${match.slice(0, match.length - value.length)}[redacted]`
+        : match;
+    })
     .replace(/[\s\S]+/u, match => redactSpacedLabelTail(match));
 }
 export function redactSensitiveText(value) {
