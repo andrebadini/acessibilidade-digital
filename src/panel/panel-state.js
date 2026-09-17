@@ -18,10 +18,16 @@ const PANEL_STATE_KEYS = Object.freeze([
   'focusId', 'scrollTop', 'reason',
 ]);
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'keyboard']);
+const PANEL_ABORTED_MESSAGE = 'A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se '
+  + 'o modo de imagem falhar de novo, use o modo sem pixels.';
 const PANEL_UNAVAILABLE_REASONS = new Set([
   PANEL_UNPREPARED_MESSAGE,
   'O resultado local não pôde ser exibido com segurança.',
   'Não foi possível concluir a operação local.',
+  // A auditoria foi encerrada sem chegar ao resultado, e o usuário NÃO pediu para parar (a revisão final da
+  // 1.1.45 mediu: no modo de imagem, sem sinal sensível na página, a sessão é revogada e o painel voltava ao
+  // início EM SILÊNCIO). A mensagem é o que a revisão exige: nunca o retorno silencioso ao neutro.
+  PANEL_ABORTED_MESSAGE,
 ]);
 const HIGHLIGHT_BINDING_REASONS = new Set(['no-binding', 'expired', 'live-proof-failed']);
 const READER_SPEECH_AVAILABILITY = new Set(['available', 'unavailable', 'busy', 'error']);

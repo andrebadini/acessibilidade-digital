@@ -16,6 +16,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/custom-field-name-mv3.test.mjs',
   'test/e2e/credential-shapes-mv3.test.mjs',
   'test/e2e/current-page-export-mv3.test.mjs',
+  'test/e2e/current-page-pixel-abort-mv3.test.mjs',
   'test/e2e/download-uniquify-mv3.test.mjs',
   'test/e2e/field-label-review.test.mjs',
   'test/e2e/input-purpose-observation.test.mjs',

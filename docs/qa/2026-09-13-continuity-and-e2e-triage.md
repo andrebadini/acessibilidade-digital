@@ -3106,3 +3106,73 @@ com as sondas do próprio revisor:
 - **329/329** nos testes afetados (núcleo, evidência, métrica e painel), e a métrica da classe ganhou as nove
   formas do revisor **com não vacuidade conferida**: o mesmo arquivo de teste **reprova** contra os bytes
   empacotados da 1.1.45 e passa nesta árvore.
+
+## Rodada 93 — a 1.1.47 fecha o Important I-1 do percurso (e uma regressão minha, medida e fechada na mesma versão)
+
+A revisão integrada final da 1.1.45 mediu, numa página **sem** sinal sensível, o modo de imagem da página
+atual sendo **revogado em silêncio**: a sessão fica `"revoked"`, nenhuma suspensão é criada e o painel volta ao
+neutro **sem mensagem** — e o modo padrão do painel é justamente `full-evidence`. A prova que a revisão exigiu
+é binária: **ou a confirmação de captura, ou uma mensagem explícita — nunca o retorno silencioso ao neutro**.
+
+**O que a 1.1.47 entrega.** O conserto é do lado do painel (nenhum arquivo do incremento paralelo foi tocado):
+um bootstrap **ocioso** (`state:"initial"`) que chega com o painel em `running` **e sem pedido de cancelamento
+do usuário** passa a levar a tela a `AUDIT_UNAVAILABLE` com `A auditoria foi encerrada antes de concluir. Refaça
+a auditoria e, se o modo de imagem falhar de novo, use o modo sem pixels.` A frase é literal em `panel.js` e em
+`panel-state.js` (o contrato de exportação daquele módulo continua sendo só as duas funções de estado) e um
+teste de unidade **reprova se as duas cópias divergirem**. Nasce junto o oráculo que faltava,
+`test/e2e/current-page-pixel-abort-mv3.test.mjs`, em `REAL_CHROME_E2E` no plano de testes.
+
+**A fronteira da mensagem custou duas medições — e a primeira versão era uma regressão.** A primeira tentativa
+disparava a mensagem para **qualquer** bootstrap ocioso com o painel em `running`; a suíte completa reprovou:
+em `url-pixel-consent-mv3`, **cancelar durante a pausa** deixou de voltar ao neutro e caiu na indisponibilidade
+(`cancel while paused removes only the owned tab and produces no report`, `WAIT_TIMEOUT` de 31 s). O desfecho
+de quem **pede** para parar é o neutro. A segunda tentativa estreitou a fronteira para
+`shouldShowPanelStartFailure` (`running` sem `auditId` correlacionado) e **também** reprovou, agora do outro
+lado: o E2E novo deixou de ver a mensagem. Uma **cópia instrumentada** da extensão (`/private/tmp/adv164/dbgext`;
+o repositório não foi tocado) mediu a causa: no caso da revogação o bootstrap ocioso chega com o painel em
+`running` **e `auditId` já preenchido** pelos pacotes de progresso —
+
+```
+[{screen:"initial", auditId:null, cargas:1},
+ {screen:"running", auditId:"c08060c6-…", hasReceivedBootstrap:true, cargas:2}]
+```
+
+—, de modo que "nenhuma auditoria correlacionada" não separa os dois casos. O que separa é o **pedido do
+usuário**: `cancellationRequested` sobe antes de o painel enviar `PANEL_CANCEL_AUDIT` (antes do pedido, porque
+o `bind` para ocioso precede o `intent-result` no caminho de aposentadoria da porta), é consumido no primeiro
+bootstrap ocioso e é limpo a cada novo início de auditoria. Com essa fronteira os dois lados ficam verdes.
+
+**Uma armadilha do harness, medida e documentada no próprio teste.** O primeiro E2E escrevia o motivo dentro do
+predicado como `'${MOTIVO}'` — e o predicado é **código comum**, não um template literal, então ele procurava o
+texto literal `${MOTIVO}` e o `waitForValue` gastou 90 s por modo para reportar apenas `WAIT_TIMEOUT`, sem
+dizer o estado observado. A espera passou a ser escrita à mão e a falha **nomeia as telas vistas**; o comentário
+do teste registra a armadilha para quem mexer depois.
+
+**Medições da 1.1.47 (Chrome for Testing 152.0.7977.64, um Chrome por vez, `--test-concurrency=1`):**
+
+- oráculo novo, **nos dois sentidos**: passa nesta árvore (**2/2**, ~2 s por modo) e na **raiz extraída do
+  próprio pacote 1.1.47** (**2/2**, ~2 s); contra os **bytes empacotados da 1.1.46**, reprova nos dois modos e
+  imprime a trajetória `running` → `reconnecting` → `initial` — a revogação silenciosa, agora com nome;
+- caminho do cancelamento preservado: `url-pixel-consent-mv3` **10/10**, com o caso do cancelamento em
+  **1,3 s** (era `WAIT_TIMEOUT` de 31 s com a fronteira larga);
+- painel **260/260**;
+- suíte completa: fase paralela **0 falhas** (1 pulado) e fase serial **111 testes, 101 passam, 10 falham** —
+  o conjunto de falhas caiu de **12 para 10**, as duas fechadas são exatamente as do cancelamento, e **nenhuma
+  falha nova** apareceu; as 10 são **9 em `test/e2e/sidepanel-flow-mv3.test.mjs`** (o arquivo do incremento
+  paralelo, cujo percurso de pixel é o defeito de raiz ainda aberto) mais a flake declarada `axe-mv3-csp`;
+- pacote `audita-acessibilidade-1.1.47.zip`, **199 arquivos**, digest
+  `2bb01b211cbf79d21fd9692f680931014d4762161d4731ab796298cade9347ac`, versão **1.1.47** no manifesto;
+- gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**;
+- **escopo de 13 arquivos na raiz extraída do zip**: **59/59**, 0 falhas — inclui o oráculo novo, o
+  cancelamento durante a pausa, o lote com pixel, as formas de credencial, o percurso obrigatório, os
+  marcadores, a retenção e as exportações da página atual;
+- **auditoria ao vivo do pacote** no Google (modo sem pixels): versão **1.1.47**, **0 falhas confirmadas**
+  (0 ocorrências), 3 verificações sob revisão humana (4 ocorrências), 9 positivos, **109** no checklist,
+  **28,5 %**, **9,0/10** e as quatro exportações `complete` (HTML 339.209 B, PDF 1.006.016 B, CSV 86.142 B e
+  JSON); o instrumento de integridade mediu **146 itens**, **146/146 ids e títulos no HTML e no PDF**, notas
+  editoriais **5/5** nos dois, **0 palavras partidas** e **0 `[redacted]`**.
+
+**O que continua fora deste incremento:** a **causa raiz** — a ordenação em `authorized-audit-starter.js` que
+publica o registro de bootstrap **depois** da suspensão por consentimento — segue com o incremento paralelo dono
+do arquivo, e é o que faz o percurso de pixel da página atual não começar numa página sem sinal sensível. O que
+a 1.1.47 muda é a consequência visível: **já não há retorno silencioso ao neutro**.

@@ -219,3 +219,70 @@ e **não** reivindica o conserto do starter.
 **Prova exigida do conserto (inalterada e agora com oráculo do revisor):** E2E em Chrome real, na página atual,
 em `element-only` **e** `full-evidence`, com uma fixture **sem** sinal sensível, exigindo ou a confirmação de
 captura, ou uma mensagem explícita de por que a auditoria não prossegue — nunca o retorno silencioso ao neutro.
+
+
+## CONSERTO DE 17/09/2026 (rodada 93, versão 1.1.47) — a revogação deixa de ser silenciosa: o painel explica, e a prova tem dentes
+
+O oráculo que o revisor exigiu passou a existir, e o produto passou a cumpri-lo. O conserto é **do lado do
+painel** (nenhum arquivo do incremento paralelo foi tocado):
+
+- `src/panel/panel.js`: em `receiveBootstrap`, um bootstrap **ocioso** (`state:"initial"`) que chega com o painel
+  em `running` **e sem pedido de cancelamento do usuário** significa que a tentativa não existe mais. Antes
+  isso recriava o estado neutro **sem nada dizer**; agora o painel transita para `AUDIT_UNAVAILABLE` com a
+  frase `A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se o modo de imagem falhar de
+  novo, use o modo sem pixels.`
+- `src/panel/panel-state.js`: a mesma frase entra em `PANEL_UNAVAILABLE_REASONS` (o redutor recusa motivo que não
+  esteja nessa lista). A frase é local nos dois módulos — o contrato de exportação do `panel-state.js` continua
+  sendo só `createInitialPanelState`/`reducePanelState` — e o teste de unidade
+  `aceita o motivo de auditoria encerrada e o projeta como indisponibilidade explícita` **reprova se as duas
+  cópias divergirem**.
+- `test/e2e/current-page-pixel-abort-mv3.test.mjs` (novo, em `REAL_CHROME_E2E` no plano de testes): fixture
+  **sem** sinal sensível, `element-only` **e** `full-evidence`, aceitando a confirmação de captura, o
+  `result` ou a tela `unavailable` com o motivo.
+
+**A fronteira da mensagem, medida — e uma regressão que ela causou e que foi fechada na mesma versão.** A
+primeira versão do conserto disparava a mensagem para **qualquer** bootstrap ocioso com o painel em `running`.
+A suíte completa reprovou por causa disso: em `url-pixel-consent-mv3`, **cancelar durante a pausa** deixou de
+voltar ao neutro e caiu na indisponibilidade (`cancel while paused removes only the owned tab and produces no
+report`, `WAIT_TIMEOUT` de 31 s). O desfecho de quem **pede** para parar é o neutro, não uma falha a explicar.
+
+A segunda tentativa estreitou a fronteira para `shouldShowPanelStartFailure` (o predicado de `running` **sem**
+`auditId` correlacionado) e **também** reprovou — agora do outro lado: o E2E novo deixou de ver a mensagem. A
+causa foi medida com uma **cópia instrumentada** da extensão (`/private/tmp/adv164/dbgext`; o repositório não
+foi tocado): no caso da revogação o bootstrap ocioso chega com o painel em `running` **e `auditId` JÁ
+PREENCHIDO** pelos pacotes de progresso —
+
+```
+[{screen:"initial", auditId:null, cargas:1},                                    ← bootstrap de entrada do painel
+ {screen:"running", auditId:"c08060c6-…", hasReceivedBootstrap:true, cargas:2}]  ← o ocioso da revogação
+```
+
+—, de modo que "nenhuma auditoria correlacionada" **não** separa os dois casos. O que separa é o **pedido do
+usuário**: `cancellationRequested` sobe antes de o painel enviar `PANEL_CANCEL_AUDIT` (antes do pedido, porque
+o `bind` para ocioso precede o `intent-result` no caminho de aposentadoria da porta), é consumido no primeiro
+bootstrap ocioso e é limpo a cada novo início de auditoria. Com essa fronteira os dois lados ficam verdes: a
+mensagem aparece na revogação e o cancelamento volta ao neutro.
+
+**Medição (Chrome for Testing 152.0.7977.64).** Contra esta árvore e contra a **raiz extraída do próprio pacote
+1.1.47** (zip + `test/`), os dois modos passam em ~2 s:
+
+```
+✔ full-evidence  desfecho=unavailable (2883ms árvore / 2303ms pacote)
+✔ element-only   desfecho=unavailable (2025ms árvore / 1996ms pacote)
+```
+
+E o caminho do cancelamento, medido no mesmo dia: `url-pixel-consent-mv3` **10/10**, com
+`cancel while paused removes only the owned tab and produces no report` passando em **1,3 s** (era
+`WAIT_TIMEOUT` de 31 s com a fronteira larga).
+
+Contra os **bytes empacotados da 1.1.46** (não vacuidade), os dois reprovam e a falha **imprime a trajetória
+observada** — é a mesma revogação silenciosa que a revisão descreveu, agora com nome:
+
+```
+telas observadas: [{"tela":"running"…},{"tela":"reconnecting"…},{"tela":"initial"…}]
+```
+
+**O que continua fora deste incremento:** a **causa raiz** (a ordenação em `authorized-audit-starter.js` que
+publica o registro de bootstrap depois da suspensão) segue com o incremento paralelo dono do arquivo. O que
+mudou é a consequência visível: uma página sem sinal sensível em modo de pixel já **não** volta ao neutro em
+silêncio — o painel diz o que aconteceu e aponta o modo sem pixels.

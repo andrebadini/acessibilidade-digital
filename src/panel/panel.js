@@ -18,7 +18,8 @@ import {
   renderPanelView,
   updatePanelReaderFeedback,
 } from './panel-view.js';
-import { createInitialPanelState, reducePanelState } from './panel-state.js';
+import { createInitialPanelState, reducePanelState,
+} from './panel-state.js';
 import { createPanelPersonaSession } from './persona-session.js';
 import { createPanelPageMarkersSession } from './page-markers-session.js';
 
@@ -285,6 +286,17 @@ export function createPanelPrivacyConfirmationController(raw) {
   }
   return Object.freeze({ confirm });
 }
+
+// A MESMA frase que `panel-state.js` aceita como motivo de indisponibilidade (o contrato daquele módulo
+// exporta só as duas funções de estado, então a frase é literal nos dois lados e o teste de unidade
+// `aceita o motivo de auditoria encerrada` falha se as duas divergirem).
+const PANEL_ABORTED_MESSAGE = 'A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se o modo '
+  + 'de imagem falhar de novo, use o modo sem pixels.';
+// O painel é o único que sabe se a parada foi PEDIDA pelo usuário. Medido (sonda 5 da rodada 93, build
+// instrumentado): quando a auditoria é revogada por conta própria, o bootstrap ocioso chega com o painel em
+// `running` e com `auditId` JÁ CORRELACIONADO — a fronteira não pode ser "nenhuma auditoria chegou a
+// existir"; o que separa os dois desfechos é o pedido de cancelamento, que só existe aqui.
+let cancellationRequested = false;
 
 function render(focusId = state.focusId) {
   if (!root) return;
@@ -582,6 +594,7 @@ async function clearHighlight() {
 
 async function startAttachedAudit() {
   const captureMode = state.captureMode;
+  cancellationRequested = false;
   transition({ type: 'START_REQUESTED', source: 'attached' });
   const requestId = nextRequestId();
   const prepared = parsePreparedCapability(await requestPanelIntent({ type: 'PREPARE_PANEL_CAPABILITY', requestId }), requestId);
@@ -632,6 +645,7 @@ async function startUrlAudit(rawUrl) {
     transition({ type: 'URL_ENTRY_REJECTED', code: 'start-failed' });
     return;
   }
+  cancellationRequested = false;
   transition({ type: 'START_REQUESTED', source: 'single-url' });
   if (navigationEntryRevision !== submittedRevision || state.screen !== 'running' || state.auditId !== null ||
     state.auditSource !== 'single-url' || state.captureMode !== captureMode) return;
@@ -681,6 +695,7 @@ async function startBatchAudit(rawUrls) {
     transition({ type: 'BATCH_ENTRY_REJECTED', code: 'start-failed', lines: [] });
     return;
   }
+  cancellationRequested = false;
   transition({ type: 'START_REQUESTED', source: 'batch' });
   transition({ type: 'BATCH_PREPARED', total: normalized.total });
   if (navigationEntryRevision !== submittedRevision || state.screen !== 'running' || state.auditId !== null ||
@@ -733,11 +748,17 @@ async function requestSessionAction(type) {
     announce(message);
     return;
   }
+  // Cancelamento: a marca sobe ANTES do pedido. O desfecho neutro pode chegar do outro lado antes da
+  // resposta (`bind` para ocioso precede o `intent-result` no caminho de aposentadoria da porta), e uma
+  // marca tardia deixaria a mensagem de falha roubar o desfecho que o usuário pediu.
+  const cancelRequested = type === 'PANEL_CANCEL_AUDIT';
+  if (cancelRequested) cancellationRequested = true;
   const response = await sessionPortClient.requestIntent({ type });
   if (response?.ok === true) {
     announce('Cancelamento solicitado.');
     return;
   }
+  if (cancelRequested) cancellationRequested = false;
   transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: 'Não foi possível concluir a operação local.' });
 }
 
@@ -855,6 +876,26 @@ function receiveBootstrap(value) {
     return;
   }
   if (value?.state === 'initial') {
+    // O sinal é consumido aqui: vale para o PRÓXIMO bootstrap ocioso e para mais nenhum.
+    const requestedStop = cancellationRequested;
+    cancellationRequested = false;
+    // Bootstrap OCIOSO durante uma auditoria EM CURSO significa que a tentativa não existe mais: a revisão
+    // final da 1.1.45 mediu, no modo de imagem de uma página sem sinal sensível, a sessão revogada e o
+    // painel de volta ao neutro SEM mensagem. Antes isto recriava o estado neutro em silêncio; agora o
+    // painel diz o que aconteceu.
+    //
+    // A fronteira é o PEDIDO do usuário (`cancellationRequested`), e não a ausência de auditoria
+    // correlacionada: medido na sonda 5, no caso da revogação o bootstrap ocioso chega com o painel em
+    // `running` e `auditId` preenchido pelos pacotes de progresso. Sem essa fronteira a mensagem roubava o
+    // desfecho de quem pediu para parar — medido no E2E `url-pixel-consent-mv3` (cancelar durante a pausa),
+    // em que a tela tem de ser `initial`, não a indisponibilidade.
+    if (state.screen === 'running' && !requestedStop) {
+      hasReceivedBootstrap = true;
+      highlightStateSynchronizer.invalidate();
+      resultBundle = null;
+      transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: PANEL_ABORTED_MESSAGE });
+      return;
+    }
     const duplicateIdleBootstrap = hasReceivedBootstrap && state.screen === 'initial';
     hasReceivedBootstrap = true;
     highlightStateSynchronizer.invalidate();

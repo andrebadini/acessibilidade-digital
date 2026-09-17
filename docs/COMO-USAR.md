@@ -1,13 +1,13 @@
 # Audita Acessibilidade — instalar e usar
 
-Guia da versão 1.1.46. A disponibilidade do pacote depende do registro de entrega; este guia não constitui publicação na loja.
+Guia da versão 1.1.47. A disponibilidade do pacote depende do registro de entrega; este guia não constitui publicação na loja.
 
 ## Instalar ou atualizar, sem login
 
 1. Descompacte o ZIP entregue em uma pasta permanente.
 2. No Chrome, abra `chrome://extensions` e ative **Modo do desenvolvedor**.
 3. Escolha **Carregar sem compactação** e selecione a pasta que contém `manifest.json`.
-4. Confira a versão **1.1.46** e fixe Audita Acessibilidade na barra, se desejar.
+4. Confira a versão **1.1.47** e fixe Audita Acessibilidade na barra, se desejar.
 
 Não é preciso instalar bibliotecas, Node.js, axe-core ou criar conta. O motor já está incluído. O Modo do desenvolvedor é necessário para esta distribuição local; não implica programação pelo usuário.
 
@@ -17,7 +17,7 @@ Para atualizar uma instalação existente, exporte os relatórios que deseja gua
 
 1. Abra uma página HTTP/HTTPS e clique no ícone da extensão. O painel lateral ficará ao lado da página.
 2. Escolha **Evidência completa**, **Somente elementos** ou **Sem imagens**. Oculte dados pessoais antes de permitir capturas.
-3. Use **Auditar a página atual**. O painel mostra o progresso. Quando houver aviso de conteúdo potencialmente sensível, confirme ou cancele; sem confirmação, a captura não prossegue.
+3. Use **Auditar a página atual**. O painel mostra o progresso. Quando houver aviso de conteúdo potencialmente sensível, confirme ou cancele; sem confirmação, a captura não prossegue. Se a auditoria não puder prosseguir no modo escolhido, o painel **explica** o que aconteceu e sugere refazer no modo sem pixels; ele não volta ao início em silêncio.
 4. Consulte o sumário. Clique em um cartão para filtrar e expanda um item ABNT para entender os resultados e as orientações.
 5. Use **Mostrar sinais na página** e **Destacar elemento**, quando disponíveis, para localizar um achado. A moldura se refere ao elemento confirmado; se a página mudou ou o alvo não puder ser localizado, consulte a captura histórica.
 6. Use **Abrir relatório completo**. A exportação entrega **HTML, PDF, CSV e JSON**. O HTML oferece detalhes expansíveis; o PDF reúne orientações essenciais e evidências sem repetir o dossiê de cada ocorrência. **Imprimir resumo / salvar PDF** gera uma edição executiva separada, que não substitui o relatório completo.

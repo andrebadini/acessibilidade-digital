@@ -89,6 +89,18 @@ test('exports only the live four-screen panel state contract', () => {
   assert.deepEqual(Object.keys(panelStateModule).sort(), ['createInitialPanelState', 'reducePanelState']);
 });
 
+test('aceita o motivo de auditoria encerrada e o projeta como indisponibilidade explícita', () => {
+  // A revisão final da 1.1.45 mediu que, no modo de imagem e sem sinal sensível na página, a sessão era
+  // revogada e o painel voltava ao início EM SILÊNCIO. O painel passou a usar este motivo; a frase é
+  // literal em `panel.js` e aqui, e este teste falha se as duas divergirem.
+  const motivo = 'A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se o modo de imagem '
+    + 'falhar de novo, use o modo sem pixels.';
+  const running = reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED', source: 'attached' });
+  const encerrada = reducePanelState(running, { type: 'AUDIT_UNAVAILABLE', auditId: null, reason: motivo });
+  assert.equal(encerrada.screen, 'unavailable');
+  assert.equal(encerrada.reason, motivo);
+});
+
 test('creates an immutable initial screen with only stable interaction state', () => {
   const state = createInitialPanelState();
   assert.deepEqual(state, {
