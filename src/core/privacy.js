@@ -61,6 +61,16 @@ export const URL_CREDENTIAL_KEY = new RegExp(String.raw`^(?:${URL_CREDENTIAL_KEY
 // Rótulo de VÁRIAS palavras (`cartão de crédito`, `senha do usuário do sistema`) exige token FORTE:
 // comprimento de segredo, ou 6+ caracteres com dígito/símbolo. Com o critério largo, prosa como
 // `A senha deve ter 8 caracteres` voltaria a acender (o token `8`).
+// Para a cauda de rótulo MULTI-PALAVRA o critério é mais estreito: uma palavra comprida de prosa
+// (`complexidade`, `intransferível`, `fiscalização`) ou uma data curta (`12/03`) não são valor. Exige
+// 6+ caracteres COM dígito ou símbolo — foi o falso positivo destrutivo medido na revisão da 1.1.32.
+function credentialLikeToken(token) {
+  const text = String(token ?? '');
+  const core = text.replace(/[.!?,;:\u2026"')\]}]+$/u, '');
+  if ([...core].length < 6) return false;
+  return /\d|[^\p{L}\p{N}\s]/u.test(core);
+}
+
 function strongValueToken(token) {
   const text = String(token ?? '');
   const core = text.replace(/[.!?,;:\u2026"')\]}]+$/u, '');
@@ -78,7 +88,7 @@ function valueLikeToken(token) {
   if ([...core].length >= 12) return true;
   return /[^\p{L}\p{N}\s]/u.test(core);
 }
-const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)|c[óo]digo[\s\-–—]+de[\s\-–—]+(?:verifica[çc][ãa]o|acesso|seguran[çc]a|recupera[çc][ãa]o|autentica[çc][ãa]o|confirma[çc][ãa]o)|frase[\s\-–—]+de[\s\-–—]+recupera[çc][ãa]o`;
+const SENSITIVE_WORD_SOURCE = String.raw`pwd|bearer|token|secret|authoriz(?:ations?)|authoris(?:ations?)|auth(?!or)|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key|senhas?|segredos?|credenci(?:al|ais)|sess(?:[ãa]o|[õo]es|ao|oes)|autentica(?:[çc][ãa]o|[çc][õo]es|cao|coes)|autoriza(?:[çc][ãa]o|[çc][õo]es|cao|coes)|chaves?|cpf|cnpj|cart(?:[ãa]o|[õo]es|ao|oes)|pins?|cvv|cvc|puk|seed|linha[\s\-_]?digit[áa]vel|n[úu]mero[\s\-_]?de[\s\-_]?seguran[çc]a|c[óo]digo[\s\-_]?de[\s\-_]?barras|c[óo]digo[\s\-–—]+de[\s\-–—]+(?:verifica[çc][ãa]o|acesso|seguran[çc]a|recupera[çc][ãa]o|autentica[çc][ãa]o|confirma[çc][ãa]o)|frase[\s\-–—]+de[\s\-–—]+recupera[çc][ãa]o`;
 export const SENSITIVE_KEY = new RegExp(
   `(?:${CREDENTIAL_RADICAL_SOURCE}|${BARE_PASS_SOURCE}|${COMPOUND_CREDENTIAL_SOURCE}|${SENSITIVE_WORD_SOURCE})`, 'iu');
 
@@ -293,23 +303,22 @@ export function backgroundImageKind(value) {
  */
 // Candidato a cauda: rótulo seguido de ruído de separador e um token. A decisão é do tarjador.
 const TAIL_CANDIDATE = new RegExp(
-  String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE})[\s]*[-–—:]*[\s]*\S+`, 'giu');
+  String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE})[\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*\S+`, 'giu');
 
 export function redactCredentialLabelTail(value) {
   // `String.raw` é obrigatório aqui: dentro de um template literal comum, `\s` vira `s` e o padrão deixa
   // de casar em silêncio — foi o que aconteceu quando esta função foi reescrita, e o sintoma foi o
   // tarjador virar no-op sem nenhum teste reprovar.
   return String(value ?? '')
-    .replace(new RegExp(String.raw`(${VALUE_LABEL_ADJACENT_SOURCE})([\s]*[-–—:]*[\s]*)(\S+)`, 'giu'),
+    // A marcação entre o rótulo e o valor é PULADA, não tratada como fim: era a guarda `[<>]` que fazia
+    // `<p><b>senha</b> X</p>` e `<div title="senha X">` desistirem e entregarem a credencial (regressão
+    // medida na revisão da 1.1.32).
+    .replace(new RegExp(String.raw`(${VALUE_LABEL_ADJACENT_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
       (match, label, space, token) =>
-        (valueLikeToken(token) && !/[<>]/u.test(token) && !match.includes('[redacted]')
-          ? `${label}${space}[redacted]`
-          : match))
-    .replace(new RegExp(String.raw`(${VALUE_LABEL_SOURCE})([\s]*[-–—:]*[\s]*)(\S+)`, 'giu'),
+        (valueLikeToken(token) && !match.includes('[redacted]') ? `${label}${space}[redacted]` : match))
+    .replace(new RegExp(String.raw`(${VALUE_LABEL_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
       (match, label, space, token) =>
-        (strongValueToken(token) && !/[<>]/u.test(token) && !match.includes('[redacted]')
-          ? `${label}${space}[redacted]`
-          : match));
+        (strongValueToken(token) && !match.includes('[redacted]') ? `${label}${space}[redacted]` : match));
 }
 
 
@@ -329,7 +338,7 @@ function spacedLabelTailIndex(text) {
     for (let end = index; end < tokens.length && end - index <= 6; end += 1) {
       let next = end + 1;
       if (next < tokens.length && SEPARATOR_NOISE.test(tokens[next].value)) next += 1;
-      if (next < tokens.length && strongValueToken(tokens[next].value)) return tokens[index].index;
+      if (next < tokens.length && credentialLikeToken(tokens[next].value)) return tokens[index].index;
       if (end + 1 >= tokens.length || !LABEL_WORD.test(tokens[end + 1].value)) break;
     }
   }
@@ -468,6 +477,8 @@ function redactStringValue(value) {
   // decisão vem da PROJEÇÃO sem tags e sem entidades, e nesse caso a string inteira cai — é string do
   // autor que carrega credencial, não prosa do relatório. Sem sinal, a string passa intacta: era o
   // tarjador aplicado à marcação que matava `Digite sua senha atual.` e `Sessão expirada.`.
+  const withTailRule = redactCredentialLabelTail(redacted);
+  if (withTailRule.includes('[redacted]')) return withTailRule;
   const projection = decodeForMatching(redacted.replace(/<[^<>]*>/gu, ' '));
   return hasCredentialValueSignal(projection) ? '[redacted]' : redacted;
 }

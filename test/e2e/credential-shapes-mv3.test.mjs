@@ -20,7 +20,10 @@ const SHAPES = [
 
 for (const [nome, slug, montar] of SHAPES) {
   test(`credencial em ${nome} não chega ao entregável`, { timeout: 300_000 }, async t => {
-    const secret = `ADVSHAPE${slug.replace(/[^a-z]/gu, '').toUpperCase().slice(0, 8)}X`;
+    // O sentinela precisa ter CARA DE CREDENCIAL (dígito), e não só ser comprido: a regra de cauda de
+    // rótulo multi-palavra exige 6+ caracteres COM dígito ou símbolo, justamente para não tarjar palavra
+    // comprida de prosa. Um sentinela só de letras não é uma credencial plausível e mediria a regra errada.
+    const secret = `ADVSHAPE${slug.replace(/[^a-z]/gu, '').toUpperCase().slice(0, 8)}7X`;
     const documento = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${nome}</title></head>
 <body><main><h1>Forma isolada</h1>${montar(secret)}
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
