@@ -98,6 +98,14 @@ const CARTAO = [
   ['PIN prefixado minúsculo', `<p>userpin: ${S('115')}</p>`],
   ['PIN prefixado em atributo', `<div data-userpin="${S('116')}">x</div>`],
   ['dígito verificador', `<p>Dígito verificador: ${S('117')}</p>`],
+  // Evasões medidas na rodada da 1.1.34: caixa misturada dentro do radical (`SeNhA:` era tarjado antes
+  // das marcas de camelCase e deixou de ser — regressão que a segunda leitura sem marcas fecha) e
+  // caractere invisível no meio do radical (`sen\u200bha:`), que nenhuma geração anterior tarjava.
+  ['caixa misturada no radical', `<p>SeNhA: ${S('120')}</p>`],
+  ['caixa misturada com prefixo', `<p>ChAvE de API: ${S('121')}</p>`],
+  ['largura zero no radical', `<p>sen\u200bha: ${S('122')}</p>`],
+  ['hífen suave no radical', `<p>car\u00adtão de crédito: ${S('123')}</p>`],
+  ['BOM no meio do radical', `<p>to\ufeffken: ${S('124')}</p>`],
   ['conta corrente', `<p>Conta corrente: ${S('118')}</p>`],
   ['certificado digital', `<p>Certificado digital: ${S('119')}</p>`],
 ];

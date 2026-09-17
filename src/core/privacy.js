@@ -46,8 +46,12 @@ const WORD_HEAD = String.raw`(?:[A-Za-z]{2,12}|(?<![\p{L}\p{N}]))`;
 const WORD_TAIL = String.raw`(?!\p{L})`;
 const WORD_SEP = String.raw`(?:\u0001|[\s\-_–—])`;
 
+// Caracteres invisíveis (hífen suave, larguras zero, controles de direção, BOM) quebram o radical no
+// meio: `sen\u200bha:` é o mesmo rótulo que `senha:` para quem lê, e o tarjador não o via. Eles saem da
+// cópia de trabalho (e do texto entregue, que é derivado dela) — são invisíveis por definição.
+const INVISIBLE_MARKS = /[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/gu;
 export function withCamelMarks(value) {
-  const text = String(value ?? '');
+  const text = String(value ?? '').replace(INVISIBLE_MARKS, '');
   if (text.length === 0 || text.includes(CAMEL_MARK)) return text;
   return text
     .replace(/(?<=[\p{Ll}\p{N}])(?=\p{Lu})/gu, CAMEL_MARK)
@@ -215,7 +219,9 @@ const STEM_HINT = new RegExp([
 const ENCODED_HINT = /&#|\\u[0-9a-f]{4}|\\x[0-9a-f]{2}|%[0-9a-f]{2}/iu;
 function mayCarryCredential(value) {
   const text = String(value ?? '');
-  return STEM_HINT.test(text) || ENCODED_HINT.test(text);
+  // O pré-filtro olha o texto SEM os caracteres invisíveis: `sen\u200bha` esconde o radical de uma
+  // comparação literal e era justamente por onde a evasão passava.
+  return STEM_HINT.test(text) || ENCODED_HINT.test(text) || STEM_HINT.test(text.replace(INVISIBLE_MARKS, ''));
 }
 
 // Um rótulo de valor não exige fronteira de palavra de nenhum lado — nem `\b` à esquerda, nem `\b` à
@@ -436,12 +442,12 @@ export function backgroundImageKind(value) {
 const TAIL_CANDIDATE = new RegExp(
   String.raw`(?:${VALUE_LABEL_ADJACENT_SOURCE})[\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*\S+`, 'giu');
 
-export function redactCredentialLabelTail(value) {
-  if (!mayCarryCredential(value)) return String(value ?? '');
-  // `String.raw` é obrigatório aqui: dentro de um template literal comum, `\s` vira `s` e o padrão deixa
-  // de casar em silêncio — foi o que aconteceu quando esta função foi reescrita, e o sintoma foi o
-  // tarjador virar no-op sem nenhum teste reprovar.
-  return stripCamelMarks(withCamelMarks(value)
+// A SEGUNDA LEITURA, sem as marcas de camelCase. A marca resolve `senhaAtual` (o radical termina onde a
+// maiúscula começa), mas ela quebra a palavra no meio quando a página mistura a caixa DENTRO do radical:
+// `SeNhA:` era tarjado antes das marcas e deixou de ser. A leitura sem marcas roda só quando a primeira
+// não achou nada e as marcas existem — o custo fica onde o caso existe.
+function tailPasses(text) {
+  return text
     // A marcação entre o rótulo e o valor é PULADA, não tratada como fim: era a guarda `[<>]` que fazia
     // `<p><b>senha</b> X</p>` e `<div title="senha X">` desistirem e entregarem a credencial (regressão
     // medida na revisão da 1.1.32).
@@ -450,7 +456,14 @@ export function redactCredentialLabelTail(value) {
         (valueLikeToken(token) && !match.includes('[redacted]') ? `${label}${space}[redacted]` : match))
     .replace(new RegExp(String.raw`(${VALUE_LABEL_SOURCE})([\s]*[-–—:]*[\s]*(?:<[^<>]{0,200}>[\s]*)*)(\S+)`, 'giu'),
       (match, label, space, token) =>
-        (strongValueToken(token) && !match.includes('[redacted]') ? `${label}${space}[redacted]` : match)));
+        (strongValueToken(token) && !match.includes('[redacted]') ? `${label}${space}[redacted]` : match));
+}
+export function redactCredentialLabelTail(value) {
+  if (!mayCarryCredential(value)) return String(value ?? '');
+  const marked = withCamelMarks(value);
+  let text = tailPasses(marked);
+  if (marked.includes(CAMEL_MARK)) text = tailPasses(stripCamelMarks(text));
+  return stripCamelMarks(text);
 }
 
 
@@ -495,9 +508,7 @@ function redactSpacedLabelTail(text) {
  * trecho: uma vez aceso, nada depois volta a ser texto no trecho. Prosa legítima (`cartão de crédito`,
  * `chave do problema`, `Senha da conta`) não acende, porque a cauda exige dígito ou símbolo forte.
  */
-export function hasCredentialValueSignal(value) {
-  if (!mayCarryCredential(value)) return false;
-  const text = withCamelMarks(value);
+function signalPasses(text) {
   // (1) rótulo + separador + valor com cara de valor; (2) rótulo + separador PENDENTE no fim do
   // acumulado (o valor está no nó seguinte); (3) rótulo ADJACENTE + valor com cara de valor.
   //
@@ -526,6 +537,13 @@ export function hasCredentialValueSignal(value) {
   return spacedLabelTailSignal(text);
 }
 
+export function hasCredentialValueSignal(value) {
+  if (!mayCarryCredential(value)) return false;
+  const marked = withCamelMarks(value);
+  if (signalPasses(marked)) return true;
+  return marked === String(value ?? '') ? false : signalPasses(String(value ?? ''));
+}
+
 /** Verdadeiro quando o texto termina em rótulo de credencial com o separador, sem o valor. */
 export function endsWithCredentialLabel(value) {
   return DANGLING_VALUE_LABEL.test(withCamelMarks(value));
@@ -537,9 +555,8 @@ export function endsWithCredentialLabel(value) {
 const HAS_SEPARATOR_SHAPE = /[:=]|->|=>|\u2192|%3a|%3d|&#0*(?:58|3a|61);|#x0*(?:3a|3d);/iu;
 const HAS_URL_SHAPE = /[?&;#]/u;
 const HAS_USERINFO_SHAPE = /@/u;
-export function redactSensitiveText(value) {
-  if (!mayCarryCredential(value)) return String(value ?? '');
-  let text = withCamelMarks(value)
+function sensitivePasses(marked) {
+  let text = marked
     .replace(/\b(Bearer)(\s+)([^\s<]+)/giu, '$1$2[redacted]')
     // Tarja com DUAS condições, e é isso que separa credencial de prosa: o primeiro token depois do
     // separador tem cara de valor, OU o resto depois do separador é um token só (o valor inteiro, sem
@@ -578,9 +595,18 @@ export function redactSensitiveText(value) {
   }
   // Rótulo SEM separador (`senha abc123`, `cartão de crédito S3GR…`, `senha - S3GR…`): a mesma regra
   // de cauda do nome acessível, para o caminho JSON não ficar mais frouxo que o do trecho.
-  return stripCamelMarks(text
+  return text
     .replace(TAIL_CANDIDATE, match => (match.includes('[redacted]') ? match : redactCredentialLabelTail(match)))
-    .replace(/[\s\S]+/u, match => redactSpacedLabelTail(match)));
+    .replace(/[\s\S]+/u, match => redactSpacedLabelTail(match));
+}
+export function redactSensitiveText(value) {
+  if (!mayCarryCredential(value)) return String(value ?? '');
+  const marked = withCamelMarks(value);
+  let text = sensitivePasses(marked);
+  // Segunda leitura, sem marcas: `SeNhA:` é o mesmo rótulo que `senha:` para quem lê, e a marca que
+  // resolve `senhaAtual` quebra a palavra no meio dele. Roda só quando houve marca a inserir.
+  if (marked.includes(CAMEL_MARK)) text = sensitivePasses(stripCamelMarks(text));
+  return stripCamelMarks(text);
 }
 
 // Uma string que CONTÉM marcação é fonte de HTML, não prosa: nela vale a regra estrita de cauda
