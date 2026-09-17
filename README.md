@@ -4,36 +4,29 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.38 preparada — sem revisão independente ainda.** A revisão da **1.1.37** deu **2 Critical,
-7 Important, 6 Minor e 6 observações** e **reprovou** o artefato — confirmando o que a geração tinha de real
-(o sublinhado/ponto/barra tarja o lugar certo; `conta corrente 12345-6` sobrevive; entidades, escapes,
-percent-encoding, invisíveis e marcação fecham; o E2E de credencial finalmente tem dentes) e medindo duas
-regressões minhas na **mesma classe** que já reprovou cinco gerações. O Critical C1 era a **caixa misturada
-dentro do radical** (`SeNhA: abc123`, `SeNhAfOrTe: abc123`, `SeNhA do usuário: abc123`), que as 1.1.33,
-1.1.35 e 1.1.36 tarjavam e a 1.1.37 deixou passar. O C2 era o **valor fraco**: `novasenha:`, `xsenha:`,
-`minhasenhaforte:`, `novasenhaadmin:`, `redefinirsenha:`, `trocarsenha:` devolviam senhas de 8 a 11 letras
-(`passarinho`) e valores como `abc123`. O Important I2 mostrou que a **métrica era cega por construção**: o
-sentinela `ADVSEN${n}X` sempre tem dígito. E os dois achados de privacidade (D1: a limpeza confiava no
-`tabId` do journal sem reatestar a aba viva; D2: o commit terminal aceitava a alça da tentativa nula e
-gravava pixels sem correlação durável) ficaram abertos.
+**Versão 1.1.39 preparada — sem revisão independente ainda.** A revisão da **1.1.38** confirmou por medição
+própria o que aquela geração tinha de real (C1 fechado 6/6 com a caixa preservada, C2 fechado em prosa 7/7,
+métrica 92/72/543 não vacuosa, 4/4 formas novas do E2E reprovando na mutação, fase paralela 4.218/4.217/0/1,
+gate GREEN, auditoria ao vivo reproduzida) e mediu **três Important**, sendo o primeiro **regressão do meu
+próprio conserto do C1**: a marca de camelCase era dispensada pela leitura contígua do vocabulário de PROSA,
+mas o de **chave** não tinha o conector `de/da/do` — `isSensitiveKeyName` perdeu **30.550 formas**, `?chaveDeApi=`
+passava na URL, chave JSON vazava e o seletor emitia `div#chaveDeApi`.
 
-A 1.1.38 fecha os quatro eixos. A marca de camelCase passa a ser decidida **por token**: ela só entra onde a
-leitura contígua do token ainda não é palavra do vocabulário com borda (`senhaAtual`, `chaveDeApi`) e **não**
-entra em `SeNhA` — quem casa a caixa misturada é a própria regex `iu` do vocabulário, e o texto entregue
-mantém a caixa original (`SeNhA: abc123` → `SeNhA: [redacted]`). O **prefixo arbitrário** antes do radical
-(`xsenha`, `xsenhaforte`) entra no portão de valor por predicado próprio, com o radical **encerrando o
-token** e **comprimento ≥ 5** — custo medido no dicionário: **39 palavras novas tarjadas em `palavra:
-abc123`**, todas compostas inglesas de radical longo (`betoken`, `obsession`, `unsecret`…), **zero palavra
-do português** e zero tarja perdida; `spin`, `hairpin`, `pushpin`, `linseed`, `chauth`, `obsessão` e
-`possessão` continuam preservados. A métrica da classe ganha **72 combinações de valor fraco** (19 rótulos ×
-4 valores × 2 caminhos; total **543**) e o E2E de formas ganha **4 formas com valor fraco**, que **reprovam
-4 de 4 contra o `src` da geração anterior**. Na privacidade, a limpeza **reatesta a aba viva** antes de
-fechar (id vivo em outra janela ⇒ nenhum efeito; aba já fechada ⇒ limpeza satisfeita sem efeito) e o commit
-terminal **recusa raster sem a alça da tentativa**. Fronteira declarada e medida: a auditoria de várias URLs
-tem tentativa consentida **por página**, então o commit de lote segue sem companheiro no armazenamento — sem
-essa fronteira o E2E `batch-pixel-consent-mv3` reprova, com ela passa. Custo do tarjador remedido: **1,02×**
-em prosa real (89.520 linhas) e **0,44×** no corpus denso de radicais. Preço do dicionário atualizado para os
-bytes desta versão: **33** no caminho de chave, **101** no predicado estrito de valor, **576** no de prosa.
+A 1.1.39 fecha os três. A marca só é dispensada quando **os dois** vocabulários reconhecem a forma contígua e
+só fica quando **acrescenta** reconhecimento (senão `xSeNhA`/`noVaSeNhA` perdiam os dois), e o conector entra
+no vocabulário de chave: medido com as sondas do próprio revisor, **`COBERTURA_PERDIDA=0 / GANHA=0`** em
+341.164 formas e zero vazamentos em URL, chave JSON e seletor. O C2 nas chaves usa agora **chave de
+atribuição** (vocabulário de prosa, com decodificação) onde a string é o assunto de um valor — chave JSON,
+consulta/hash de URL, nome de atributo — e mantém o vocabulário **fechado** onde ela é identificador (id,
+referência de rótulo, rota), que é o que preserva `pintura.png`, `secretaria-saude` e `Chaveiro`; as **caudas
+qualificadoras medidas** entram na lista fechada (**383 → 86** vazando, e **0** delas era coberta na 1.1.36) e o
+nome acessível passa pelo tarjador completo (**57 → 10**). O caçador adversarial do revisor foi de **329 para
+154** vazamentos em 1.260 casos, sem nenhuma palavra nova no dicionário além das 39 declaradas. Na privacidade,
+a limpeza passou a distinguir **aba inexistente** (resolve `null`: limpeza satisfeita, registro pode ir para
+`removed`) de **leitura impossível** (rejeita: nada fecha e o registro fica em `cleanup-pending`); e o nome de
+um nó de texto privado continua retirado — só a **vaziez** é preservada, o que permite à regra apontar 5.13.10
+sem entregar conteúdo. **Resíduo declarado:** journal forjado com `tabId` **e** `windowId` que casam (o vínculo
+por identidade de documento muda a cada navegação e o atacante deste cenário já executa código na extensão).
 
 **Versão 1.1.36 — revisada: 2 Critical, 4 Important, 5 Minor e 8 observações**, todos fechados na 1.1.37.
 A revisão da **1.1.35** deu **2 Critical,
