@@ -111,7 +111,7 @@ Os três foram verificados primeiro em isolamento e depois **juntos num clone li
 
 **Uma falha da suíte da revisão não era do produto:** o teste do baseline `78ba813` rodava `git show` sem `cwd`, então passava da raiz do repositório e falhava quando a suíte era lançada de outro diretório. **Corrigido na 1.1.22**: a raiz vem de `import.meta.url` e o `git` roda com `cwd` explícito; verificado da raiz e de `/tmp` (5/5 nos dois).
 
-## Revisão da 1.1.36 → veredito 2 Critical, 3 Important, 4 Minor + 6 observações
+## Revisão da 1.1.36 → veredito 2 Critical, 4 Important, 5 Minor + 8 observações
 
 Relatório completo em `docs/qa/revisoes/REVIEW-1.1.36.md`. O alvo foi o pacote `8fffa961…56f5` (HEAD `f33bcde`) e o veredito foi **reprovado** — mas a revisão confirmou por medição própria o que o incremento tinha de real: a correção do sublinhado/ponto/barra é ampla (**60/60** formas multi-parte tarjam o lugar certo, contra **45/60 no lugar errado** nas quatro gerações anteriores), a rota com query fechou, o preço declarado agora reproduz e a fase paralela bate.
 
