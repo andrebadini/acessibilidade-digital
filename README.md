@@ -4,6 +4,29 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.48 — candidata de produção, com a revisão adversarial do último conserto aprovada.** O pacote
+`release/audita-acessibilidade-1.1.48.zip` (199 arquivos, digest
+`7da8b3f02288c58776fbb3b8ecf6681aa5041662fd6cd7fd8bdd4e9d7b281689`, commit `39c86c0`, reconstruível por
+`npm run build:release`) fecha o **último defeito funcional conhecido**: numa página **sem** sinal sensível, os
+modos com foto da página atual eram **revogados** em vez de concluir. A causa foi medida ponta a ponta numa cópia
+isolada — o portão de privacidade armava sem pausa e a captura acontecia, mas o commit terminal era recusado pela
+guarda de correlação ("D2") por faltar o **companheiro durável da tentativa**, que só existia no caminho de
+retomada pós-consentimento — e o conserto dá à captura autorizada **sem** pausa o seu próprio companheiro
+("tentativa direta"), com digesto em domínio separado e criado antes de qualquer raster. **A guarda D2 continua
+intacta** (nenhum raster entra sem companheiro) e o caminho com sinal sensível segue pausando e pedindo
+autorização. Medições: página limpa conclui nos **dois** modos com foto (`result` em ~1–2 s; antes: revogação);
+página com senha/marcador privado pausa → confirma → `result`; duas auditorias seguidas sem resíduo;
+`url-pixel-consent-mv3` 10/10; suíte paralela **4.231/4.230/0**; escopo de 16 arquivos no pacote **verde** (61/61 na
+geração imediatamente anterior, mesma lista, medida em janela quieta); auditoria ao vivo do pacote com **0 falhas
+confirmadas**, 9 positivos, 108–109 no checklist, 28,5–29,2 % e integridade 146/146 ids e títulos no HTML e no PDF.
+A revisão adversarial do conserto deu **"pode entrar"** depois de achar e eu fechar um **Important (A-2)** — a
+aposentadoria da tentativa direta era chamada com a assinatura trocada, o que piorava o cenário da página que
+revela sinal depois de armar em relação à 1.1.47 — e um achado de processo (A-3, E2E fora do plano de testes);
+o oráculo novo (`test/e2e/current-page-pixel-direct-retire-mv3.test.mjs`) **reprova contra os bytes anteriores**.
+Relatórios: `docs/qa/revisoes/REVIEW-1.1.48.md`, `docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`
+e o dossiê `docs/qa/2026-09-17-prontidao-para-producao.md`. Fica declarado, sem bloquear: o Minor N-1 (a tela de
+indisponibilidade explica, mas não oferece ali o seletor de modo).
+
 **Versão 1.1.45.** A revisão independente da **1.1.44** **APROVOU** o artefato — 0 Critical, 0 Important
 bloqueante e 6 Minor — e é a **primeira aprovação da classe de credencial depois de nove reprovações**. Ela
 mediu por conta própria: 17 formas de valor em 7 seções (`0/18` em todas), 198.360 identificadores × id/classe ×

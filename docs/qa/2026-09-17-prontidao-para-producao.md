@@ -164,6 +164,14 @@ na máquina de trabalho. O binário é o mesmo (Chrome for Testing 152.0.7977.64
 observada entre as duas rodadas ao vivo (109/28,5 % × 108/29,2 %) é a variação de instância da página do Google,
 já declarada nas gerações anteriores — não de versão.
 
+## 3.2 Fecho da versão
+
+**Versão fechada como produção em 18/09/2026**, a pedido do usuário, com a revisão adversarial do último conserto
+aprovada ("pode entrar") e o pacote `7da8b3f0…` reconstruível do commit `39c86c0`. Nota de versão em
+`docs/releases/1.1.48.md`. A distribuição (Chrome Web Store) é uma ação externa que depende do usuário: exige a
+conta de desenvolvedor, o endereço HTTPS público da política de privacidade e o envio pelo console — o material
+de preenchimento está em `store-assets/STORE-LISTING.md` e o passo a passo em `store-assets/PUBLICACAO-LOJA.md`.
+
 ## 4. O que falta para "produção", em uma frase
 
 O conserto que faltava passou pela revisão independente (**PODE ENTRAR**) e não falta nada de funcional

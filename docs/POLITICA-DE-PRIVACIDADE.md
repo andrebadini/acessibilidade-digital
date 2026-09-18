@@ -22,7 +22,7 @@ Durante uma auditoria, a extensão pode tratar:
 
 Esse tratamento inclui dados de navegação (a URL escolhida e os horários da auditoria) e conteúdo do site (texto, estrutura, imagens, mídia e demais recursos da página auditada). Esses dados são processados e armazenados localmente mesmo quando não são transmitidos a terceiros.
 
-As capturas podem conter dados pessoais ou sigilosos que estejam visíveis na página. Nos modos com imagens, antes de cada captura a extensão verifica sinais conhecidos de conteúdo potencialmente sensível. Na primeira verificação, a identificação desses sinais pausa a auditoria e exige confirmação explícita. Nas verificações posteriores, uma categoria nova bloqueia aquela captura. Páginas dinâmicas podem mudar no intervalo técnico inevitável entre a última verificação e a captura; esse controle reduz, mas não elimina o risco. O usuário ainda deve ocultar ou remover informações sensíveis antes de confirmar.
+As capturas podem conter dados pessoais ou sigilosos que estejam visíveis na página. Nos modos com imagens, antes de cada captura a extensão verifica sinais conhecidos de conteúdo potencialmente sensível. **Sem sinal identificado não há pausa**: a captura prossegue, porque não há o que autorizar. Na primeira verificação, a identificação desses sinais pausa a auditoria e exige confirmação explícita. Nas verificações posteriores, uma categoria nova bloqueia aquela captura. Páginas dinâmicas podem mudar no intervalo técnico inevitável entre a última verificação e a captura; esse controle reduz, mas não elimina o risco. O usuário ainda deve ocultar ou remover informações sensíveis antes de confirmar.
 
 ## 3. Processamento local e transmissão
 

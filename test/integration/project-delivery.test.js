@@ -24,7 +24,11 @@ test('plain-language usage docs report the current verification boundary accurat
   for (const format of ['HTML', 'PDF', 'CSV', 'JSON-LD']) {
     assert.match(guide, new RegExp(`^- ${format}:`, 'imu'));
   }
-  assert.match(combined, /candidato beta[^.]*gate único[^.]*E2E real[^.]*Chrome[^.]*QA visual/iu);
+  // O guia deixou de se chamar beta quando a versão foi fechada como produção: o que a asserção protege é a
+  // existência do gate de entrega (suíte, E2E real no Chrome fixado, percurso até os quatro formatos e QA visual)
+  // e o registro dele junto ao pacote — não a palavra "beta".
+  assert.match(combined, /gate único[^.]*E2E real[^.]*Chrome[^.]*QA visual/iu);
+  assert.match(guide, /registro desse gate|registrado junto ao pacote/iu);
   assert.match(combined, /Outra URL[^.]*três modos/iu);
   assert.match(combined, /lote explícito de 2 a 20 URLs nos três modos/iu);
   assert.match(combined, /consentimento para capturas é individual por página/iu);
