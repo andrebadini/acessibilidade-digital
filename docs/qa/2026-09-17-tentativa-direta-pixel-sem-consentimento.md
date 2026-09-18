@@ -70,15 +70,27 @@ marcadores no mesmo `auditId`, o que mataria a auditoria já consentida e deixar
 (a direção era segura — nenhum raster sem companheiro, nenhum consentimento burlado —, mas era regressão
 funcional: a 1.1.47 conclui nesse cenário).
 
-**Fechamento:** `prepareResume` **aposenta a tentativa direta antes** de preparar a consentida
-(`retireDirectAttempt`, em `service-worker.js`, só para o alvo anexado — é onde a direta existe). O digesto
-direto é determinístico a partir do `auditId`, então a aposentadoria é sempre possível e é confirmada pela
-leitura de ausência; se a confirmação falhar, a operação é recusada em vez de seguir.
+**Fechamento (desenho final, na 1.1.48):** a aposentadoria acontece **no instante em que a pausa vai ser
+criada** — o portão ganhou o gancho opcional `onRetireDirect`, chamado no ramo do primeiro raster quando o
+sinal aparece **depois** de o portão ter armado (é o único ponto de pausa posterior a um armar; no `preflight`
+a pausa é imediata e não existe tentativa direta, então não há chamada). O ciclo de vida expõe `retireDirect`
+(`retireDirectAttempt` em `service-worker.js`): digesto determinístico a partir do `auditId`, remoção
+**confirmada** pela leitura de ausência e recusa da operação se a confirmação falhar, tocando **somente** o
+marcador direto. O `prepareResume` continua aposentando a direta antes de criar a consentida, como **rede de
+segurança** de ordenação.
+
+**Variante A-1b (cancelamento), fechada pelo mesmo movimento:** sem a aposentadoria na pausa, cancelar nessa
+pausa fazia a liquidação chamar `classify(consentId)`, encontrar o marcador **direto**, ficar `blocked`, falhar
+e deixar o marcador residual até o fim da sessão. Com a aposentadoria na pausa, `classify` vê `absent`, a
+liquidação conclui e não sobra resíduo.
 
 **Prova com dentes:** `test/background/pixel-attempt-terminal-commit.test.js` reproduz a sequência exata
 (direta → consentida no mesmo `auditId`) e verifica que fica **um** marcador — o consentido —, que a direta
 aposentada não é mais legível (`markerMatches` falso), que o commit consentido conclui e que a limpeza
 `post-finish` deixa **zero** marcadores. Com a aposentadoria desligada por mutação, o mesmo teste **reprova**.
+`test/background/pixel-privacy-gate.test.js` mede o **ponto** da aposentadoria: com o sinal aparecendo entre o
+armar e o primeiro raster, a sequência é `['armed', 'retired', 'pause']`; na pausa imediata do `preflight`, é
+`['pause']` (sem armar não há direta a aposentar).
 
 ## 4. Limites declarados
 

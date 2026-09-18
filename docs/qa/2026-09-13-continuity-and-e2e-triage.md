@@ -3230,11 +3230,16 @@ nulos). Cinco arquivos: `session-url-digest.js`, `pixel-attempt-correlation.js`,
 os módulos reais, a **colisão de marcadores**: se a página **revelar sinal sensível depois** de o portão armar
 sem pausa (SPA que renderiza o formulário tarde), o caminho consentido cria o marcador dele além do direto —
 `scanMarker` fica `blocked` com dois marcadores no mesmo `auditId` e a auditoria consentida morre, com resíduo
-até o fim da sessão (a 1.1.47 conclui nesse cenário: era regressão funcional do conserto). **Fechamento:**
-`prepareResume` aposenta a tentativa direta **antes** de preparar a consentida (`retireDirectAttempt`,
-`service-worker.js`, alvo anexado, remoção confirmada por leitura de ausência; se a confirmação falhar, a
-operação é recusada). O teste que reproduz a sequência exata **reprova com a aposentadoria desligada por
-mutação** (`test/background/pixel-attempt-terminal-commit.test.js`).
+até o fim da sessão (a 1.1.47 conclui nesse cenário: era regressão funcional do conserto). **Fechamento (desenho final):** a
+aposentadoria acontece **no instante em que a pausa vai ser criada** — gancho opcional `onRetireDirect` no
+portão, chamado no ramo do primeiro raster quando o sinal aparece **depois** de o portão ter armado (no
+`preflight`, pausa imediata, não há direta a aposentar) — e o `prepareResume` repete a aposentadoria como **rede
+de segurança** (`retireDirect`, remoção confirmada por leitura de ausência; se a confirmação falhar, a operação
+é recusada). O mesmo movimento fecha a **variante do cancelamento (A-1b)**: sem ele a liquidação encontrava o
+marcador direto, ficava `blocked` e deixava resíduo. Testes com dentes: a sequência exata
+(`pixel-attempt-terminal-commit.test.js`) **reprova com a aposentadoria desligada por mutação**, e o ponto da
+aposentadoria é medido em `pixel-privacy-gate.test.js` (`['armed','retired','pause']`; `['pause']` no
+preflight).
 
 **Medições (Chrome for Testing 152.0.7977.64).** Numa página sem sinal sensível, os dois modos com foto chegam a
 **`result` em ~1 s** (antes: `unavailable`); o caminho **com** sinal sensível continua pausando, confirmando e
