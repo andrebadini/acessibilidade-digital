@@ -1,12 +1,18 @@
-# Uso fiscal do Audita Acessibilidade
+# Entender o resultado do Audita Acessibilidade
+
+O Audita Acessibilidade é uma ferramenta **independente e aberta a qualquer pessoa**: quem desenvolve, quem
+escreve conteúdo, quem pesquisa, quem ensina, quem fiscaliza e quem apenas quer entender a acessibilidade de uma
+página usam o mesmo produto, do mesmo jeito — sem login, sem servidor e sem cadastro. O fato de um órgão de
+controle poder usar o resultado **não** faz dele um instrumento fiscal: o relatório é material técnico de apoio,
+não certificação nem laudo oficial.
 
 ## O que o resultado significa
 
 O Audita Acessibilidade registra o que conseguiu observar em uma única página, naquele momento. “Aprovado” indica que a expectativa automatizável foi observada no recorte coletado. “Reprovado” indica uma falha observável. “Revisar” ou `cantTell` exige julgamento; ausência de falha automática não prova conformidade integral.
 
-Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional. O relatório apoia a análise técnica, mas não equivale a certificação nem a laudo oficial.
+O relatório apoia a análise técnica de quem o lê, mas não equivale a certificação nem a laudo oficial — e não substitui a experiência real de quem usa a página com tecnologia assistiva.
 
-Antes de usar o material em uma fiscalização, confira a URL, a data, o viewport quando disponível, os avisos de cobertura, as evidências e cada decisão de revisão. Identifique a pessoa avaliadora e descreva o contexto necessário. “Pular revisão” mantém o caso indeterminado.
+Antes de reutilizar o material — num relatório interno, numa conversa com quem mantém o site, numa pesquisa, numa aula ou em qualquer análise de terceiros —, confira a URL, a data, o viewport quando disponível, os avisos de cobertura, as evidências e cada decisão de revisão. Identifique a pessoa avaliadora e descreva o contexto necessário. “Pular revisão” mantém o caso indeterminado.
 
 ## Arquivos gerados
 

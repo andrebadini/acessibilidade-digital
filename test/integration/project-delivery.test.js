@@ -10,7 +10,7 @@ import { scanNeutralIdentity } from '../../scripts/verify-neutral-identity.mjs';
 const read = path => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
 
 test('plain-language usage docs report the current verification boundary accurately', async () => {
-  const [readme, guide] = await Promise.all([read('README.md'), read('docs/USO-FISCAL.md')]);
+  const [readme, guide] = await Promise.all([read('README.md'), read('docs/ENTENDER-O-RESULTADO.md')]);
   const combined = `${readme}\n${guide}`;
   for (const phrase of [
     'Carregar sem compactação', 'debugger', 'downloads', 'processamento local', 'revisão',

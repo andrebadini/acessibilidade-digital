@@ -3311,3 +3311,27 @@ pacote: **gate GREEN**, **unidade/integração 4.187/4.186/0**, o E2E novo verde
 anteriores, e a bateria completa anterior (suíte 4.231/4.230/0 na fase paralela, escopo 61/61 no zip e auditoria
 ao vivo 1.1.48 com 0 falhas confirmadas, 108 no checklist, 29,2 %, 9,0/10 e integridade 146/146) medida nos bytes
 `c519a33b…`, cuja única diferença para os finais é a linha revisada do A-2.
+
+## Rodada 95 — enquadramento: a ferramenta é democrática, não um instrumento fiscal
+
+Decisão do usuário (18/09/2026): "Não coloque na documentação que o uso é fiscal, pois será aberto para qualquer
+um. O fato dos fiscais utilizarem a extensão não significa que a extensão é para uso fiscal. A ideia é ser uma
+ferramenta democrática."
+
+- `docs/USO-FISCAL.md` passou a `docs/ENTENDER-O-RESULTADO.md`, com a abertura reescrita: ferramenta independente e
+  **aberta a qualquer pessoa** (quem desenvolve, escreve, pesquisa, ensina, fiscaliza ou apenas quer entender),
+  sem login, sem servidor e sem cadastro; o uso por órgão de controle **não** faz dela um instrumento fiscal, e o
+  relatório continua declarado como material técnico de apoio, não certificação nem laudo oficial. O parágrafo
+  prático ("confira URL, data, viewport, cobertura, evidências e decisões") deixou de citar fiscalização e passou a
+  valer para qualquer reutilização do material. As seções técnicas (o que cada número significa, arquivos gerados,
+  evidências visuais, privacidade, limitações e o gate de entrega) ficaram intactas.
+- `store-assets/STORE-LISTING.md`: o público-alvo deixou de ser "profissionais de acessibilidade, auditoria,
+  qualidade, desenvolvimento e fiscalização técnica" e passou a "qualquer pessoa que queira avaliar a
+  acessibilidade de uma página — desenvolvimento, design, conteúdo, qualidade, pesquisa, ensino, órgãos de
+  controle e cidadania em geral".
+- `README.md`, `test/integration/project-delivery.test.js` e o registro de achados foram atualizados para o novo
+  caminho (o registro guarda a nota de que o documento foi renomeado).
+- **O produto não mudou**: nenhuma linha de `src/` foi tocada (o pacote `7da8b3f0…` continua idêntico e
+  reconstruível de `39c86c0`). As duas ocorrências da palavra "fiscal" em `src/core/privacy.js` são vocabulário
+  do classificador de credencial (`fiscal`, `fiscalização` como qualificadores de campo sensível) e **não**
+  enquadramento de uso — mexer nelas enfraqueceria a proteção de privacidade.

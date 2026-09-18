@@ -108,7 +108,7 @@ Os dados não são transmitidos ao desenvolvedor, vendidos, usados em publicidad
 
 - Visibilidade: pública.
 - Regiões: Brasil na primeira publicação.
-- Público principal: profissionais de acessibilidade, auditoria, qualidade, desenvolvimento e fiscalização técnica.
+- Público principal: qualquer pessoa que queira avaliar a acessibilidade de uma página — desenvolvimento, design, conteúdo, qualidade, pesquisa, ensino, órgãos de controle e cidadania em geral.
 
 ## Política de privacidade
 

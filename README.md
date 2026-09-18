@@ -532,7 +532,7 @@ As permissões `tabs`, `scripting` e `debugger` permitem identificar e inspecion
 
 A extensão audita a página aberta, outra URL ou um lote explícito de 2 a 20 URLs nos três modos, sempre sobre os estados observados, e não todo o serviço. No modo de evidência completa, o relatório inclui o mapa numerado e a legenda dos anúncios estimados quando a coleta consegue produzi-los; omissões e limites ficam registrados. Itens contextuais exigem revisão humana. Frames de terceiros, canvas, vídeo, conteúdo protegido ou coleta estrutural bloqueada podem produzir resultado parcial.
 
-Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional. A cobertura automática não equivale a certificação nem a laudo oficial. Consulte [Uso fiscal](docs/USO-FISCAL.md) para interpretar o resultado e [Backlog da beta](docs/BETA-BACKLOG.md) para as melhorias não bloqueantes já registradas.
+Audita Acessibilidade é uma ferramenta independente, sem vínculo institucional. A cobertura automática não equivale a certificação nem a laudo oficial. Consulte [Entender o resultado](docs/ENTENDER-O-RESULTADO.md) para saber o que cada número significa e [Backlog da beta](docs/BETA-BACKLOG.md) para as melhorias não bloqueantes já registradas.
 
 O candidato só deve ser distribuído depois do gate de suíte lógica, verificação estática, E2E real no Chrome e QA visual. O registro desse gate acompanha o pacote final, distinguindo eventuais correções e repetições focadas.
 
