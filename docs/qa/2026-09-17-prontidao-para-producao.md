@@ -84,6 +84,16 @@ e a guarda D2 continua **intacta**. Medições: página sem sinal sensível nos 
 (`current-page-pixel-consent-free-mv3`) **reprova contra os bytes da 1.1.47**; escopo de 14 arquivos na raiz do
 pacote **verde**. Detalhes em `docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`.
 
+**A cura passou pela revisão adversarial (veredito: PODE ENTRAR).** O revisor mediu os bytes finais
+(`7da8b3f0…`, commit `39c86c0`), **reconstruiu o pacote num clone dele com o mesmo digest** e confirmou por
+medição própria: a guarda D2 intacta (`commitTerminal` byte-idêntico à 1.1.47), a tentativa direta não vira
+consentimento em nenhuma fronteira, a jornada conclui com foto nas páginas sem sinal sensível, o caminho
+consentido pausa → confirma → `result`, o cancelamento durante a pausa liquida sem resíduo, e o oráculo novo do
+autor tem dentes (reprova contra os bytes anteriores). No caminho ele achou e eu fechei **um Important (A-2)** —
+a aposentadoria da tentativa direta era chamada com a **assinatura trocada**, o que **piorava** o cenário da
+página que revela sinal depois de armar em relação à 1.1.47 — e **um achado de processo (A-3)**, o E2E novo fora
+do plano de testes. Relatório em `docs/qa/revisoes/REVIEW-1.1.48.md`; desfecho no registro de achados.
+
 **O que continua aberto, com dono declarado — e o que a revisão REFUTOU sobre a causa.** A causa raiz continua
 **não medida**. A hipótese que este dossiê declarava antes ("o registro `audita:panel-bootstrap:v1:<windowId>` é
 publicado depois da suspensão") foi **refutada pela revisão final da 1.1.45**, que leu a árvore: em
@@ -156,7 +166,8 @@ já declarada nas gerações anteriores — não de versão.
 
 ## 4. O que falta para "produção", em uma frase
 
-Não falta nada de funcional conhecido **neste** incremento: o percurso principal conclui nos três modos de
+O conserto que faltava passou pela revisão independente (**PODE ENTRAR**) e não falta nada de funcional
+conhecido **neste** incremento: o percurso principal conclui nos três modos de
 evidência (o de pixel inclusive em página sem sinal sensível, que era o último bloqueio), o relatório e as
 quatro exportações funcionam, e o destaque corresponde ao elemento. Falta **uma** formalidade — a
 re-verificação independente da 1.1.48, incluindo a revisão adversarial do conserto da tentativa direta — e

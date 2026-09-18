@@ -3268,3 +3268,39 @@ do pacote no Google: versão **1.1.48**, **0 falhas confirmadas** (0 ocorrência
 ocorrências), **9 positivos**, **108** no checklist (a rodada anterior dos mesmos bytes deu 109), **29,2 %**,
 **9,0/10** e as quatro exportações `complete`; integridade **146/146 ids e títulos no HTML e no PDF**, notas
 **5/5**, **0 palavras partidas**, **0 `[redacted]`**.
+
+### Rodada 94 (epílogo) — a revisão adversarial do conserto achou o A-2 e o veredito final é **PODE ENTRAR**
+
+O conserto da tentativa direta foi para a revisão adversarial antes de entrar no produto, e ela achou um
+**Important** que a minha bateria não pegava: a aposentadoria da tentativa direta era chamada com a **assinatura
+trocada** (`{auditId}` no starter × string no ciclo de vida). O gancho do portão lançava, a pausa era negada e o
+cenário da página que **revela sinal depois de armar** piorava em relação à 1.1.47: em vez de pausar e concluir
+depois do consentimento, a auditoria era revogada **sem oferecer consentimento**, com marcador residual. Os três
+testes que eu tinha dublavam um lado da fronteira (espiões no portão, dublê do ciclo de vida no starter e a
+colisão exercitada pela rede de segurança do `prepareResume`) — nenhum cruzava a fiação real.
+
+**Fechamento:** `retireDirect(args.auditId)` (uma linha) e um E2E que cruza a fiação de ponta a ponta
+(`test/e2e/current-page-pixel-direct-retire-mv3.test.mjs`, em `element-only` — no `full-evidence` o raster de
+página inteira é cedo demais e a injeção chega tarde, medido no caminho): a tentativa direta nasce no armar
+(observada de fora por `chrome.storage.session`), a página injeta o campo de senha depois disso, a pausa tem de
+aparecer, o consentimento conclui em `result` e **zero marcadores** sobram. **Não vacuidade medida:** contra os
+bytes `c519a33b…` o teste **reprova em 3,4 s** com `{"tela":"unavailable","confirma":false}`. Um achado de
+processo (**A-3**) também foi fechado no mesmo commit: o E2E novo estava fora do plano de testes
+(`TEST_PLAN_UNCLASSIFIED_E2E` abortaria `npm test`/`verify`); o runner do commit `39c86c0` classifica **226
+arquivos, 181 paralelos + 45 seriais, 47 E2E**.
+
+**Veredito final da revisão (arquivado em `docs/qa/revisoes/REVIEW-1.1.48.md`): PODE ENTRAR**, nos bytes
+`7da8b3f0…` (commit `39c86c0`), que o próprio revisor **reconstruiu num clone com o mesmo digest**. Ele mediu, nos
+bytes finais: pausa aos 2,15 s com a senha revelada depois do armar → consentimento → `result` → **0 marcadores**;
+cancelamento nessa pausa → `initial` em 5,41 s → **0 marcadores**; jornada limpa `result@2,0 s` (full-evidence) e
+`result@1,5 s` (element-only); página sensível pausa → confirma → `result@2,5 s`; duas auditorias seguidas 2×
+`result` com 0 marcadores; `url-pixel-consent-mv3` **10/10**; D2 intacta (baterias 10/10 e 5/5, `commitTerminal`
+byte-idêntico à 1.1.47); e o meu E2E novo nos bytes empacotados **1/1**, reprovando em 3,49 s contra os anteriores.
+
+**Nota de ambiente (medida).** A minha re-medição da suíte completa e do escopo nos bytes finais caiu numa janela
+em que a máquina do usuário estava com trabalho pesado próprio (Python a ~430 % de CPU e `rclone`, carga média
+~8–10) e os E2E de credencial estouraram em massa por tempo limite (~121 s cada, o tempo limite do próprio
+teste) — os mesmos arquivos que passaram **61/61** e **59/59** em janelas quietas. O usuário pediu, além disso,
+que os testes **não abram janela**: toda a bateria passou a rodar com o shim em `--headless=new`
+(`/private/tmp/adv169/chrome-quiet`). A re-medição isolada do escopo e a auditoria ao vivo nos bytes finais
+ficaram agendadas para a primeira janela quieta.

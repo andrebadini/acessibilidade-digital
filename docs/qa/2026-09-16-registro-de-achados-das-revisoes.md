@@ -644,3 +644,23 @@ isolada**, sem tocar no projeto, e a causa foi medida ponta a ponta (sonda instr
 | A-4 | **Important** (achado da revisão do conserto, o A-2 dela) | **Assinatura trocada na aposentadoria da tentativa direta:** o starter chamava `retireDirect({ auditId })` (objeto) e o ciclo de vida espera a **string**; o gancho do portão lançava, o portão negava a pausa e o cenário do A-1 piorava em relação à 1.1.47 (revogação sem oferecer consentimento + marcador residual). Os testes da versão não pegaram porque cada um dublava um lado da fronteira (espiões no portão, dublê do ciclo de vida no starter, e a colisão exercitada pela rede de segurança do `prepareResume`) | **fechado**: chamada alinhada (`retireDirect(args.auditId)`) e teste novo que **cruza a fiação real** — `test/e2e/current-page-pixel-direct-retire-mv3.test.mjs`, em `element-only`, com gatilho no marcador: nasce a direta no armar, a página revela o campo depois, a pausa aparece, o consentimento conclui em `result` e sobram **zero** marcadores. **Não vacuidade medida**: contra os bytes sem o conserto, **reprova em 3,4 s** com `{"tela":"unavailable","confirma":false}` |
 
 Documento de decisão e medição: `docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`.
+
+## Revisão adversarial do conserto da tentativa direta (1.1.48) → **PODE ENTRAR**
+
+Relatório arquivado em `docs/qa/revisoes/REVIEW-1.1.48.md`. O revisor mediu o artefato `7da8b3f0…` (199
+arquivos, versão 1.1.48, commit `39c86c0`), **reconstruiu o pacote num clone próprio com o mesmo digest** e
+fechou a proveniência.
+
+| Achado | Sev. | Medida e desfecho |
+|---|---|---|
+| **A-2** | **Important (bloqueou a versão anterior)** | A aposentadoria da tentativa direta era chamada com a **assinatura trocada** (`{auditId}` no starter × string no ciclo de vida): o gancho do portão lançava, a pausa era negada e o cenário da página que revela sinal depois de armar **piorava** em relação à 1.1.47 — revogação sem oferecer consentimento e marcador residual. Os testes da versão não pegavam porque cada um dublava um lado da fronteira. **Fechado** com `retireDirect(args.auditId)` e com um E2E que **cruza a fiação real** (`current-page-pixel-direct-retire-mv3`, não vacuidade medida: reprova em 3,4 s contra os bytes anteriores). Verificação do revisor em três níveis: unidade (remove só a direta), fiação real (marcador 0,06 s → senha → **pausa 2,15 s** → `result` → **0 marcadores**) e cancelamento (pausa 2,16 s → cancela → `initial` 5,41 s → **0 marcadores**, nenhum achado novo) |
+| **A-3** | processo | O E2E novo estava **fora do plano de testes** (`TEST_PLAN_UNCLASSIFIED_E2E` abortaria `npm test`/`verify`) | **fechado** no mesmo commit: o runner do `39c86c0` classifica **226 arquivos, 181 paralelos + 45 seriais, 47 E2E** |
+| Observação 1 | — | Assimetria de assinatura do `retireDirect` (string) contra `prepareDirect`/`prepareResume` (objeto) — origem do A-2 | declarada; coberta por teste de fiação real |
+| Observação 2 | — | A limpeza do marcador de tentativa é assíncrona ao anúncio do `result` (medido 1 → 0 em ~5 s) | declarada, sem efeito de produto |
+
+**O que a revisão confirmou por medição própria:** guarda D2 intacta (raster sem alça → `TERMINAL_COMMIT_DENIED`
+com o armazenamento não chamado; alça de outra auditoria e quatro alças forjadas recusadas; `commitTerminal`
+byte-idêntico à 1.1.47); tentativa direta ≠ consentimento em todas as fronteiras; jornada limpa `result@2,0 s`
+(full-evidence) e `result@1,5 s` (element-only); página sensível pausa → confirma → `result@2,5 s`; duas
+auditorias seguidas 2× `result` com 0 marcadores; `url-pixel-consent-mv3` **10/10**; o E2E novo do autor nos
+bytes empacotados **1/1** (52,8 s) e **reprova em 3,49 s** contra os bytes anteriores.

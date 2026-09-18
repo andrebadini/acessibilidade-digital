@@ -21,6 +21,7 @@ Cópias integrais dos relatórios produzidos pelos revisores independentes desta
 | `REVIEW-1.1.31.md` | diff `3c571f4..fa91745` e o zip da 1.1.31, com 900+34+45 formas próprias, corpus de 30 frases realistas e E2E de sentinela com forma isolada antes dos controles | **2 Critical, 4 Important** + 5 Minor + 5 observações — o conserto de idioma foi confirmado ponta a ponta, mas a classe continuava aberta, o seletor era o quinto vocabulário e a prova de mutação era vacuosa | `audita-acessibilidade-1.1.31.zip` (`28a53946…32ba`) |
 | `REVIEW-1.1.32.md` | diff `fa91745..d17dd8a` e o zip da 1.1.32, com universo de 801 formas, corpus de 29 e 62 frases realistas, ablação dos mecanismos novos e E2E no pacote | **1 Critical, 3 Important** + 4 Minor + 6 observações — três regressões minhas (guarda `[<>]` na cauda, scanner destruindo prosa, E2E não registrado no plano) e vocabulário de cartão/boleto ausente | `audita-acessibilidade-1.1.32.zip` (`0f0d5f38…89375`) |
 | `REVIEW-1.1.45.md` | **revisão integrada final** do produto contra os 12 critérios, no zip da 1.1.45 e na árvore do commit | **NÃO PRONTO** — 2 Critical (classe de credencial, um deles introduzido pela própria 1.1.45) + 1 Important (revogação silenciosa no modo de pixel da página atual) + 4 Minor; critérios 1-7 e 12 atendidos, 8 Parcial por decisão do usuário, 9 e 11 atendidos com ressalva, **10 não atendido** | `audita-acessibilidade-1.1.45.zip` (`9df21c05…36a1`) |
+| `REVIEW-1.1.48.md` | **revisão adversarial do conserto da tentativa direta** (o que curou a revogação) nos bytes finais da 1.1.48, com ataques de unidade, fiação real em Chrome e não vacuidade | **PODE ENTRAR** — depois de um **Important (A-2)** medido e fechado: a aposentadoria da tentativa direta era chamada com a assinatura trocada e o cenário da página que revela sinal depois de armar piorava em relação à 1.1.47; com a chamada alinhada, a pausa volta aos 2,15 s, o consentimento conclui em `result` e o cancelamento liquida sem resíduo. Fica **1 achado de processo (A-3)** fechado (E2E fora do plano de testes) e **2 observações sem bloqueio** | `audita-acessibilidade-1.1.48.zip` (`7da8b3f0…1689`) |
 | `REVIEW-1.1.47.md` | **re-verificação do I-1** no zip da 1.1.47 e na árvore do commit `ee9eb80`, com sondas próprias e não vacuidade contra a 1.1.46 e a 1.1.45 | **I-1 ATENDIDO** — a mensagem aparece nos dois modos de imagem numa página sem sinal sensível (1,5 s e 1,0 s), o cancelamento pedido pelo usuário volta ao neutro (`url-pixel-consent-mv3` 10/10) e a classe de credencial está idêntica à 1.1.44 aprovada; **1 Minor novo (N-1)**, não bloqueante | `audita-acessibilidade-1.1.47.zip` (`2bb01b21…47ac`) |
 
 **As revisões da 1.1.33 à 1.1.44 ainda não têm linha nesta tabela** — o índice ficou para trás. Os vereditos e o desfecho de cada achado estão em `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md`: a classe de credencial acumulou nove reprovações seguidas entre a 1.1.16 e a 1.1.43 e foi **aprovada na 1.1.44**.
@@ -48,6 +49,20 @@ percurso de pixel da página atual ainda não começa. A **causa continua NÃO M
 hipótese de ordenação do bootstrap que o projeto declarava antes foi **refutada pela revisão da 1.1.45** (as
 chamadas de 2326/2356 rodam antes de `execute()`, 2385, e sem sinal sensível não há pausa alguma — a auditoria é
 revogada) e a documentação foi retratada em `f4ca492`.
+
+## Estado agora (18/09/2026, madrugada)
+
+**A 1.1.48 é a versão candidata e o conserto que curou o percurso de pixel passou pela revisão adversarial:
+"pode entrar".** O que a revisão exigiu está fechado e medido por ela mesma: a guarda D2 continua intacta
+(`commitTerminal` byte-idêntico à 1.1.47), a tentativa direta não vira consentimento em nenhuma fronteira, a
+jornada conclui com foto nas páginas sem sinal sensível, o caminho consentido segue pausando e concluindo, o
+cancelamento durante a pausa que nasce depois do armar liquida sem resíduo, `url-pixel-consent-mv3` 10/10 e o
+oráculo novo do autor tem dentes (reprova contra os bytes anteriores). O pacote `7da8b3f0…` está no commit
+`39c86c0` e foi reconstruído independentemente pelo revisor, com o mesmo digest.
+
+Ficam **declarados, sem bloquear**: o Minor N-1 (a mensagem da tela de indisponibilidade não é acionável ali
+mesmo), a assimetria de assinatura do `retireDirect` (origem do A-2, agora coberta por teste de fiação real) e a
+limpeza assíncrona do marcador de tentativa (1 → 0 em ~5 s após o resultado, sem efeito de produto).
 
 ## Histórico do estado (até a 1.1.37)
 
