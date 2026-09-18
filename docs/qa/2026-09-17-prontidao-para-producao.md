@@ -1,7 +1,7 @@
-# Prontidão para produção — Audita Acessibilidade 1.1.47
+# Prontidão para produção — Audita Acessibilidade 1.1.48
 
-Data: 17/09/2026. Artefato: `release/audita-acessibilidade-1.1.47.zip`, digest
-`2bb01b211cbf79d21fd9692f680931014d4762161d4731ab796298cade9347ac`, 199 arquivos, versão `1.1.47` no
+Data: 17/09/2026. Artefato: `release/audita-acessibilidade-1.1.48.zip`, digest
+`234997ac1d93b2faa40c5ee9321f5a3a1af74d8fa6aa6252795589750e394f0c`, 199 arquivos, versão `1.1.48` no
 manifesto. Chrome for Testing 152.0.7977.64, um Chrome por vez, `--test-concurrency=1`.
 
 Esta é a versão que responde à **revisão integrada final da 1.1.45**
@@ -13,7 +13,7 @@ fechados na **1.1.46** (verificados pelo próprio revisor) e o **Important I-1**
 
 | # | Critério | Estado | Evidência principal |
 | --- | --- | --- | --- |
-| 1 | Percurso principal funciona no Chrome sem instabilidade | **Atendido** | `mandatory-journey-mv3` e `current-page-export-mv3` a partir dos bytes empacotados (escopo de 13 arquivos no zip: **59/59**); auditoria ao vivo no Google concluída, painel estável |
+| 1 | Percurso principal funciona no Chrome sem instabilidade | **Atendido** (o percurso da página atual conclui nos **três** modos de evidência na 1.1.48) | `mandatory-journey-mv3` e `current-page-export-mv3` a partir dos bytes empacotados (escopo de **14 arquivos** no zip: **61/61**); auditoria ao vivo no Google concluída, painel estável |
 | 2 | Relatório abre e exportações funcionam | **Atendido** | quatro exportações `complete` na auditoria ao vivo do pacote, relatório em aba própria, versão **1.1.47** declarada no artefato |
 | 3 | Destaque corresponde ao elemento e documento corretos | **Atendido** | `highlight-marking-mv3` e `page-markers-signals-mv3`, com caixa sobre o elemento e correlação de documento (no zip) |
 | 4 | A inspeção automática não altera visivelmente a página | **Atendido** | medição com contadores de evento e observador de mutações: 0 eventos, 0 mutações, geometria/rolagem/foco idênticos; limite declarado: captura de regiões fora da viewport |
@@ -22,9 +22,9 @@ fechados na **1.1.46** (verificados pelo próprio revisor) e o **Important I-1**
 | 7 | Conclusões ABNT respeitam obrigatoriedade, alternativas e limites | **Atendido** | 146 itens (96 requisitos + 50 recomendações) conferidos contra o PDF da norma; amostra conferida nos dois sentidos; 5.9.7 não produz `failed` por desenho |
 | 8 | Interface e relatório claros para leigos | **Parcial por decisão do usuário** | os seis blocos didáticos estão no relatório entregue; não houve teste com pessoa de fora, e o usuário decidiu que isso não bloqueia (2026-09-16) |
 | 9 | Recursos obrigatórios implementados | **Atendido** | rastreabilidade recurso a recurso registrada nos critérios (campo de URL, auditoria da página aberta, refazer, progresso, relatório em aba, filtros, agrupamento por item, destaques, personas, anúncios estimados com aviso honesto, menu de contexto como atalho, lote, vocabulário e checagens pt-BR, quatro exportações, sem login) |
-| 10 | Sem falha Critical/Important conhecida | **Atendido com ressalva declarada** (o **I-1 foi re-verificado e está ATENDIDO** em `docs/qa/revisoes/REVIEW-1.1.47.md`) | a classe de credencial foi **aprovada** na 1.1.44; os 2 Critical da revisão final da 1.1.45 foram fechados na **1.1.46** (`NOVOS vs 1.1.44 = 0` no corpus de 896 formas; resíduo `secreto*` **0/182**). O **I-1** exigia que a revogação do modo de pixel **nunca** terminasse em silêncio: a **1.1.47** entrega a mensagem explícita e o oráculo que a mede nos dois sentidos (§2). **Ressalva:** numa página **sem** sinal sensível a auditoria ainda é **revogada** — o percurso de pixel da página atual não chega a começar —, e a **causa raiz dessa revogação continua não medida** (a hipótese de ordenação do bootstrap foi **refutada** pela revisão; ver §2). O arquivo é do incremento paralelo. O que a 1.1.47 mudou é que a falha **explica** por que não começou |
+| 10 | Sem falha Critical/Important conhecida | **Atendido** | a classe de credencial foi **aprovada** na 1.1.44 e os dois Critical da revisão final da 1.1.45 foram fechados na **1.1.46** (`NOVOS vs 1.1.44 = 0` no corpus de 896 formas; resíduo `secreto*` **0/182**). O **I-1** (revogação silenciosa no modo de pixel) foi re-verificado e está **ATENDIDO** (`docs/qa/revisoes/REVIEW-1.1.47.md`), e a **revogação em si** foi fechada na **1.1.48**: a causa foi medida (a guarda **D2** sem companheiro durável de tentativa) e a **tentativa direta** deu companheiro à captura autorizada sem pausa, **sem tocar na guarda** — o percurso conclui em página sem sinal sensível (`result` em ~1 s nos dois modos) e o caminho com sinal sensível segue igual (pausa → confirma → `result`). Permanecem **declarados**: 1 Minor (N-1, §3) e os 9 testes do incremento paralelo (outro desenho, em andamento) |
 | 11 | Achados menores documentados | **Atendido** | `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` com desfecho por achado, de 1.1.16 a 1.1.45 |
-| 12 | Versão empacotada testada em Chrome real | **Atendido** | suíte completa: fase paralela **4.225 testes, 4.224 passam, 0 falham, 1 pulado**; fase serial **111 testes, 101 passam, 10 falham** — **9** delas em `test/e2e/sidepanel-flow-mv3.test.mjs` (arquivo do incremento paralelo) e **1** a flake declarada `axe-mv3-csp`; o conjunto caiu de **12 para 10** contra a medição anterior do mesmo dia, sem nenhuma falha nova. Escopo de 13 arquivos na raiz extraída do zip: **59/59**. Gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**. Auditoria ao vivo do pacote no Google e integridade dos quatro artefatos: §3.1 |
+| 12 | Versão empacotada testada em Chrome real | **Atendido** | suíte completa da 1.1.48: fase paralela **4.227 testes, 4.226 passam, 0 falham, 1 pulado**; fase serial **113 testes, 104 passam, 9 falham** — **todas as 9** em `test/e2e/sidepanel-flow-mv3.test.mjs` (arquivo do incremento paralelo, que exercita outro desenho), com **zero falhas nos arquivos deste incremento** e sem a flake `axe-mv3-csp` nesta passagem. Escopo de **14 arquivos** na raiz extraída do zip (inclui os dois oráculos do percurso de pixel): **61/61**. Gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**. Auditoria ao vivo do pacote no Google e integridade dos quatro artefatos: §3.1 |
 
 ## 2. O Important I-1: o que a 1.1.47 fecha e o que continua com o incremento paralelo
 
@@ -73,6 +73,17 @@ requisito do I-1 está cumprido e não há perda de dado nem promessa falsa. Sug
 terceiro caminho "Escolher outro modo"/voltar a `initial` na tela de indisponibilidade, ou preservar o motivo
 específico no `RETRY`.
 
+**A cura chegou na 1.1.48 (causa medida, não suposta).** A revogação em si foi fechada: o portão de privacidade
+arma sem pausa numa página sem sinal sensível (`pixel-privacy-gate.js`, `preflight`), a captura acontece, e o
+commit terminal era recusado pela guarda **D2** (`commitTerminal` em `service-worker.js`) porque o companheiro
+durável da tentativa só existia no caminho de retomada pós-consentimento (`prepareResume`). A **tentativa
+direta** dá à captura sem consentimento o seu próprio companheiro (digesto em domínio separado, derivado só do
+`auditId`; `prepare` aceita `consentId` nulo **apenas** para o alvo anexado), criado antes de qualquer raster —
+e a guarda D2 continua **intacta**. Medições: página sem sinal sensível nos dois modos com foto → **`result` em
+~1 s** (antes: `unavailable`); caminho com sinal sensível inalterado; oráculo novo
+(`current-page-pixel-consent-free-mv3`) **reprova contra os bytes da 1.1.47**; escopo de 14 arquivos na raiz do
+pacote **verde**. Detalhes em `docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`.
+
 **O que continua aberto, com dono declarado — e o que a revisão REFUTOU sobre a causa.** A causa raiz continua
 **não medida**. A hipótese que este dossiê declarava antes ("o registro `audita:panel-bootstrap:v1:<windowId>` é
 publicado depois da suspensão") foi **refutada pela revisão final da 1.1.45**, que leu a árvore: em
@@ -117,31 +128,32 @@ de nunca editar os mesmos arquivos em paralelo. O histórico do diagnóstico, co
 
 ### 3.1 Auditoria ao vivo do pacote e integridade dos artefatos
 
-Auditoria executada **a partir da raiz extraída do pacote 1.1.47** (`/private/tmp/adv164/run147`), em
-`https://www.google.com/`, modo **sem pixels**, 17/09/2026 20:10 UTC, Chrome for Testing 152.0.7977.64,
-viewport 1266×757:
+Auditoria executada **a partir da raiz extraída do pacote 1.1.48** (`/private/tmp/adv166-run148`), em
+`https://www.google.com/`, modo **sem pixels**, 18/09/2026 02:03 UTC, Chrome for Testing 152.0.7977.64,
+viewport 1268×757:
 
 | Medida | Valor |
 | --- | --- |
-| Versão declarada no artefato | **1.1.47** |
+| Versão declarada no artefato | **1.1.48** |
 | Falhas confirmadas | **0** (0 ocorrências) |
 | Verificações sob revisão humana | **3** (4 ocorrências) |
 | Resultados positivos | **9** |
 | Checklist ainda sem conclusão | **109** |
 | Cobertura automática / índice técnico | **28,5 %** (denominador 130) / **9,0 de 10** |
-| Exportações | quatro, `complete` (HTML 339.209 B, PDF 1.006.016 B, CSV 86.142 B, JSON) |
+| Exportações | quatro, `complete` (HTML 339.209 B, PDF 1.006.127 B, CSV 86.142 B, JSON) |
 | Frases legais indevidas / aviso de estimativa | **0** "Inconformidade ao item" / aviso de anúncio estimado presente |
 | Integridade (instrumento `artcheck133.py`) | **146 itens, 146 ids únicos, 146 títulos**; 0 ids e 0 títulos ausentes no HTML **e** no PDF; notas editoriais **5/5** nos dois; **0 palavras partidas**; **0 `[redacted]`** no JSON e no HTML; 11 snippets (5.228 caracteres) |
 
-O CSV não carrega a matriz completa de 146 itens (34 ids e 36 títulos "ausentes" nele) — é o mesmo número da
-1.1.46 medida com o mesmo instrumento, e é o desenho do formato: o CSV entrega as ocorrências, não o dossiê
-item a item.
+O CSV não carrega a matriz completa de 146 itens (34 ids e 36 títulos "ausentes" nele) — é o mesmo número das
+gerações anteriores medidas com o mesmo instrumento, e é o desenho do formato: o CSV entrega as ocorrências,
+não o dossiê item a item.
 
 ## 4. O que falta para "produção", em uma frase
 
-Falta **uma** coisa funcional que não é deste incremento — entender e corrigir a **revogação** que faz o
-percurso de pixel da página atual não começar numa página sem sinal sensível, dentro de
-`authorized-audit-starter.js`, arquivo congelado do incremento paralelo (a falha **silenciosa** já está fechada, e
-a hipótese de ordenação antes declarada aqui foi **refutada** pela revisão) — e **uma** formalidade: a
-re-verificação independente deste artefato. Fora isso, o produto está construído, medido e documentado — e
-**nada foi publicado**: distribuição exige autorização específica do usuário.
+Não falta nada de funcional conhecido **neste** incremento: o percurso principal conclui nos três modos de
+evidência (o de pixel inclusive em página sem sinal sensível, que era o último bloqueio), o relatório e as
+quatro exportações funcionam, e o destaque corresponde ao elemento. Falta **uma** formalidade — a
+re-verificação independente da 1.1.48, incluindo a revisão adversarial do conserto da tentativa direta — e
+seguem **declarados** os limites de §3 e os 9 testes do incremento paralelo (outro desenho, em andamento).
+Fora isso, o produto está construído, medido e documentado — e **nada foi publicado**: distribuição exige
+autorização específica do usuário.

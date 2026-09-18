@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   createPixelAttemptDigest,
+  createPixelDirectAttemptDigest,
   createSessionPixelAttemptDigestAuthority,
 } from '../../src/core/privacy/session-url-digest.js';
 import {
@@ -66,6 +67,56 @@ test('prepares an exact non-authorizing marker and keeps raw consent out of pers
     assert.deepEqual(projected, { auditId: 'audit-1', attemptDigest: digest, pageId: null, ownershipId: null });
     return true;
   }), true);
+});
+
+test('direct attempt is attached-only, domain-separated and never carries a consent claim', async () => {
+  // A captura que o portão de privacidade autoriza SEM pausa (página sem sinal sensível) recebe uma
+  // tentativa DIRETA: `consentId` nulo, apenas para o alvo anexado, com digesto de domínio próprio.
+  // Ela não pode valer como consentimento nem servir a alvo de posse/página (URL, lote).
+  const area = sessionArea();
+  const store = Object.freeze({ name: 'store-a' });
+  const coordinator = correlationFor({ area, store });
+  const digest = await createPixelDirectAttemptDigest(
+    { auditId: 'audit-1' }, new Uint8Array(32).fill(7), webcrypto.subtle,
+  );
+  const consentDigest = await expectedAttempt('audit-1', 'B'.repeat(21) + 'g');
+  assert.notEqual(digest, consentDigest);
+  const capability = await coordinator.prepare({
+    auditId: 'audit-1', consentId: null, pageId: null, ownershipId: null, expiresAt: 200,
+  });
+  assert.deepEqual(Object.keys(capability), []);
+  const markerKey = `audita:pixel-attempt:v1:audit-1:${digest.slice('hmac-sha256:'.length)}`;
+  assert.deepEqual(area.values[markerKey], {
+    version: 1, auditId: 'audit-1', attemptDigest: digest,
+    pageId: null, ownershipId: null, preparedAt: 100, expiresAt: 200,
+  });
+  // Sem consentimento cru no estado persistido e sem marcador do caminho consentido.
+  assert.equal(JSON.stringify(area.values).includes('consentId'), false);
+  assert.equal(Object.keys(area.values).includes(
+    `audita:pixel-attempt:v1:audit-1:${consentDigest.slice('hmac-sha256:'.length)}`,
+  ), false);
+  assert.equal(await coordinator.markerMatches({
+    auditId: 'audit-1', attemptDigest: digest, pageId: null, ownershipId: null,
+  }), true);
+  assert.equal(await coordinator.markerMatches({
+    auditId: 'audit-1', attemptDigest: consentDigest, pageId: null, ownershipId: null,
+  }), false);
+  // Fronteira: tentativa direta não existe para alvo de posse/página nem com consentimento malformado.
+  for (const request of [
+    { auditId: 'audit-1', consentId: null, pageId: 'page_1', ownershipId: null, expiresAt: 200 },
+    { auditId: 'audit-1', consentId: null, pageId: null, ownershipId: 'owner_' + 'a'.repeat(22), expiresAt: 200 },
+    { auditId: 'audit-1', consentId: 'curto', pageId: null, ownershipId: null, expiresAt: 200 },
+    { auditId: '', consentId: null, pageId: null, ownershipId: null, expiresAt: 200 },
+  ]) {
+    await assert.rejects(
+      () => coordinator.prepare(request),
+      /PIXEL_ATTEMPT_CORRELATION_INVALID/u,
+    );
+  }
+  assert.equal(await coordinator.remove({
+    auditId: 'audit-1', attemptDigest: digest, pageId: null, ownershipId: null,
+  }), true);
+  assert.equal(area.values[markerKey], undefined);
 });
 
 test('fails closed for marker drift and removes only an exactly correlated marker', async () => {

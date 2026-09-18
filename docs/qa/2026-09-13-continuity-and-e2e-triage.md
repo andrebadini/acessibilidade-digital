@@ -3199,3 +3199,39 @@ reabertos) e o gate segue GREEN. Relatório em `docs/qa/revisoes/REVIEW-1.1.47.m
 — `RETRY` mantém a tela e troca o motivo específico pelo genérico, e "Iniciar nova auditoria" repete o mesmo
 modo; a recuperação existe em um clique no ícone da extensão (medida pelo revisor) e o achado entra no backlog de
 apresentação. **A causa raiz da revogação continua não medida** e o arquivo segue com o incremento paralelo.
+
+## Rodada 94 — a 1.1.48 cura o percurso de pixel: a causa foi medida e a captura sem consentimento ganha companheiro durável
+
+A 1.1.47 fechou o **silêncio** do I-1; faltava a **cura** — numa página sem sinal sensível a auditoria de pixel
+continuava sendo revogada. O usuário pediu a cura (é funcionalidade básica) e escolheu que eu **medisse primeiro
+numa cópia isolada**, sem tocar no projeto.
+
+**Causa medida ponta a ponta** (sonda instrumentada em `/private/tmp/adv165/root`, rastro `audita:diag:v1`): o
+portão de privacidade **arma sem pausa** (`preflight` em `src/background/pixel-privacy-gate.js`; `consentId`
+nulo e sem sinal detectado), a captura de pixel acontece, e no commit terminal a guarda **D2**
+(`commitTerminal` em `src/background/service-worker.js`) recusa o modelo que carrega raster porque o
+**companheiro durável da tentativa** não existe — ele só era criado no caminho de retomada pós-consentimento
+(`prepareResume`). O erro subia mascarado: `TERMINAL_COMMIT_DENIED` → `OBSERVED_RUNNER_DENIED`
+(`observed-tab-runner.js`) → `ATTACHED_AUDIT_EXECUTION_DENIED` (`run-audit.js`); a recuperação encontrava o
+trabalho em `finalizing` sem suspensão e **interrompia** a auditoria (sessão `revoked`, capacidade
+`invalidated`, sem trabalho, sem pausa). **Prova de que a guarda era o único bloqueio:** numa passagem só de
+diagnóstico ela foi desligada e o painel chegou a `result` em ~1 s nos dois modos; com ela religada e sem o
+conserto, volta a morrer. **O patch entregue não contém esse relaxamento** — a guarda segue valendo.
+
+**O conserto (tentativa direta).** A captura que o portão autoriza sem pausa passa a ter o seu próprio
+companheiro durável, criado **antes de qualquer raster**: digesto em domínio separado
+(`audita:pixel-direct-attempt:v1`, derivado só do `auditId`), marcador e capacidade iguais aos do caminho
+consentido, e `prepare` aceitando `consentId` nulo **apenas** para o alvo anexado (`pageId`/`ownershipId`
+nulos). Cinco arquivos: `session-url-digest.js`, `pixel-attempt-correlation.js`, `service-worker.js`
+(`prepareDirect`), `pixel-privacy-gate.js` (gancho opcional `onArmedDirect`) e `authorized-audit-starter.js`
+(liga o gancho e guarda a alça). Decisão e medições: `docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`.
+
+**Medições (Chrome for Testing 152.0.7977.64).** Numa página sem sinal sensível, os dois modos com foto chegam a
+**`result` em ~1 s** (antes: `unavailable`); o caminho **com** sinal sensível continua pausando, confirmando e
+concluindo; duas auditorias seguidas na mesma sessão concluem **sem marcador residual**; o oráculo novo
+(`test/e2e/current-page-pixel-consent-free-mv3.test.mjs`, classificado em `REAL_CHROME_E2E`) **reprova contra os
+bytes empacotados da 1.1.47** e passa nesta árvore; o escopo serial de 13 arquivos na raiz do pacote segue
+**59/59**; e a suíte de unidade ganhou dois testes de fronteira (domínio do digesto direto e tentativa direta
+anexada-apenas). Os testes do incremento paralelo (`sidepanel-flow-mv3`) **não** mudam: 3 passam e 9 falham
+antes e depois — eles exercitam outro desenho (auditoria numa cópia inativa, com pausa esperada) e falham por
+expectativas próprias ainda em andamento.

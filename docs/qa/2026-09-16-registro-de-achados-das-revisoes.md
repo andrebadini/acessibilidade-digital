@@ -626,3 +626,17 @@ confirmou que os dois commits posteriores (`5cab932`, `f4ca492`) são só docume
 destacado, o E2E novo, o gate e as sondas de credencial), o fechamento do painel pelo "X" do Chrome, regiões
 fora da viewport, `deviceScaleFactor ≠ 1`, impressão física e teste com pessoa leiga — e a **causa raiz da
 revogação**, que ele confirma **não ser** a ordem do registro de bootstrap.
+
+## Achado novo do autor, medido e fechado na 1.1.48 — a revogação do percurso de pixel tinha causa localizada
+
+Depois da re-verificação da 1.1.47 (I-1 **ATENDIDO**, com a revogação ainda aberta e a causa não medida), o
+usuário pediu a cura — o modo padrão do painel falhava em páginas comuns. A investigação foi feita **numa cópia
+isolada**, sem tocar no projeto, e a causa foi medida ponta a ponta (sonda instrumentada, rastro
+`audita:diag:v1`):
+
+| # | Sev. | Achado | Desfecho |
+|---|---|---|---|
+| A-1 | **Important** (produto) | Numa página **sem** sinal sensível o percurso de pixel **não concluía**: o portão de privacidade arma sem pausa (`pixel-privacy-gate.js`, `preflight`), a captura acontece, e o commit terminal é recusado pela guarda **D2** (`commitTerminal` em `service-worker.js`) porque o **companheiro durável da tentativa** não existe — ele só era criado no caminho de retomada pós-consentimento (`prepareResume`). O erro subia mascarado (`TERMINAL_COMMIT_DENIED` → `OBSERVED_RUNNER_DENIED` → `ATTACHED_AUDIT_EXECUTION_DENIED`) e a recuperação revogava a auditoria inteira | **corrigido na 1.1.48** pela **tentativa direta**: a captura autorizada sem pausa ganha companheiro próprio (digesto em domínio separado `audita:pixel-direct-attempt:v1`, derivado só do `auditId`; `prepare` aceita `consentId` nulo **apenas** para o alvo anexado), criado antes de qualquer raster. A **guarda D2 segue intacta** — a passagem que a desligou foi só de diagnóstico e **não** entrou no patch. Medições: página limpa nos dois modos com foto → **`result` em ~1 s** (antes `unavailable`); caminho com sinal sensível inalterado (pausa → confirma → `result`); duas auditorias seguidas sem marcador residual; oráculo novo `current-page-pixel-consent-free-mv3` **reprova contra os bytes da 1.1.47** e passa nesta árvore; escopo de 14 arquivos na raiz do pacote **verde** |
+| A-2 | Observação | Os testes do incremento paralelo (`test/e2e/sidepanel-flow-mv3.test.mjs`) **não** mudam com o conserto: 3 passam e 9 falham antes e depois. Eles exercitam outro desenho (auditoria numa **cópia inativa**, com pausa de consentimento esperada) e falham por expectativas próprias ainda em andamento, incluindo uma asserção de `resize` do painel | **declarado**: não é regressão deste incremento, e a decisão de desenho (página própria × cópia inativa) é do incremento dono |
+
+Documento de decisão e medição: `docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`.

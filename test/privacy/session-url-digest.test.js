@@ -6,6 +6,7 @@ import {
   SESSION_HMAC_KEY,
   createSessionHmacKeyBytes,
   createPixelAttemptDigest,
+  createPixelDirectAttemptDigest,
   createSessionPixelAttemptDigestAuthority,
   createSessionUrlDigest,
   createSessionUrlDigestManager,
@@ -60,11 +61,57 @@ test('derives a domain-separated pixel attempt digest without widening the URL m
     randomBytes: length => new Uint8Array(length).fill(9),
     now: () => 123,
   });
-  assert.deepEqual(Object.keys(authority), ['digestAttempt']);
+  assert.deepEqual(Object.keys(authority), ['digestAttempt', 'digestDirectAttempt']);
   assert.equal(
     await authority.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(22) }),
     await authority.digestAttempt({ auditId: 'audit-1', consentId: 'A'.repeat(22) }),
   );
+});
+
+test('direct attempt digest is domain-separated, audit-only and rejects malformed input', async () => {
+  // O conserto do percurso de pixel em página SEM sinal sensível dá companheiro durável à captura que o
+  // portão autoriza sem pausa. O digesto dela NÃO pode colidir com o da tentativa consentida do MESMO
+  // auditId (senão a captura sem consentimento valeria como consentida) e só aceita `auditId`.
+  const key = createSessionHmacKeyBytes(length => new Uint8Array(length).fill(7));
+  const consentida = await createPixelAttemptDigest(
+    { auditId: 'audit-1', consentId: 'A'.repeat(22) }, key, webcrypto.subtle,
+  );
+  const direta = await createPixelDirectAttemptDigest({ auditId: 'audit-1' }, key, webcrypto.subtle);
+  assert.match(direta, /^hmac-sha256:[A-Za-z0-9_-]{43}$/u);
+  assert.notEqual(direta, consentida);
+  assert.equal(direta, await createPixelDirectAttemptDigest({ auditId: 'audit-1' }, key, webcrypto.subtle));
+  assert.notEqual(direta, await createPixelDirectAttemptDigest({ auditId: 'audit-2' }, key, webcrypto.subtle));
+
+  const sessionArea = createSessionArea();
+  const authority = createSessionPixelAttemptDigestAuthority({
+    sessionArea,
+    subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(9),
+    now: () => 123,
+  });
+  assert.equal(
+    await authority.digestDirectAttempt({ auditId: 'audit-1' }),
+    await authority.digestDirectAttempt({ auditId: 'audit-1' }),
+  );
+  for (const value of [
+    { auditId: '' },
+    { auditId: 'audit-1', consentId: 'A'.repeat(22) },
+    { auditId: 'audit-1', extra: true },
+    Object.assign(Object.create({ inherited: true }), { auditId: 'audit-1' }),
+  ]) {
+    await assert.rejects(
+      () => createPixelDirectAttemptDigest(value, key, webcrypto.subtle),
+      /PIXEL_DIRECT_ATTEMPT_DIGEST_INVALID/u,
+    );
+  }
+  let getterCalls = 0;
+  const hostile = {};
+  Object.defineProperty(hostile, 'auditId', { enumerable: true, get() { getterCalls += 1; return 'audit-1'; } });
+  await assert.rejects(
+    () => authority.digestDirectAttempt(hostile),
+    /PIXEL_DIRECT_ATTEMPT_DIGEST_INVALID/u,
+  );
+  assert.equal(getterCalls, 0);
 });
 
 test('pixel attempt digest rejects malformed or accessor-bearing audit-consent pairs before HMAC', async () => {

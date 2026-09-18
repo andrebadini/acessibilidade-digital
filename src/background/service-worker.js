@@ -574,6 +574,30 @@ export function createPixelAttemptLifecycleV1(raw) {
     return createHandle(capability, correlation, request.consentId);
   }
 
+  // TENTATIVA DIRETA (conserto do percurso de pixel em página SEM sinal sensível): a captura que o portão
+  // autoriza sem pausa precisa do MESMO companheiro durável da captura consentida — o marcador de tentativa
+  // que amarra o raster à auditoria. Sem consentimento não há `consentId`; o digesto vem do domínio próprio
+  // (`audita:pixel-direct-attempt:v1`) e a guarda D2 do commit terminal segue INTACTA.
+  async function prepareDirect(rawRequest) {
+    const request = exact(rawRequest, ['auditId', 'expiresAt']);
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
+      !Number.isSafeInteger(request.expiresAt) || request.expiresAt < 0) {
+      throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
+    }
+    const capability = await input.attemptCorrelation.prepare({
+      auditId: request.auditId, consentId: null, pageId: null, ownershipId: null,
+      expiresAt: request.expiresAt,
+    });
+    const attemptDigest = await input.attemptAuthority.digestDirectAttempt({ auditId: request.auditId });
+    const correlation = Object.freeze({
+      auditId: request.auditId, attemptDigest, pageId: null, ownershipId: null,
+    });
+    if (await input.attemptCorrelation.markerMatches(correlation) !== true) {
+      throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
+    }
+    return createHandle(capability, correlation, null);
+  }
+
   async function classifyCore(rawRequest) {
     const compact = exact(rawRequest, ['auditId', 'consentId']);
     const correlated = exact(rawRequest, ['auditId', 'consentId', 'pageId', 'ownershipId']);
@@ -752,7 +776,7 @@ export function createPixelAttemptLifecycleV1(raw) {
     return true;
   }
 
-  return Object.freeze({ prepareResume, commitTerminal, classify, cleanup });
+  return Object.freeze({ prepareResume, prepareDirect, commitTerminal, classify, cleanup });
 }
 
 export function createExactUrlAuditResourceCleanerV1(raw) {

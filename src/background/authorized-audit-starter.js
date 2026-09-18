@@ -2339,11 +2339,25 @@ export function createAuthorizedAuditStarter(input) {
               createdAt: postGrant, updatedAt: postGrant,
             });
             await writeConfirmed(sessionArea, ACTIVE_AUDIT_JOB_KEY, active, activeRecord, 'ACTIVE_AUDIT_JOB_DENIED');
+            // A tentativa DIRETA é preparada quando o portão ARMA sem pausa (página sem sinal sensível):
+            // é o companheiro durável que a guarda D2 exige para gravar o raster. O registro `liveRecord`
+            // só existe depois da criação do portão, então a ligação passa por esta variável.
+            let liveRecord = null;
             const privacyGate = capturePolicy.mode === 'no-pixels' ? null : createPixelPrivacyGateV1({
               pixelState, consentId: null, authorityExpiresAt: grant.expiresAt,
               commitClock: pixelCommitClock, async afterPixels() {},
+              async onArmedDirect() {
+                const attemptHandle = await pixelAttemptLifecycle.prepareDirect({
+                  auditId: args.auditId, expiresAt: grant.expiresAt,
+                });
+                if (!attemptHandle || typeof attemptHandle !== 'object' ||
+                  Reflect.ownKeys(attemptHandle).length !== 0 || !liveRecord) {
+                  throw new Error('PIXEL_ATTEMPT_PREPARE_DENIED');
+                }
+                liveRecord.attemptHandle = attemptHandle;
+              },
             });
-            const liveRecord = {
+            liveRecord = {
               active, controller, grant, capturePolicy, privacyGate, consentId: null, targetLock: lock,
               externallyInvalidated: false, liquidationReason: null,
               committed: null, completion: null, attemptHandle: null,

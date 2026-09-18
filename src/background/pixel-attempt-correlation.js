@@ -1,4 +1,4 @@
-import { resolveSessionPixelAttemptDigestAuthorityV1 } from '../core/privacy/session-url-digest.js';
+import { resolveSessionPixelAttemptDigestAuthorityV1, resolveSessionPixelDirectAttemptDigestAuthorityV1 } from '../core/privacy/session-url-digest.js';
 
 const MARKER_PREFIX = 'audita:pixel-attempt:v1:';
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
@@ -114,6 +114,9 @@ export function createPixelAttemptCorrelationV1(raw) {
   const digestAttempt = input
     ? resolveSessionPixelAttemptDigestAuthorityV1(input.attemptAuthority, input.sessionArea)
     : null;
+  const resolveDirectDigest = input
+    ? resolveSessionPixelDirectAttemptDigestAuthorityV1(input.attemptAuthority, input.sessionArea)
+    : null;
   if (!input || !binding || binding.sessionArea !== input.sessionArea ||
     typeof input.sessionArea?.get !== 'function' || typeof input.sessionArea?.set !== 'function' ||
     typeof input.sessionArea?.remove !== 'function' || typeof digestAttempt !== 'function' ||
@@ -150,9 +153,14 @@ export function createPixelAttemptCorrelationV1(raw) {
 
   const prepare = async value => {
     const request = exact(value, ['auditId', 'consentId', 'pageId', 'ownershipId', 'expiresAt']);
-    if (!request || !AUDIT_ID.test(request.auditId ?? '') || !CONSENT_ID.test(request.consentId ?? '') ||
+    // A tentativa DIRETA (captura sem consentimento, em página sem sinal sensível) traz `consentId` NULO:
+    // o digesto dela vem do domínio próprio e ela só existe para o alvo anexado (sem página/alça de posse).
+    const direta = request?.consentId === null;
+    if (!request || !AUDIT_ID.test(request.auditId ?? '') ||
+      !(direta ? resolveDirectDigest !== null : CONSENT_ID.test(request.consentId ?? '')) ||
       (request.pageId !== null && !ID.test(request.pageId ?? '')) ||
       (request.ownershipId !== null && !ID.test(request.ownershipId ?? '')) ||
+      (direta && (request.pageId !== null || request.ownershipId !== null)) ||
       !Number.isSafeInteger(request.expiresAt)) throw new TypeError('PIXEL_ATTEMPT_CORRELATION_INVALID');
 
     return serialize(input.sessionArea, request.auditId, async () => {
@@ -160,7 +168,9 @@ export function createPixelAttemptCorrelationV1(raw) {
       if (!Number.isSafeInteger(preparedAt) || preparedAt < 0 || request.expiresAt <= preparedAt) {
         throw new TypeError('PIXEL_ATTEMPT_CORRELATION_INVALID');
       }
-      const attemptDigest = await digestAttempt({ auditId: request.auditId, consentId: request.consentId });
+      const attemptDigest = direta
+        ? await resolveDirectDigest({ auditId: request.auditId })
+        : await digestAttempt({ auditId: request.auditId, consentId: request.consentId });
       const graph = marker({
         version: 1, auditId: request.auditId, attemptDigest, pageId: request.pageId,
         ownershipId: request.ownershipId, preparedAt, expiresAt: request.expiresAt,

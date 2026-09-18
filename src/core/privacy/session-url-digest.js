@@ -69,9 +69,37 @@ export function createSessionPixelAttemptDigestAuthority({ sessionArea, subtle, 
       return createPixelAttemptDigest(validated, keyBytes, subtle);
     });
   };
-  const authority = Object.freeze({ digestAttempt });
-  PIXEL_ATTEMPT_AUTHORITIES.set(authority, Object.freeze({ sessionArea, digestAttempt }));
+  const digestDirectAttempt = value => {
+    if (coordinator.destroyed) return Promise.reject(new Error('HMAC_MANAGER_DESTROYED'));
+    const validated = readDataRecord(value, PIXEL_DIRECT_ATTEMPT_KEYS);
+    if (!validated || !AUDIT_ID.test(validated.auditId ?? '')) {
+      return Promise.reject(new TypeError('PIXEL_DIRECT_ATTEMPT_DIGEST_INVALID'));
+    }
+    return enqueueSessionKeyOperation(coordinator, async () => {
+      const keyBytes = await loadOrCreateSessionKey({ sessionArea, randomBytes, now });
+      return createPixelDirectAttemptDigest(validated, keyBytes, subtle);
+    });
+  };
+  const authority = Object.freeze({ digestAttempt, digestDirectAttempt });
+  PIXEL_ATTEMPT_AUTHORITIES.set(authority, Object.freeze({ sessionArea, digestAttempt, digestDirectAttempt }));
   return authority;
+}
+
+const PIXEL_DIRECT_ATTEMPT_DOMAIN = 'audita:pixel-direct-attempt:v1';
+const PIXEL_DIRECT_ATTEMPT_KEYS = ['auditId'];
+
+export async function createPixelDirectAttemptDigest(value, sessionKey, subtle) {
+  const pair = readDataRecord(value, PIXEL_DIRECT_ATTEMPT_KEYS);
+  if (!pair || !AUDIT_ID.test(pair.auditId ?? '')) {
+    throw new TypeError('PIXEL_DIRECT_ATTEMPT_DIGEST_INVALID');
+  }
+  const material = `${PIXEL_DIRECT_ATTEMPT_DOMAIN}\u0000${pair.auditId.length}:${pair.auditId}`;
+  return signHmac(new TextEncoder().encode(material), sessionKey, subtle);
+}
+
+export function resolveSessionPixelDirectAttemptDigestAuthorityV1(authority, sessionArea) {
+  const metadata = authority && typeof authority === 'object' ? PIXEL_ATTEMPT_AUTHORITIES.get(authority) : null;
+  return metadata?.sessionArea === sessionArea ? metadata.digestDirectAttempt ?? null : null;
 }
 
 export function resolveSessionPixelAttemptDigestAuthorityV1(authority, sessionArea) {

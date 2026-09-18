@@ -317,18 +317,22 @@ function settleWithoutRaster(metadata) {
 }
 
 export function createPixelPrivacyGateV1(input) {
-  const args = exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels']);
+  // O gancho da tentativa direta é OPCIONAL: só o caminho anexado o passa; as demais construções do portão
+  // (URL, lote, retomada) mantêm exatamente as cinco chaves de antes.
+  const args = exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels']) ??
+    exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels', 'onArmedDirect']);
   const pause = args && callable(args.pixelState, 'pause');
   const gateRunnerStart = args && callable(args.pixelState, 'gateRunnerStart');
   if (!args || !pause || !gateRunnerStart ||
     (args.consentId !== null && (typeof args.consentId !== 'string' || !CONSENT_ID.test(args.consentId))) ||
     !validInteger(args.authorityExpiresAt) || !isPixelCommitClockV1(args.commitClock) ||
-    typeof args.afterPixels !== 'function') throw denied();
+    typeof args.afterPixels !== 'function' ||
+    (Object.hasOwn(args, 'onArmedDirect') && typeof args.onArmedDirect !== 'function')) throw denied();
   const metadata = {
     auditId: null, target: null, policy: null, state: 'created', pipelineConsumed: false,
     consentId: args.consentId, authorityExpiresAt: args.authorityExpiresAt,
     commitExpiresAt: null, highWater: -1, commitClock: args.commitClock,
-    pause, gateRunnerStart, afterPixels: args.afterPixels,
+    pause, gateRunnerStart, afterPixels: args.afterPixels, onArmedDirect: args.onArmedDirect ?? null,
   };
   const gate = Object.freeze({
     preflight: async request => {
@@ -355,6 +359,12 @@ export function createPixelPrivacyGateV1(input) {
         promoteSuspensionTime(metadata, canonicalSuspension);
         metadata.state = 'paused';
         return Object.freeze({ status: 'privacy-paused', signals: captured.signals });
+      }
+      // Sem sinal sensível não há pausa: a captura segue. O gancho prepara o companheiro durável da
+      // tentativa DIRETA antes de qualquer raster — é o que a guarda D2 exige no commit terminal.
+      if (metadata.consentId === null && metadata.onArmedDirect !== null) {
+        try { await metadata.onArmedDirect({ auditId: captured.auditId, target: captured.target, policy: captured.policy }); }
+        catch { metadata.state = 'failed'; throw denied(); }
       }
       metadata.state = 'armed';
       return Object.freeze({ status: 'armed' });

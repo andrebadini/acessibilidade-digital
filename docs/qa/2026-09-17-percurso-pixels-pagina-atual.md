@@ -299,3 +299,28 @@ invertida. O que a revisão mediu no lugar: sem sinal sensível a auditoria é *
 consertar precisa medir a **revogação**, não a ordem do bootstrap. O arquivo é do incremento paralelo. O que a
 1.1.47 mudou é a consequência visível: uma página sem sinal sensível em modo de pixel já **não** volta ao neutro
 em silêncio — o painel diz o que aconteceu e aponta o modo sem pixels.
+
+
+## CONSERTO DEFINITIVO DE 17/09/2026 (versão 1.1.48) — a causa foi medida e o percurso de pixel CONCLUI em página sem sinal sensível
+
+A 1.1.47 fechou o **silêncio** (a tela passou a explicar). Faltava a **cura**: numa página sem sinal sensível a
+auditoria continuava sendo revogada. A causa foi medida ponta a ponta numa cópia isolada instrumentada
+(`/private/tmp/adv165/root`; o repositório não foi tocado): o portão de privacidade **arma sem pausa**
+(`preflight` em `src/background/pixel-privacy-gate.js`, `consentId` nulo e sem sinal detectado), a captura de
+pixel acontece, e no commit terminal a guarda **D2** (`commitTerminal` em `src/background/service-worker.js`)
+recusa o modelo que carrega raster porque o **companheiro durável da tentativa** não existe — ele só era criado
+no caminho de retomada pós-consentimento (`prepareResume`). O erro subia mascarado
+(`TERMINAL_COMMIT_DENIED` → `OBSERVED_RUNNER_DENIED` → `ATTACHED_AUDIT_EXECUTION_DENIED`) e a recuperação
+interrompia a auditoria inteira.
+
+**O conserto (1.1.48):** a captura autorizada sem pausa ganha o seu **próprio** companheiro durável — a
+**tentativa direta**, com digesto em domínio separado (`audita:pixel-direct-attempt:v1`, derivado só do
+`auditId`), criada quando o portão arma sem pausa e **antes de qualquer raster**. A guarda D2 continua
+**intacta**: nenhum raster entra sem companheiro. Decisão e medições completas em
+`docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`.
+
+**Medições (Chrome for Testing 152.0.7977.64):** numa página sem sinal sensível, `full-evidence` e
+`element-only` chegam a **`result` em ~1 s** (antes: `unavailable`); o caminho **com** sinal sensível continua
+pausando, confirmando e concluindo; duas auditorias seguidas na mesma sessão concluem sem marcador residual; o
+oráculo novo (`test/e2e/current-page-pixel-consent-free-mv3.test.mjs`) **reprova contra os bytes da 1.1.47** e
+passa nesta árvore; o escopo serial de 13 arquivos segue **59/59**.
