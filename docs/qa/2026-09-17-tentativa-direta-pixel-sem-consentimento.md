@@ -92,6 +92,29 @@ aposentada não é mais legível (`markerMatches` falso), que o commit consentid
 armar e o primeiro raster, a sequência é `['armed', 'retired', 'pause']`; na pausa imediata do `preflight`, é
 `['pause']` (sem armar não há direta a aposentar).
 
+## 3.2 Achado A-2 da revisão (Important, bloqueou a versão) — a fiação real do gancho
+
+A revisão adversarial do conserto mediu, com os módulos reais e depois em Chrome, que a **assinatura da
+aposentadoria estava trocada**: o starter chamava `pixelAttemptLifecycle.retireDirect({ auditId })` (objeto) e o
+ciclo de vida define `retireDirectAttempt(auditId)` esperando **string**. Com o objeto, o digesto recebia
+`{auditId: {auditId}}` e rejeitava (`PIXEL_DIRECT_ATTEMPT_DIGEST_INVALID`); o gancho do portão lançava, o portão
+negava a pausa e o desfecho no cenário do A-1 era **pior que o da 1.1.47**: em vez de pausar e concluir depois do
+consentimento, a auditoria era **revogada sem oferecer consentimento**, deixando um marcador residual.
+
+**Por que os testes da versão não pegaram:** cada um dublava um lado da fronteira — o teste do portão usa
+espiões, o do starter substitui o ciclo de vida (`retireDirect() { return true; }`) e o de terminal-commit
+exercita a colisão pela **rede de segurança** do `prepareResume` (que recebe a string crua e por isso
+funcionava). Nenhum cruzava a fiação real do gancho.
+
+**Fechamento:** a chamada passou a `retireDirect(args.auditId)` (uma linha) e nasceu o teste que cruza a fiação
+de ponta a ponta — `test/e2e/current-page-pixel-direct-retire-mv3.test.mjs`, em `element-only` (o primeiro raster
+de **elemento** vem depois da seleção; no `full-evidence` o raster de página inteira é cedo demais e a injeção
+chega tarde — medido durante o desenvolvimento), com a fixture da sonda do revisor (240 controles, página alta):
+a tentativa direta nasce no armar (observada de fora por `chrome.storage.session`), a página injeta o campo de
+senha depois disso, a pausa tem de aparecer, o consentimento leva a `result` e **zero marcadores** sobram.
+**Não vacuidade medida:** contra os bytes `c519a33b…` (sem o conserto do A-2) o teste **reprova em 3,4 s** com
+`{"tela":"unavailable","confirma":false}`; contra a árvore corrigida passa em ~50 s.
+
 ## 4. Limites declarados
 
 - A tentativa direta **não** é consentimento: ela não cria suspensão, não marca a sessão como `privacy-paused`

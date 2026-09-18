@@ -1,7 +1,7 @@
 # Prontidão para produção — Audita Acessibilidade 1.1.48
 
 Data: 17/09/2026. Artefato: `release/audita-acessibilidade-1.1.48.zip`, digest
-`c519a33be4136eed1d5df8a2e04d1d31407f5be4585722743536648d73482ba4`, 199 arquivos, versão `1.1.48` no
+`7da8b3f02288c58776fbb3b8ecf6681aa5041662fd6cd7fd8bdd4e9d7b281689`, 199 arquivos, versão `1.1.48` no
 manifesto. Chrome for Testing 152.0.7977.64, um Chrome por vez, `--test-concurrency=1`.
 
 Esta é a versão que responde à **revisão integrada final da 1.1.45**

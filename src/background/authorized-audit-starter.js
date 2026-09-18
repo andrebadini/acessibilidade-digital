@@ -2349,7 +2349,7 @@ export function createAuthorizedAuditStarter(input) {
               // A página pode revelar sinal sensível DEPOIS de o portão armar: aí a captura pausa e a
               // tentativa direta precisa sair de cena ANTES de a consentida entrar (achado A-1).
               async onRetireDirect() {
-                if (await pixelAttemptLifecycle.retireDirect({ auditId: args.auditId }) !== true) {
+                if (await pixelAttemptLifecycle.retireDirect(args.auditId) !== true) {
                   throw new Error('PIXEL_ATTEMPT_PREPARE_DENIED');
                 }
                 if (liveRecord) liveRecord.attemptHandle = null;
