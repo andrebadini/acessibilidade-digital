@@ -3302,5 +3302,12 @@ em que a máquina do usuário estava com trabalho pesado próprio (Python a ~430
 ~8–10) e os E2E de credencial estouraram em massa por tempo limite (~121 s cada, o tempo limite do próprio
 teste) — os mesmos arquivos que passaram **61/61** e **59/59** em janelas quietas. O usuário pediu, além disso,
 que os testes **não abram janela**: toda a bateria passou a rodar com o shim em `--headless=new`
-(`/private/tmp/adv169/chrome-quiet`). A re-medição isolada do escopo e a auditoria ao vivo nos bytes finais
-ficaram agendadas para a primeira janela quieta.
+(`/private/tmp/adv169/chrome-quiet`). A re-medição isolada do escopo e a auditoria ao vivo nos bytes finais **não** foram
+forçadas nessa condição: um monitor chegou a esperar 12 minutos por carga < 3 (nunca veio; a carga oscilou
+entre 6,3 e 10,6) e foi encerrado. O que sustenta os bytes finais é a **medição independente do revisor** sobre
+eles (jornada nos dois modos, caminho consentido, cancelamento, `url-pixel-consent-mv3` 10/10, o E2E novo 1/1 com
+não vacuidade, D2 10/10 e 5/5, proveniência reconstruída), mais, do lado do autor sobre a árvore idêntica ao
+pacote: **gate GREEN**, **unidade/integração 4.187/4.186/0**, o E2E novo verde e reprovando contra os bytes
+anteriores, e a bateria completa anterior (suíte 4.231/4.230/0 na fase paralela, escopo 61/61 no zip e auditoria
+ao vivo 1.1.48 com 0 falhas confirmadas, 108 no checklist, 29,2 %, 9,0/10 e integridade 146/146) medida nos bytes
+`c519a33b…`, cuja única diferença para os finais é a linha revisada do A-2.
