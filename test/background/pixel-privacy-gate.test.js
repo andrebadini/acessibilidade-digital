@@ -136,6 +136,65 @@ async function rasterFixture({
   return { boundary, gate, cleanup };
 }
 
+// ACHADO A-1 DA REVISÃO DO CONSERTO, no lado do portão: quando a página revela sinal sensível DEPOIS de o
+// portão armar sem pausa (a re-sondagem do limite de raster detecta), a tentativa DIRETA precisa ser
+// aposentada ANTES de a pausa ser criada — senão o marcador direto convive com o consentido e a auditoria
+// consentida morre. O portão chama `onRetireDirect` antes de `pixelState.pause` nos dois pontos de pausa.
+test('arming without signals prepares the direct attempt, and a later pause retires it before pausing', async () => {
+  const sequence = [];
+  const gate = createPixelPrivacyGateV1({
+    pixelState: {
+      async pause() { sequence.push('pause'); return suspension(); },
+      async gateRunnerStart() { throw new Error('unexpected runner'); },
+    },
+    consentId: null, authorityExpiresAt: 1_900_000_000_000, commitClock: commitClock(),
+    async afterPixels() { sequence.push('after'); },
+    async onArmedDirect() { sequence.push('armed'); },
+    async onRetireDirect() { sequence.push('retired'); },
+  });
+  assert.equal(
+    (await gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: EMPTY })).status,
+    'armed',
+  );
+  assert.deepEqual(sequence, ['armed'], 'sem sinal sensível o portão arma e prepara a tentativa direta');
+  // Sinal aparece entre o armar e o primeiro raster: a re-sondagem pausa — e aposenta a direta ANTES.
+  const boundary = createPixelRasterBoundaryV1({
+    auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, privacyGate: gate,
+    probeDocumentIdentity: async () => PROOF,
+    probeSensitiveCaptureSignals: async () => SENSITIVE,
+    signal: new AbortController().signal,
+    captureFullPage: async () => { throw new Error('raster não pode começar depois da pausa'); },
+    captureElement: async () => { throw new Error('raster não pode começar depois da pausa'); },
+  });
+  // A pausa interrompe o raster (é o sinal que o pipeline converte em pausa de consentimento).
+  await assert.rejects(() => boundary.captureFullPage(), /PIXEL_PRIVACY_GATE_DENIED/u);
+  assert.deepEqual(sequence, ['armed', 'retired', 'pause'], 'a direta sai de cena antes da pausa');
+});
+
+test('a pause at preflight does not retire anything (the gate never armed)', async () => {
+  const sequence = [];
+  const gate = createPixelPrivacyGateV1({
+    pixelState: {
+      async pause() { sequence.push('pause'); return suspension(); },
+      async gateRunnerStart() { throw new Error('unexpected runner'); },
+    },
+    consentId: null, authorityExpiresAt: 1_900_000_000_000, commitClock: commitClock(),
+    async afterPixels() { sequence.push('after'); },
+    async onArmedDirect() { sequence.push('armed'); },
+    async onRetireDirect() { sequence.push('retired'); },
+  });
+  const preflight = await gate.preflight({
+    auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE,
+  });
+  assert.equal(preflight.status, 'privacy-paused');
+  assert.deepEqual(sequence, ['pause'], 'sem armar não há tentativa direta a aposentar');
+});
+
+test('a gate without the direct-attempt hooks keeps the exact five-key shape', async () => {
+  const { gate } = fixture();
+  assert.equal(isPixelPrivacyGateV1(gate), true);
+});
+
 test('pixel raster boundary is opaque and rejects hostile factory envelopes before effects', async () => {
   let effects = 0;
   const { gate } = fixture();

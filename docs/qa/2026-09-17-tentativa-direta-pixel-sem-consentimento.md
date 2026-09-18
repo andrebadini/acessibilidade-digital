@@ -61,6 +61,25 @@ aceito para alvo de posse/página (URL, lote).
 As sondas e os registros brutos estão em `/private/tmp/adv165/` (`conserto-A.patch`, `conserto-A.py`,
 `LEIA-ME-conserto-A.md`, `limpo/`, `root/`, `probe-*.mjs`, `*.log`).
 
+## 3.1 Achado A-1 da revisão adversarial do conserto (fechado antes de a versão sair)
+
+A revisão independente do patch mediu, com os módulos reais, uma **colisão de marcadores**: se a página
+**revelar sinal sensível depois** de o portão armar sem pausa (SPA que renderiza o formulário tarde, modal de
+login), o caminho consentido cria o marcador dele **além** do direto — e `scanMarker` fica `blocked` com dois
+marcadores no mesmo `auditId`, o que mataria a auditoria já consentida e deixaria resíduo até o fim da sessão
+(a direção era segura — nenhum raster sem companheiro, nenhum consentimento burlado —, mas era regressão
+funcional: a 1.1.47 conclui nesse cenário).
+
+**Fechamento:** `prepareResume` **aposenta a tentativa direta antes** de preparar a consentida
+(`retireDirectAttempt`, em `service-worker.js`, só para o alvo anexado — é onde a direta existe). O digesto
+direto é determinístico a partir do `auditId`, então a aposentadoria é sempre possível e é confirmada pela
+leitura de ausência; se a confirmação falhar, a operação é recusada em vez de seguir.
+
+**Prova com dentes:** `test/background/pixel-attempt-terminal-commit.test.js` reproduz a sequência exata
+(direta → consentida no mesmo `auditId`) e verifica que fica **um** marcador — o consentido —, que a direta
+aposentada não é mais legível (`markerMatches` falso), que o commit consentido conclui e que a limpeza
+`post-finish` deixa **zero** marcadores. Com a aposentadoria desligada por mutação, o mesmo teste **reprova**.
+
 ## 4. Limites declarados
 
 - A tentativa direta **não** é consentimento: ela não cria suspensão, não marca a sessão como `privacy-paused`

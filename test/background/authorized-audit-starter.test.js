@@ -562,6 +562,9 @@ function dependencyFixture({
   };
   dependencies.pixelAttemptLifecycle = {
     async prepareResume() { return Object.freeze(Object.create(null)); },
+    // Tentativa DIRETA (captura autorizada sem pausa) e sua aposentadoria quando a pausa chega depois.
+    async prepareDirect() { return Object.freeze(Object.create(null)); },
+    async retireDirect() { return true; },
     async commitTerminal(value) {
       const { attemptHandle: _attemptHandle, ...terminal } = value;
       const committed = await dependencies.commitTerminalAudit(terminal);
@@ -698,6 +701,8 @@ function capturePolicyGateHarness() {
     schedulePixelExpiry: touched('schedulePixelExpiry'),
     pixelAttemptLifecycle: {
       prepareResume: touched('pixelAttemptLifecycle.prepareResume'),
+      prepareDirect: touched('pixelAttemptLifecycle.prepareDirect'),
+      retireDirect: touched('pixelAttemptLifecycle.retireDirect'),
       commitTerminal: touched('pixelAttemptLifecycle.commitTerminal'),
       classify: touched('pixelAttemptLifecycle.classify'),
       cleanup: touched('pixelAttemptLifecycle.cleanup'),
@@ -2816,6 +2821,8 @@ test('single-URL consent is one-shot and resumes the retained owner without navi
   const attemptHandle = Object.freeze(Object.create(null));
   dependencies.pixelAttemptLifecycle = Object.freeze({
     async prepareResume(value) { attempts.push(['prepare', structuredClone(value)]); return attemptHandle; },
+    async prepareDirect(value) { attempts.push(['prepare-direct', structuredClone(value)]); return attemptHandle; },
+    async retireDirect(value) { attempts.push(['retire-direct', structuredClone(value)]); return true; },
     async commitTerminal(value) {
       attempts.push(['commit', value.attemptHandle]);
       return dependencies.commitTerminalAudit(value);
@@ -2997,6 +3004,8 @@ test('resumes one paused pixel audit exactly once in the same target and finishe
   const attemptHandle = Object.freeze(Object.create(null));
   dependencies.pixelAttemptLifecycle = Object.freeze({
     async prepareResume(value) { pixelAttemptCalls.push(['prepare', value]); return attemptHandle; },
+    async prepareDirect(value) { pixelAttemptCalls.push(['prepare-direct', value]); return attemptHandle; },
+    async retireDirect(value) { pixelAttemptCalls.push(['retire-direct', value]); return true; },
     async commitTerminal(value) {
       pixelAttemptCalls.push(['commit', value.attemptHandle]);
       return dependencies.commitTerminalAudit(value);
@@ -3142,6 +3151,8 @@ test('a failed running-resume publication compensates the claimed attempt before
         attemptState = 'prepared';
         return Object.freeze(Object.create(null));
       },
+      async prepareDirect() { attemptState = 'prepared'; return Object.freeze(Object.create(null)); },
+      async retireDirect() { attemptState = 'absent'; return true; },
       async commitTerminal() { throw new Error('TERMINAL_COMMIT_MUST_NOT_RUN'); },
       async classify() { return Object.freeze({ state: attemptState, handle: null }); },
       async cleanup(value) {

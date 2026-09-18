@@ -320,20 +320,34 @@ export function createPixelPrivacyGateV1(input) {
   // O gancho da tentativa direta é OPCIONAL: só o caminho anexado o passa; as demais construções do portão
   // (URL, lote, retomada) mantêm exatamente as cinco chaves de antes.
   const args = exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels']) ??
-    exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels', 'onArmedDirect']);
+    exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels', 'onArmedDirect']) ??
+    exact(input, ['pixelState', 'consentId', 'authorityExpiresAt', 'commitClock', 'afterPixels',
+      'onArmedDirect', 'onRetireDirect']);
   const pause = args && callable(args.pixelState, 'pause');
   const gateRunnerStart = args && callable(args.pixelState, 'gateRunnerStart');
   if (!args || !pause || !gateRunnerStart ||
     (args.consentId !== null && (typeof args.consentId !== 'string' || !CONSENT_ID.test(args.consentId))) ||
     !validInteger(args.authorityExpiresAt) || !isPixelCommitClockV1(args.commitClock) ||
     typeof args.afterPixels !== 'function' ||
-    (Object.hasOwn(args, 'onArmedDirect') && typeof args.onArmedDirect !== 'function')) throw denied();
+    (Object.hasOwn(args, 'onArmedDirect') && typeof args.onArmedDirect !== 'function') ||
+    (Object.hasOwn(args, 'onRetireDirect') && typeof args.onRetireDirect !== 'function')) throw denied();
   const metadata = {
     auditId: null, target: null, policy: null, state: 'created', pipelineConsumed: false,
     consentId: args.consentId, authorityExpiresAt: args.authorityExpiresAt,
     commitExpiresAt: null, highWater: -1, commitClock: args.commitClock,
     pause, gateRunnerStart, afterPixels: args.afterPixels, onArmedDirect: args.onArmedDirect ?? null,
+    onRetireDirect: args.onRetireDirect ?? null,
   };
+  // A tentativa DIRETA (captura autorizada sem pausa) deixa de valer no instante em que a pausa por
+  // consentimento é criada: a página pode ter revelado sinal sensível DEPOIS de o portão armar (achado A-1 da
+  // revisão do conserto). Sem aposentá-la, os dois marcadores conviveriam no mesmo auditId e a auditoria
+  // consentida morreria (`scanMarker` fechado à falha) — inclusive no cancelamento, antes de qualquer retomada.
+  const retireDirectBeforePause = async captured => {
+    if (metadata.onArmedDirect === null || metadata.onRetireDirect === null) return;
+    try { await metadata.onRetireDirect({ auditId: captured.auditId, target: captured.target, policy: captured.policy }); }
+    catch { metadata.state = 'failed'; throw denied(); }
+  };
+
   const gate = Object.freeze({
     preflight: async request => {
       if (metadata.state !== 'created') throw denied();
@@ -341,6 +355,8 @@ export function createPixelPrivacyGateV1(input) {
       metadata.auditId = captured.auditId; metadata.target = captured.target; metadata.policy = captured.policy;
       metadata.state = 'preflighting';
       if (metadata.consentId === null && captured.signals.detected) {
+        // Sem armar não existe tentativa direta: a aposentadoria acontece no primeiro raster (abaixo),
+        // que é o único ponto de pausa DEPOIS de o portão ter armado.
         let suspension;
         try {
           suspension = await metadata.pause({
@@ -381,6 +397,7 @@ export function createPixelPrivacyGateV1(input) {
       }
       if (metadata.consentId === null) {
         if (captured.signals.detected) {
+          await retireDirectBeforePause(captured);
           let suspension;
           try {
             suspension = await metadata.pause({

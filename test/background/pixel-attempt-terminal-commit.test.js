@@ -59,7 +59,13 @@ function rasterCount(model) {
 function sessionArea() {
   const values = {};
   return {
-    async get(key) { return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {}; },
+    values,
+    // `chrome.storage.session.get(null)` devolve a área inteira: o `scanMarker` do ciclo de vida depende
+    // disso para achar o marcador por prefixo de auditId (é o caminho da tentativa DIRETA, sem consentId).
+    async get(key) {
+      if (key === null) return structuredClone(values);
+      return Object.hasOwn(values, key) ? { [key]: structuredClone(values[key]) } : {};
+    },
     async set(entries) { Object.assign(values, structuredClone(entries)); },
     async remove(key) { delete values[key]; },
   };
@@ -92,6 +98,70 @@ async function lifecycleFixture(store) {
   });
   return { lifecycle, handle, coordinator };
 }
+
+async function bareLifecycle(store) {
+  const area = sessionArea();
+  const binding = createPixelAttemptStoreBindingV1(store, area);
+  const authority = createSessionPixelAttemptDigestAuthority({
+    sessionArea: area, subtle: webcrypto.subtle,
+    randomBytes: length => new Uint8Array(length).fill(9), now: () => 10,
+  });
+  const coordinator = createPixelAttemptCorrelationV1({
+    sessionArea: area, attemptAuthority: authority, now: () => 100, storeBinding: binding,
+  });
+  const lifecycle = createPixelAttemptLifecycleV1({
+    sessionArea: area,
+    auditStore: store,
+    attemptAuthority: authority,
+    attemptCorrelation: coordinator,
+    modelNow: () => '2026-08-29T12:00:00.000Z',
+  });
+  const markers = () => Object.keys(area.values ?? {}).filter(key => key.startsWith('audita:pixel-attempt:v1:'));
+  return { lifecycle, area, markers, coordinator, authority };
+}
+
+// ACHADO A-1 DA REVISÃO DO CONSERTO: a página pode revelar sinal sensível DEPOIS de o portão armar sem pausa
+// (SPA que renderiza o formulário tarde, modal de login). Nesse caso existem, em sequência, a tentativa DIRETA
+// e a CONSENTIDA para o MESMO auditId — e `scanMarker` fica `blocked` com dois marcadores, o que mataria a
+// auditoria já consentida e deixaria resíduo. A consentida só entra depois de a direta sair.
+test('a tentativa direta é aposentada quando o consentimento chega depois (achado A-1)', async () => {
+  const store = createInMemoryAuditStore();
+  const auditId = 'audit-terminal-correlation';
+  const graph = await terminalGraph(auditId);
+  assert.ok(rasterCount(graph.model) > 0, 'a fixture precisa CONTER raster, senão o caso é vazio');
+  const { lifecycle, markers, coordinator, authority } = await bareLifecycle(store);
+  const direta = await lifecycle.prepareDirect({ auditId, expiresAt: 200 });
+  assert.deepEqual(Object.keys(direta), []);
+  assert.equal(markers().length, 1);
+  const digestoDireto = (await authority.digestDirectAttempt({ auditId })).slice('hmac-sha256:'.length);
+  const digestoConsentido = (await authority.digestAttempt({ auditId, consentId: CONSENT_ID })).slice('hmac-sha256:'.length);
+  assert.equal(markers()[0], `audita:pixel-attempt:v1:${auditId}:${digestoDireto}`);
+  assert.equal(
+    (await lifecycle.classify({ auditId, consentId: null, pageId: null, ownershipId: null })).state, 'prepared',
+  );
+  const consentida = await lifecycle.prepareResume({
+    auditId, consentId: CONSENT_ID, pageId: null, ownershipId: null, expiresAt: 200,
+  });
+  assert.equal(markers().length, 1, 'direta e consentida não podem conviver no mesmo auditId');
+  assert.equal(
+    (await lifecycle.classify({ auditId, consentId: CONSENT_ID, pageId: null, ownershipId: null })).state, 'prepared',
+    'o marcador que fica é o consentido',
+  );
+  assert.equal(markers()[0], `audita:pixel-attempt:v1:${auditId}:${digestoConsentido}`,
+    'o marcador que fica é o consentido, não o direto');
+  assert.equal(await coordinator.markerMatches({
+    auditId, attemptDigest: `hmac-sha256:${digestoDireto}`, pageId: null, ownershipId: null,
+  }), false, 'a direta aposentada não pode mais ser lida');
+  const committed = await lifecycle.commitTerminal({ ...graph, expectedRevision: 1, attemptHandle: consentida });
+  assert.equal(committed.revision, 1, 'a auditoria consentida conclui depois de a direta ser aposentada');
+  assert.equal(
+    (await lifecycle.classify({ auditId, consentId: CONSENT_ID, pageId: null, ownershipId: null })).state, 'terminal',
+  );
+  assert.equal(await lifecycle.cleanup({
+    auditId, consentId: CONSENT_ID, pageId: null, ownershipId: null, expected: 'post-finish',
+  }), true);
+  assert.equal(markers().length, 0, 'não pode sobrar marcador depois da limpeza');
+});
 
 test('raster sem a alça da tentativa não é persistido e o store nem é chamado', async () => {
   const store = createInMemoryAuditStore();

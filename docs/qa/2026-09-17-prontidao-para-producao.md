@@ -1,7 +1,7 @@
 # Prontidão para produção — Audita Acessibilidade 1.1.48
 
 Data: 17/09/2026. Artefato: `release/audita-acessibilidade-1.1.48.zip`, digest
-`234997ac1d93b2faa40c5ee9321f5a3a1af74d8fa6aa6252795589750e394f0c`, 199 arquivos, versão `1.1.48` no
+`c519a33be4136eed1d5df8a2e04d1d31407f5be4585722743536648d73482ba4`, 199 arquivos, versão `1.1.48` no
 manifesto. Chrome for Testing 152.0.7977.64, um Chrome por vez, `--test-concurrency=1`.
 
 Esta é a versão que responde à **revisão integrada final da 1.1.45**
@@ -24,7 +24,7 @@ fechados na **1.1.46** (verificados pelo próprio revisor) e o **Important I-1**
 | 9 | Recursos obrigatórios implementados | **Atendido** | rastreabilidade recurso a recurso registrada nos critérios (campo de URL, auditoria da página aberta, refazer, progresso, relatório em aba, filtros, agrupamento por item, destaques, personas, anúncios estimados com aviso honesto, menu de contexto como atalho, lote, vocabulário e checagens pt-BR, quatro exportações, sem login) |
 | 10 | Sem falha Critical/Important conhecida | **Atendido** | a classe de credencial foi **aprovada** na 1.1.44 e os dois Critical da revisão final da 1.1.45 foram fechados na **1.1.46** (`NOVOS vs 1.1.44 = 0` no corpus de 896 formas; resíduo `secreto*` **0/182**). O **I-1** (revogação silenciosa no modo de pixel) foi re-verificado e está **ATENDIDO** (`docs/qa/revisoes/REVIEW-1.1.47.md`), e a **revogação em si** foi fechada na **1.1.48**: a causa foi medida (a guarda **D2** sem companheiro durável de tentativa) e a **tentativa direta** deu companheiro à captura autorizada sem pausa, **sem tocar na guarda** — o percurso conclui em página sem sinal sensível (`result` em ~1 s nos dois modos) e o caminho com sinal sensível segue igual (pausa → confirma → `result`). Permanecem **declarados**: 1 Minor (N-1, §3) e os 9 testes do incremento paralelo (outro desenho, em andamento) |
 | 11 | Achados menores documentados | **Atendido** | `docs/qa/2026-09-16-registro-de-achados-das-revisoes.md` com desfecho por achado, de 1.1.16 a 1.1.45 |
-| 12 | Versão empacotada testada em Chrome real | **Atendido** | suíte completa da 1.1.48: fase paralela **4.227 testes, 4.226 passam, 0 falham, 1 pulado**; fase serial **113 testes, 104 passam, 9 falham** — **todas as 9** em `test/e2e/sidepanel-flow-mv3.test.mjs` (arquivo do incremento paralelo, que exercita outro desenho), com **zero falhas nos arquivos deste incremento** e sem a flake `axe-mv3-csp` nesta passagem. Escopo de **14 arquivos** na raiz extraída do zip (inclui os dois oráculos do percurso de pixel): **61/61**. Gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**. Auditoria ao vivo do pacote no Google e integridade dos quatro artefatos: §3.1 |
+| 12 | Versão empacotada testada em Chrome real | **Atendido** | suíte completa da 1.1.48: fase paralela **4.231 testes, 4.230 passam, 0 falham, 1 pulado**; fase serial **113 testes, 104 passam, 9 falham** — **todas as 9** em `test/e2e/sidepanel-flow-mv3.test.mjs` (arquivo do incremento paralelo, que exercita outro desenho), com **zero falhas nos arquivos deste incremento** e sem a flake `axe-mv3-csp` nesta passagem. Escopo de **14 arquivos** na raiz extraída do zip (inclui os dois oráculos do percurso de pixel): **61/61**. Gate `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**. Auditoria ao vivo do pacote no Google e integridade dos quatro artefatos: §3.1 |
 
 ## 2. O Important I-1: o que a 1.1.47 fecha e o que continua com o incremento paralelo
 
@@ -128,25 +128,31 @@ de nunca editar os mesmos arquivos em paralelo. O histórico do diagnóstico, co
 
 ### 3.1 Auditoria ao vivo do pacote e integridade dos artefatos
 
-Auditoria executada **a partir da raiz extraída do pacote 1.1.48** (`/private/tmp/adv166-run148`), em
-`https://www.google.com/`, modo **sem pixels**, 18/09/2026 02:03 UTC, Chrome for Testing 152.0.7977.64,
-viewport 1268×757:
+Auditoria executada **a partir da raiz extraída do pacote 1.1.48** (`/private/tmp/adv168-run148`), em
+`https://www.google.com/`, modo **sem pixels**, 18/09/2026 02:38 UTC, Chrome for Testing 152.0.7977.64 **em headless** (`--headless=new`, para não abrir
+janela no Mac do usuário durante o trabalho), viewport 1274×757:
 
 | Medida | Valor |
 | --- | --- |
 | Versão declarada no artefato | **1.1.48** |
 | Falhas confirmadas | **0** (0 ocorrências) |
-| Verificações sob revisão humana | **3** (4 ocorrências) |
+| Verificações sob revisão humana | **3** (4 ocorrências) — a mesma contagem da rodada anterior |
 | Resultados positivos | **9** |
-| Checklist ainda sem conclusão | **109** |
-| Cobertura automática / índice técnico | **28,5 %** (denominador 130) / **9,0 de 10** |
-| Exportações | quatro, `complete` (HTML 339.209 B, PDF 1.006.127 B, CSV 86.142 B, JSON) |
+| Checklist ainda sem conclusão | **108** (a rodada anterior dos mesmos bytes deu 109) |
+| Cobertura automática / índice técnico | **29,2 %** (denominador 130) / **9,0 de 10** (a rodada anterior deu 28,5 %) |
+| Exportações | quatro, `complete` (HTML 327.169 B, PDF 970.747 B, CSV 82.886 B, JSON) |
 | Frases legais indevidas / aviso de estimativa | **0** "Inconformidade ao item" / aviso de anúncio estimado presente |
-| Integridade (instrumento `artcheck133.py`) | **146 itens, 146 ids únicos, 146 títulos**; 0 ids e 0 títulos ausentes no HTML **e** no PDF; notas editoriais **5/5** nos dois; **0 palavras partidas**; **0 `[redacted]`** no JSON e no HTML; 11 snippets (5.228 caracteres) |
+| Integridade (instrumento `artcheck133.py`) | **146 itens, 146 ids únicos, 146 títulos**; 0 ids e 0 títulos ausentes no HTML **e** no PDF; notas editoriais **5/5** nos dois; **0 palavras partidas**; **0 `[redacted]`** no JSON e no HTML; 8 snippets (4.853 caracteres) |
 
-O CSV não carrega a matriz completa de 146 itens (34 ids e 36 títulos "ausentes" nele) — é o mesmo número das
+O CSV não carrega a matriz completa de 146 itens (35 ids e 37 títulos "ausentes" nele nesta rodada) — é o mesmo número das
 gerações anteriores medidas com o mesmo instrumento, e é o desenho do formato: o CSV entrega as ocorrências,
 não o dossiê item a item.
+
+**Nota de método (headless).** A bateria final da 1.1.48 foi medida com `--headless=new` a pedido do usuário ("os
+testes precisam ser silenciosos, estão abrindo o navegador o tempo todo"), para não abrir janela nem roubar foco
+na máquina de trabalho. O binário é o mesmo (Chrome for Testing 152.0.7977.64), o harness é o mesmo e a variação
+observada entre as duas rodadas ao vivo (109/28,5 % × 108/29,2 %) é a variação de instância da página do Google,
+já declarada nas gerações anteriores — não de versão.
 
 ## 4. O que falta para "produção", em uma frase
 

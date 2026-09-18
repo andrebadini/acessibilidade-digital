@@ -3226,6 +3226,16 @@ nulos). Cinco arquivos: `session-url-digest.js`, `pixel-attempt-correlation.js`,
 (`prepareDirect`), `pixel-privacy-gate.js` (gancho opcional `onArmedDirect`) e `authorized-audit-starter.js`
 (liga o gancho e guarda a alça). Decisão e medições: `docs/qa/2026-09-17-tentativa-direta-pixel-sem-consentimento.md`.
 
+**A revisão adversarial do conserto achou o A-1 e ele foi fechado antes de a versão sair.** O revisor mediu, com
+os módulos reais, a **colisão de marcadores**: se a página **revelar sinal sensível depois** de o portão armar
+sem pausa (SPA que renderiza o formulário tarde), o caminho consentido cria o marcador dele além do direto —
+`scanMarker` fica `blocked` com dois marcadores no mesmo `auditId` e a auditoria consentida morre, com resíduo
+até o fim da sessão (a 1.1.47 conclui nesse cenário: era regressão funcional do conserto). **Fechamento:**
+`prepareResume` aposenta a tentativa direta **antes** de preparar a consentida (`retireDirectAttempt`,
+`service-worker.js`, alvo anexado, remoção confirmada por leitura de ausência; se a confirmação falhar, a
+operação é recusada). O teste que reproduz a sequência exata **reprova com a aposentadoria desligada por
+mutação** (`test/background/pixel-attempt-terminal-commit.test.js`).
+
 **Medições (Chrome for Testing 152.0.7977.64).** Numa página sem sinal sensível, os dois modos com foto chegam a
 **`result` em ~1 s** (antes: `unavailable`); o caminho **com** sinal sensível continua pausando, confirmando e
 concluindo; duas auditorias seguidas na mesma sessão concluem **sem marcador residual**; o oráculo novo
@@ -3235,3 +3245,21 @@ bytes empacotados da 1.1.47** e passa nesta árvore; o escopo serial de 13 arqui
 anexada-apenas). Os testes do incremento paralelo (`sidepanel-flow-mv3`) **não** mudam: 3 passam e 9 falham
 antes e depois — eles exercitam outro desenho (auditoria numa cópia inativa, com pausa esperada) e falham por
 expectativas próprias ainda em andamento.
+
+### Rodada 94 (fecho) — bateria final em headless, com o A-1 fechado
+
+A pedido do usuário ("os testes precisam ser silenciosos, estão abrindo o navegador o tempo todo e não consigo
+trabalhar neste Mac"), toda a bateria passou a rodar com um shim que executa o Chrome for Testing com
+`--headless=new` (`/private/tmp/adv169/chrome-quiet`, sem tocar no harness): nenhuma janela abre e nenhum foco é
+roubado. Confirmado nos dois arquivos mais dependentes de interface — `current-page-pixel-consent-free-mv3`
+**2/2** e `url-pixel-consent-mv3` **10/10** — e depois em toda a bateria.
+
+**Medições finais da 1.1.48** (pacote `audita-acessibilidade-1.1.48.zip`, 199 arquivos, digest
+`c519a33be4136eed1d5df8a2e04d1d31407f5be4585722743536648d73482ba4`, que já contém o fecho do A-1): suíte paralela
+**4.231/4.230/0** (1 pulado) e serial **113/104/9**, com as 9 falhas todas em `sidepanel-flow-mv3.test.mjs` (o
+arquivo do incremento paralelo — outro desenho, expectativas próprias em andamento) e **zero falhas nos arquivos
+deste incremento**; escopo de **14 arquivos** na raiz extraída do zip **61/61**; gate **GREEN**; auditoria ao vivo
+do pacote no Google: versão **1.1.48**, **0 falhas confirmadas** (0 ocorrências), 3 sob revisão humana (4
+ocorrências), **9 positivos**, **108** no checklist (a rodada anterior dos mesmos bytes deu 109), **29,2 %**,
+**9,0/10** e as quatro exportações `complete`; integridade **146/146 ids e títulos no HTML e no PDF**, notas
+**5/5**, **0 palavras partidas**, **0 `[redacted]`**.

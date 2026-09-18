@@ -550,6 +550,24 @@ export function createPixelAttemptLifecycleV1(raw) {
     return { state: 'ok', marker: matches[0] ?? null };
   }
 
+  // ACHADO A-1 da revisão do conserto: a página pode REVELAR sinal sensível depois de o portão ter armado
+  // (SPA que renderiza o formulário tarde, modal de login): aí a captura pausa, a pessoa consente e o caminho
+  // consentido cria o marcador DELE — com dois marcadores no mesmo `auditId`, `scanMarker` fica `blocked`
+  // (fechado à falha) e a auditoria morre, deixando resíduo. O digesto direto é determinístico a partir do
+  // `auditId`, então a aposentadoria é sempre possível: a tentativa direta sai ANTES de a consentida entrar.
+  async function retireDirectAttempt(auditId) {
+    const attemptDigest = await input.attemptAuthority.digestDirectAttempt({ auditId });
+    const correlation = Object.freeze({ auditId, attemptDigest, pageId: null, ownershipId: null });
+    const scan = await scanMarker(auditId);
+    if (scan.state !== 'ok') throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
+    if (scan.marker === null || scan.marker.attemptDigest !== attemptDigest) return true;
+    if (await input.attemptCorrelation.remove(correlation) !== true ||
+      await input.attemptCorrelation.markerMatches(correlation) !== false) {
+      throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
+    }
+    return true;
+  }
+
   async function prepareResume(rawRequest) {
     const request = exact(rawRequest, ['auditId', 'consentId', 'pageId', 'ownershipId', 'expiresAt']);
     const attachedAttempt = request?.pageId === null && request?.ownershipId === null;
@@ -560,6 +578,7 @@ export function createPixelAttemptLifecycleV1(raw) {
       !Number.isSafeInteger(request.expiresAt) || request.expiresAt < 0) {
       throw new TypeError('PIXEL_ATTEMPT_LIFECYCLE_INVALID');
     }
+    if (attachedAttempt) await retireDirectAttempt(request.auditId);
     const capability = await input.attemptCorrelation.prepare(request);
     const attemptDigest = await input.attemptAuthority.digestAttempt({
       auditId: request.auditId, consentId: request.consentId,
@@ -776,7 +795,7 @@ export function createPixelAttemptLifecycleV1(raw) {
     return true;
   }
 
-  return Object.freeze({ prepareResume, prepareDirect, commitTerminal, classify, cleanup });
+  return Object.freeze({ prepareResume, prepareDirect, retireDirect: retireDirectAttempt, commitTerminal, classify, cleanup });
 }
 
 export function createExactUrlAuditResourceCleanerV1(raw) {

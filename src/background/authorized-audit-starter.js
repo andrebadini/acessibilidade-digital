@@ -2346,6 +2346,14 @@ export function createAuthorizedAuditStarter(input) {
             const privacyGate = capturePolicy.mode === 'no-pixels' ? null : createPixelPrivacyGateV1({
               pixelState, consentId: null, authorityExpiresAt: grant.expiresAt,
               commitClock: pixelCommitClock, async afterPixels() {},
+              // A página pode revelar sinal sensível DEPOIS de o portão armar: aí a captura pausa e a
+              // tentativa direta precisa sair de cena ANTES de a consentida entrar (achado A-1).
+              async onRetireDirect() {
+                if (await pixelAttemptLifecycle.retireDirect({ auditId: args.auditId }) !== true) {
+                  throw new Error('PIXEL_ATTEMPT_PREPARE_DENIED');
+                }
+                if (liveRecord) liveRecord.attemptHandle = null;
+              },
               async onArmedDirect() {
                 const attemptHandle = await pixelAttemptLifecycle.prepareDirect({
                   auditId: args.auditId, expiresAt: grant.expiresAt,
