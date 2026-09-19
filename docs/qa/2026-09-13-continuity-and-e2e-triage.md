@@ -3388,3 +3388,41 @@ reconstruível do commit. A bateria serial completa e a auditoria ao vivo do pac
 **declarados**: o limite de captura fora da viewport (com a oscilação transitória de geometria), `5.9.1` agregado,
 campo customizado sem nome, clareza para leigos (critério 8, decisão do usuário) e a publicação na Chrome Web
 Store, que depende da conta do dono (política de privacidade já publicada em HTTPS).
+
+## Rodada 97 — a revisão da 1.1.49 achou dois Important de produto, e os dois fecharam no mesmo dia
+
+**O que a revisão independente mediu.** O parecer (`docs/qa/revisoes/REVIEW-1.1.49.md`) confirmou por medição
+própria o conserto N-1 (com dentes: os testes morrem sob mutação), o pacote reconstruível e byte-idêntico, a
+migração E2E **9/9 em 306 s** e as seis provas centrais do oráculo antigo — duas delas mais fortes que antes. E
+deu **NÃO PODE ENTRAR** por dois Important de produto.
+
+**1) A exportação podia morrer sem produzir arquivo (N-2).** O revisor mediu `credential-shapes-mv3` **17/23**
+numa janela com um único Chrome, todas `DOWNLOAD_PROOF_TIMEOUT`, e na execução a partir do pacote viu
+`exportLaunchStates:["revoked"]`. A sonda do autor isolou a causa: `handleTabUpdated` revogava a concessão no
+**estado intermediário da navegação que a própria autoridade inicia** (`about:blank` sem `pendingUrl`), que sob
+carga chega depois de a concessão existir — o relatório respondia `ok`, a aba nunca conectava e nenhum arquivo
+saía. Conserto: `stagingNavigationPending` + janela limitada de 30 s; navegação confirmada para outro destino,
+aba/janela ausente e falta de prova fora da janela continuam revogando. **`credential-shapes-mv3` 23/23 depois**
+(17/23 antes). A sonda de delta do próprio revisor (10 cenários) deu 10/10 no código novo e 3 falhas no antigo,
+incluindo idade negativa (relógio para trás) e janela que não se renova.
+
+**2) A mensagem de observação passiva negava um efeito medido (N-1 do revisor).** Numa fixture com um handler de
+`resize` comum, a captura de elementos deixa o documento diferente do inicial (247 eventos, 496 mutações de DOM,
+contador em `resizes=253`) e o próprio oráculo do autor reprovava o caso. Conserto: a mensagem passou a declarar o
+efeito e nasceu o oráculo `passive current-page declares the capture resize on a page that reacts to it`, que
+exige geometria final idêntica, zero navegação/rolagem, o efeito medido e a declaração no relatório — e proíbe a
+frase antiga.
+
+**Os cinco Minor e a observação também fecharam:** quatro asserções de CSV repostas; o seletor da ficha do painel
+tem de resolver no documento vivo a um elemento com o defeito; `Anúncio esperado:` e a citação WCAG no HTML
+voltaram; o perdão de `resize` ganhou teto (`8 × capturas + 32`), piso de `1x1` e amostragem obrigatória a partir
+de 16 eventos; o anúncio do caminho novo diz "A página observada não foi alterada."; o caminho novo chama
+`reviseNavigationEntry()`; e cinco linhas de documentação vencidas foram corrigidas, com a divergência 7 × 9
+reconciliada por medição.
+
+**Medições da rodada (pacote `a45a67b7…e12448`, 199 arquivos).** Suíte paralela **4.235/4.234/0** (1 pulado);
+fase serial **114/113/1**, a única falha sendo a flake de limpeza de `axe-mv3-csp` (passa 1/1 isolada, medido
+pelo autor e pelo revisor); `sidepanel-flow-mv3` **10/10** na árvore e **10/10** a partir da raiz extraída do
+pacote; `credential-shapes-mv3` **23/23**; gate `verify` **GREEN**; auditoria ao vivo do pacote no Google com
+**1.1.49** declarada, 0 falhas confirmadas, 9 positivos, 108 no checklist, 29,2 %, 9,0/10, quatro exportações
+completas e integridade **146/146** ids e títulos, notas **5/5**, **0** palavras partidas, **0** `[redacted]`.

@@ -107,6 +107,19 @@ a revisão mediu no lugar: sem sinal sensível a auditoria é **revogada** (`ses
 de nunca editar os mesmos arquivos em paralelo. O histórico do diagnóstico, com a retratação, está em
 `docs/qa/2026-09-17-percurso-pixels-pagina-atual.md`.
 
+## 2.1 Fecho da 1.1.49 (18/09/2026)
+
+A 1.1.49 fecha o **N-1** (Minor da re-verificação da 1.1.47) e migra os nove cenários E2E da página atual; a
+revisão adversarial independente dela (`docs/qa/revisoes/REVIEW-1.1.49.md`) deu **NÃO PODE ENTRAR** por dois
+Important de produto — a exportação podia ser revogada durante a própria navegação que ela inicia (corrigido em
+`export-launch.js`, com `credential-shapes-mv3` 23/23 depois) e a mensagem de observação passiva negava um efeito
+medido em páginas que reagem a `resize` (mensagem corrigida + oráculo reativo novo). Registro completo:
+`docs/qa/2026-09-18-incremento-1.1.49.md`; nota: `docs/releases/1.1.49.md`. Bateria: paralela
+**4.235/4.234/0** (1 pulado), serial **114/113/1** (a única falha é a flake de limpeza de `axe-mv3-csp`, que passa
+1/1 isolada), `verify` **GREEN**, auditoria ao vivo do pacote com **1.1.49** declarada, 0 falhas confirmadas,
+9 positivos, 108 no checklist, 29,2 %, 9,0/10, quatro exportações completas e integridade **146/146** ids e
+títulos, notas **5/5**, **0** palavras partidas e **0** `[redacted]`.
+
 ## 3. Resíduos declarados (medidos; nenhum é vazamento)
 
 - **Identificador ambíguo:** em `id`/`classe` que contém radical de credencial o conteúdo é tratado como valor
