@@ -1,7 +1,7 @@
 # Incremento 1.1.49 — N-1 fechado e a suíte E2E da página atual migrada para o desenho passivo
 
 Data: 18/09/2026. Versão: **1.1.49**. Pacote: `release/audita-acessibilidade-1.1.49.zip`, 199 arquivos, digest
-`92945a8db8df341f04a42e7b2606f06e6e3b5d07d31e5531b334fc965ece5fa9`. Chrome for Testing 152.0.7977.64, um Chrome
+`aab8b386e6ac6c3e7025ea06517a14e53e8a9b63eb6acb18318c809b79cb73a1`. Chrome for Testing 152.0.7977.64, um Chrome
 por vez, bateria em **headless**.
 
 ## 1. O que este incremento fecha
@@ -47,7 +47,7 @@ produto:
 | ocorrência conhecida = imagem do servidor (a cópia recarregava) | ocorrência conhecida = **botão sem nome do documento vivo**, com evidência de elemento correlacionada por seletor qualificado (`button#missing-name` ou o caminho estrutural) |
 
 **Medição:** `node --test --test-concurrency=1 test/e2e/sidepanel-flow-mv3.test.mjs` com Chrome for Testing
-152.0.7977.64 → **9/9 verdes, 299 s, zero falhas**. Antes da migração, a mesma execução dava **7 falhas** (2 verdes
+152.0.7977.64 → **9/9 verdes, 299 s, zero falhas na migração**. Antes da migração, a mesma execução dava **7 falhas** (2 verdes
 de outros percursos). **Reconciliação de números (N-7 da revisão da 1.1.49):** o **7** é o arquivo da versão
 anterior rodando contra o produto ATUAL — medido pelo revisor, `df4bd2d:test/e2e/sidepanel-flow-mv3.test.mjs`
 contra os bytes de hoje dá 7 falhas / 2 passes. O **9** que aparece no dossiê (§1, critério 12) é o total de
@@ -74,10 +74,10 @@ evidência de elementos que existem na página).
 
 | Medida | Resultado |
 | --- | --- |
-| Suíte paralela (não-Chrome) | **4.235 testes, 4.234 passam, 0 falham, 1 pulado** (1.1.48: 4.231/4.230/0) |
+| Suíte paralela (não-Chrome) | **4.235 testes, 4.234 passam, 0 falham, 1 pulado** nos bytes finais (recorte sem `test/e2e/`: 4.191/4.190/0; 1.1.48: 4.231/4.230/0) |
 | Suíte do painel | **263/263** |
 | `test/e2e/sidepanel-flow-mv3.test.mjs` | **10/10 verdes** com o caso reativo novo (o arquivo tinha 9 entradas) |
-| Fase serial completa (45 arquivos de Chrome real) | **114 testes, 113 passam, 1 falha** — a única é `axe-mv3-csp`, erro no hook `after` (`cleanup axe limitado falhou: [{"stage":"profile","code":"failed"}]`), a flake de limpeza já declarada; **passa 1/1 isolada**, medido pelo autor e pelo revisor |
+| Fase serial completa (45 arquivos de Chrome real) | **114 testes, 114 passam, 0 falham** nos bytes finais (a flake de limpeza de `axe-mv3-csp`, que aparecia nas passagens anteriores, **não** ocorreu nesta) |
 | `credential-shapes-mv3` (a classe de credencial) | **23/23** depois do conserto da exportação (antes: 17/23 na mesma máquina) |
 | `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` | **GREEN** |
 | Auditoria ao vivo do pacote (Google, sem pixels, headless) | versão **1.1.49** declarada; **0 falhas confirmadas** (0 ocorrências); 2 sob revisão humana (2 ocorrências); 9 positivos; **108** no checklist; cobertura **29,2 %**; índice **9,0/10**; 12 grupos de achados; **0** frases de "Inconformidade ao item"; quatro exportações `complete` (HTML 327.391 B, PDF 970.029 B, CSV 82.886 B, JSON 359.397 B) |
@@ -168,3 +168,25 @@ de 16 eventos; o anúncio do caminho novo virou "A página observada não foi al
 `reviseNavigationEntry()` (simetria); e as cinco linhas de documentação vencidas foram corrigidas, com a
 divergência 7 × 9 reconciliada por medição (7 = arquivo antigo contra o produto atual; 9 = fase serial da bateria
 da 1.1.48).
+
+
+## 7. Adendo da revisão (verificação delta) e as condições fechadas
+
+O adendo (`docs/qa/revisoes/REVIEW-1.1.49-adendo.md`) deu **PODE ENTRAR** e confirmou por medição própria o
+fechamento dos dois Important: a janela de tolerância da exportação não abre buraco (sonda de 10 cenários, 10/10 no
+código novo contra 3 falhas no antigo) e `credential-shapes-mv3` **23/23 inclusive com o orçamento antigo de
+120 s** — o que isola o conserto de produto do aumento de orçamento do teste. As cinco condições do adendo foram
+fechadas:
+
+| Condição | Desfecho |
+|---|---|
+| **A-1** (Important de prova): o contador do caso reativo passava com o efeito removido (`resizes=7` do painel contra 253 do efeito) | **CORRIGIDO**: o caso exige **delta** contra a linha de base (`>= 32`; delta medido 246) **e** o `eventCounts.resize` do próprio oráculo de fonte (`>= 32`). **Não vacuidade medida:** com `captureBeyondViewport: false` na cópia mutada, o caso **reprova** (`counterDelta: 0`) |
+| **A-2** (Minor): o anúncio afirmava que a página não foi alterada | **CORRIGIDO**: "Escolha o modo e inicie uma nova auditoria." (sem a segunda frase), fixado em `test/panel/panel-runtime.test.js` com asserção de que "não foi alterada" não aparece |
+| **A-3** (Minor): teto proporcional em uma chamada e fixo nas outras três | **CORRIGIDO**: `captureResizeCeiling(attempt)` nas quatro chamadas que perdoam `resize` |
+| **A-6** (Minor, documentação): critério 12 do dossiê com os números da 1.1.48 | **CORRIGIDO**: números da 1.1.49 no critério 12, com os da 1.1.48 como histórico; menções a "9/9" qualificadas como medição **da migração** |
+| **A-5/A-7/A-8** (Observações) | **registradas**: a flake de `annotation-map` sob carga (2 falhas em 2 passagens com carga 6,07; 0 em janela quieta; 3/3 isolada nos dois commits), a tolerância avaliada por evento (sem evento novo a concessão vive até o TTL, como antes) e o `reviseNavigationEntry()` como defesa em profundidade (a camada de porta é quem barra a corrida) |
+
+**Proveniência depois do adendo.** A-1 e A-3 mudaram apenas oráculo; **A-2 mudou uma frase de produto**
+(`src/panel/panel.js`), o que reempacotou o artefato para `aab8b386…73a1`. A bateria final (§4) descreve esses
+bytes: `sidepanel-flow-mv3` **10/10 em 349 s**, auditoria ao vivo do pacote com a versão 1.1.49, integridade
+146/146 ids e títulos, notas 5/5, 0 palavras partidas e 0 `[redacted]`.

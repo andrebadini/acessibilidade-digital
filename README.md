@@ -5,13 +5,13 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 ## Instalação e estado da entrega
 
 **Versão 1.1.49 — produção.** O pacote `release/audita-acessibilidade-1.1.49.zip` (199 arquivos, digest
-`a45a67b7f11d7dfa5f4f0b29300bc1d6a4278625f54dd3e2f1970d0764512448`, reconstruível por `npm run build:release`)
+`aab8b386e6ac6c3e7025ea06517a14e53e8a9b63eb6acb18318c809b79cb73a1`, reconstruível por `npm run build:release`)
 fecha as duas pontas que a 1.1.48 deixou declaradas. **N-1:** a tela de indisponibilidade volta a oferecer o
 seletor de modo ("Escolher outro modo" devolve a tela inicial preservando a preferência) e "Tentar novamente"
 deixa de trocar o motivo específico pelo genérico. **Suíte E2E da página atual:** os nove cenários que ainda
 afirmavam a auditoria em cópia inativa foram migrados para o desenho passivo — documento aberto, zero abas
 criadas, zero registros de posse, relatório vivo com destaque no próprio documento e exclusão que não fecha a aba
-do usuário — e a execução completa do arquivo dá **9/9 verdes em 299 s** (antes: 7 falhas). A migração também
+do usuário — e a execução completa do arquivo dá **9/9 verdes em 299 s na migração** (antes: 7 falhas). A migração também
 mediu e declarou que capturar elemento fora da viewport oscila transitoriamente a geometria (com restauração
 exata e zero mutações/rolagem/foco/estilo). A revisão adversarial independente desta versão
 (`docs/qa/revisoes/REVIEW-1.1.49.md`) deu **NÃO PODE ENTRAR** por dois Important de produto, ambos fechados

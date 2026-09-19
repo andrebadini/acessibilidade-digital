@@ -1519,4 +1519,9 @@ test('a indisponibilidade oferece repetir e escolher outro modo, e a retentativa
     'escolher outro modo devolve a tela com o seletor de modo');
   assert.ok(document.root.querySelector('input[data-capture-mode]'));
   assert.equal(document.root.textContent.includes('A auditoria foi encerrada antes de concluir'), false);
+  // A-2 do adendo da 1.1.49: o anúncio é fixado aqui e NÃO pode afirmar que a página não foi alterada — numa
+  // página que reage a `resize` a auditoria anterior pode tê-la alterado; esta ação só volta ao seletor.
+  const liveRegion = document.root.querySelector('[role="status"]');
+  assert.equal(liveRegion?.textContent, 'Escolha o modo e inicie uma nova auditoria.');
+  assert.equal((document.root.textContent ?? '').includes('não foi alterada'), false);
 });

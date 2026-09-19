@@ -729,3 +729,31 @@ Teste novo em `test/background/export-launch.test.js` (tolera dentro da janela, 
 `credential-shapes-mv3` **23/23** depois do conserto (antes: 17/23 na mesma máquina). O E2E de credencial também
 ganhou o `EXPORT_DELIVERY_SNAPSHOT` e orçamento de 300 s por tentativa, para que uma próxima falha já venha
 diagnosticada.
+
+
+## Adendo da revisão da 1.1.49 — verificação delta do conserto → **PODE ENTRAR**
+
+Parecer em `docs/qa/revisoes/REVIEW-1.1.49-adendo.md` (mesmo revisor, clone próprio no commit `27a894a`, um Chrome
+por vez por cadeado). O adendo **confirmou por medição própria** o fechamento dos dois Important: a janela de
+tolerância da exportação **não abre buraco** (sonda de 10 cenários: tolera `about:blank` sem `pendingUrl` até
+30.000 ms inclusive, revoga em 30.001 ms, e revoga na hora para `pendingUrl` externo, URL confirmada para outro
+destino, aba/janela erradas, leitura falha e idade negativa; a janela não se renova por eventos tolerados —
+**10/10 no código novo contra 3 falhas no antigo**); e a taxa de `credential-shapes-mv3` foi a **23/23 inclusive
+com o orçamento antigo de 120 s** (o produto anterior dava 17/23), o que isola o conserto de produto do aumento de
+orçamento do teste. A suíte de página atual deu **10/10 em 348 s** por medição dele, e a mutação da mensagem
+reprova o caso reativo.
+
+| Achado | Sev. | Medida do revisor | Desfecho |
+|---|---|---|---|
+| **A-1** — o contador do caso reativo não tinha dentes | **Important (de prova)** | Com o efeito removido do produto (`captureBeyondViewport: false`), o caso **passava**: o contador marcava `resizes=7` (resíduo do painel) contra `253` do efeito real; a asserção `[1-9][0-9]*` aceitava os dois | **CORRIGIDO**: o teste passou a exigir **delta** contra a linha de base (`>= 32`, com o delta medido de 246) **e** uma segunda medida independente, o `eventCounts.resize` do próprio oráculo de fonte (`__auditaSourceInvariantV1.compare()`), também `>= 32` |
+| **A-2** — o anúncio afirmava que a página não foi alterada | Minor | Nenhum teste fixava a string; e a afirmação é absoluta justamente onde a medição mostra alteração possível | **CORRIGIDO**: o anúncio virou "Escolha o modo e inicie uma nova auditoria." (sem a segunda frase) e a frase passou a ser fixada em `test/panel/panel-runtime.test.js`, com asserção explícita de que "não foi alterada" **não** aparece |
+| **A-3** — o teto da oscilação tinha duas fórmulas | Minor | Teto proporcional em uma chamada, fixo (512) nas outras três | **CORRIGIDO**: helper `captureResizeCeiling(attempt)` = `8 × capturas + 32`, usado nas **quatro** chamadas que perdoam `resize` |
+| **A-4** — o oráculo trava o limite como comportamento esperado | Observação | Se o produto um dia evitar a oscilação, o teste reprova e a mensagem declara efeito inexistente | **registrado** no próprio teste (o caso e a mensagem têm de mudar juntos) |
+| **A-5** — `annotation-map.test.js:632` é flaky sob carga | Observação | 2 falhas em 2 passagens com carga 6,07; 0 falhas em janela quieta (4190/4191); 3/3 isolado nos dois commits | **registrado** como ruído conhecido da fase paralela (o teste usa `timeoutMs: 5` e uma corrida de microtarefa); refino futuro: aguardar a condição em vez do tique fixo |
+| **A-6** — o critério 12 do dossiê ainda trazia os números da 1.1.48 | Minor | Última linha vencida depois de `75db4e5` | **CORRIGIDO**: critério 12 com os números da 1.1.49 (e os da 1.1.48 mantidos como histórico); as menções a "9/9" qualificadas como medição **da migração** |
+| **A-7** — a tolerância é avaliada por evento | Observação | Sem evento novo, a concessão vive até o TTL de 15 min, como antes | **registrado** no comentário do conserto |
+| **A-8** — `reviseNavigationEntry()` é defesa em profundidade sem teste | Observação | Removendo a outra guarda, os lançamentos de URL seguem 0 nas duas árvores: quem barra é a camada de porta | **registrado** como simetria correta, não load-bearing |
+
+**Nota de proveniência.** Depois do adendo, três condições foram fechadas: A-1 e A-3 (só oráculo) e A-2 (**uma
+frase de produto** em `src/panel/panel.js`). O pacote mudou de `a45a67b7…` para **`aab8b386…73a1`**; a bateria final
+registrada (paralela, serial, escopo do pacote e auditoria ao vivo) descreve os bytes finais.

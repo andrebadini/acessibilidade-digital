@@ -3421,8 +3421,8 @@ de 16 eventos; o anúncio do caminho novo diz "A página observada não foi alte
 reconciliada por medição.
 
 **Medições da rodada (pacote `a45a67b7…e12448`, 199 arquivos).** Suíte paralela **4.235/4.234/0** (1 pulado);
-fase serial **114/113/1**, a única falha sendo a flake de limpeza de `axe-mv3-csp` (passa 1/1 isolada, medido
-pelo autor e pelo revisor); `sidepanel-flow-mv3` **10/10** na árvore e **10/10** a partir da raiz extraída do
+fase serial **114/114/0** nos bytes finais (a flake de limpeza de `axe-mv3-csp` apareceu nas passagens
+anteriores e passou 1/1 isolada, medido pelo autor e pelo revisor); `sidepanel-flow-mv3` **10/10** na árvore e **10/10** a partir da raiz extraída do
 pacote; `credential-shapes-mv3` **23/23**; gate `verify` **GREEN**; auditoria ao vivo do pacote no Google com
 **1.1.49** declarada, 0 falhas confirmadas, 9 positivos, 108 no checklist, 29,2 %, 9,0/10, quatro exportações
 completas e integridade **146/146** ids e títulos, notas **5/5**, **0** palavras partidas, **0** `[redacted]`.

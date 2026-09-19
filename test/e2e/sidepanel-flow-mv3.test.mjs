@@ -203,12 +203,14 @@ for (const scenario of [
       }:null}));
       throw cause;
     }), auditId);
-    await step('SILENT_AUDIT', async () => {
-      await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
+    const terminalAttempt = await step('SILENT_AUDIT', async () => {
+      const attempt = await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
         minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
         diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
       }, fixture.origin);
-      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore);
+      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore,
+        { maxCaptureResizes: captureResizeCeiling(attempt) });
+      return attempt;
     });
     const fingerprint = await markerRecordFingerprint(extension, auditId);
     assert.equal(fingerprint.present, true);
@@ -223,8 +225,10 @@ for (const scenario of [
       const targets = (await extension.browser.command('Target.getTargets')).targetInfos;
       assert.equal(targets.some(info => info.targetId === workerTarget.targetId && info.attached === false), true);
       // O passo anterior capturou elementos (element-only): a oscilação transitória de geometria da
-      // captura fora da viewport é o limite declarado, e não uma alteração do documento.
-      await assertSourceUntouched(extension, identityBefore, { allowCaptureResize: true });
+      // captura fora da viewport é o limite declarado, e não uma alteração do documento. O teto vem do que
+      // foi capturado (A-3 do adendo da 1.1.49), não de um número fixo.
+      await assertSourceUntouched(extension, identityBefore,
+        { allowCaptureResize: true, maxCaptureResizes: captureResizeCeiling(terminalAttempt) });
     });
     const preserved = await extension.evaluate(extension.startPage.page, `(() => {
       globalThis.__auditaSourceInvariantV1.dispose();
@@ -759,6 +763,13 @@ async function assertSourceUntouched(extension, identityBefore,
 
 // Percurso passivo (página atual): nenhuma cópia, nenhuma aba criada, nenhum registro de posse. O documento
 // original continua sendo o único documento observado, com o CDP do próprio E2E possuindo a aba antes e depois.
+// Teto da oscilação da captura, proporcional ao que foi capturado (medido: ~2 eventos por elemento; o teto é
+// folgado, mas finito). Usado em TODAS as chamadas que perdoam `resize` — antes só uma delas tinha o teto
+// proporcional (A-3 do adendo da 1.1.49).
+function captureResizeCeiling(attempt) {
+  return 8 * ((attempt?.elements ?? 0) + (attempt?.fullPage ?? 0)) + 32;
+}
+
 async function assertNoCopyCreated(extension, identityBefore, options = {}) {
   await assertSourceUntouched(extension, identityBefore, options);
   const proof = await extension.evaluate(extension.harnessPage, `(async()=>{
@@ -1177,7 +1188,8 @@ async function assertObservedTerminalAttempt(extension, auditId, identityBefore,
   return attempt;
 }
 
-async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImages, identityBefore) {
+async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImages, identityBefore,
+  { maxCaptureResizes = 512 } = {}) {
   const summary = await extension.evaluate(panel, `(() => ({
     coverage:Number(document.querySelector('progress.coverage-progress')?.max??0),
     failures:document.querySelectorAll('[data-result-card][data-classification="failed"]').length,
@@ -1264,7 +1276,8 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
       /Prévia omitida no painel para manter o resultado leve/u.test(detail.previewText), true,
     'o painel deve exibir a miniatura ou informar que a captura integral está no relatório');
   } else assert.equal(detail.images >= expectedImages, true);
-  await assertSourceUntouched(extension, identityBefore, { allowCaptureResize: mode !== 'no-pixels' });
+  await assertSourceUntouched(extension, identityBefore,
+    { allowCaptureResize: mode !== 'no-pixels', maxCaptureResizes });
 }
 
 function reportSurfaceExpression() {
@@ -1294,12 +1307,14 @@ function reportSurfaceExpression() {
 // O relatório da página atual é VIVO: a sessão continua ligada ao documento observado, então o retorno e o
 // destaque ao vivo existem. O que não existe é a limitação de cópia recarregada — no lugar dela vai a
 // declaração de observação passiva.
-async function openLiveReport(extension, panel, auditId, minimumImages, identityBefore) {
+async function openLiveReport(extension, panel, auditId, minimumImages, identityBefore,
+  { maxCaptureResizes = 512 } = {}) {
   const step = async (name, operation) => {
     try { return await operation(); }
     catch (cause) { throw new Error(`REPORT_${name}_${cause?.code ?? 'FAILED'}`, { cause }); }
   };
-  await assertSourceUntouched(extension, identityBefore, { allowCaptureResize: minimumImages > 0 });
+  await assertSourceUntouched(extension, identityBefore,
+    { allowCaptureResize: minimumImages > 0, maxCaptureResizes });
   await step('OPEN', () => extension.click(panel, 'button[data-intent="OPEN_REPORT"]'));
   const report = await step('CONNECT', async () => {
     try { return await extension.waitForReport({ auditId }); }
@@ -1924,8 +1939,12 @@ test('passive current-page declares the capture resize on a page that reacts to 
         if(stable>=6)return resolve(true);if(++samples>=60)return resolve(false);setTimeout(sample,50)};
       sample();
     })`, { awaitPromise: true }), true, 'a geometria do documento precisa estabilizar antes da linha de base');
-    const baseline = await extension.evaluate(extension.startPage.page,
-      '({href:location.href,scrollY,viewport:[innerWidth,innerHeight]})');
+    const baseline = await extension.evaluate(extension.startPage.page, `(() => ({
+      href:location.href,scrollY,viewport:[innerWidth,innerHeight],
+      counterValue:Number((document.getElementById('reactive-counter')?.textContent??'').match(/^resizes=(\\d+)/u)?.[1] ?? -1),
+    }))()`);
+    assert.equal(baseline.counterValue >= 0, true,
+      `o contador da página reativa precisa existir antes da auditoria: ${JSON.stringify(baseline)}`);
     // `beginAttachedAttempt` prova a fonte intocada ANTES do arranque (a mutação do handler só pode
     // acontecer depois, na captura) e já arma a observação de abas criadas.
     const { auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
@@ -1936,13 +1955,24 @@ test('passive current-page declares the capture resize on a page that reacts to 
     const after = await extension.evaluate(extension.startPage.page, `(() => ({
       href:location.href,scrollY,viewport:[innerWidth,innerHeight],
       counter:document.getElementById('reactive-counter')?.textContent??null,
+      counterValue:Number((document.getElementById('reactive-counter')?.textContent??'').match(/^resizes=(\\d+)/u)?.[1] ?? -1),
+      proofResizes:Number(globalThis.__auditaSourceInvariantV1?.compare?.().eventCounts?.resize ?? -1),
     }))()`);
     assert.deepEqual(after.viewport, baseline.viewport,
       'a geometria final do documento observado tem de voltar à inicial');
     assert.equal(after.href, baseline.href, 'a auditoria não pode navegar o documento observado');
     assert.equal(after.scrollY, baseline.scrollY, 'a auditoria não pode rolar o documento observado');
-    assert.match(after.counter ?? '', /^resizes=[1-9][0-9]* w=\d+ h=\d+$/u,
-      'numa página que reage a `resize` o efeito declarado precisa estar MEDIDO, não suposto');
+    assert.match(after.counter ?? '', /^resizes=\d+ w=\d+ h=\d+$/u,
+      'o contador da fixture precisa registrar o redimensionamento observado');
+    // A-1 do adendo da 1.1.49: o contador conta TODOS os `resize` desde o carregamento, inclusive os que o
+    // painel lateral provoca ao abrir (medido: 7 no resíduo). O que prova o efeito da CAPTURA é o DELTA
+    // contra a linha de base — sem ele a asserção passava até com a oscilação removida do produto.
+    const counterDelta = after.counterValue - baseline.counterValue;
+    assert.equal(counterDelta >= 32, true,
+      `a oscilação da captura precisa aparecer no contador da página (delta medido: 246, resíduo do painel: 0): ${JSON.stringify({ baselineCounter: baseline.counterValue, afterCounter: after.counterValue, counterDelta })}`);
+    // Segunda medida independente, do próprio oráculo de fonte: o mesmo efeito, contado por outro observador.
+    assert.equal(after.proofResizes >= 32, true,
+      `o oráculo de fonte precisa contar a oscilação da captura: ${JSON.stringify({ proofResizes: after.proofResizes, counterDelta })}`);
     const attempt = await readPrivateAttempt(extension, auditId);
     assert.equal(attempt.diagnostics.includes('DYNAMIC_PROBES_OMITTED_PASSIVE'), true);
     assert.equal(attempt.elements >= 1, true,
@@ -2041,8 +2071,10 @@ test('passive current-page audits complete in every mode and keep the observed d
         diagnostics: ['PIXEL_CAPTURE_OMITTED'],
       }, fixture.origin);
       assert.equal(attempt.rasterDataUrls, 0);
-      await assertPanelSummaryAndDetail(extension, panel, 'no-pixels', 0, identityBefore);
-      const report = await openLiveReport(extension, panel, auditId, 0, identityBefore);
+      await assertPanelSummaryAndDetail(extension, panel, 'no-pixels', 0, identityBefore,
+        { maxCaptureResizes: captureResizeCeiling(attempt) });
+      const report = await openLiveReport(extension, panel, auditId, 0, identityBefore,
+        { maxCaptureResizes: captureResizeCeiling(attempt) });
       await extension.captureJourney('report-current-passive-no-pixels', report, { captureBeyondViewport: false });
       panel = await deleteAuditAndKeepSource(extension, panel, report, auditId, extension.startPage.tabId);
     });
@@ -2056,12 +2088,14 @@ test('passive current-page audits complete in every mode and keep the observed d
       await confirmOnce(extension, panel);
       assert.equal(await waitForResult(extension, panel, auditId), auditId);
       await assertObservedProgress(extension, panel);
-      await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
+      const attempt = await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
         minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
         diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
       }, fixture.origin);
-      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore);
-      const report = await openLiveReport(extension, panel, auditId, 1, identityBefore);
+      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore,
+        { maxCaptureResizes: captureResizeCeiling(attempt) });
+      const report = await openLiveReport(extension, panel, auditId, 1, identityBefore,
+        { maxCaptureResizes: captureResizeCeiling(attempt) });
       await extension.captureJourney('report-current-passive-elements', report, { captureBeyondViewport: false });
       panel = await deleteAuditAndKeepSource(extension, panel, report, auditId, extension.startPage.tabId);
     });
@@ -2097,11 +2131,11 @@ test('passive current-page audits complete in every mode and keep the observed d
       await step('CONFIRM', () => confirmOnce(extension, panel));
       assert.equal(await step('RESULT', () => waitForResult(extension, panel, auditId)), auditId);
       await step('PROGRESS', () => assertObservedProgress(extension, panel));
-      await step('TERMINAL_PROOF', () => assertObservedTerminalAttempt(extension, auditId, identityBefore, {
-        minimumFullPage: 1, minimumElements: 1,
-      }, fixture.origin));
+      const terminalAttempt = await step('TERMINAL_PROOF', () => assertObservedTerminalAttempt(
+        extension, auditId, identityBefore, { minimumFullPage: 1, minimumElements: 1 }, fixture.origin));
       await step('PANEL_DETAIL', () =>
-        assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore));
+        assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore,
+          { maxCaptureResizes: captureResizeCeiling(terminalAttempt) }));
       await step('PANEL_VISIBLE', () => extension.waitForValue(panel,
         'document.visibilityState', value => value === 'visible', { timeoutMs: 10_000, intervalMs: 50 }));
       // Chrome 152 may time out rasterizing this native panel after worker restart,
@@ -2115,7 +2149,8 @@ test('passive current-page audits complete in every mode and keep the observed d
         subtest.diagnostic('qa-limitation=PANEL_SCREENSHOT_CDP_TIMEOUT; panel-screenshot=not-produced; report-and-export-proofs=still-required');
       }
       const report = await step('REPORT_OPEN', () =>
-        openLiveReport(extension, panel, auditId, 1, identityBefore));
+        openLiveReport(extension, panel, auditId, 1, identityBefore,
+          { maxCaptureResizes: captureResizeCeiling(terminalAttempt) }));
       try {
         await step('REPORT_CAPTURE', () =>
           extension.captureJourney('report-current-passive-full', report, { captureBeyondViewport: false }));

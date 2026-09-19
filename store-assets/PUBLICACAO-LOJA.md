@@ -16,8 +16,8 @@ desenvolvedor autenticada (com verificação em duas etapas), e nada aqui é fei
 
 ## Arquivo a enviar
 
-`release/audita-acessibilidade-1.1.48.zip` — 199 arquivos, digest
-`7da8b3f02288c58776fbb3b8ecf6681aa5041662fd6cd7fd8bdd4e9d7b281689`, versão `1.1.48` no manifesto. O console
+`release/audita-acessibilidade-1.1.49.zip` — 199 arquivos, digest
+`aab8b386e6ac6c3e7025ea06517a14e53e8a9b63eb6acb18318c809b79cb73a1`, versão `1.1.49` no manifesto. O console
 aceita o ZIP diretamente; **não** envie a pasta, nem um ZIP que contenha a pasta do repositório.
 
 ## Campos do formulário (copiar de `store-assets/STORE-LISTING.md`)
