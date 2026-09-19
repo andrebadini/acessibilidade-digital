@@ -4,10 +4,23 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
-**Versão 1.1.48 — candidata de produção, com a revisão adversarial do último conserto aprovada.** O pacote
+**Versão 1.1.49 — produção.** O pacote `release/audita-acessibilidade-1.1.49.zip` (199 arquivos, digest
+`92945a8db8df341f04a42e7b2606f06e6e3b5d07d31e5531b334fc965ece5fa9`, reconstruível por `npm run build:release`)
+fecha as duas pontas que a 1.1.48 deixou declaradas. **N-1:** a tela de indisponibilidade volta a oferecer o
+seletor de modo ("Escolher outro modo" devolve a tela inicial preservando a preferência) e "Tentar novamente"
+deixa de trocar o motivo específico pelo genérico. **Suíte E2E da página atual:** os nove cenários que ainda
+afirmavam a auditoria em cópia inativa foram migrados para o desenho passivo — documento aberto, zero abas
+criadas, zero registros de posse, relatório vivo com destaque no próprio documento e exclusão que não fecha a aba
+do usuário — e a execução completa do arquivo dá **9/9 verdes em 299 s** (antes: 7 falhas). A migração também
+mediu e declarou que capturar elemento fora da viewport oscila transitoriamente a geometria (com restauração
+exata e zero mutações/rolagem/foco/estilo). Nota de versão: `docs/releases/1.1.49.md`; registro do incremento:
+`docs/qa/2026-09-18-incremento-1.1.49.md`. A política de privacidade está publicada em
+<https://andrebadini.github.io/audita-acessibilidade-privacidade/>.
+
+**Versão 1.1.48 — fechada como produção em 18/09/2026.** O pacote
 `release/audita-acessibilidade-1.1.48.zip` (199 arquivos, digest
 `7da8b3f02288c58776fbb3b8ecf6681aa5041662fd6cd7fd8bdd4e9d7b281689`, commit `39c86c0`, reconstruível por
-`npm run build:release`) fecha o **último defeito funcional conhecido**: numa página **sem** sinal sensível, os
+`npm run build:release`) fechou o **último defeito funcional conhecido**: numa página **sem** sinal sensível, os
 modos com foto da página atual eram **revogados** em vez de concluir. A causa foi medida ponta a ponta numa cópia
 isolada — o portão de privacidade armava sem pausa e a captura acontecia, mas o commit terminal era recusado pela
 guarda de correlação ("D2") por faltar o **companheiro durável da tentativa**, que só existia no caminho de

@@ -101,6 +101,36 @@ test('aceita o motivo de auditoria encerrada e o projeta como indisponibilidade 
   assert.equal(encerrada.reason, motivo);
 });
 
+test('a tela de indisponibilidade devolve o seletor de modo preservando a preferência (N-1 da 1.1.47)', () => {
+  // A re-verificação independente da 1.1.47 mediu (achado N-1) que a tela `unavailable` não oferecia o
+  // caminho que a própria mensagem sugere: "Iniciar nova auditoria" repetia o MESMO modo, que acabara de
+  // falhar. O caminho novo devolve a tela inicial — onde o seletor de modo existe — sem perder a
+  // preferência anterior nem o registro local.
+  const motivo = 'A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se o modo de imagem '
+    + 'falhar de novo, use o modo sem pixels.';
+  let state = reducePanelState(createInitialPanelState(), {
+    type: 'CAPTURE_MODE_SELECTED', mode: 'element-only', focusId: 'capture-mode-element-only',
+  });
+  state = reducePanelState(state, { type: 'START_REQUESTED', source: 'attached' });
+  state = reducePanelState(state, { type: 'AUDIT_UNAVAILABLE', auditId: 'audit-n1', reason: motivo });
+  assert.equal(state.screen, 'unavailable');
+  assert.equal(state.reason, motivo);
+  assert.equal(state.captureMode, 'element-only');
+
+  const back = reducePanelState(state, { type: 'NEW_AUDIT_REQUESTED' });
+  assert.equal(back.screen, 'initial');
+  assert.equal(back.captureMode, 'element-only', 'a preferência de modo não pode ser descartada');
+  assert.equal(back.auditId, null);
+  assert.equal(back.reason, null);
+  assert.equal(typeof back.focusId, 'string');
+  assert.ok(back.focusId.length > 0);
+
+  // A mesma transição continua recusada fora das telas que a oferecem.
+  const running = reducePanelState(createInitialPanelState(), { type: 'START_REQUESTED', source: 'attached' });
+  assert.equal(reducePanelState(running, { type: 'NEW_AUDIT_REQUESTED' }).screen, 'running');
+  assert.equal(reducePanelState(createInitialPanelState(), { type: 'NEW_AUDIT_REQUESTED' }).screen, 'initial');
+});
+
 test('creates an immutable initial screen with only stable interaction state', () => {
   const state = createInitialPanelState();
   assert.deepEqual(state, {

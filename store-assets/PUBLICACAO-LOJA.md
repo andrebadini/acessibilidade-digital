@@ -1,4 +1,4 @@
-# Publicação na Chrome Web Store — passo a passo do envio (1.1.48)
+# Publicação na Chrome Web Store — passo a passo do envio (1.1.49)
 
 Este documento é o roteiro de envio. **O envio em si depende do usuário**: o console exige a conta de
 desenvolvedor autenticada (com verificação em duas etapas), e nada aqui é feito automaticamente.
@@ -8,9 +8,9 @@ desenvolvedor autenticada (com verificação em duas etapas), e nada aqui é fei
 1. **Conta de desenvolvedor** registrada em <https://chrome.google.com/webstore/devconsole> (taxa única de
    registro) com a verificação de identidade concluída.
 2. **Política de privacidade em endereço HTTPS público.** O console recusa a publicação de extensões que tratam
-   dados do site sem esse endereço. O conteúdo a publicar é `docs/POLITICA-DE-PRIVACIDADE.md`; qualquer
-   hospedagem estática serve (GitHub Pages do próprio repositório, por exemplo). Guarde a URL — ela é um campo do
-   formulário.
+   dados do site sem esse endereço. **Já está publicado:**
+   <https://andrebadini.github.io/audita-acessibilidade-privacidade/> (repositório público
+   `andrebadini/audita-acessibilidade-privacidade`, GitHub Pages). Basta colar essa URL no campo do formulário.
 3. **Capturas de tela** já prontas em `store-assets/` (as três em 1280×800, formato aceito pela loja):
    `screenshot-panel.png`, `screenshot-evidence-failed.png`, `screenshot-evidence-review.png`.
 

@@ -619,7 +619,7 @@ confirmou que os dois commits posteriores (`5cab932`, `f4ca492`) são só docume
 
 | # | Sev. | Achado | Desfecho |
 |---|---|---|---|
-| N-1 | Minor | **A mensagem não é acionável a partir da própria tela que a mostra.** Na `unavailable`, `RETRY` mantém a tela e **troca o motivo específico pelo genérico** ("Não foi possível concluir a operação local."), e "Iniciar nova auditoria" reinicia com o **mesmo modo** (a tela não renderiza o seletor) → falha de novo → mesma tela. O usuário só recupera clicando de novo no ícone da extensão, que devolve `initial` com o seletor de modo — e aí `no-pixels` conclui (`result`, auditId `6e2faa40-…`) | **registrado no backlog** (o revisor classificou Minor: o requisito do I-1 está cumprido, não há perda de dado nem promessa falsa, e há recuperação em um clique). Sugestão mínima aceita como backlog: um terceiro caminho "Escolher outro modo"/voltar a `initial` na tela de indisponibilidade, ou preservar o motivo específico no `RETRY` |
+| N-1 | Minor | **A mensagem não é acionável a partir da própria tela que a mostra.** Na `unavailable`, `RETRY` mantém a tela e **troca o motivo específico pelo genérico** ("Não foi possível concluir a operação local."), e "Iniciar nova auditoria" reinicia com o **mesmo modo** (a tela não renderiza o seletor) → falha de novo → mesma tela. O usuário só recupera clicando de novo no ícone da extensão, que devolve `initial` com o seletor de modo — e aí `no-pixels` conclui (`result`, auditId `6e2faa40-…`) | **CORRIGIDO na 1.1.49** (o revisor classificou Minor: o requisito do I-1 estava cumprido, não havia perda de dado nem promessa falsa, e havia recuperação em um clique). O conserto aceita as **duas** sugestões do revisor: a tela de indisponibilidade passou a oferecer **"Escolher outro modo"** (devolve `initial` com o seletor, preservando a preferência) e o `RETRY` passou a **preservar o motivo específico** quando a retomada é recusada. Provas: `panel-state` (transição e recusas), `panel-view` (rótulo e intents) e `panel-runtime` (percurso real: indisponibilidade → retomada recusada → motivo preservado → seletor de volta). Registro: `docs/qa/2026-09-18-incremento-1.1.49.md` |
 | N-2 | Observação | Documentação e escopo: a retratação da causa (`f4ca492`) e o registro da revisão da 1.1.45 estão coerentes com a medição dele; o arquivo `test/e2e/sidepanel-flow-mv3.test.mjs` modificado no worktree é do incremento paralelo, **não** faz parte do zip (199/199 conferidos) e não foi medido | **declarado** |
 
 **Não medido pelo revisor, declarado por ele:** a suíte completa e o escopo serial da 1.1.47 (mediu o arquivo
@@ -664,3 +664,17 @@ byte-idêntico à 1.1.47); tentativa direta ≠ consentimento em todas as fronte
 (full-evidence) e `result@1,5 s` (element-only); página sensível pausa → confirma → `result@2,5 s`; duas
 auditorias seguidas 2× `result` com 0 marcadores; `url-pixel-consent-mv3` **10/10**; o E2E novo do autor nos
 bytes empacotados **1/1** (52,8 s) e **reprova em 3,49 s** contra os bytes anteriores.
+
+
+## Incremento 1.1.49 — N-1 fechado e a suíte E2E da página atual migrada
+
+Registro completo: `docs/qa/2026-09-18-incremento-1.1.49.md`; nota de versão: `docs/releases/1.1.49.md`.
+Pacote `release/audita-acessibilidade-1.1.49.zip`, digest `92945a8d…e5fa9`, 199 arquivos.
+
+| Item | Sev. | Desfecho |
+|---|---|---|
+| **N-1** (re-verificação da 1.1.47) | Minor | **corrigido no produto** — ver a linha do achado acima |
+| **9 cenários E2E** de `sidepanel-flow-mv3` | declarado no dossiê (§1 critério 10, §4) | **migrados para o desenho passivo** e verdes: **9/9 em 299 s** (antes: 7 falhas). O oráculo deixou de exigir cópia/posse de aba e passou a exigir documento observado, zero abas criadas, relatório vivo e exclusão que não fecha a aba do usuário |
+| **3 linhas de documentação vencidas** | higiene | README, dossiê §4 e `docs/BETA-BACKLOG.md` corrigidos |
+| **Achado novo (medido pela migração)** | declarado | capturar elemento fora da viewport oscila transitoriamente a geometria no Chrome 152 (248 eventos de `resize` num fixture de 240 controles, com retorno exato e zero mutações/rolagem/foco/estilo). É o limite já declarado para regiões fora da viewport; o modo sem pixels continua exigindo zero eventos |
+| **Ambiente** | não é produto | o Chrome for Testing de `/private/tmp/audita-cft152-fixed` deixou de iniciar (processos auxiliares com `SIGTRAP`); a bateria passou a usar binário recém-baixado do canal oficial, mesma versão `152.0.7977.64` |

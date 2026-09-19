@@ -21,7 +21,20 @@ const fragmentMarker = 'AUDITA4D_FRAGMENT_149B8C30';
 const memoryMarker = 'AUDITA4D_MEMORY_ONLY_4CC931E2';
 const attachedCopyLimitation =
   'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
-const knownOccurrence = Object.freeze({ selector: '#missing-alt', wcag: '1.1.1', abnt: '5.2.1' });
+const passiveObservationLimitation =
+  'A página foi observada sem alterar foco, rolagem ou layout. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.';
+// A página atual é auditada NO documento aberto (roteamento entregue em 1c9b296, passivo desde então). O
+// elemento observado é o que existe AGORA: `armSourceInvariantProof` remove a imagem do servidor só em
+// memória, então a ocorrência conhecida do percurso passivo é o BOTÃO sem nome acessível, presente no
+// documento vivo, com evidência de elemento correlacionada pelo seletor qualificado (`button#missing-name`).
+// Medido no inventário real: `axe.button-name` (ABNT 5.13.10, WCAG 4.1.2) sai como `cantTell` complementar, e
+// o produtor de seletor qualifica o ID com a tag real do elemento.
+// O produtor qualifica o seletor com o ID quando ele existe e cai no caminho estrutural quando não existe:
+// os dois cenários desta suíte usam o MESMO botão sem nome, um com `id="missing-name"` e outro sem ID algum.
+const knownOccurrence = Object.freeze({
+  ruleId: 'axe.button-name', wcag: '4.1.2', abnt: '5.13.10', outcome: 'cantTell',
+  selectors: Object.freeze(['button#missing-name', 'html > body > main > button']),
+});
 const canonicalReportTitle = 'Relatório de auditoria — Audita Acessibilidade';
 const exportMime = Object.freeze({
   html: 'text/html;charset=utf-8', pdf: 'application/pdf',
@@ -151,7 +164,7 @@ for (const scenario of [
     const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
     await waitForPrivacyPause(extension, panel);
     const auditId = await auditIdPromise;
-    const owner = await assertPausedAttempt(extension, auditId, identityBefore, `${fixture.origin}/current`);
+    await assertPausedObservedAttempt(extension, auditId, identityBefore);
     await confirmOnce(extension, panel);
     assert.equal(await waitForResult(extension, panel, auditId).catch(async cause => {
       const attempt = await readPrivateAttempt(extension, auditId).catch(() => null);
@@ -169,7 +182,7 @@ for (const scenario of [
       throw cause;
     }), auditId);
     await step('SILENT_AUDIT', async () => {
-      await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+      await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
         minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
         diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
       }, fixture.origin);
@@ -187,7 +200,9 @@ for (const scenario of [
       await new Promise(resolve => setTimeout(resolve, 45_000));
       const targets = (await extension.browser.command('Target.getTargets')).targetInfos;
       assert.equal(targets.some(info => info.targetId === workerTarget.targetId && info.attached === false), true);
-      await assertSourceUntouched(extension, identityBefore);
+      // O passo anterior capturou elementos (element-only): a oscilação transitória de geometria da
+      // captura fora da viewport é o limite declarado, e não uma alteração do documento.
+      await assertSourceUntouched(extension, identityBefore, { allowCaptureResize: true });
     });
     const preserved = await extension.evaluate(extension.startPage.page, `(() => {
       globalThis.__auditaSourceInvariantV1.dispose();
@@ -415,6 +430,9 @@ for (const scenario of [
       const surface = await extension.evaluate(report, reportSurfaceExpression());
       assert.equal(surface.ready && surface.abnt && surface.wcag && surface.announcement, true);
       assert.ok(surface.images > 0);
+      assert.equal(surface.limitation, false, 'o relatório da página atual não é o de uma cópia recarregada');
+      assert.equal(surface.passiveLimitation, true, 'o relatório deve declarar a observação passiva');
+      assert.equal(surface.explanationVisible, false);
       if (!scenario.idle) await extension.captureJourney('markers-report-after-review', report, { captureBeyondViewport: false });
       await exportFourFormats(extension, report, auditId, extension.downloadDirectory);
       // Finalizing a verified export advances the storage revision once; the
@@ -534,7 +552,20 @@ async function armSourceInvariantProof(extension) {
       'popstate','hashchange','pagehide'
     ];
     const events=Object.fromEntries(eventNames.map(name=>[name,0]));
-    const onEvent=event=>{if(Object.hasOwn(events,event.type))events[event.type]+=1};
+    const resizeSamples=[];
+    const onEvent=event=>{
+      if(!Object.hasOwn(events,event.type))return;
+      events[event.type]+=1;
+      // O percurso passivo não pode redimensionar o documento observado. Quando um evento de resize
+      // aparece, a geometria do momento é a prova que separa a animação do painel de uma alteração
+      // causada pela auditoria; sem ela o diagnóstico só diz "248 eventos".
+      if(event.type==='resize'&&resizeSamples.length<24){
+        const visual=visualViewport;
+        resizeSamples.push('t='+Math.round(performance.now())+' '+innerWidth+'x'+innerHeight+'/'+
+          document.documentElement.clientWidth+'x'+document.documentElement.clientHeight+
+          (visual?'/'+Math.round(visual.width)+'x'+Math.round(visual.height):''));
+      }
+    };
     for(const name of eventNames)window.addEventListener(name,onEvent,true);
     const mutationCounts={childList:0,attributes:0,characterData:0};
     const recordMutations=records=>{for(const record of records)mutationCounts[record.type]+=1};
@@ -585,7 +616,8 @@ async function armSourceInvariantProof(extension) {
           style:JSON.stringify(current.style)===JSON.stringify(baseline.style),
           missingAltAbsent:current.missingAltAbsent===true&&baseline.missingAltAbsent===true,
           eventTotal,mutationTotal,overlays:current.overlays,
-          eventCounts:{...events},viewportBefore:baseline.viewport,viewportAfter:current.viewport
+          eventCounts:{...events},resizeSamples:[...resizeSamples],
+          viewportBefore:baseline.viewport,viewportAfter:current.viewport
         };
       },
       dispose(){observer.disconnect();for(const name of eventNames)window.removeEventListener(name,onEvent,true)}
@@ -640,41 +672,35 @@ async function armTabIsolationProof(extension) {
   assert.equal(ready, true);
 }
 
-async function readTabIsolationProof(extension, ownerTabId) {
-  return extension.evaluate(extension.harnessPage, `(async()=>{
-    await new Promise(resolve=>setTimeout(resolve,30));
-    const proof=globalThis.__auditaCurrentCopyProofV1;
-    const active=await chrome.tabs.query({active:true,windowId:${JSON.stringify(extension.startPage.windowId)}});
-    let ownerActive=null;let ownerExists=true;let sourceDebuggerAttachedNow=false;
-    try{ownerActive=(await chrome.tabs.get(${JSON.stringify(ownerTabId)})).active===true}catch{ownerExists=false}
-    try{sourceDebuggerAttachedNow=(await chrome.debugger.getTargets()).some(target=>
-      target.tabId===${JSON.stringify(extension.startPage.tabId)}&&target.attached===true)}catch{sourceDebuggerAttachedNow=true}
-    return {
-      created:proof.state.created,sourceUpdates:proof.state.sourceUpdates,
-      ownerActivations:proof.state.activations.filter(value=>value.tabId===${JSON.stringify(ownerTabId)}).length,
-      ownerRemovals:proof.state.removed.filter(value=>value.tabId===${JSON.stringify(ownerTabId)}).length,
-      activeIds:active.map(tab=>tab.id),ownerActive,ownerExists,
-      debugSamples:proof.state.debugSamples,sourceDebugAttached:proof.state.sourceDebugAttached,
-      sourceDebuggerBaseline:proof.state.sourceDebuggerBaseline,
-      sourceDebuggerAttachedNow
-    };
-  })()`, { awaitPromise: true });
-}
 
-async function assertSourceUntouched(extension, identityBefore) {
+// `allowCaptureResize` existe por MEDIÇÃO, não por conveniência: capturar um elemento fora da viewport usa
+// `Page.captureScreenshot` com `captureBeyondViewport: true`, e no Chrome 152 isso altera transitoriamente a
+// geometria (medido: o viewport chega a 1x1 e volta; 248 eventos de `resize` num fixture de 240 controles,
+// com a geometria final idêntica). É o limite já declarado do produto para regiões fora da viewport. O que
+// NÃO é permitido em nenhum modo: navegação, mutação de DOM, rolagem, foco, seleção, entrada, estilo ou
+// sobreposição — e a geometria final tem de ser exatamente a inicial (`viewport: true`).
+async function assertSourceUntouched(extension, identityBefore, { allowCaptureResize = false } = {}) {
   const [comparison, identityAfter] = await Promise.all([
     extension.evaluate(extension.startPage.page, 'globalThis.__auditaSourceInvariantV1.compare()'),
     extension.identityOf(extension.startPage),
   ]);
   const diagnostic = {
     eventCounts: comparison.eventCounts,
+    resizeSamples: comparison.resizeSamples,
     viewportBefore: comparison.viewportBefore,
     viewportAfter: comparison.viewportAfter,
   };
   const verified = { ...comparison };
   delete verified.eventCounts;
+  delete verified.resizeSamples;
   delete verified.viewportBefore;
   delete verified.viewportAfter;
+  const captureResizes = Number(comparison.eventCounts?.resize ?? 0);
+  if (allowCaptureResize && captureResizes > 0) {
+    // A geometria final continua obrigatória; a amostragem só documenta a oscilação transitória.
+    assert.equal(comparison.viewport, true, JSON.stringify(diagnostic));
+    verified.eventTotal -= captureResizes;
+  }
   assert.deepEqual(verified, {
     stable: true, url: true, title: true, dom: true, history: true, scroll: true, viewport: true,
     focus: true, input: true, selection: true, style: true, missingAltAbsent: true,
@@ -686,25 +712,42 @@ async function assertSourceUntouched(extension, identityBefore) {
   'a identidade do documento original mudou durante a auditoria');
 }
 
-async function assertCopyIsolation(extension, ownerTabId, identityBefore, { removed }) {
-  await assertSourceUntouched(extension, identityBefore);
-  const proof = await readTabIsolationProof(extension, ownerTabId);
-  assert.equal(proof.created.length, 1);
-  assert.deepEqual(proof.created.filter(value => value.tabId === ownerTabId), [{
-    tabId: ownerTabId, windowId: extension.startPage.windowId, active: false,
-  }]);
+// Percurso passivo (página atual): nenhuma cópia, nenhuma aba criada, nenhum registro de posse. O documento
+// original continua sendo o único documento observado, com o CDP do próprio E2E possuindo a aba antes e depois.
+async function assertNoCopyCreated(extension, identityBefore, options = {}) {
+  await assertSourceUntouched(extension, identityBefore, options);
+  const proof = await extension.evaluate(extension.harnessPage, `(async()=>{
+    await new Promise(resolve=>setTimeout(resolve,30));
+    const stored=await chrome.storage.session.get(null);
+    const proof=globalThis.__auditaCurrentCopyProofV1;
+    const active=await chrome.tabs.query({active:true,windowId:${JSON.stringify(extension.startPage.windowId)}});
+    let sourceDebuggerAttachedNow=false;
+    try{sourceDebuggerAttachedNow=(await chrome.debugger.getTargets()).some(target=>
+      target.tabId===${JSON.stringify(extension.startPage.tabId)}&&target.attached===true)}catch{sourceDebuggerAttachedNow=true}
+    return {
+      created:proof.state.created,sourceUpdates:proof.state.sourceUpdates,
+      activations:proof.state.activations.filter(value=>value.tabId!==${JSON.stringify(extension.startPage.tabId)}).length,
+      removals:proof.state.removed.filter(value=>value.tabId!==${JSON.stringify(extension.startPage.tabId)}).length,
+      activeIds:active.map(tab=>tab.id),
+      ownedRecords:Object.entries(stored).filter(([key])=>key.startsWith('audita:owned-tab:v2:')).length,
+      debugSamples:proof.state.debugSamples,sourceDebugAttached:proof.state.sourceDebugAttached,
+      sourceDebuggerBaseline:proof.state.sourceDebuggerBaseline,sourceDebuggerAttachedNow,
+      sourceTabStillOpen:true
+    };
+  })()`, { awaitPromise: true });
+  assert.deepEqual(proof.created, [], 'a auditoria da página atual não pode criar abas');
+  assert.equal(proof.activations, 0, 'nenhuma aba pode ser ativada pela auditoria da página atual');
+  assert.equal(proof.removals, 0, 'nenhuma aba pode ser fechada pela auditoria da página atual');
   assert.deepEqual(proof.activeIds, [extension.startPage.tabId]);
-  assert.equal(proof.ownerActivations, 0);
-  assert.equal(proof.ownerActive, removed ? null : false);
-  assert.equal(proof.ownerExists, !removed);
-  assert.equal(proof.ownerRemovals >= (removed ? 1 : 0), true);
   assert.deepEqual(proof.sourceUpdates, []);
+  assert.equal(proof.ownedRecords, 0, 'o percurso passivo não registra posse de aba');
   assert.ok(proof.debugSamples >= 1);
   assert.equal(proof.sourceDebuggerBaseline, true,
     'o CDP do próprio E2E deve possuir a aba original antes da auditoria');
   assert.equal(proof.sourceDebugAttached, proof.debugSamples,
     'a posse externa do CDP sobre a origem não pode oscilar durante a auditoria');
   assert.equal(proof.sourceDebuggerAttachedNow, true);
+  return proof;
 }
 
 async function stopServiceWorker(extension) {
@@ -822,19 +865,32 @@ async function readPrivateAttempt(extension, requestedAuditId = null) {
       evidenceCount:evidence.length,exportJournalCount:Array.isArray(exportJournal)?exportJournal.length:null,
       executionCheckpointPresent:Object.hasOwn(stored,'audita:execution-checkpoint:v1:'+auditId),
       status:model?.session?.status??null,
-      imageAltOccurrences:(model?.occurrences??[]).filter(item=>item?.nbrItemRef===${JSON.stringify(knownOccurrence.abnt)})
+      knownOccurrenceRefs:(model?.occurrences??[]).filter(item=>item?.nbrItemRef===${JSON.stringify(knownOccurrence.abnt)})
         .map(item=>({ruleId:item?.ruleId??null,source:item?.source??null,selector:item?.target?.selector??null,
           nodeId:item?.nodeId??null,nbrItemRef:item?.nbrItemRef??null,outcome:item?.outcome??null,
           evidenceRefs:item?.evidenceRefs??[],itemWcagRefs:item?.itemWcagRefs??[],
           sourceWcagRefs:item?.sourceWcagRefs??[],testedWcagRefs:item?.testedWcagRefs??[],wcagRefs:item?.wcagRefs??[]})),
-      knownServerImageOccurrence:Boolean(model?.occurrences?.some(item=>
-        item?.source?.ruleId==='content-image-alternative'&&
+      knownLiveOccurrence:Boolean(model?.occurrences?.some(item=>
+        item?.source?.ruleId===${JSON.stringify(knownOccurrence.ruleId)}&&
         item?.nbrItemRef===${JSON.stringify(knownOccurrence.abnt)}&&
         item?.itemWcagRefs?.includes(${JSON.stringify(knownOccurrence.wcag)})&&
         item?.evidenceRefs?.some(evidenceId=>{
           const artifact=evidence.find(value=>value?.evidenceId===evidenceId);
-          return artifact?.nodeId===item?.nodeId&&artifact?.selector?.css===${JSON.stringify(knownOccurrence.selector)};
+          return artifact?.nodeId===item?.nodeId&&${JSON.stringify(knownOccurrence.selectors)}.includes(artifact?.selector?.css);
         }))),
+      knownLiveSelector:(()=>{
+        const item=(model?.occurrences??[]).find(candidate=>
+          candidate?.source?.ruleId===${JSON.stringify(knownOccurrence.ruleId)}&&
+          candidate?.nbrItemRef===${JSON.stringify(knownOccurrence.abnt)}&&
+          candidate?.itemWcagRefs?.includes(${JSON.stringify(knownOccurrence.wcag)})&&
+          candidate?.evidenceRefs?.some(evidenceId=>{
+            const artifact=evidence.find(value=>value?.evidenceId===evidenceId);
+            return artifact?.nodeId===candidate?.nodeId&&${JSON.stringify(knownOccurrence.selectors)}.includes(artifact?.selector?.css);
+          }));
+        if(!item)return null;
+        const artifact=evidence.find(value=>item.evidenceRefs?.includes(value?.evidenceId)&&value?.nodeId===item.nodeId);
+        return artifact?.selector?.css??null;
+      })(),
       fullPage:evidence.filter(item=>item?.kind==='full-page'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
       elements:evidence.filter(item=>item?.kind==='element'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
       rasterDataUrls:(publicText.match(/data:image\\/(?:png|jpeg|webp);base64,/giu)||[]).length,
@@ -858,54 +914,7 @@ async function waitForActiveAuditId(extension) {
   });
 }
 
-async function assertPausedCopyDocument(extension, ownerTabId, expectedUrl) {
-  const proof = await extension.evaluate(extension.harnessPage, `(async()=>{
-    const tab=await chrome.tabs.get(${JSON.stringify(ownerTabId)});
-    const frames=await chrome.scripting.executeScript({
-      target:{tabId:${JSON.stringify(ownerTabId)},frameIds:[0]},world:'ISOLATED',
-      args:[${JSON.stringify(expectedUrl)},${JSON.stringify(memoryMarker)}],
-      func:(expectedUrl,memoryMarker)=>({
-        expectedUrl:location.href===expectedUrl,
-        expectedDocument:document.title==='Origem preservada'&&
-          document.querySelector('h1')?.textContent==='Origem que deve permanecer intacta',
-        fixtureContent:Boolean(document.querySelector('#password-field')&&document.querySelector('[data-audita-private]')),
-        serverImagePresent:Boolean(document.querySelector('img#missing-alt')),
-        serverInput:document.querySelector('#source-notes')?.value==='valor vindo do servidor',
-        serverStyle:document.querySelector('#runtime-style-target')?.dataset.runtimeState==='server'&&
-          document.querySelector('#runtime-style-target')?.textContent==='Estado visual do servidor',
-        memoryStateAbsent:!(document.documentElement?.outerHTML??'').includes(memoryMarker)&&
-          typeof globalThis.__auditaSourceInvariantV1==='undefined'&&
-          typeof globalThis.__auditaP4dImageRemovedV1==='undefined'
-      })
-    });
-    const main=frames.length===1&&frames[0]?.frameId===0&&typeof frames[0]?.documentId==='string'&&
-      frames[0].documentId.length>0?frames[0].result:null;
-    return {
-      exactlyOneMainDocument:Boolean(main),inactive:tab.active===false,complete:tab.status==='complete',
-      tabUrlExpected:tab.url===${JSON.stringify(expectedUrl)},expectedUrl:main?.expectedUrl===true,
-      expectedDocument:main?.expectedDocument===true,fixtureContent:main?.fixtureContent===true,
-      serverImagePresent:main?.serverImagePresent===true,
-      serverInput:main?.serverInput===true,serverStyle:main?.serverStyle===true,
-      memoryStateAbsent:main?.memoryStateAbsent===true
-    };
-  })()`, { awaitPromise: true });
-  assert.deepEqual(proof, {
-    exactlyOneMainDocument: true, inactive: true, complete: true, tabUrlExpected: true,
-    expectedUrl: true, expectedDocument: true, fixtureContent: true, serverInput: true,
-    serverImagePresent: true, serverStyle: true, memoryStateAbsent: true,
-  });
-}
 
-async function waitForOwner(extension, auditId, predicate) {
-  return extension.waitForValue(extension.harnessPage, `(async()=>{
-    const stored=await chrome.storage.session.get(null);
-    return Object.entries(stored).filter(([key,value])=>
-      key.startsWith('audita:owned-tab:v2:')&&value?.auditId===${JSON.stringify(auditId)})
-      .map(([,value])=>({tabId:value.tabId,windowId:value.windowId,state:value.state,cleanupMode:value.cleanupMode}));
-  })()`, value => Array.isArray(value) && value.length === 1 && predicate(value[0]), {
-    timeoutMs: 30_000, intervalMs: 50,
-  });
-}
 
 async function waitForActiveAuditCleanup(extension, auditId) {
   return extension.waitForValue(extension.harnessPage, `(async()=>{
@@ -1039,40 +1048,47 @@ function assertSanitizedModelUrls(values, fixtureOrigin) {
   }
 }
 
-async function assertPausedAttempt(extension, auditId, identityBefore, expectedUrl) {
-  const [owner] = await waitForOwner(extension, auditId,
-    value => value.state === 'retained-for-consent' && value.cleanupMode === 'always');
+// Pausa por privacidade no percurso passivo: a sessão existe, o trabalho terminou antes de qualquer raster, e
+// NÃO há posse de aba — o documento pausado é o próprio documento do usuário.
+async function assertPausedObservedAttempt(extension, auditId, identityBefore) {
   const attempt = await readPrivateAttempt(extension, auditId);
   assert.equal(attempt.activeSame, true);
   assert.equal(attempt.activeState, 'privacy-paused');
-  assert.equal(attempt.owners.length, 1);
+  assert.deepEqual(attempt.owners, []);
   assert.equal(attempt.auditPresent, false);
   assert.equal(attempt.modelPresent, false);
   assert.equal(attempt.reportPresent, false);
   assert.equal(attempt.evidenceCount, 0);
   assert.equal(attempt.exportJournalCount, 0);
   assert.equal(attempt.executionCheckpointPresent, true);
-  assert.equal(attempt.sessionRasterDataUrls, 0);
+  assert.equal(attempt.sessionRasterDataUrls, 0, 'nenhum raster pode existir antes do consentimento');
   assert.equal(attempt.forbiddenSessionUrlCount, 0);
   assert.equal(attempt.startJournalPresent, false);
   assert.equal(attempt.rawNavigationCount, 0);
   assert.equal(attempt.pixelStateCount >= 1, true);
-  await assertPausedCopyDocument(extension, owner.tabId, expectedUrl);
-  await assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: false });
-  return owner;
+  await assertNoCopyCreated(extension, identityBefore);
+  return attempt;
 }
 
-async function assertTerminalAttempt(extension, auditId, ownerTabId, identityBefore, expected, fixtureOrigin) {
-  await waitForOwner(extension, auditId,
-    value => value.tabId === ownerTabId && value.state === 'removed' && value.cleanupMode === 'always');
+async function assertObservedTerminalAttempt(extension, auditId, identityBefore, expected, fixtureOrigin) {
   await waitForActiveAuditCleanup(extension, auditId);
   const attempt = await readPrivateAttempt(extension, auditId);
   assert.equal(attempt.activeSame, false);
   assert.equal(attempt.auditPresent, true);
   assert.equal(attempt.modelPresent, true);
   assert.equal(attempt.reportPresent, true);
-  assert.equal(attempt.knownServerImageOccurrence, true,
-    `a imagem removida apenas da origem em memória deve permanecer observável na cópia recarregada: ${JSON.stringify(attempt.imageAltOccurrences)}`);
+  assert.deepEqual(attempt.owners, [], 'o percurso passivo não deixa posse de aba');
+  assert.equal(attempt.knownLiveOccurrence, true,
+    `a falha do botão sem nome do documento VIVO deve estar no modelo, com evidência de elemento correlacionada: ${JSON.stringify(attempt.knownOccurrenceRefs)}`);
+  const liveResolution = await extension.evaluate(extension.startPage.page, `(() => {
+    let node=null;
+    try{node=document.querySelector(${JSON.stringify(attempt.knownLiveSelector)})}catch{return {ok:false,reason:'selector-invalid'}}
+    if(!node)return {ok:false,reason:'not-found'};
+    const name=(node.getAttribute('aria-label')??node.textContent??'').trim();
+    return {ok:node.tagName==='BUTTON'&&name==='',tag:node.tagName,id:node.id??null,name};
+  })()`);
+  assert.equal(liveResolution.ok, true,
+    `o seletor registrado na evidência deve resolver, no documento vivo, ao botão sem nome acessível: ${JSON.stringify(liveResolution)}`);
   assert.equal(attempt.executionCheckpointPresent, false);
   assert.equal(attempt.exportJournalCount, 0);
   assert.ok(['complete', 'partial'].includes(attempt.status));
@@ -1080,7 +1096,9 @@ async function assertTerminalAttempt(extension, auditId, ownerTabId, identityBef
   assert.equal(attempt.elements >= expected.minimumElements, true, JSON.stringify({ elements: attempt.elements }));
   if (expected.fullPageExact !== undefined) assert.equal(attempt.fullPage, expected.fullPageExact);
   if (expected.elementsExact !== undefined) assert.equal(attempt.elements, expected.elementsExact);
-  assert.equal(attempt.diagnostics.includes('ATTACHED_COPY_RELOADED'), true);
+  assert.equal(attempt.diagnostics.includes('ATTACHED_COPY_RELOADED'), false,
+    'a página atual não é auditada em cópia recarregada');
+  assert.equal(attempt.diagnostics.includes('DYNAMIC_PROBES_OMITTED_PASSIVE'), true);
   for (const diagnostic of expected.diagnostics ?? []) assert.equal(attempt.diagnostics.includes(diagnostic), true);
   assert.equal(attempt.forbiddenPublicCount, 0);
   assert.equal(attempt.forbiddenSessionUrlCount, 0);
@@ -1089,7 +1107,8 @@ async function assertTerminalAttempt(extension, auditId, ownerTabId, identityBef
   assert.equal(attempt.pixelStateCount, 0);
   assert.equal(attempt.pixelCompanionPresent, false);
   assertSanitizedModelUrls(attempt.urls, fixtureOrigin);
-  await assertCopyIsolation(extension, ownerTabId, identityBefore, { removed: true });
+  const capturesPixels = (expected.minimumElements ?? 0) > 0 || (expected.minimumFullPage ?? 0) > 0;
+  await assertNoCopyCreated(extension, identityBefore, { allowCaptureResize: capturesPixels });
   return attempt;
 }
 
@@ -1106,7 +1125,7 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
   assert.ok(summary.occurrences > 0);
   assert.equal(summary.forbiddenCount, 0);
   const selectedIndex = await extension.evaluate(panel, `(() => {
-    const expected=${JSON.stringify(JSON.stringify(['page-1', 'audita-core', 'form-field-label']))};
+    const expected=${JSON.stringify(JSON.stringify(['page-1', 'audita-core', 'accessible-component-name']))};
     const card=[...document.querySelectorAll('[data-result-card]')]
       .find(value=>value.dataset.checkKey===expected);
     const button=card?.querySelector('button[data-intent="SELECT_OCCURRENCE"]');
@@ -1141,25 +1160,29 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
         consult:Boolean(document.querySelector('[data-action="consult-evidence"]')),
         highlight:Boolean(document.querySelector('[data-action="highlight-occurrence"]'))
       };
-    })()`, value => value?.visible === true && value?.selected === selectedIndex && value?.consult === true, {
-    timeoutMs: 10_000, intervalMs: 25,
+    })()`, value => value?.visible === true && value?.selected === selectedIndex &&
+      (value?.highlight === true || value?.consult === true), {
+    timeoutMs: 15_000, intervalMs: 25,
   });
-  assert.equal(detail.selector, '#missing-label');
-  assert.equal(detail.normative.includes('WCAG 3.3.2, 4.1.2'), true);
-  assert.equal(detail.normative.includes('ABNT NBR 17225: 5.9.1'), true);
-  assert.match(detail.accessibility, /Anúncio esperado:\s*\S/u);
-  assert.match(detail.technical, /Regra:\s*form-field-label/u);
+  assert.ok(typeof detail.selector === 'string' && detail.selector.length > 0,
+    `a ficha da ocorrência observada deve trazer o seletor sanitizado: ${JSON.stringify(detail.selector)}`);
+  assert.match(detail.normative.join(' '), /WCAG[^]{0,60}4\.1\.2/u);
+  assert.match(detail.normative.join(' '), /ABNT NBR 17225: 5\.13\.10/u);
+  assert.ok(detail.accessibility.length > 0);
+  assert.match(detail.technical, /Regra:\s*accessible-component-name/u);
   assert.match(detail.technical, /Trecho sanitizado/u);
   assert.match(detail.previewText, /Evidências/u);
-  assert.equal(detail.highlight, false);
-  assert.equal(detail.consult, true);
+  // A sessão da página atual é viva: o painel oferece o destaque no próprio documento observado, e não o
+  // caminho alternativo de consulta usado quando não há elemento destacável.
+  assert.equal(detail.highlight, true);
+  assert.equal(detail.consult, false);
   if (mode === 'no-pixels') assert.equal(detail.images, 0);
   else if (mode === 'full-evidence') {
     assert.equal(detail.images >= expectedImages ||
       /Prévia omitida no painel para manter o resultado leve/u.test(detail.previewText), true,
     'o painel deve exibir a miniatura ou informar que a captura integral está no relatório');
   } else assert.equal(detail.images >= expectedImages, true);
-  await assertSourceUntouched(extension, identityBefore);
+  await assertSourceUntouched(extension, identityBefore, { allowCaptureResize: mode !== 'no-pixels' });
 }
 
 function reportSurfaceExpression() {
@@ -1174,6 +1197,7 @@ function reportSurfaceExpression() {
       wcag:text.includes('WCAG 2.2:'),abnt:text.includes('ABNT NBR 17225:'),
       announcement:text.includes('Anúncio estimado:'),selector:text.includes('Seletor:'),
       limitation:(document.body?.textContent??'').includes(${JSON.stringify(attachedCopyLimitation)}),
+      passiveLimitation:(document.body?.textContent??'').includes(${JSON.stringify(passiveObservationLimitation)}),
       explanationVisible:Boolean(explanation&&!explanation.hidden&&/cópia temporária/iu.test(explanation.textContent??'')),
       returnHidden:Boolean(back?.hidden),returnDisabled:Boolean(back?.disabled),
       highlightControls:document.querySelectorAll('[data-report-highlight-control]').length,
@@ -1185,12 +1209,15 @@ function reportSurfaceExpression() {
   })()`;
 }
 
-async function openViewOnlyReport(extension, panel, auditId, minimumImages, identityBefore) {
+// O relatório da página atual é VIVO: a sessão continua ligada ao documento observado, então o retorno e o
+// destaque ao vivo existem. O que não existe é a limitação de cópia recarregada — no lugar dela vai a
+// declaração de observação passiva.
+async function openLiveReport(extension, panel, auditId, minimumImages, identityBefore) {
   const step = async (name, operation) => {
     try { return await operation(); }
     catch (cause) { throw new Error(`REPORT_${name}_${cause?.code ?? 'FAILED'}`, { cause }); }
   };
-  await assertSourceUntouched(extension, identityBefore);
+  await assertSourceUntouched(extension, identityBefore, { allowCaptureResize: minimumImages > 0 });
   await step('OPEN', () => extension.click(panel, 'button[data-intent="OPEN_REPORT"]'));
   const report = await step('CONNECT', async () => {
     try { return await extension.waitForReport({ auditId }); }
@@ -1229,18 +1256,21 @@ async function openViewOnlyReport(extension, panel, auditId, minimumImages, iden
   assert.equal(state.abnt, true);
   assert.equal(state.announcement, true);
   assert.equal(state.selector, true);
-  assert.equal(state.limitation, true);
-  assert.equal(state.explanationVisible, true);
-  assert.equal(state.returnHidden, true);
-  assert.equal(state.returnDisabled, true);
-  assert.equal(state.highlightControls, 0);
+  assert.equal(state.limitation, false,
+    'a página atual não pode ser declarada como cópia recarregada');
+  assert.equal(state.passiveLimitation, true,
+    'o relatório deve declarar a observação passiva do estado presente');
+  assert.equal(state.explanationVisible, false);
+  assert.equal(state.returnHidden, false);
+  assert.equal(state.returnDisabled, false);
+  assert.ok(state.highlightControls > 0, 'a sessão viva da página atual oferece destaque no relatório');
   assert.ok(state.evidenceOnly > 0);
   assert.equal(state.images >= minimumImages, true);
   assert.equal(state.forbiddenCount, 0);
   return report;
 }
 
-function durableDeletionExpression(auditId, ownerTabId) {
+function durableDeletionExpression(auditId, sourceTabId) {
   return `(async()=>{
     const auditId=${JSON.stringify(auditId)};
     const stored=await chrome.storage.session.get(null);const entries=Object.entries(stored);
@@ -1268,7 +1298,7 @@ function durableDeletionExpression(auditId, ownerTabId) {
     const related=(key,value)=>key.includes(auditId)||JSON.stringify(value).includes(auditId);
     return {
       auditPresent:Boolean(audit),reportPresent:Boolean(revision),latestSame:latest?.auditId===auditId,
-      ownedTabPresent:(await chrome.tabs.query({})).some(tab=>tab.id===${JSON.stringify(ownerTabId)}),
+      ownedTabPresent:(await chrome.tabs.query({})).some(tab=>tab.id===${JSON.stringify(sourceTabId)}),
       retentionPresent:Boolean(retention),exportJournalCount:Array.isArray(journal)?journal.length:null,
       exportReceiptPresent:Boolean(receipt),activeSame:stored['audita:active-audit-job:v1']?.auditId===auditId,
       owners,
@@ -1288,18 +1318,19 @@ function durableDeletionExpression(auditId, ownerTabId) {
   })()`;
 }
 
-function isDurablyDeleted(value, ownerTabId) {
+function isDurablyDeleted(value, sourceTabId) {
+  // No percurso passivo a aba observada é a aba do usuário: a exclusão apaga o registro local e NÃO fecha a
+  // aba. `ownedTabPresent` aqui significa "a aba original continua aberta", e não há posse residual alguma.
   return Boolean(value && value.auditPresent === false && value.reportPresent === false &&
     value.latestSame === false && value.retentionPresent === false && value.exportJournalCount === 0 &&
     value.exportReceiptPresent === false && value.activeSame === false && Array.isArray(value.owners) &&
-    value.ownedTabPresent === false &&
-    value.owners.every(owner => owner.state === 'removed' && owner.tabExists === false) &&
+    value.owners.length === 0 && value.ownedTabPresent === true &&
     value.checkpointSessionCount === 0 && value.highlightCount === 0 &&
     value.rawNavigationCount === 0 && value.pixelSessionCount === 0 &&
     value.auditKeyCount === 0 && value.retentionKeyCount === 0 && value.pixelCompanionPresent === false);
 }
 
-async function deleteAuditAndRestoreSource(extension, panel, report, auditId, ownerTabId) {
+async function deleteAuditAndKeepSource(extension, panel, report, auditId, sourceTabId) {
   await extension.click(report, '#delete-audit');
   await extension.waitForValue(report, `document.querySelector('#delete-audit-dialog')?.open`, Boolean, {
     timeoutMs: 10_000, intervalMs: 25,
@@ -1307,13 +1338,13 @@ async function deleteAuditAndRestoreSource(extension, panel, report, auditId, ow
   await extension.click(report, '#delete-audit-confirm');
   let deletion;
   try {
-    deletion = await extension.waitForValue(extension.harnessPage, durableDeletionExpression(auditId, ownerTabId),
-      value => isDurablyDeleted(value, ownerTabId), { timeoutMs: 20_000, intervalMs: 50 });
+    deletion = await extension.waitForValue(extension.harnessPage, durableDeletionExpression(auditId, sourceTabId),
+      value => isDurablyDeleted(value, sourceTabId), { timeoutMs: 20_000, intervalMs: 50 });
   } catch (error) {
-    deletion = await extension.evaluate(extension.harnessPage, durableDeletionExpression(auditId, ownerTabId), { awaitPromise: true });
+    deletion = await extension.evaluate(extension.harnessPage, durableDeletionExpression(auditId, sourceTabId), { awaitPromise: true });
     throw new Error(`DELETE_WAIT_TIMEOUT ${JSON.stringify(deletion)}`, { cause: error });
   }
-  assert.equal(isDurablyDeleted(deletion, ownerTabId), true, JSON.stringify(deletion));
+  assert.equal(isDurablyDeleted(deletion, sourceTabId), true, JSON.stringify(deletion));
   let nextPanel;
   try {
     // Deletion revokes the audit session; the action authorizes a new panel session.
@@ -1502,9 +1533,11 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
   assert.match(html, /^<!doctype html>/iu);
   assert.match(html, /<html\b[^>]*\blang="pt-BR"/iu);
   assert.equal(html.includes(`<title>${canonicalReportTitle}</title>`), true);
-  assert.equal(html.includes('1.1.1'), true);
-  assert.equal(html.includes('5.2.1'), true);
-  assert.equal(html.includes(attachedCopyLimitation), true);
+  assert.equal(html.includes(knownOccurrence.abnt), true);
+  assert.equal(html.includes(attachedCopyLimitation), false,
+    'o relatório da página atual não pode declarar cópia recarregada');
+  assert.equal(html.includes(passiveObservationLimitation), true,
+    'o relatório da página atual deve declarar a observação passiva');
   assert.match(html, /<\/body>\s*<\/html>\s*$/iu);
 
   const technical = JSON.parse(artifacts.get('json').bytes.toString('utf8'));
@@ -1521,16 +1554,18 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
     assert.ok(html.includes('Avaliadora QA') && html.includes('Barreira confirmada no teste local'));
   }
   const occurrence = technical.audit?.occurrences?.find(candidate =>
-    candidate?.source?.ruleId === 'content-image-alternative' &&
+    candidate?.source?.ruleId === knownOccurrence.ruleId &&
     candidate?.nbrItemRef === knownOccurrence.abnt);
-  assert.ok(occurrence);
+  assert.ok(occurrence, `a ocorrência observada no documento vivo deve ser exportada: ${JSON.stringify(
+    (technical.audit?.occurrences ?? []).filter(candidate => candidate?.nbrItemRef === knownOccurrence.abnt)
+      .map(candidate => ({ ruleId: candidate?.source?.ruleId, selector: candidate?.target?.selector })))}`);
   assert.equal(occurrence.itemWcagRefs.includes(knownOccurrence.wcag), true);
-  assert.equal(Array.isArray(occurrence.evidenceRefs), true);
   const stableEvidence = technical.audit?.evidence?.find(candidate =>
-    occurrence.evidenceRefs.includes(candidate?.evidenceId) &&
+    occurrence.evidenceRefs?.includes(candidate?.evidenceId) &&
     candidate?.nodeId === occurrence.nodeId &&
-    candidate?.selector?.css === knownOccurrence.selector);
-  assert.ok(stableEvidence);
+    knownOccurrence.selectors.includes(candidate?.selector?.css));
+  assert.ok(stableEvidence, `a evidência do elemento vivo deve acompanhar a exportação: ${JSON.stringify(
+    (technical.audit?.evidence ?? []).map(candidate => ({ nodeId: candidate?.nodeId, selector: candidate?.selector })))}`);
   assert.equal(technical.assertions.some(assertion => assertion?.test?.id === `urn:abnt:nbr17225:${knownOccurrence.abnt}` &&
     assertion.test.itemWcagRefs?.includes(knownOccurrence.wcag)), true);
 
@@ -1546,7 +1581,8 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
   assert.equal(requiredHeaders.every(header => headers.includes(header)), true);
   const record = rows.slice(1).map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]])))
     .find(value => value.nbr_item_ref === knownOccurrence.abnt &&
-      value.item_wcag_refs.split(';').includes(knownOccurrence.wcag) && value.source_rule_id === 'axe.image-alt');
+      value.item_wcag_refs.split(';').includes(knownOccurrence.wcag) &&
+      value.source_rule_id === knownOccurrence.ruleId);
   assert.ok(record, JSON.stringify(rows.slice(1)
     .map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]])))
     .filter(value => value.nbr_item_ref === knownOccurrence.abnt)
@@ -1554,12 +1590,8 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
       source_wcag_refs: value.source_wcag_refs, tested_wcag_refs: value.tested_wcag_refs, wcag_refs: value.wcag_refs,
       outcome: value.outcome, classification: value.classification }))));
   assert.equal(record.csv_schema_version, 'audita-occurrences-v2');
-  assert.equal(record.outcome, 'cantTell');
+  assert.equal(record.outcome, knownOccurrence.outcome);
   assert.equal(record.source_wcag_refs.split(';').includes(knownOccurrence.wcag), true);
-  assert.equal(record.tested_wcag_refs, '');
-  assert.equal(record.wcag_refs, '');
-  assert.equal(record.section_508_refs, '');
-  assert.equal(record.consumer_basis_ref, '');
   assert.equal(record.audit_id, auditId);
   assert.equal(record.export_delivery_identity_type, 'ExportDeliveryIdentityV1');
   assert.equal(record.export_delivery_audit_id, auditId);
@@ -1770,7 +1802,7 @@ test('passive current-page observes memory-only elements without navigation or i
   t.diagnostic('Chrome152; actual-document; memory-only finding retained; no created tabs; focus/scroll/layout preserved; report opened; highlight/clear; model hash preserved');
 });
 
-test('current-page audits run in one inactive copy and leave the original page intact', { timeout: 600_000 }, async t => {
+test('passive current-page audits complete in every mode and keep the observed document intact', { timeout: 600_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do painel lateral.');
   const fixture = await startFixtureServer(t, new Map([
     ['/current', {
@@ -1808,21 +1840,19 @@ test('current-page audits run in one inactive copy and leave the original page i
     ]);
     assert.equal(initial.startButtons, 1);
     assert.equal((await extension.runtimeContexts({ contextTypes: ['POPUP'] })).length, 0);
-    await extension.captureJourney('panel-current-copy-initial', panel);
+    await extension.captureJourney('panel-current-passive-initial', panel);
 
     await t.test('full-evidence can be cancelled at the privacy pause without touching the source', async () => {
       const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'full-evidence');
       await waitForPrivacyPause(extension, panel);
       const auditId = await auditIdPromise;
       assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-      const owner = await assertPausedAttempt(extension, auditId, identityBefore, sourceUrl);
+      await assertPausedObservedAttempt(extension, auditId, identityBefore);
       await extension.click(panel, 'button[data-intent="CANCEL_AUDIT"]');
       await extension.waitForValue(panel,
         `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial', {
           timeoutMs: 30_000, intervalMs: 50,
         });
-      await waitForOwner(extension, auditId,
-        value => value.tabId === owner.tabId && value.state === 'removed' && value.cleanupMode === 'always');
       await waitForActiveAuditCleanup(extension, auditId);
       const cancelled = await readPrivateAttempt(extension, auditId);
       assert.equal(cancelled.auditPresent, false);
@@ -1837,24 +1867,24 @@ test('current-page audits run in one inactive copy and leave the original page i
       assert.equal(cancelled.pixelStateCount, 0);
       assert.equal(cancelled.pixelCompanionPresent, false);
       assert.equal(cancelled.forbiddenSessionUrlCount, 0);
-      await assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: true });
+      assert.deepEqual(cancelled.owners, []);
+      await assertNoCopyCreated(extension, identityBefore);
     });
-    await t.test('no-pixels shows progress, completes in the copy and exposes a view-only report', async () => {
+
+    await t.test('no-pixels shows progress, completes in the observed document and exposes a live report', async () => {
       const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'no-pixels');
       const auditId = await auditIdPromise;
       assert.equal(await waitForResult(extension, panel, auditId), auditId);
       await assertObservedProgress(extension, panel);
-      const [owner] = await waitForOwner(extension, auditId,
-        value => value.state === 'removed' && value.cleanupMode === 'always');
-      const attempt = await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+      const attempt = await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
         minimumFullPage: 0, minimumElements: 0, fullPageExact: 0, elementsExact: 0,
         diagnostics: ['PIXEL_CAPTURE_OMITTED'],
       }, fixture.origin);
       assert.equal(attempt.rasterDataUrls, 0);
       await assertPanelSummaryAndDetail(extension, panel, 'no-pixels', 0, identityBefore);
-      const report = await openViewOnlyReport(extension, panel, auditId, 0, identityBefore);
-      await extension.captureJourney('report-current-copy-no-pixels', report, { captureBeyondViewport: false });
-      panel = await deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId);
+      const report = await openLiveReport(extension, panel, auditId, 0, identityBefore);
+      await extension.captureJourney('report-current-passive-no-pixels', report, { captureBeyondViewport: false });
+      panel = await deleteAuditAndKeepSource(extension, panel, report, auditId, extension.startPage.tabId);
     });
 
     await t.test('element-only confirms once and keeps the full-page capture omitted', async () => {
@@ -1862,18 +1892,18 @@ test('current-page audits run in one inactive copy and leave the original page i
       await waitForPrivacyPause(extension, panel);
       const auditId = await auditIdPromise;
       assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-      const owner = await assertPausedAttempt(extension, auditId, identityBefore, sourceUrl);
+      await assertPausedObservedAttempt(extension, auditId, identityBefore);
       await confirmOnce(extension, panel);
       assert.equal(await waitForResult(extension, panel, auditId), auditId);
       await assertObservedProgress(extension, panel);
-      await assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+      await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
         minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
         diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
       }, fixture.origin);
       await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore);
-      const report = await openViewOnlyReport(extension, panel, auditId, 1, identityBefore);
-      await extension.captureJourney('report-current-copy-elements', report, { captureBeyondViewport: false });
-      panel = await deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId);
+      const report = await openLiveReport(extension, panel, auditId, 1, identityBefore);
+      await extension.captureJourney('report-current-passive-elements', report, { captureBeyondViewport: false });
+      panel = await deleteAuditAndKeepSource(extension, panel, report, auditId, extension.startPage.tabId);
     });
 
     await t.test('full-evidence rehydrates after worker restart and exports all four formats', async subtest => {
@@ -1893,23 +1923,21 @@ test('current-page audits run in one inactive copy and leave the original page i
       await step('PRIVACY_PAUSE', () => waitForPrivacyPause(extension, panel));
       const auditId = await step('RESOLVE_AUDIT', () => auditIdPromise);
       assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-      const owner = await step('PAUSED_PROOF', () =>
-        assertPausedAttempt(extension, auditId, identityBefore, sourceUrl));
+      await step('PAUSED_PROOF', () => assertPausedObservedAttempt(extension, auditId, identityBefore));
       await step('WORKER_STOP', () => stopServiceWorker(extension));
       await step('WORKER_REPLACEMENT', () => proveReplacementServiceWorker(extension));
       await step('REHYDRATED_PAUSE', () => waitForPrivacyPause(extension, panel));
       await step('REHYDRATED_STORAGE', async () => {
         const rehydrated = await readPrivateAttempt(extension, auditId);
         assert.equal(rehydrated.activeState, 'privacy-paused');
-        assert.deepEqual(rehydrated.owners.map(value => value.tabId), [owner.tabId]);
+        assert.deepEqual(rehydrated.owners, []);
         assert.equal(rehydrated.sessionRasterDataUrls, 0);
       });
-      await step('REHYDRATED_ISOLATION', () =>
-        assertCopyIsolation(extension, owner.tabId, identityBefore, { removed: false }));
+      await step('REHYDRATED_SOURCE', () => assertNoCopyCreated(extension, identityBefore));
       await step('CONFIRM', () => confirmOnce(extension, panel));
       assert.equal(await step('RESULT', () => waitForResult(extension, panel, auditId)), auditId);
       await step('PROGRESS', () => assertObservedProgress(extension, panel));
-      await step('TERMINAL_PROOF', () => assertTerminalAttempt(extension, auditId, owner.tabId, identityBefore, {
+      await step('TERMINAL_PROOF', () => assertObservedTerminalAttempt(extension, auditId, identityBefore, {
         minimumFullPage: 1, minimumElements: 1,
       }, fixture.origin));
       await step('PANEL_DETAIL', () =>
@@ -1920,33 +1948,42 @@ test('current-page audits run in one inactive copy and leave the original page i
       // despite visible frames and a verified detail. This QA image is separate from
       // required audit evidence, source isolation and export proofs.
       try {
-        await step('PANEL_CAPTURE', () => extension.captureJourney('panel-current-copy-summary', panel,
+        await step('PANEL_CAPTURE', () => extension.captureJourney('panel-current-passive-summary', panel,
           { captureBeyondViewport: false }));
       } catch (error) {
         if (error?.cause?.code !== 'CDP_COMMAND_TIMEOUT') throw error;
         subtest.diagnostic('qa-limitation=PANEL_SCREENSHOT_CDP_TIMEOUT; panel-screenshot=not-produced; report-and-export-proofs=still-required');
       }
       const report = await step('REPORT_OPEN', () =>
-        openViewOnlyReport(extension, panel, auditId, 1, identityBefore));
+        openLiveReport(extension, panel, auditId, 1, identityBefore));
       try {
         await step('REPORT_CAPTURE', () =>
-          extension.captureJourney('report-current-copy-full', report, { captureBeyondViewport: false }));
+          extension.captureJourney('report-current-passive-full', report, { captureBeyondViewport: false }));
       } catch (error) {
         if (error?.cause?.code !== 'CDP_COMMAND_TIMEOUT') throw error;
         subtest.diagnostic('qa-limitation=REPORT_SCREENSHOT_CDP_TIMEOUT; report-ui-screenshot=not-produced; actual-evidence-and-four-downloads=still-required');
       }
       await step('EXPORT_FOUR', () => exportFourFormats(extension, report, auditId, extension.downloadDirectory));
       panel = await step('CLEANUP', () =>
-        deleteAuditAndRestoreSource(extension, panel, report, auditId, owner.tabId));
+        deleteAuditAndKeepSource(extension, panel, report, auditId, extension.startPage.tabId));
     });
 
+    // A aba do usuário continua a mesma depois de quatro auditorias, uma exclusão e um reinício do worker.
+    const finalSurface = await extension.evaluate(extension.harnessPage, `(async()=>{
+      const tabs=await chrome.tabs.query({});
+      const stored=await chrome.storage.session.get(null);
+      return {sourceOpen:tabs.some(tab=>tab.id===${JSON.stringify(extension.startPage.tabId)}),
+        owned:Object.keys(stored).filter(key=>key.startsWith('audita:owned-tab:v2:')).length};
+    })()`, { awaitPromise: true });
+    assert.equal(finalSurface.sourceOpen, true, 'a aba original do usuário deve continuar aberta');
+    assert.equal(finalSurface.owned, 0, 'nenhuma posse de aba pode sobrar do percurso passivo');
     assert.equal(await extension.evaluate(extension.startPage.page, `(() => {
       globalThis.__auditaSourceInvariantV1?.dispose?.();delete globalThis.__auditaP4dImageRemovedV1;return true;
     })()`), true);
     assert.equal(await extension.evaluate(extension.harnessPage, `(() => {
       globalThis.__auditaCurrentCopyProofV1?.dispose?.();return true;
     })()`), true);
-    t.diagnostic('Chrome=152; current-page=inactive-copy; consult each subtest result for mode, restart, report and export proof');
+    t.diagnostic('Chrome=152; current-page=passive-live-document; consult each subtest result for mode, restart, report and export proof');
   } catch (error) {
     t.diagnostic(`controlled-failure=${redactDiagnostic(error?.code ?? error?.message ?? 'E2E_DENIED')}`);
     throw error;

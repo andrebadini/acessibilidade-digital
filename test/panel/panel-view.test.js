@@ -1346,3 +1346,26 @@ test('todo controle da própria interface do painel tem nome acessível', () => 
   }
   assert.ok(controlesVarridos > 0, 'a varredura precisa encontrar controles, senão ela é vacuosa');
 });
+
+test('a tela de indisponibilidade oferece repetir e escolher outro modo (N-1 da 1.1.47)', () => {
+  const emitted = [];
+  const document = new TestDocument();
+  const motivo = 'A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se o modo de imagem '
+    + 'falhar de novo, use o modo sem pixels.';
+  const state = { ...fixture().state, screen: 'unavailable', auditId: 'audit-1', reason: motivo };
+  const root = renderPanelView({
+    view: buildPanelView({ state }), document, onIntent: value => emitted.push(value), onEvent() {},
+  });
+  assert.equal(root.dataset.screen, 'unavailable');
+  assert.ok(root.textContent.includes(motivo), 'o motivo específico precisa chegar à tela');
+  const retry = root.querySelector('button[data-intent="RETRY"]');
+  const choose = root.querySelector('button[data-intent="NEW_AUDIT"]');
+  assert.ok(retry, 'a retentativa continua disponível');
+  assert.ok(choose, 'a tela precisa oferecer a escolha de outro modo');
+  assert.equal(choose.textContent, 'Escolher outro modo');
+  assert.equal(root.querySelector('button[data-intent="START_ATTACHED"]'), null,
+    'repetir o mesmo modo sem oferecer o seletor era o defeito N-1');
+  retry.click();
+  choose.click();
+  assert.deepEqual(emitted, [{ type: 'RETRY' }, { type: 'NEW_AUDIT' }]);
+});

@@ -2,7 +2,13 @@
 
 Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. Elas não reduzem os controles de privacidade, autorização de capturas, correlação das evidências, limpeza de estado ou confiabilidade normativa.
 
-## Estado vigente — produção 1.1.14, 12/09
+## Estado vigente — produção 1.1.49, 18/09
+
+A versão vigente é a **1.1.49** (nota em `docs/releases/1.1.49.md`; incremento em
+`docs/qa/2026-09-18-incremento-1.1.49.md`). Ela fecha o Minor **N-1** da re-verificação da 1.1.47 (a tela de
+indisponibilidade volta a oferecer o seletor de modo e a retentativa preserva o motivo específico) e migra os nove
+cenários E2E da página atual para o desenho passivo. Os itens abaixo continuam sendo os refinamentos **não
+bloqueantes** registrados ao longo das betas; nenhum deles é falha conhecida do produto.
 
 Produção local entregue; a pausa histórica da 1.1.13 foi encerrada a pedido do usuário. Registro completo: `docs/qa/2026-09-12-production1114-release.md`. Versão correta em novos modelos desde 1.1.13 e agora visível em HTML/PDF; retomada do lote corrigida para preservar o sinal vivo de cancelamento. Duas revisões finais C=0/I=0, etapas nativas aprovadas após correção da preparação de cinco casos, pacote conferido e Google atual com quatro formatos/PDF de 24 páginas.
 

@@ -488,7 +488,16 @@ async function handleIntent(intent) {
       await pageMarkers.highlight(intent.occurrenceId);
       return;
     case 'NEW_AUDIT': {
-      if (state.screen !== 'result' || state.highlight.state === 'busy') return;
+      if (!['result', 'unavailable'].includes(state.screen) || state.highlight.state === 'busy') return;
+      if (state.screen === 'unavailable') {
+        // N-1 da re-verificação da 1.1.47: a tela de indisponibilidade devolve o seletor de modo em vez de
+        // repetir o mesmo modo que acabou de falhar.
+        batchEntryDraft = '';
+        pageMarkers.reset();
+        transition({ type: 'NEW_AUDIT_REQUESTED' });
+        announce('Escolha o modo e inicie uma nova auditoria. A tela não foi alterada.');
+        return;
+      }
       pageMarkerInteractionRevision++;
       const priorResult = resultBundle;
       if (!await pageMarkers.hide()) return;
@@ -844,6 +853,9 @@ function consultEvidence(occurrenceId, reason) {
 
 async function retryAudit() {
   const auditId = state.auditId;
+  // N-1 da re-verificação da 1.1.47: a tentativa de retomada não pode APAGAR o motivo específico que a tela
+  // já mostrava. Sem isto, "Tentar novamente" trocava um motivo útil pelo genérico.
+  const priorReason = state.reason;
   transition({ type: 'RETRY_REQUESTED' });
   if (!auditId) {
     await startAttachedAudit();
@@ -851,7 +863,10 @@ async function retryAudit() {
   }
   const response = await requestPanelIntent({ type: 'PANEL_REHYDRATE_VIEW', auditId });
   if (!parseRehydrateResponse(response, auditId)) {
-    transition({ type: 'AUDIT_UNAVAILABLE', auditId, reason: 'Não foi possível concluir a operação local.' });
+    transition({
+      type: 'AUDIT_UNAVAILABLE', auditId,
+      reason: priorReason ?? 'Não foi possível concluir a operação local.',
+    });
   } else announce('Recuperando o resultado local.');
 }
 

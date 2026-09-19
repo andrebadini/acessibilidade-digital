@@ -474,7 +474,9 @@ export function reducePanelState(current, event) {
         scrollTop: panelScrollTop(event.scrollTop, current.scrollTop),
       });
     case 'NEW_AUDIT_REQUESTED':
-      if (!exactDataRecord(event, ['type']) || current.screen !== 'result' ||
+      // A tela de indisponibilidade também devolve o seletor de modo (N-1 da re-verificação da 1.1.47): sem
+      // esse caminho, "Tentar novamente" repetia o MESMO modo e a tela não oferecia como escolher outro.
+      if (!exactDataRecord(event, ['type']) || !['result', 'unavailable'].includes(current.screen) ||
         current.highlight.state !== 'idle') return current;
       return deepFreezePanelState({
         ...createInitialPanelState(), captureMode: current.captureMode, persona: current.persona,

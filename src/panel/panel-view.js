@@ -1215,7 +1215,10 @@ function renderUnavailable(document, view, emit) {
     heading(document, 2, 'Não foi possível mostrar a auditoria'),
     paragraph(document, view.reason ?? 'Não foi possível concluir a operação local.', 'unavailable-reason'),
     actionButton(document, 'Tentar novamente', 'RETRY', 'retry', emit, 'primary-action'),
-    actionButton(document, 'Iniciar nova auditoria', 'START_ATTACHED', 'start-attached', emit, 'secondary-action'),
+    // N-1 da re-verificação da 1.1.47: a mensagem desta tela sugere outro modo de evidência, e "Iniciar nova
+    // auditoria" repetia o mesmo modo sem oferecer o seletor. O caminho devolve a tela inicial, onde o modo é
+    // escolhido, sem perder a preferência anterior nem o registro local.
+    actionButton(document, 'Escolher outro modo', 'NEW_AUDIT', 'new-audit', emit, 'secondary-action'),
     liveRegion(document, view.reason ?? 'Painel indisponível.'),
   );
   return root;

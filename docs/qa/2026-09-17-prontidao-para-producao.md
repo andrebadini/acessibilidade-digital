@@ -174,11 +174,19 @@ de preenchimento está em `store-assets/STORE-LISTING.md` e o passo a passo em `
 
 ## 4. O que falta para "produção", em uma frase
 
-O conserto que faltava passou pela revisão independente (**PODE ENTRAR**) e não falta nada de funcional
-conhecido **neste** incremento: o percurso principal conclui nos três modos de
-evidência (o de pixel inclusive em página sem sinal sensível, que era o último bloqueio), o relatório e as
-quatro exportações funcionam, e o destaque corresponde ao elemento. Falta **uma** formalidade — a
-re-verificação independente da 1.1.48, incluindo a revisão adversarial do conserto da tentativa direta — e
-seguem **declarados** os limites de §3 e os 9 testes do incremento paralelo (outro desenho, em andamento).
-Fora isso, o produto está construído, medido e documentado — e **nada foi publicado**: distribuição exige
-autorização específica do usuário.
+**Atualização de 18/09/2026 (1.1.49):** as duas pontas que esta seção declarava estão fechadas. O **Minor N-1** foi
+corrigido no produto (a tela de indisponibilidade passou a oferecer "Escolher outro modo" e a retentativa passou a
+preservar o motivo específico) e os **nove cenários E2E** da página atual foram migrados para o desenho passivo —
+`test/e2e/sidepanel-flow-mv3.test.mjs` dá **9/9 verdes** (antes: 7 falhas). Registro:
+`docs/qa/2026-09-18-incremento-1.1.49.md`; nota de versão: `docs/releases/1.1.49.md`. A revisão adversarial do
+conserto da 1.1.48 **concluiu** ("pode entrar", `docs/qa/revisoes/REVIEW-1.1.48.md` §6), com a ressalva de método
+que ela mesma declara: o revisor **não** repetiu a suíte completa, o gate nem a auditoria ao vivo — isso ficou do
+lado do autor (§3.1) e está registrado como tal.
+
+O texto original desta seção, mantido para rastreabilidade, dizia: o conserto que faltava passou pela revisão
+independente (**PODE ENTRAR**) e não falta nada de funcional conhecido **neste** incremento — o percurso principal
+conclui nos três modos de evidência, o relatório e as quatro exportações funcionam, e o destaque corresponde ao
+elemento. Faltava **uma** formalidade — a re-verificação independente da 1.1.48, incluindo a revisão adversarial
+do conserto da tentativa direta — e seguiam **declarados** os limites de §3 e os 9 testes do incremento paralelo
+(outro desenho, em andamento). A versão foi fechada como produção a pedido do usuário (§3.2) e a formalidade foi
+cumprida em 17/09 (`REVIEW-1.1.48.md`); os nove testes foram migrados na 1.1.49.

@@ -1415,3 +1415,108 @@ test('announces document drift exactly and normalizes malformed failure response
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE|PIXEL_CONSENT_DOCUMENT_CHANGED/u);
   }
 });
+
+test('a indisponibilidade oferece repetir e escolher outro modo, e a retentativa não apaga o motivo (N-1 da 1.1.47)', async t => {
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  });
+
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  const timers = [];
+  globalThis.setTimeout = (callback, delay) => {
+    const timer = { callback, delay, cleared: false };
+    timers.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = timer => { timer.cleared = true; };
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(), disconnects: 0,
+          postMessage(message) { this.posted.push(structuredClone(message)); },
+          disconnect() { this.disconnects += 1; },
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?n1-unavailable=${Date.now()}`);
+  const port = ports[0];
+  const idleBootstrap = {
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  };
+  port.onMessage.emit(idleBootstrap);
+  const personaPrepare = port.posted.find(packet =>
+    packet?.envelope?.type === 'PREPARE_PANEL_PERSONA_CAPABILITY');
+  if (personaPrepare) port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: personaPrepare.requestId,
+    response: { ok: false, code: 'PERSONA_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="initial"]'));
+
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'running',
+    auditId: 'audit-n1', sessionCapabilityId: 'B'.repeat(22), result: null, captureMode: 'full-evidence',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="running"]'));
+
+  // Bootstrap ocioso durante a auditoria em curso: a sessão não existe mais. O painel diz o motivo exato.
+  port.onMessage.emit(idleBootstrap);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="unavailable"]'));
+  assert.match(document.root.textContent, /A auditoria foi encerrada antes de concluir/u);
+  const retry = document.root.querySelector('button[data-intent="RETRY"]');
+  const choose = document.root.querySelector('button[data-intent="NEW_AUDIT"]');
+  assert.ok(retry, 'a tela precisa oferecer a retentativa');
+  assert.ok(choose, 'a tela precisa oferecer a escolha de outro modo');
+  assert.equal(choose.textContent, 'Escolher outro modo');
+
+  // Retentativa recusada pelo trabalhador: o motivo específico NÃO pode virar o genérico.
+  await retry.dispatch('click');
+  const rehydrate = port.posted.filter(packet =>
+    packet?.envelope?.type === 'PANEL_REHYDRATE_VIEW').at(-1);
+  assert.ok(rehydrate, 'a retentativa precisa pedir a retomada da visualização');
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'intent-result', requestId: rehydrate.requestId,
+    response: { ok: false, code: 'AUDIT_NOT_FOUND' },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="unavailable"]'));
+  assert.match(document.root.textContent, /A auditoria foi encerrada antes de concluir/u,
+    'o motivo específico deve sobreviver à retentativa recusada');
+  assert.doesNotMatch(document.root.textContent, /Não foi possível concluir a operação local/u);
+
+  await document.root.querySelector('button[data-intent="NEW_AUDIT"]').dispatch('click');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="initial"]'),
+    'escolher outro modo devolve a tela com o seletor de modo');
+  assert.ok(document.root.querySelector('input[data-capture-mode]'));
+  assert.equal(document.root.textContent.includes('A auditoria foi encerrada antes de concluir'), false);
+});

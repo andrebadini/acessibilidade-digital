@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.48
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.49
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
@@ -112,4 +112,4 @@ Os dados não são transmitidos ao desenvolvedor, vendidos, usados em publicidad
 
 ## Política de privacidade
 
-Publicar o conteúdo integral de `docs/POLITICA-DE-PRIVACIDADE.md` em endereço HTTPS público e informar esse endereço no console.
+Endereço público já publicado (GitHub Pages): **https://andrebadini.github.io/audita-acessibilidade-privacidade/** — conteúdo integral de `docs/POLITICA-DE-PRIVACIDADE.md` (versão 1.5), gerado de `store-assets/privacy.html`. É esse endereço que vai no campo do console.
