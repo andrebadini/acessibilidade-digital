@@ -48,7 +48,12 @@ produto:
 
 **Medição:** `node --test --test-concurrency=1 test/e2e/sidepanel-flow-mv3.test.mjs` com Chrome for Testing
 152.0.7977.64 → **9/9 verdes, 299 s, zero falhas**. Antes da migração, a mesma execução dava **7 falhas** (2 verdes
-de outros percursos). O caso migrado cobre os quatro subtestes: cancelamento na pausa, sem pixels, somente
+de outros percursos). **Reconciliação de números (N-7 da revisão da 1.1.49):** o **7** é o arquivo da versão
+anterior rodando contra o produto ATUAL — medido pelo revisor, `df4bd2d:test/e2e/sidepanel-flow-mv3.test.mjs`
+contra os bytes de hoje dá 7 falhas / 2 passes. O **9** que aparece no dossiê (§1, critério 12) é o total de
+falhas da fase serial da bateria da **1.1.48**, que também incluía as flakiness de carga daquele momento. São
+bases diferentes: 9 falhas na fase serial de 113 testes em 18/09, 7 falhas no arquivo isolado contra o produto
+atual. O caso migrado cobre os quatro subtestes: cancelamento na pausa, sem pixels, somente
 elementos e evidência completa com reinício do trabalhador e as quatro exportações.
 
 ### 3.1 Achado novo, declarado: a geometria oscila durante a captura fora da viewport
@@ -69,11 +74,27 @@ evidência de elementos que existem na página).
 
 | Medida | Resultado |
 | --- | --- |
-| Suíte paralela | preenchido pela bateria final |
-| Fase serial (45 arquivos de Chrome real) | preenchido pela bateria final |
+| Suíte paralela (não-Chrome) | **4.234 testes, 4.233 passam, 0 falham, 1 pulado** (1.1.48: 4.231/4.230/0; os +3 são os testes do N-1) |
+| Suíte do painel | **263/263** |
+| `test/e2e/sidepanel-flow-mv3.test.mjs` (9 cenários) | **9/9 verdes, 299 s** (autor) e **9/9 verdes, 306 s** (revisor independente, clone próprio) |
+| Fase serial completa (45 arquivos de Chrome real) | primeira passagem: **113 testes, 107 passam, 6 falham** — e as seis são contenção de ambiente, medidas de novo isoladas: `credential-shapes-mv3` **23/23 em 77 s** e `axe-mv3-csp` **1/1** (a falha da passagem cheia é o erro de hook `after`, a flake de limpeza já declarada). A passagem limpa em janela exclusiva está registrada abaixo |
 | `AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` | GREEN |
-| Auditoria ao vivo do pacote | preenchido pela bateria final |
-| Integridade dos quatro artefatos | preenchido pela bateria final |
+| Auditoria ao vivo do pacote | preenchido pela medição final |
+| Integridade dos quatro artefatos | preenchido pela medição final |
+
+### 4.1 Como as seis falhas da primeira passagem serial foram triadas
+
+A primeira passagem completa da fase serial (23:05–23:42) rodou **em paralelo com a bateria de Chrome do revisor
+independente** — exatamente a condição que o projeto documenta como produtora de estouros por tempo limite. As seis
+falhas:
+
+| Falha | Assinatura | Triagem medida |
+| --- | --- | --- |
+| `axe-mv3-csp` (1) | erro no hook `after`: `cleanup axe limitado falhou: [{stage:'profile',code:'failed'}]` | **passa 1/1 isolado** (medido duas vezes, pelo autor e pelo revisor) — flake de limpeza já declarada desde a 1.1.28 |
+| `credential-shapes-mv3` (5) | `DOWNLOAD_PROOF_TIMEOUT` em ~121 s na linha 105 (`waitForFourDownloads`), sem nenhuma asserção de sanitização falhando | **23/23 em 77 s** isolado, com a máquina exclusiva (cadeado de coordenação com o revisor) |
+
+Nenhuma das seis é asserção de produto. O revisor **interrompeu** a própria execução concorrente desse arquivo e
+declarou o resultado parcial dele inválido, o que confirma a leitura de contenção.
 
 ## 5. Ambiente — o Chrome for Testing quebrado e o binário novo (medido)
 

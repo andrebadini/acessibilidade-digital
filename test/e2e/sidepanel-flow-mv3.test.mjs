@@ -21,8 +21,12 @@ const fragmentMarker = 'AUDITA4D_FRAGMENT_149B8C30';
 const memoryMarker = 'AUDITA4D_MEMORY_ONLY_4CC931E2';
 const attachedCopyLimitation =
   'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
+// A frase é literal e foi CORRIGIDA na 1.1.49 (achado N-1 da revisão adversarial): a captura de elementos
+// mexe transitoriamente na geometria do documento, e numa página que reage a `resize` o efeito fica
+// registrado — a versão anterior negava isso.
 const passiveObservationLimitation =
-  'A página foi observada sem alterar foco, rolagem ou layout. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.';
+  'A página foi observada sem navegação e sem alterar foco, rolagem ou o layout final. Nas verificações com imagens, a captura de elementos pode redimensionar a área de captura por um instante e restaurá-la; páginas que reagem a redimensionamento podem registrar essa mudança. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.';
+const supersededPassiveObservationClaim = 'sem alterar foco, rolagem ou layout.';
 // A página atual é auditada NO documento aberto (roteamento entregue em 1c9b296, passivo desde então). O
 // elemento observado é o que existe AGORA: `armSourceInvariantProof` remove a imagem do servidor só em
 // memória, então a ocorrência conhecida do percurso passivo é o BOTÃO sem nome acessível, presente no
@@ -79,6 +83,24 @@ function currentPageDocument(controlCount = 240) {
         </main>
       </body>
     </html>`;
+}
+
+// Página REATIVA: a mesma fixture do percurso passivo mais um handler de `resize` comum, que escreve no DOM.
+// A revisão adversarial da 1.1.49 mediu que a captura de elementos (`captureBeyondViewport`) leva o viewport
+// do documento observado a 1x1 por um instante e o restaura; numa página assim o handler roda e o documento
+// termina diferente do inicial. O produto não evita isso sem perder a captura fora da área visível — o que
+// ele tem de fazer é restaurar a geometria e DECLARAR o efeito no relatório.
+function reactiveCurrentPageDocument() {
+  return currentPageDocument().replace('</body>', `    <div id="reactive-counter">resizes=0</div>
+    <script>
+      let reactiveCount = 0;
+      const reactiveNode = document.getElementById('reactive-counter');
+      addEventListener('resize', () => {
+        reactiveCount += 1;
+        reactiveNode.textContent = 'resizes=' + reactiveCount + ' w=' + innerWidth + ' h=' + innerHeight;
+      });
+    </script>
+  </body>`);
 }
 
 // Read only public presentation and a digest of the durable record. Native
@@ -679,7 +701,8 @@ async function armTabIsolationProof(extension) {
 // com a geometria final idêntica). É o limite já declarado do produto para regiões fora da viewport. O que
 // NÃO é permitido em nenhum modo: navegação, mutação de DOM, rolagem, foco, seleção, entrada, estilo ou
 // sobreposição — e a geometria final tem de ser exatamente a inicial (`viewport: true`).
-async function assertSourceUntouched(extension, identityBefore, { allowCaptureResize = false } = {}) {
+async function assertSourceUntouched(extension, identityBefore,
+  { allowCaptureResize = false, maxCaptureResizes = 512 } = {}) {
   const [comparison, identityAfter] = await Promise.all([
     extension.evaluate(extension.startPage.page, 'globalThis.__auditaSourceInvariantV1.compare()'),
     extension.identityOf(extension.startPage),
@@ -697,8 +720,30 @@ async function assertSourceUntouched(extension, identityBefore, { allowCaptureRe
   delete verified.viewportAfter;
   const captureResizes = Number(comparison.eventCounts?.resize ?? 0);
   if (allowCaptureResize && captureResizes > 0) {
-    // A geometria final continua obrigatória; a amostragem só documenta a oscilação transitória.
-    assert.equal(comparison.viewport, true, JSON.stringify(diagnostic));
+    // N-5 da revisão da 1.1.49: o perdão não pode ser incondicional. A geometria final continua obrigatória,
+    // a oscilação tem TETO, nenhuma amostra pode colapsar o documento abaixo de 1x1 e a oscilação tem de
+    // estar AMOSTRADA (alguma geometria diferente da inicial, ou a lista cheia, quando a amostragem trunca).
+    assert.equal(comparison.viewport, true,
+      `a geometria final tem de ser idêntica à inicial: ${JSON.stringify(diagnostic)}`);
+    assert.ok(captureResizes <= maxCaptureResizes,
+      `a oscilação da captura passou do teto medido: ${JSON.stringify({ captureResizes, maxCaptureResizes, eventCounts: comparison.eventCounts })}`);
+    const geometries = (comparison.resizeSamples ?? [])
+      .map(sample => /^t=\d+ (\d+)x(\d+)\//u.exec(sample))
+      .filter(Boolean)
+      .map(match => ({ width: Number(match[1]), height: Number(match[2]) }));
+    assert.ok(geometries.length > 0, `a oscilação precisa deixar amostras: ${JSON.stringify(diagnostic)}`);
+    assert.equal(geometries.every(({ width, height }) => width >= 1 && height >= 1), true,
+      `nenhuma amostra pode colapsar o documento abaixo de 1x1: ${JSON.stringify(geometries)}`);
+    const baseline = comparison.viewportBefore;
+    const differs = ({ width, height }) => width !== baseline.innerWidth || height !== baseline.innerHeight;
+    // Poucos eventos de `resize` também aparecem quando o PRÓPRIO painel assume a largura final (medido: 6
+    // eventos sem mudança de geometria). O que não pode passar despercebido é a oscilação da captura: a
+    // partir de um punhado de eventos, alguma amostra TEM de mostrar geometria diferente da inicial — sem
+    // isso a oscilação não estaria medida, e o perdão seria fé, não prova.
+    if (captureResizes > 16) {
+      assert.equal(geometries.some(differs), true,
+        `a oscilação da captura precisa estar amostrada: ${JSON.stringify({ geometries, baseline, captureResizes })}`);
+    }
     verified.eventTotal -= captureResizes;
   }
   assert.deepEqual(verified, {
@@ -1003,11 +1048,25 @@ async function beginAttachedAttempt(extension, panel, mode) {
     const button=document.querySelector('button[data-intent="START_ATTACHED"]');
     return Boolean(input&&!input.disabled&&button&&!button.disabled);
   })()`, value => value === true, { timeoutMs: 10_000, intervalMs: 25 });
-  await extension.click(panel, `input[data-capture-mode="${mode}"]`);
-  await extension.waitForValue(panel,
-    `document.querySelector('input[name="capture-mode"]:checked')?.value`, value => value === mode, {
-      timeoutMs: 5_000, intervalMs: 25,
-    });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await extension.click(panel, `input[data-capture-mode="${mode}"]`);
+    try {
+      await extension.waitForValue(panel,
+        `document.querySelector('input[name="capture-mode"]:checked')?.value`, value => value === mode, {
+          timeoutMs: 5_000, intervalMs: 25,
+        });
+      break;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      // Um bootstrap ocioso pode re-renderizar a tela inicial logo depois de o painel abrir e devolver a
+      // seleção ao padrão. Repetir o clique é o que o usuário faria; a asserção seguinte continua exigindo o
+      // modo escolhido, os controles habilitados e a fonte intocada antes do arranque.
+      await extension.waitForValue(panel,
+        `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial', {
+          timeoutMs: 10_000, intervalMs: 50,
+        });
+    }
+  }
   await armTabIsolationProof(extension);
   await armProgressObserver(extension, panel);
   const identityBefore = await armSourceInvariantProof(extension);
@@ -1108,7 +1167,13 @@ async function assertObservedTerminalAttempt(extension, auditId, identityBefore,
   assert.equal(attempt.pixelCompanionPresent, false);
   assertSanitizedModelUrls(attempt.urls, fixtureOrigin);
   const capturesPixels = (expected.minimumElements ?? 0) > 0 || (expected.minimumFullPage ?? 0) > 0;
-  await assertNoCopyCreated(extension, identityBefore, { allowCaptureResize: capturesPixels });
+  // Teto medido: a oscilação observada ficou em ~2 eventos por elemento capturado (248 num fixture de 240
+  // controles, com ~124 elementos capturados). O teto é folgado, mas finito — uma oscilação descontrolada
+  // (ou um laço de redimensionamento) reprova em vez de passar despercebida.
+  const captured = (attempt.elements ?? 0) + (attempt.fullPage ?? 0);
+  await assertNoCopyCreated(extension, identityBefore, {
+    allowCaptureResize: capturesPixels, maxCaptureResizes: 8 * captured + 32,
+  });
   return attempt;
 }
 
@@ -1164,11 +1229,28 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
       (value?.highlight === true || value?.consult === true), {
     timeoutMs: 15_000, intervalMs: 25,
   });
+  // N-4 da revisão da 1.1.49: o seletor exibido na ficha não pode ser só "string não vazia" — ele tem de
+  // resolver, no documento VIVO, ao mesmo tipo de elemento sem nome acessível que a auditoria observou.
   assert.ok(typeof detail.selector === 'string' && detail.selector.length > 0,
     `a ficha da ocorrência observada deve trazer o seletor sanitizado: ${JSON.stringify(detail.selector)}`);
+  const sheetResolution = await extension.evaluate(extension.startPage.page, `(() => {
+    let node=null;
+    try{node=document.querySelector(${JSON.stringify(detail.selector)})}catch{return {ok:false,reason:'selector-invalid'}}
+    if(!node)return {ok:false,reason:'not-found'};
+    const name=(node.getAttribute('aria-label')??node.textContent??'').trim();
+    // A ficha pode apontar o botão sem nome OU o campo sem rótulo — os dois achados reais desta fixture. O
+    // que a asserção exige é que o seletor exibido resolva, no documento VIVO, a um elemento defeituoso.
+    const labelled = Boolean(node.getAttribute('aria-label')??node.getAttribute('aria-labelledby'));
+    const hasLabelElement = typeof node.labels?.length === 'number' ? node.labels.length > 0 : false;
+    const inputWithoutLabel = node.tagName==='INPUT' && !labelled && !hasLabelElement;
+    return {ok:(node.tagName==='BUTTON'&&name==='')||inputWithoutLabel,
+      tag:node.tagName,id:node.id??null,name,labelled,hasLabelElement};
+  })()`);
+  assert.equal(sheetResolution.ok, true,
+    `o seletor da ficha do painel deve resolver, no documento vivo, a um elemento com o defeito observado: ${JSON.stringify({selector: detail.selector, sheetResolution})}`);
   assert.match(detail.normative.join(' '), /WCAG[^]{0,60}4\.1\.2/u);
   assert.match(detail.normative.join(' '), /ABNT NBR 17225: 5\.13\.10/u);
-  assert.ok(detail.accessibility.length > 0);
+  assert.match(detail.accessibility, /Anúncio esperado:\s*\S/u);
   assert.match(detail.technical, /Regra:\s*accessible-component-name/u);
   assert.match(detail.technical, /Trecho sanitizado/u);
   assert.match(detail.previewText, /Evidências/u);
@@ -1534,6 +1616,9 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
   assert.match(html, /<html\b[^>]*\blang="pt-BR"/iu);
   assert.equal(html.includes(`<title>${canonicalReportTitle}</title>`), true);
   assert.equal(html.includes(knownOccurrence.abnt), true);
+  // N-4 da revisão da 1.1.49: o HTML entregue precisa citar também a referência WCAG da ocorrência
+  // conhecida (antes da migração ele exigia uma citação WCAG; a nova versão tinha perdido essa prova).
+  assert.equal(html.includes(knownOccurrence.wcag), true);
   assert.equal(html.includes(attachedCopyLimitation), false,
     'o relatório da página atual não pode declarar cópia recarregada');
   assert.equal(html.includes(passiveObservationLimitation), true,
@@ -1592,6 +1677,12 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
   assert.equal(record.csv_schema_version, 'audita-occurrences-v2');
   assert.equal(record.outcome, knownOccurrence.outcome);
   assert.equal(record.source_wcag_refs.split(';').includes(knownOccurrence.wcag), true);
+  // N-3 da revisão da 1.1.49: estas quatro asserções existiam antes da migração, continuam verdadeiras no
+  // produto (o revisor mediu) e foram repostas — a troca de oráculo não as exigia.
+  assert.equal(record.tested_wcag_refs, '');
+  assert.equal(record.wcag_refs, '');
+  assert.equal(record.section_508_refs, '');
+  assert.equal(record.consumer_basis_ref, '');
   assert.equal(record.audit_id, auditId);
   assert.equal(record.export_delivery_identity_type, 'ExportDeliveryIdentityV1');
   assert.equal(record.export_delivery_audit_id, auditId);
@@ -1800,6 +1891,75 @@ test('passive current-page observes memory-only elements without navigation or i
   assert.equal(typeof observed.modelHash, 'string');
   assert.equal(finalHash, observed.modelHash, 'highlight and clear must not rewrite the audit evidence');
   t.diagnostic('Chrome152; actual-document; memory-only finding retained; no created tabs; focus/scroll/layout preserved; report opened; highlight/clear; model hash preserved');
+});
+
+test('passive current-page declares the capture resize on a page that reacts to it', { timeout: 420_000 }, async t => {
+  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do painel lateral.');
+  const fixture = await startFixtureServer(t, new Map([
+    ['/current', {
+      status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: reactiveCurrentPageDocument(),
+    }],
+  ]));
+  let extension;
+  try {
+    extension = await launchUnpackedExtension(t, {
+      extensionPath: await realpath(workspaceRoot), startUrl: `${fixture.origin}/current`,
+      viewport: { width: 1280, height: 900 }, chromeBinary, expectedMajor: 152,
+    });
+    await armSourceInvariantProof(extension);
+    const panel = await extension.openSidePanelFromAction();
+    await extension.waitForValue(panel, `(() => ({
+      screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+      modes:[...document.querySelectorAll('input[data-capture-mode]')].map(input=>({
+        mode:input.value,checked:input.checked,disabled:input.disabled
+      })),
+    }))()`, value => value?.screen === 'initial' && value.modes.length === 3, { timeoutMs: 30_000, intervalMs: 50 });
+    // A linha de base é lida com o painel JÁ ABERTO e depois que a geometria PARA de mudar: abrir o painel
+    // encolhe o viewport da página ao longo de algumas centenas de milissegundos, e essa mudança é do
+    // navegador, não da auditoria (o mesmo cuidado que o caso de memória só em memória toma).
+    assert.equal(await extension.evaluate(extension.startPage.page, `new Promise(resolve => {
+      let previous='';let stable=0;let samples=0;
+      const sample=()=>{const current=innerWidth+':'+innerHeight;
+        stable=current===previous?stable+1:0;previous=current;
+        if(stable>=6)return resolve(true);if(++samples>=60)return resolve(false);setTimeout(sample,50)};
+      sample();
+    })`, { awaitPromise: true }), true, 'a geometria do documento precisa estabilizar antes da linha de base');
+    const baseline = await extension.evaluate(extension.startPage.page,
+      '({href:location.href,scrollY,viewport:[innerWidth,innerHeight]})');
+    // `beginAttachedAttempt` prova a fonte intocada ANTES do arranque (a mutação do handler só pode
+    // acontecer depois, na captura) e já arma a observação de abas criadas.
+    const { auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
+    await waitForPrivacyPause(extension, panel);
+    const auditId = await auditIdPromise;
+    await confirmOnce(extension, panel);
+    assert.equal(await waitForResult(extension, panel, auditId), auditId);
+    const after = await extension.evaluate(extension.startPage.page, `(() => ({
+      href:location.href,scrollY,viewport:[innerWidth,innerHeight],
+      counter:document.getElementById('reactive-counter')?.textContent??null,
+    }))()`);
+    assert.deepEqual(after.viewport, baseline.viewport,
+      'a geometria final do documento observado tem de voltar à inicial');
+    assert.equal(after.href, baseline.href, 'a auditoria não pode navegar o documento observado');
+    assert.equal(after.scrollY, baseline.scrollY, 'a auditoria não pode rolar o documento observado');
+    assert.match(after.counter ?? '', /^resizes=[1-9][0-9]* w=\d+ h=\d+$/u,
+      'numa página que reage a `resize` o efeito declarado precisa estar MEDIDO, não suposto');
+    const attempt = await readPrivateAttempt(extension, auditId);
+    assert.equal(attempt.diagnostics.includes('DYNAMIC_PROBES_OMITTED_PASSIVE'), true);
+    assert.equal(attempt.elements >= 1, true,
+      'a captura de elementos continua existindo numa página reativa — é ela que causa a oscilação');
+    assert.equal(attempt.forbiddenSessionUrlCount, 0);
+    await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
+    const report = await extension.waitForReport({ auditId });
+    await extension.waitForValue(report, 'Boolean(document.querySelector("button[data-report-export]"))', Boolean,
+      { timeoutMs: 30_000 });
+    const declaration = await extension.evaluate(report, 'document.body.textContent');
+    // A mensagem corrigida (N-1 da revisão da 1.1.49) declara o efeito em vez de negá-lo.
+    assert.match(declaration, /pode redimensionar a área de captura por um instante/u);
+    assert.match(declaration, /páginas que reagem a redimensionamento podem registrar essa mudança/u);
+    assert.equal(declaration.includes(supersededPassiveObservationClaim), false,
+      'a frase antiga, que negava o efeito, não pode voltar');
+    t.diagnostic(`Chrome152; página reativa; ${after.counter}; geometria final idêntica; efeito declarado no relatório`);
+  } finally { await extension?.close().catch(() => {}); }
 });
 
 test('passive current-page audits complete in every mode and keep the observed document intact', { timeout: 600_000 }, async t => {

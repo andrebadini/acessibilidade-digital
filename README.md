@@ -5,7 +5,7 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 ## Instalação e estado da entrega
 
 **Versão 1.1.49 — produção.** O pacote `release/audita-acessibilidade-1.1.49.zip` (199 arquivos, digest
-`92945a8db8df341f04a42e7b2606f06e6e3b5d07d31e5531b334fc965ece5fa9`, reconstruível por `npm run build:release`)
+`a45a67b7f11d7dfa5f4f0b29300bc1d6a4278625f54dd3e2f1970d0764512448`, reconstruível por `npm run build:release`)
 fecha as duas pontas que a 1.1.48 deixou declaradas. **N-1:** a tela de indisponibilidade volta a oferecer o
 seletor de modo ("Escolher outro modo" devolve a tela inicial preservando a preferência) e "Tentar novamente"
 deixa de trocar o motivo específico pelo genérico. **Suíte E2E da página atual:** os nove cenários que ainda
@@ -13,7 +13,14 @@ afirmavam a auditoria em cópia inativa foram migrados para o desenho passivo �
 criadas, zero registros de posse, relatório vivo com destaque no próprio documento e exclusão que não fecha a aba
 do usuário — e a execução completa do arquivo dá **9/9 verdes em 299 s** (antes: 7 falhas). A migração também
 mediu e declarou que capturar elemento fora da viewport oscila transitoriamente a geometria (com restauração
-exata e zero mutações/rolagem/foco/estilo). Nota de versão: `docs/releases/1.1.49.md`; registro do incremento:
+exata e zero mutações/rolagem/foco/estilo). A revisão adversarial independente desta versão
+(`docs/qa/revisoes/REVIEW-1.1.49.md`) deu **NÃO PODE ENTRAR** por dois Important de produto, ambos fechados
+aqui: a exportação podia ser revogada durante a própria navegação que ela inicia (aba em estado intermediário
+sem `pendingUrl`), e a mensagem de observação passiva negava um efeito que existe — em página que reage a
+`resize`, a captura de elementos deixa o documento diferente do inicial (medido: 247 eventos e 496 mutações de
+DOM). O primeiro foi corrigido com uma janela limitada de tolerância ao estado pendente
+(`credential-shapes-mv3` **23/23** depois; antes 17/23) e o segundo com a mensagem corrigida mais um oráculo
+novo sobre fixture reativa. Nota de versão: `docs/releases/1.1.49.md`; registro do incremento:
 `docs/qa/2026-09-18-incremento-1.1.49.md`. A política de privacidade está publicada em
 <https://andrebadini.github.io/audita-acessibilidade-privacidade/>.
 

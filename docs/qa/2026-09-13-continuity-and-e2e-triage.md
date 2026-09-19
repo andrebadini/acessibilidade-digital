@@ -3335,3 +3335,56 @@ ferramenta democrática."
   reconstruível de `39c86c0`). As duas ocorrências da palavra "fiscal" em `src/core/privacy.js` são vocabulário
   do classificador de credencial (`fiscal`, `fiscalização` como qualificadores de campo sensível) e **não**
   enquadramento de uso — mexer nelas enfraqueceria a proteção de privacidade.
+
+## Rodada 96 — 1.1.49: o N-1 fecha e a suíte E2E da página atual passa a descrever o produto
+
+**O que entrou nesta rodada.** Dois itens que estavam declarados, e três linhas de documentação vencidas:
+
+1. **N-1 (Minor da re-verificação independente da 1.1.47) no produto.** A tela de indisponibilidade ganhou o
+   caminho **"Escolher outro modo"** (intent `NEW_AUDIT`, devolve `initial` com o seletor preservando
+   `captureMode`/persona) e o **`RETRY` deixou de apagar o motivo específico** quando a retomada é recusada. São
+   três arquivos de produto (`panel-state.js`, `panel.js`, `panel-view.js`) e três testes novos, um deles um
+   percurso **real do painel** em `panel-runtime` (bootstrap ocioso durante auditoria em curso → indisponibilidade
+   com o motivo → retomada recusada → motivo preservado → seletor de volta). Suíte do painel: **263/263**.
+2. **Os nove cenários E2E da página atual.** O arquivo `test/e2e/sidepanel-flow-mv3.test.mjs` ainda afirmava o
+   desenho da cópia inativa (aba própria, `retained-for-consent`, relatório somente leitura, exclusão fechando a
+   aba) e falhava desde `1c9b296`. A migração troca o oráculo: documento observado, **zero abas criadas**, **zero
+   registros de posse**, `DYNAMIC_PROBES_OMITTED_PASSIVE` obrigatório e `ATTACHED_COPY_RELOADED` proibido,
+   relatório **vivo** com destaque no próprio documento, exclusão que **não fecha** a aba do usuário. Medição:
+   **9/9 verdes em 299 s** (antes: 7 falhas, 2 verdes de outros percursos).
+3. **Documentação vencida.** README (dizia "candidata de produção" para a 1.1.48, fechada como produção em 18/09),
+   dossiê §4 (dizia que faltava a re-verificação independente da 1.1.48, que concluiu em 17/09 com a ressalva de
+   método que ela mesma declara) e `docs/BETA-BACKLOG.md` (dizia "produção 1.1.14").
+
+**Achado novo, medido pela própria migração — e declarado, não consertado.** O oráculo de fonte intocada passou a
+medir o que nunca media, e achou: capturar elemento **fora da viewport** usa `Page.captureScreenshot` com
+`captureBeyondViewport: true` e, no Chrome 152, isso **oscila transitoriamente a geometria do documento
+observado** — **248 eventos de `resize`** num fixture de 240 controles, com o viewport amostrando `1x1` e voltando.
+A geometria **final** é idêntica à inicial, e não há navegação, mutação de DOM, rolagem, foco, seleção, entrada,
+estilo ou sobreposição; o modo **sem pixels** continua exigindo **zero** eventos. O produto não mudou por causa
+disso (não capturar fora da viewport seria perder evidência de elementos que existem na página): é o limite já
+declarado para regiões fora da viewport, agora com número, e o teste passou a **amostrar** a geometria em cada
+`resize` no diagnóstico em vez de só contar eventos.
+
+**Ambiente — o que parecia regressão de produto e era do binário.** O Chrome for Testing em
+`/private/tmp/audita-cft152-fixed` deixou de iniciar nesta máquina: os processos auxiliares morrem com `SIGTRAP`
+(`GPU process isn't usable. Goodbye.`). O bundle tem assinatura inconsistente (`codesign -v --deep --strict`:
+"code has no resources but signature indicates they must be present"). Com um binário **recém-baixado do canal
+oficial** — mesma versão `152.0.7977.64` — o caso passivo que estourava `CDP_CLOSED`/`CDP_COMMAND_TIMEOUT` fecha em
+**~3 s**. A bateria desta rodada passou a usar o binário novo, com o mesmo shim `--headless=new` (sem janela).
+
+**Uma flake de carga, documentada.** Numa passagem com a máquina ocupada, a **segunda** exportação do cenário de
+revisão visual voltou `revoked` (`EXPORT_DELIVERY_SNAPSHOT {"exportLaunchStates":["revoked"]}`) e estourou o tempo
+de prova de download. O mesmo cenário passa **1/1 em 12 s** isolado e na passagem completa em janela quieta
+(**9/9**). É a classe de flake sob carga já declarada no projeto, não um defeito do incremento.
+
+**Medições da rodada.** Suíte paralela **4.234 testes, 4.233 passam, 0 falham, 1 pulado** (eram 4.231/4.230/0 na
+1.1.48: +3 são os testes novos do N-1). `sidepanel-flow-mv3` **9/9** (299 s). Painel **263/263**. Gate
+`AUDITA_VERIFY_SKIP_TESTS=1 npm run verify` **GREEN**. Pacote `92945a8d…e5fa9`, 199 arquivos, versão `1.1.49`,
+reconstruível do commit. A bateria serial completa e a auditoria ao vivo do pacote estão registradas em
+`docs/qa/2026-09-18-incremento-1.1.49.md`.
+
+**Fila declarada depois desta rodada.** Nada de funcional conhecido em aberto no percurso principal. Seguem
+**declarados**: o limite de captura fora da viewport (com a oscilação transitória de geometria), `5.9.1` agregado,
+campo customizado sem nome, clareza para leigos (critério 8, decisão do usuário) e a publicação na Chrome Web
+Store, que depende da conta do dono (política de privacidade já publicada em HTTPS).

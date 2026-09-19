@@ -184,6 +184,30 @@ test('revokes a pre-connection export immediately for any noncanonical URL', asy
   }
 });
 
+test('tolerates the transient staging state of its own navigation and revokes it after the grace window', async () => {
+  // Defeito medido na revisão adversarial da 1.1.49 (N-2): sob carga, o evento de `tabs.onUpdated` da PRÓPRIA
+  // aba recém-criada (`about:blank` sem `pendingUrl` publicado) chegava depois de a concessão existir e a
+  // revogava — a exportação do usuário morria sem produzir arquivo, com o relatório já respondendo "ok".
+  const input = navigationFixture();
+  assert.equal((await input.authority.requestExport(input.request)).ok, true);
+  input.setCurrentTab({ id: input.tabId, windowId: input.windowId, url: 'about:blank' });
+
+  assert.equal(await input.authority.handleTabUpdated(input.tabId, { status: 'loading' }), false,
+    'o estado pendente da nossa própria navegação não pode revogar a concessão');
+  assert.equal((await input.authority.getLaunch(input.auditId)).state, 'awaiting-connection',
+    'a concessão tem de continuar viva depois do evento transitório');
+  assert.equal(input.calls.some(call => call[0] === 'release' || call[0] === 'remove'), false);
+
+  input.setEpoch(1000 + 30_000);
+  assert.equal(await input.authority.handleTabUpdated(input.tabId, { status: 'loading' }), false,
+    'dentro da janela a mesma leitura continua tolerada');
+
+  input.setEpoch(1000 + 30_001);
+  assert.equal(await input.authority.handleTabUpdated(input.tabId, { status: 'loading' }), true,
+    'fora da janela, um estado que não prova a aba de exportação volta a revogar');
+  assert.equal((await input.authority.getLaunch(input.auditId)).state, 'revoked');
+});
+
 test('re-proves a canonical pre-connection event against the current exact export tab', async () => {
   for (const mode of ['canonical', 'stale-external', 'pending-external', 'read-failed']) {
     const input = navigationFixture();
@@ -204,7 +228,10 @@ test('re-proves a canonical pre-connection event against the current exact expor
 });
 
 test('fails closed immediately when one fresh read cannot prove an exact export staging snapshot', async () => {
-  for (const mode of ['still-blank', 'read-failed', 'url-absent', 'wrong-tab', 'wrong-window', 'pending-external']) {
+  // 'still-blank' saiu daqui na 1.1.49: o estado `about:blank` sem `pendingUrl` é o INTERMEDIÁRIO da
+  // navegação que a própria autoridade iniciou, e revogá-lo era o defeito N-2 medido sob carga. O caso
+  // passou a ter teste próprio, logo abaixo, com a janela de tolerância e o desfecho depois dela.
+  for (const mode of ['read-failed', 'url-absent', 'wrong-tab', 'wrong-window', 'pending-external']) {
     const input = navigationFixture();
     assert.equal((await input.authority.requestExport(input.request)).ok, true);
     if (mode === 'read-failed') input.setTabReadFailure(true);

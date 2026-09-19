@@ -491,11 +491,14 @@ async function handleIntent(intent) {
       if (!['result', 'unavailable'].includes(state.screen) || state.highlight.state === 'busy') return;
       if (state.screen === 'unavailable') {
         // N-1 da re-verificação da 1.1.47: a tela de indisponibilidade devolve o seletor de modo em vez de
-        // repetir o mesmo modo que acabou de falhar.
+        // repetir o mesmo modo que acabou de falhar. `reviseNavigationEntry` mantém a simetria com todos os
+        // outros caminhos que voltam a `initial` (N-9 da revisão da 1.1.49: era o único sem ele), e o anúncio
+        // passou a dizer "página", não "tela" (N-6: "tela" é o painel, que acabou de mudar).
         batchEntryDraft = '';
         pageMarkers.reset();
+        reviseNavigationEntry();
         transition({ type: 'NEW_AUDIT_REQUESTED' });
-        announce('Escolha o modo e inicie uma nova auditoria. A tela não foi alterada.');
+        announce('Escolha o modo e inicie uma nova auditoria. A página observada não foi alterada.');
         return;
       }
       pageMarkerInteractionRevision++;

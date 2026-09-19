@@ -5,8 +5,15 @@ const BOTH_MODES = Object.freeze(['single', 'batch']);
 export const ATTACHED_COPY_RELOADED_MESSAGE =
   'A auditoria foi executada em uma cópia temporária recarregada da URL da aba escolhida; alterações não salvas e estado mantido apenas em memória na aba original não foram observados.';
 
+// Medido em 18/09/2026 (revisão adversarial da 1.1.49, achado N-1): a captura de elementos usa
+// `Page.captureScreenshot` com `captureBeyondViewport: true`, e no Chrome 152 isso leva o viewport do
+// documento observado a 1x1 por um instante e o restaura (até ~250 eventos de `resize` numa fixture de 240
+// controles). Numa página que reaja a `resize` escrevendo no DOM, o documento TERMINA diferente do inicial —
+// o oráculo de fonte intocada do próprio projeto reprova esse caso. A mensagem anterior ("sem alterar foco,
+// rolagem ou layout") era, por isso, falsa para páginas reativas, e a frase foi corrigida para declarar o
+// efeito em vez de negá-lo. No modo sem imagens não há captura e nenhum evento é observado.
 export const DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE =
-  'A página foi observada sem alterar foco, rolagem ou layout. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.';
+  'A página foi observada sem navegação e sem alterar foco, rolagem ou o layout final. Nas verificações com imagens, a captura de elementos pode redimensionar a área de captura por um instante e restaurá-la; páginas que reagem a redimensionamento podem registrar essa mudança. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.';
 
 export const EXPORT_ISSUE_MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',

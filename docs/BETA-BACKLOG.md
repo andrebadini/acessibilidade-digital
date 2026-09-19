@@ -4,6 +4,10 @@ Este arquivo registra melhorias que não bloqueiam a primeira beta utilizável. 
 
 ## Estado vigente — produção 1.1.49, 18/09
 
+> As seções abaixo preservam a cronologia das betas (inclusive as menções à 1.1.13 e à 1.1.14): são registro
+> histórico, não a versão vigente. O que descreve o estado atual é este cabeçalho, a nota
+> `docs/releases/1.1.49.md` e o registro `docs/qa/2026-09-18-incremento-1.1.49.md`.
+
 A versão vigente é a **1.1.49** (nota em `docs/releases/1.1.49.md`; incremento em
 `docs/qa/2026-09-18-incremento-1.1.49.md`). Ela fecha o Minor **N-1** da re-verificação da 1.1.47 (a tela de
 indisponibilidade volta a oferecer o seletor de modo e a retentativa preserva o motivo específico) e migra os nove

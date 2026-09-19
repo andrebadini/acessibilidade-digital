@@ -49,7 +49,7 @@ const SHAPES = [
 ];
 
 for (const [nome, slug, montar, tipo = 'digit'] of SHAPES) {
-  test(`credencial em ${nome} não chega ao entregável`, { timeout: 300_000 }, async t => {
+  test(`credencial em ${nome} não chega ao entregável`, { timeout: 480_000 }, async t => {
     // O sentinela padrão tem CARA DE CREDENCIAL (dígito) — é o formato que a regra de cauda de rótulo
     // multi-palavra exige. Os tipos `letters`, `phrase` e `weak` existem porque a revisão da 1.1.36 mediu
     // que SÓ o sentinela com dígito deixava o portão de valor sem prova: uma frase-senha de 25 letras
@@ -102,7 +102,35 @@ for (const [nome, slug, montar, tipo = 'digit'] of SHAPES) {
     const report = await extension.waitForReport({ auditId });
     await waitForValue(report, `Boolean(document.querySelector('button[data-report-export]'))`, value => value === true, { timeoutMs: 30_000 });
     await extension.click(report, 'button[data-report-export]');
-    const downloads = await waitForFourDownloads(extension, { auditId, timeoutMs: 120_000, intervalMs: 250 });
+    // O orçamento era 120 s e a medição de 18/09 mostrou que ele é curto para a carga BASAL desta máquina
+    // (não para dois Chromes: 6 de 23 formas estouraram numa janela exclusiva, ~22 %, enquanto outras
+    // passagens fechavam 23/23 em 77 s). Os outros arquivos de exportação já usam 300 s pelo mesmo motivo
+    // (`public-axe-map`, `url-audit`, `batch-pixel-consent`, `mandatory-journey`). A asserção não mudou:
+    // continua exigindo os quatro downloads completos e conferidos.
+    let downloads;
+    try {
+      downloads = await waitForFourDownloads(extension, { auditId, timeoutMs: 300_000, intervalMs: 250 });
+    } catch (cause) {
+      // Diagnóstico sem conteúdo (nem modelo, nem URL, nem IDs privados): separa "a exportação travou" de
+      // "o download demorou mais que o orçamento", que era impossível distinguir com o erro fixo.
+      const snapshot = await evaluate(extension.harnessPage, `(async () => {
+        const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+        const receipt=await store.getExportReceipt(${JSON.stringify(auditId)});
+        const latest=await store.getLatest();
+        const statuses=['running','preparing','delivering','complete','partial','failed'];
+        const launchStates=['allocated','awaiting-connection','connected','terminal','revoked'];
+        const rows=Object.values(await chrome.storage.session.get(null)).filter(row=>row?.auditId===${JSON.stringify(auditId)});
+        return {
+          receipt:statuses.includes(receipt?.status)?receipt.status:null,
+          completed:['html','pdf','csv','json'].filter(format=>
+            receipt?.formats?.some(item=>item.format===format&&item.state==='complete')),
+          exportState:latest?.auditId===${JSON.stringify(auditId)}&&statuses.includes(latest?.exportStatus)?latest.exportStatus:null,
+          exportLaunchStates:rows.filter(row=>row?.path==='/src/export/index.html')
+            .map(row=>launchStates.includes(row.state)?row.state:'other'),
+        };
+      })()`, { awaitPromise: true }).catch(() => null);
+      throw new Error(`EXPORT_DELIVERY_SNAPSHOT:${JSON.stringify(snapshot)}`, { cause });
+    }
     assert.equal(downloads.every(record => record.state === 'complete'), true);
     const superficies = {
       painel: await evaluate(panel, 'document.documentElement.outerHTML'),

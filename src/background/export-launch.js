@@ -16,6 +16,12 @@ const RECEIPT_KEYS = Object.freeze(['version','auditId','modelRevision','modelHa
 const RECEIPT_FORMAT_KEYS = Object.freeze(['format','mimeType','byteSize','sha256','downloadId','state']);
 const PATH = '/src/export/index.html';
 const TTL_MS = 15 * 60 * 1000;
+// Janela em que o estado INTERMEDIÁRIO da navegação que a própria autoridade iniciou é tolerado. Medido em
+// 18/09/2026 (revisão adversarial da 1.1.49, achado N-2): sob carga, `tabs.get` responde `about:blank` SEM
+// `pendingUrl` por tempo suficiente para `handleTabUpdated` revogar a concessão — a exportação do usuário
+// morria sem produzir arquivo, e o relatório já havia respondido "ok". Só uma navegação CONFIRMADA para
+// outro destino (ou a janela/aba sumindo) revoga; e a tolerância é limitada no tempo.
+const STAGING_GRACE_MS = 30_000;
 const SHARED_QUEUES = new WeakMap();
 const launchKey = auditId => `audita:export-launch:v1:${auditId}`;
 const indexKey = tabId => `audita:export-launch-tab:v1:${tabId}`;
@@ -47,6 +53,15 @@ function exactStagingTab(tab, launch, expectedUrl) {
   if (!tab || tab.id !== launch.tabId || tab.windowId !== launch.windowId) return false;
   if (tab.url === expectedUrl) return !tab.pendingUrlPresent || tab.pendingUrl === expectedUrl;
   return tab.url === 'about:blank' && tab.pendingUrlPresent && tab.pendingUrl === expectedUrl;
+}
+// O complemento tolerante de `exactStagingTab`: a aba continua sendo a NOSSA enquanto a URL é `about:blank` ou
+// a esperada, e qualquer `pendingUrl` publicado é a esperada. É o estado intermediário que o Chrome publica
+// durante a navegação iniciada por `tabs.update`.
+function stagingNavigationPending(tab, launch, expectedUrl) {
+  if (!tab || tab.id !== launch.tabId || tab.windowId !== launch.windowId) return false;
+  const urlAllowed = tab.url === expectedUrl || tab.url === 'about:blank';
+  const pendingAllowed = !tab.pendingUrlPresent || tab.pendingUrl === expectedUrl;
+  return urlAllowed && pendingAllowed;
 }
 function exactConnectedTab(tab, launch, expectedUrl) {
   return Boolean(tab && tab.id === launch.tabId && tab.windowId === launch.windowId &&
@@ -536,6 +551,10 @@ export function createExportLaunchAuthority(raw) {
       if(url!==null&&url!=='about:blank'&&url!==expectedUrl)return revoke(launch);
       const current=await readOwnedTab(launch);
       if(exactStagingTab(current,launch,expectedUrl))return false;
+      // A navegação iniciada pela própria autoridade passa por estados intermediários; revogar em cima deles
+      // era o defeito medido (N-2). A tolerância vale só dentro da janela e só para o estado pendente.
+      const ageMs=readEpoch(input.epochNow)-launch.issuedAt;
+      if(stagingNavigationPending(current,launch,expectedUrl)&&Number.isFinite(ageMs)&&ageMs>=0&&ageMs<=STAGING_GRACE_MS)return false;
       return revoke(launch);
     });
   }

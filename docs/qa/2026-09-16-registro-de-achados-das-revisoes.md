@@ -678,3 +678,54 @@ Pacote `release/audita-acessibilidade-1.1.49.zip`, digest `92945a8d…e5fa9`, 19
 | **3 linhas de documentação vencidas** | higiene | README, dossiê §4 e `docs/BETA-BACKLOG.md` corrigidos |
 | **Achado novo (medido pela migração)** | declarado | capturar elemento fora da viewport oscila transitoriamente a geometria no Chrome 152 (248 eventos de `resize` num fixture de 240 controles, com retorno exato e zero mutações/rolagem/foco/estilo). É o limite já declarado para regiões fora da viewport; o modo sem pixels continua exigindo zero eventos |
 | **Ambiente** | não é produto | o Chrome for Testing de `/private/tmp/audita-cft152-fixed` deixou de iniciar (processos auxiliares com `SIGTRAP`); a bateria passou a usar binário recém-baixado do canal oficial, mesma versão `152.0.7977.64` |
+
+
+## Revisão adversarial independente da 1.1.49 → **NÃO PODE ENTRAR** (dois Important), fechada no mesmo dia
+
+Parecer arquivado em `docs/qa/revisoes/REVIEW-1.1.49.md` (revisor independente, clone próprio em `2cf5a6b`,
+Chrome for Testing 152.0.7977.64, um Chrome por vez com cadeado combinado). O revisor **confirmou por medição
+própria**: o conserto N-1 está correto (com testes que morrem sob mutação: 263/263 sem mutação, 261/263 com o
+reducer revertido, 262/263 com cada um dos outros dois mutantes), o pacote é reconstruível e byte-idêntico à
+árvore, a migração E2E passa **9/9** (306 s, reproduzido), e as seis provas centrais do oráculo antigo continuam
+cobertas — duas delas **mais fortes** que antes (zero posse de aba; ocorrência conhecida resolvida no documento
+vivo). O veredito foi **NÃO PODE ENTRAR** por dois Important de produto.
+
+| Achado | Sev. | Medida do revisor | Desfecho |
+|---|---|---|---|
+| **N-1** (do revisor) — a mensagem "sem alterar foco, rolagem ou layout" é falsa em páginas que reagem a `resize` | **Important** | Fixture com um `addEventListener('resize')` comum: **247 eventos**, viewport a `1x1`, **496 mutações de DOM**, contador da página em `resizes=253`; o próprio oráculo do autor reprova o caso. Sonda de causalidade (5 experimentos): a oscilação vem da flag `captureBeyondViewport: true`, não da posição do recorte; sem efeito cruzado entre alvos; geometria final sempre restaurada | **CORRIGIDO**: (a) a mensagem passiva passou a **declarar** o efeito (`src/core/report/diagnostic-policy.js`, com teste literal em `test/report/diagnostic-policy.test.js`); (b) oráculo novo `passive current-page declares the capture resize on a page that reacts to it`, que exige geometria final idêntica, zero navegação/rolagem, o efeito MEDIDO no contador da página (`resizes=252` na passagem final) e a declaração no relatório; (c) a frase antiga não pode voltar (asserção dedicada) |
+| **N-2** — a prova das quatro exportações falhava de forma intermitente **sem** segundo Chrome (6/23) | **Important** | `credential-shapes-mv3` **17/23** numa janela com um único Chrome, todas `DOWNLOAD_PROOF_TIMEOUT` em ~121 s; e, na execução a partir do pacote, `EXPORT_DELIVERY_SNAPSHOT:{"receipt":null,"exportLaunchStates":["revoked"]}` | **CAUSA ISOLADA E CORRIGIDA** (ver abaixo) |
+| **N-3** | Minor | Quatro asserções de CSV removidas sem substituto, ainda verdadeiras no produto | **CORRIGIDO**: repostas |
+| **N-4** | Minor | Três asserções mais fracas que as substituídas (seletor da ficha, `Anúncio esperado:`, citação WCAG no HTML) | **CORRIGIDO**: o seletor da ficha tem de resolver, no documento vivo, a um elemento com o defeito; o anúncio voltou; o HTML volta a exigir a citação WCAG |
+| **N-5** | Minor | O perdão de `resize` não tinha teto nem julgava a geometria transitória | **CORRIGIDO**: teto `8 × capturas + 32`, nenhuma amostra abaixo de `1x1`, e a partir de 16 eventos alguma amostra TEM de mostrar geometria diferente da inicial |
+| **N-6** | Minor | O anúncio "A tela não foi alterada." é ambíguo (a tela acabou de mudar) | **CORRIGIDO**: "A página observada não foi alterada." |
+| **N-7** | Minor | Cinco linhas de documentação ainda vencidas | **CORRIGIDO**: nota da 1.1.48, prosa histórica do backlog, critério 10 e §3 do dossiê, e a divergência 7 × 9 reconciliada por medição (7 = arquivo antigo contra o produto atual; 9 = fase serial da bateria da 1.1.48) |
+| **N-8** | fechamento | Versão declarada "produção" com a bateria aberta e vermelha | **FECHADO**: bateria refeita em janela controlada, linhas preenchidas, dossiê atualizado |
+| **N-9** | Observação | O caminho novo era o único que voltava a `initial` sem `reviseNavigationEntry()` | **CORRIGIDO**: uma linha, com a sonda do revisor mostrando que não havia exploração possível |
+
+### N-2 — a causa, medida com sonda própria
+
+O autor instrumentou uma cópia de trabalho (`src/background/export-launch.js`, marcas de estágio + leitura das
+concessões) e rodou o arquivo de credencial até reproduzir. Resultado da sonda nos casos que falharam:
+
+```
+DEBUG-EXPORT-OPEN {"debug":[],"launches":[{"state":"revoked","attemptId":"1","hasTab":true,"documentId":null}],
+ "sessions":[],"receipt":null,"journalCount":0}
+DEBUG-REPORT-STATUS "Relatório atualizado na fila de geração."
+```
+
+Ou seja: o relatório **recebeu `ok`** do trabalhador (a concessão foi criada e respondida), a aba de exportação
+**nunca conectou** (`documentId: null`, nenhuma sessão), e a concessão acabou **`revoked`** — mas o `catch` de
+`requestExport` **nunca rodou** (`debug: []`). A revogação veio de `handleTabUpdated`: durante a navegação que a
+**própria autoridade** iniciou, o Chrome publica estados intermediários (`about:blank` recém-criada, sem
+`pendingUrl`), e sob carga essa janela dura o bastante para o evento de `tabs.onUpdated` chegar depois de a
+concessão existir — quando `exactStagingTab` não reconhece o estado pendente, a autoridade revogava a exportação
+do usuário. **Era defeito de produto, não do teste.**
+
+**Conserto:** `stagingNavigationPending` (o complemento tolerante de `exactStagingTab`) com janela limitada
+(`STAGING_GRACE_MS = 30 s`): o estado pendente da nossa própria navegação não revoga; qualquer navegação
+confirmada para outro destino continua revogando na hora, e fora da janela a falta de prova volta a revogar.
+Teste novo em `test/background/export-launch.test.js` (tolera dentro da janela, revoga depois) e o caso
+`still-blank` saiu do teste de "falha fechada imediata" com a justificativa medida. **Validação:**
+`credential-shapes-mv3` **23/23** depois do conserto (antes: 17/23 na mesma máquina). O E2E de credencial também
+ganhou o `EXPORT_DELIVERY_SNAPSHOT` e orçamento de 300 s por tentativa, para que uma próxima falha já venha
+diagnosticada.

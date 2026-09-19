@@ -10,7 +10,10 @@ import { deriveSystemLimitations, listedLimitations } from '../../src/core/repor
 test('passive observation omission reaches report limitations without claiming a technical failure', () => {
   const diagnostic = {
     code: 'DYNAMIC_PROBES_OMITTED_PASSIVE',
-    message: 'A página foi observada sem alterar foco, rolagem ou layout. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.',
+    // A frase é literal e foi CORRIGIDA na 1.1.49 depois da revisão adversarial (achado N-1 do revisor): a
+    // captura de elementos com `captureBeyondViewport` mexe transitoriamente na geometria do documento, e
+    // numa página que reage a `resize` o efeito fica registrado — a mensagem antiga negava isso.
+    message: 'A página foi observada sem navegação e sem alterar foco, rolagem ou o layout final. Nas verificações com imagens, a captura de elementos pode redimensionar a área de captura por um instante e restaurá-la; páginas que reagem a redimensionamento podem registrar essa mudança. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.',
     recoverable: true,
   };
   const policy = diagnosticPolicyEntry(diagnostic, {
