@@ -37,7 +37,7 @@ A auditoria de cada página ocorrerá nesta ordem:
 9. deduplicação de ocorrências visualmente equivalentes sem apagar a proveniência de cada motor;
 10. captura de evidências e agregação normativa.
 
-axe-core será fixado em `4.13.0`. O pacote de distribuição conterá `vendor/axe/axe.min.js`, licença MPL-2.0 e avisos de terceiros. Não haverá CDN, import remoto, `unsafe-eval` ou alteração da CSP para contornar incompatibilidades. A integração só será ativada depois de um gate E2E em Chromium MV3; se falhar, a extensão continuará com o motor próprio e registrará a limitação.
+axe-core será fixado em `4.13.0`. O pacote de distribuição conterá `vendor/axe/axe.js` (build não minificado, legível por humano), licença MPL-2.0 e avisos de terceiros. Não haverá CDN, import remoto, `unsafe-eval` ou alteração da CSP para contornar incompatibilidades. A integração só será ativada depois de um gate E2E em Chromium MV3; se falhar, a extensão continuará com o motor próprio e registrará a limitação.
 
 Configuração inicial do axe:
 

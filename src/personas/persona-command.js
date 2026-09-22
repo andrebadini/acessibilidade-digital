@@ -314,6 +314,11 @@ export function applyAuditaPersonaCommand(command, environment = globalThis) {
     if (observation.namespace) {
       try {
         var probeRuntime = readSingleton(observation.namespace);
+        // The Tab report also loads this namespace, without installing a persona.
+        // Only a valid, empty runtime without an orphan bridge proves absence.
+        if (probeRuntime === null && !Object.getOwnPropertyDescriptor(environment, '__auditaPersonaV1')) {
+          return { ok: true, present: false, mode: null };
+        }
         if (probeRuntime) {
           var probeState = modeFromRuntime(probeRuntime);
           if (probeState.ok) probeMode = probeState.mode;

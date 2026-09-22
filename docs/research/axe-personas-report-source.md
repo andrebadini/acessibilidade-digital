@@ -32,13 +32,13 @@ O Decreto nº 2.181/1997 será citado com o inciso e a alínea corretos: art. 12
 
 - versão: `4.13.0`, publicada em 5 de agosto de 2026;
 - licença: MPL-2.0, gratuita e sem royalties, com obrigações de aviso e disponibilização do código coberto;
-- arquivos a distribuir: `axe.min.js`, `LICENSE` e `LICENSE-3RD-PARTY.txt`;
-- tamanho do `axe.min.js`: 580.491 bytes; aproximadamente 154.842 bytes com gzip de nível 9;
+- arquivos a distribuir: `axe.js` (build não minificado, legível), `LICENSE` e `LICENSE-3RD-PARTY.txt`;
+- tamanho do `axe.js`: 1.305.279 bytes; o antigo `axe.min.js` de 580.491 bytes foi rejeitado pela Chrome Web Store como código ofuscado;
 - 105 regras totais, 89 habilitadas e 16 desabilitadas por padrão;
 - 60 regras WCAG 2.0 A/AA, 2 regras WCAG 2.1 A/AA, 1 regra específica de WCAG 2.2 A/AA, 27 boas práticas, 3 regras AAA, 7 experimentais e 5 obsoletas/depreciadas;
 - a regra específica de WCAG 2.2 é `target-size`, associada ao critério 2.5.8, desabilitada por padrão;
 - a API produz `passes`, `violations`, `incomplete` e `inapplicable`;
-- `axe.min.js` contém construções `new Function`; a integração só será habilitada após execução real em Chromium MV3 sob CSP estrita, sem `unsafe-eval` e sem código remoto.
+- `axe.js` contém construções `new Function` no fonte legível; a integração só será habilitada após execução real em Chromium MV3 sob CSP estrita, sem `unsafe-eval` e sem código remoto.
 
 ## Limites de automação e interpretação
 

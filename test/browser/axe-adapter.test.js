@@ -26,7 +26,7 @@ test('injects pinned axe locally in every isolated frame before running its pack
   assert.deepEqual(calls[0], {
     target: { tabId: 42, allFrames: true },
     world: 'ISOLATED',
-    files: ['vendor/axe/axe.min.js'],
+    files: ['vendor/axe/axe.js'],
   });
   assert.deepEqual(calls[1].target, { tabId: 42, allFrames: true });
   assert.equal(calls[1].world, 'ISOLATED');

@@ -22,6 +22,7 @@ import { createInitialPanelState, reducePanelState,
 } from './panel-state.js';
 import { createPanelPersonaSession } from './persona-session.js';
 import { createPanelPageMarkersSession } from './page-markers-session.js';
+import { openReadingReport } from '../reader/controller.js';
 
 const root = document.querySelector('#panel-root');
 const chromeApi = globalThis.chrome ?? null;
@@ -56,6 +57,7 @@ let readerRefreshInFlight = false;
 let readerFeedbackStopped = false;
 let panelPageHidden = false;
 let pageMarkerInteractionRevision = 0;
+let openingTabReading = false;
 const personaSession = createPanelPersonaSession({
   requestIntent: requestPanelIntent,
   createRequestId: nextRequestId,
@@ -424,6 +426,18 @@ function handleEvent(event) {
 
 async function handleIntent(intent) {
   switch (intent.type) {
+    case 'OPEN_TAB_READING':
+      if (openingTabReading || !hasReceivedBootstrap || state.screen === 'running') return;
+      openingTabReading = true;
+      try {
+        if (state.persona.mode !== null) await personaSession.stop();
+        if (state.persona.mode !== null) throw new Error('PERSONA_STILL_ACTIVE');
+        await pageMarkers.hide();
+        await openReadingReport(chromeApi);
+      } catch {
+        announce('Não foi possível abrir a conferência. Selecione uma página HTTP ou HTTPS, encerre a simulação e tente novamente.');
+      } finally { openingTabReading = false; }
+      return;
     case 'START_ATTACHED':
       await startAttachedAudit();
       return;

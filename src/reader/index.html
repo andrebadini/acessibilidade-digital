@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Conferência de leitura por Tab — Audita Acessibilidade</title>
+  <link rel="stylesheet" href="reader.css">
+  <script type="module" src="reader.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#results">Ir para os elementos</a>
+  <header><p class="brand">Audita Acessibilidade</p><h1>Conferência de leitura por Tab</h1><p id="identity">Preparando inspeção local…</p></header>
+  <main>
+    <section aria-labelledby="about-title" class="intro">
+      <h2 id="about-title">Confira a leitura, sem áudio</h2>
+      <p id="explanation"></p><p id="privacy"></p>
+      <div class="actions" aria-label="Conferir na página">
+        <button id="observe" disabled>Acompanhar Tab na página</button>
+        <button id="clear" disabled>Encerrar destaques</button>
+        <button id="refresh" disabled>Atualizar inspeção</button>
+      </div>
+      <p class="hint">Ao acompanhar, volte à página e use Tab ou Shift+Tab. Uma legenda visual mostra o elemento em foco. Escape remove os destaques. A inspeção não pressiona teclas nem ativa controles do site.</p>
+      <p id="status" role="status" aria-live="polite">Lendo os elementos da página…</p>
+    </section>
+    <section aria-labelledby="summary-title"><h2 id="summary-title">O que foi encontrado</h2><div id="summary" class="summary"></div>
+      <details id="limitations"><summary>Limites desta inspeção</summary><ul id="limitation-list"></ul></details>
+    </section>
+    <section aria-labelledby="export-title" class="export"><h2 id="export-title">Guardar o relatório</h2><p>Os arquivos incluem todas as categorias, mesmo que você filtre a visualização.</p>
+      <div class="actions"><button id="export-html" disabled>Exportar HTML</button><button id="export-csv" disabled>Exportar CSV</button><button id="export-json" disabled>Exportar JSON</button><button id="print" disabled>Imprimir / salvar PDF</button></div>
+    </section>
+    <div class="filter"><label for="category">Mostrar elementos</label><select id="category"><option value="all">Todos</option><option value="tab">Na sequência de Tab</option><option value="outside-tab">Controles fora do Tab</option><option value="reading">Conteúdo estrutural</option><option value="hidden">Elementos ocultos</option></select></div>
+    <div id="results" tabindex="-1"></div>
+    <section id="page-map" class="page-map" aria-label="Mapa de leitura da página"></section>
+  </main>
+  <footer>Relatório complementar do estado observado. Não substitui testes com pessoas usuárias e tecnologias assistivas.</footer>
+</body>
+</html>

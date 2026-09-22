@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REAL_CHROME_E2E = new Set([
+  'test/e2e/tab-reading-mv3.test.mjs',
   'test/e2e/axe-mv3-csp.test.mjs',
   'test/e2e/batch-audit-mv3.test.mjs',
   'test/e2e/batch-pixel-consent-mv3.test.mjs',
@@ -104,13 +105,8 @@ function runTests(files, { serial = false } = {}) {
 
 async function main() {
   const plan = createTestPlan(await discoverTests(resolve(workspaceRoot, 'test')));
-  // As duas fases sempre executam, e o pior resultado é o que sai. A versão anterior parava na
-  // primeira falha da fase paralela (`if (parallelStatus !== 0) return parallelStatus;`), e como
-  // essa fase tem oito falhas pré-existentes conhecidas, a fase serial — os 34 arquivos de Chrome
-  // real, incluindo o percurso obrigatório — **nunca chegava a rodar**. O efeito era um relatório
-  // de suíte que dizia "4185 testes, 4176 passam, 8 falham" sem ter executado nenhum E2E de Chrome,
-  // e um E2E que falhava de verdade (orçamento de download curto sob carga) ficou invisível. Um
-  // portão de release não pode pular a fase que mais importa por causa de falhas conhecidas.
+  // As duas fases sempre executam, e o pior resultado é o que sai. Uma falha na fase paralela
+  // não pode esconder regressões nos testes reais de Chrome, incluindo o percurso obrigatório.
   const parallelStatus = await runTests(plan.parallel);
   const serialStatus = await runTests(plan.serial, { serial: true });
   return parallelStatus !== 0 ? parallelStatus : serialStatus;

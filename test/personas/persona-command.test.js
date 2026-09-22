@@ -183,6 +183,37 @@ test('probe reports a conflicting namespace but only commands diagnose its brand
   });
 });
 
+test('probe treats a valid shared preview namespace without a persona singleton or bridge as absent', () => {
+  const { environment, created } = environmentFixture();
+  assert.deepEqual(apply({ version: 1, op: 'probe' }, environment), {
+    ok: true, present: false, mode: null,
+  });
+  assert.equal(created.length, 0);
+});
+
+test('probe never treats an orphan or accessor persona bridge as proof of absence', () => {
+  for (const descriptor of [
+    { value: null },
+    { value: Object.freeze({ version: 1 }) },
+    { get() { throw new Error('bridge accessor must not run'); } },
+  ]) {
+    const { environment } = environmentFixture();
+    Object.defineProperty(environment, '__auditaPersonaV1', descriptor);
+    assert.deepEqual(apply({ version: 1, op: 'probe' }, environment), {
+      ok: true, present: true, mode: null,
+    });
+  }
+});
+
+test('probe keeps malformed falsy singleton values present so commands fail closed', () => {
+  for (const singleton of [false, 0, '']) {
+    const { environment } = environmentFixture({ singleton });
+    assert.deepEqual(apply({ version: 1, op: 'probe' }, environment), {
+      ok: true, present: true, mode: null,
+    });
+  }
+});
+
 test('install binds one opaque lease and exposes only the closed autonomous shutdown emitter', () => {
   const createdRuntime = runtimeFixture();
   const { environment, created, sent, getSingleton } = environmentFixture({

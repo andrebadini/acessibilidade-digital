@@ -18,7 +18,7 @@ import { startFixtureServer, launchUnpackedExtension, resolveRealChromeTestBinar
 // (`#edf3f7`) — acima de 4,5:1 e de 3:1 para texto grande, então a pendência é do instrumento, não do
 // artefato. Qualquer OUTRO id em `incomplete` reprova.
 
-const axeSource = await readFile(new URL('../../vendor/axe/axe.min.js', import.meta.url), 'utf8');
+const axeSource = await readFile(new URL('../../vendor/axe/axe.js', import.meta.url), 'utf8');
 
 const DOCUMENTO = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fixture</title></head>
 <body><main><h1>Página com defeitos conhecidos</h1>

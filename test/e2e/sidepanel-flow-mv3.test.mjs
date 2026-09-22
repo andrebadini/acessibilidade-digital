@@ -1957,6 +1957,7 @@ test('passive current-page declares the capture resize on a page that reacts to 
       counter:document.getElementById('reactive-counter')?.textContent??null,
       counterValue:Number((document.getElementById('reactive-counter')?.textContent??'').match(/^resizes=(\\d+)/u)?.[1] ?? -1),
       proofResizes:Number(globalThis.__auditaSourceInvariantV1?.compare?.().eventCounts?.resize ?? -1),
+      resizeSamples:globalThis.__auditaSourceInvariantV1?.compare?.().resizeSamples??[],
     }))()`);
     assert.deepEqual(after.viewport, baseline.viewport,
       'a geometria final do documento observado tem de voltar à inicial');
@@ -1964,19 +1965,54 @@ test('passive current-page declares the capture resize on a page that reacts to 
     assert.equal(after.scrollY, baseline.scrollY, 'a auditoria não pode rolar o documento observado');
     assert.match(after.counter ?? '', /^resizes=\d+ w=\d+ h=\d+$/u,
       'o contador da fixture precisa registrar o redimensionamento observado');
-    // A-1 do adendo da 1.1.49: o contador conta TODOS os `resize` desde o carregamento, inclusive os que o
-    // painel lateral provoca ao abrir (medido: 7 no resíduo). O que prova o efeito da CAPTURA é o DELTA
-    // contra a linha de base — sem ele a asserção passava até com a oscilação removida do produto.
+    // A-1 do adendo da 1.1.49: descontar os eventos anteriores evita confundir a animação do painel com
+    // a captura. O piso histórico de 32 dependia de uma medição de 246 eventos; no mesmo CFT 152.0.7977.64,
+    // tanto a 1.1.49 quanto a 1.1.50 produziram quatro eventos e 138 PNGs decodificáveis. Exigimos agora
+    // a assinatura causal observada: colapso a 1x1 seguido do retorno à linha de base. O mutante que força
+    // captureBeyondViewport:false produz zero eventos e nenhuma amostra 1x1, e continua reprovado.
     const counterDelta = after.counterValue - baseline.counterValue;
-    assert.equal(counterDelta >= 32, true,
-      `a oscilação da captura precisa aparecer no contador da página (delta medido: 246, resíduo do painel: 0): ${JSON.stringify({ baselineCounter: baseline.counterValue, afterCounter: after.counterValue, counterDelta })}`);
-    // Segunda medida independente, do próprio oráculo de fonte: o mesmo efeito, contado por outro observador.
-    assert.equal(after.proofResizes >= 32, true,
-      `o oráculo de fonte precisa contar a oscilação da captura: ${JSON.stringify({ proofResizes: after.proofResizes, counterDelta })}`);
     const attempt = await readPrivateAttempt(extension, auditId);
+    const rasterProof = await extension.evaluate(extension.harnessPage, `(async()=>{
+      const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+      const revision=await store.getReportRevision(${JSON.stringify(auditId)});
+      const elements=(revision?.model?.evidence??[]).filter(item=>item.kind==='element');
+      const rasters=elements.filter(item=>item.dataUrl?.startsWith('data:image/png;base64,'));
+      const sizes=await Promise.all(rasters.map(async item=>{
+        try{
+          const bytes=Uint8Array.from(atob(item.dataUrl.slice('data:image/png;base64,'.length)),c=>c.charCodeAt(0));
+          const image=await createImageBitmap(new Blob([bytes],{type:'image/png'}));
+          const result={width:image.width,height:image.height};
+          image.close();return result;
+        }catch{return null}
+      }));
+      const diagnostics=revision?.model?.session?.diagnostics??[];
+      return {totalElements:elements.length,rasters:rasters.length,
+        decoded:sizes.filter(item=>item?.width>0&&item?.height>0).length,
+        dimensions:[...new Set(sizes.map(item=>item?item.width+'x'+item.height:'invalid'))],
+        diagnosticCounts:diagnostics.reduce((counts,item)=>(counts[item.code]=(counts[item.code]??0)+1,counts),{})};
+    })()`, { awaitPromise: true });
+    t.diagnostic('reactive-capture=' + JSON.stringify({ counterDelta, proofResizes: after.proofResizes,
+      resizeSamples: after.resizeSamples, baselineViewport: baseline.viewport, finalViewport: after.viewport,
+      elements: attempt.elements, rasterProof }));
+    assert.equal(counterDelta >= 2, true,
+      `a saída e o retorno da captura precisam aparecer no contador da página: ${JSON.stringify({ baselineCounter: baseline.counterValue, afterCounter: after.counterValue, counterDelta })}`);
+    // Segunda medida independente, do próprio oráculo de fonte: o mesmo efeito, contado por outro observador.
+    assert.equal(after.proofResizes >= 2, true,
+      `o oráculo de fonte precisa contar a oscilação da captura: ${JSON.stringify({ proofResizes: after.proofResizes, counterDelta })}`);
+    const geometries = after.resizeSamples.map(sample => /^t=\d+ (\d+)x(\d+)\//u.exec(sample))
+      .filter(Boolean).map(match => [Number(match[1]), Number(match[2])]);
+    const collapseIndex = geometries.findIndex(([width, height]) => width === 1 && height === 1);
+    assert.ok(collapseIndex >= 0,
+      `a captura precisa registrar a geometria 1x1, ausente na animação do painel: ${JSON.stringify(after.resizeSamples)}`);
+    assert.equal(geometries.slice(collapseIndex + 1).some(([width, height]) =>
+      width === baseline.viewport[0] && height === baseline.viewport[1]), true,
+    'a amostragem precisa registrar o retorno de 1x1 à geometria inicial');
     assert.equal(attempt.diagnostics.includes('DYNAMIC_PROBES_OMITTED_PASSIVE'), true);
     assert.equal(attempt.elements >= 1, true,
       'a captura de elementos continua existindo numa página reativa — é ela que causa a oscilação');
+    assert.equal(rasterProof.rasters, attempt.elements);
+    assert.equal(rasterProof.decoded, rasterProof.rasters,
+      'todos os PNGs de elementos precisam decodificar com dimensões positivas');
     assert.equal(attempt.forbiddenSessionUrlCount, 0);
     await extension.click(panel, 'button[data-intent="OPEN_REPORT"]');
     const report = await extension.waitForReport({ auditId });

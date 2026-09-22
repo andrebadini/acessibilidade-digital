@@ -30,7 +30,7 @@ assert.equal(packageJson.devDependencies?.['axe-core'], '4.13.0', 'axe-core prec
 assert.equal(lock.packages?.['']?.devDependencies?.['axe-core'], '4.13.0', 'lock raiz precisa fixar axe-core');
 assert.equal(lock.packages?.['node_modules/axe-core']?.version, '4.13.0', 'lock precisa resolver axe-core 4.13.0');
 const axeVendorHashes = Object.freeze({
-  'axe.min.js': 'c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1',
+  'axe.js': '138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88',
   'LICENSE': 'af175b9d96ee93c21a036152e1b905b0b95304d4ae8c2c921c7609100ba8df7e',
   'LICENSE-3RD-PARTY.txt': '4f8563870d0fca38bbc3e00b6f670cb7fa9f380ba9f26a7f7d1184a6b18b1653',
 });
@@ -40,7 +40,7 @@ for (const [name, expected] of Object.entries(axeVendorHashes)) {
   assert.equal(digest, expected, `hash oficial divergente: vendor/axe/${name}`);
 }
 assert.equal(AXE_PROVENANCE.version, '4.13.0');
-assert.equal(AXE_PROVENANCE.runtimeSha256, axeVendorHashes['axe.min.js']);
+assert.equal(AXE_PROVENANCE.runtimeSha256, axeVendorHashes['axe.js']);
 assert.equal(AXE_PROVENANCE.packageTarballSha256, '096912f6e77b4b695fc9304b7be65091db42d98de054da674ae222a11cb33f70');
 assert.deepEqual(AXE_MV3_CSP_GATE, {
   enabled: true,

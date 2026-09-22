@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280" role="img" aria-labelledby="title desc">
+  <title id="title">Audita Acessibilidade</title>
+  <desc id="desc">Lupa branca com marca de foco âmbar. Evidências locais e revisão humana.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#003b71"/>
+      <stop offset="1" stop-color="#00294f"/>
+    </linearGradient>
+  </defs>
+  <rect width="440" height="280" fill="url(#background)"/>
+  <path d="M315 0H440V280H390Z" fill="#005a9c" opacity=".22"/>
+  <path d="M0 0H440V6H0Z" fill="#ffb547"/>
+  <g transform="translate(282 54) scale(.29)">
+    <circle cx="220" cy="208" r="128" fill="#005a9c" stroke="#fff" stroke-width="42"/>
+    <rect x="151" y="145" width="138" height="126" rx="24" fill="none" stroke="#ffb547" stroke-width="24"/>
+    <circle cx="220" cy="208" r="18" fill="#fff"/>
+    <path d="M314 302 424 412" fill="none" stroke="#fff" stroke-width="52" stroke-linecap="round"/>
+  </g>
+  <g fill="#fff" font-family="Arial, Helvetica, sans-serif">
+    <text x="28" y="86" font-size="39" font-weight="700" letter-spacing="-.8">Audita</text>
+    <text x="28" y="120" font-size="25" font-weight="700" letter-spacing="-.5">Acessibilidade</text>
+    <path d="M28 149H76" stroke="#ffb547" stroke-width="4"/>
+    <text x="28" y="187" font-size="19">Evidências locais.</text>
+    <text x="28" y="216" font-size="19">Revisão humana.</text>
+  </g>
+</svg>

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 
 let runtimeModule = {};
 try { runtimeModule = await import('../../src/background/persona-runtime.js'); } catch { /* RED */ }
@@ -120,6 +122,43 @@ test('clear also removes orphan CSS when the namespace is already absent', async
     ok: true, documentId: target.documentId, frameId: 0, mode: null,
   });
   assert.deepEqual(fixture.calls.map(call => call[0]), ['execute', 'removeCSS', 'execute']);
+});
+
+test('a real shared-only preview namespace permits inspect and double-probed cleanup without installing a persona', async () => {
+  const source = await readFile(new URL('../../src/core/accessibility/accessible-preview-runtime.classic.js', import.meta.url), 'utf8');
+  for (const withOrphanBridge of [false, true]) {
+    const context = vm.createContext({});
+    vm.runInContext(source, context);
+    if (withOrphanBridge) vm.runInContext("Object.defineProperty(globalThis, '__auditaPersonaV1', { get() { throw new Error('must not read bridge'); } })", context);
+    const calls = [];
+    const chromeApi = { scripting: {
+      async executeScript(details) {
+        assert.deepEqual(details.target, { tabId: target.tabId, documentIds: [target.documentId] });
+        assert.equal(details.world, 'ISOLATED');
+        assert.equal(Object.hasOwn(details, 'files'), false, 'inspect and cleanup must not install personas');
+        calls.push(details.args[0].op);
+        const result = vm.runInContext(`(${details.func.toString()})(${JSON.stringify(details.args[0])})`, context);
+        return injection(JSON.parse(JSON.stringify(result)));
+      },
+      async insertCSS() { assert.fail('inspect and cleanup must not insert CSS'); },
+      async removeCSS(details) {
+        assert.deepEqual(details.target, { tabId: target.tabId, documentIds: [target.documentId] });
+        calls.push('removeCSS');
+      },
+    } };
+    const runtime = runtimeModule.createPersonaInjectionRuntime({ chromeApi });
+    assert.deepEqual(await runtime.apply({ target, op: 'inspect' }), withOrphanBridge
+      ? { ok: false, reason: 'runtime-error' }
+      : { ok: true, documentId: target.documentId, frameId: 0, mode: null });
+    calls.length = 0;
+    assert.deepEqual(await runtime.apply({ target, op: 'clear' }), withOrphanBridge
+      ? { ok: false, reason: 'cleanup-unconfirmed' }
+      : { ok: true, documentId: target.documentId, frameId: 0, mode: null });
+    assert.deepEqual(calls, withOrphanBridge
+      ? ['probe', 'clear', 'removeCSS', 'inspect']
+      : ['probe', 'removeCSS', 'probe']);
+    assert.equal(vm.runInContext("globalThis[Symbol.for('audita.accessible-preview.runtime.v1')].getContentSingleton()", context), null);
+  }
 });
 
 test('clear fails closed if a runtime becomes active between the first probe and CSS removal', async () => {

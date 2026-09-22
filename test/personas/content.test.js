@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { createPersonaInjectionRuntime } from '../../src/background/persona-runtime.js';
 
 const namespaceExpression = 'globalThis[Symbol.for("audita.accessible-preview.runtime.v1")]';
 const LEASE = `lease-${'L'.repeat(22)}`;
@@ -214,6 +215,46 @@ async function loadContentFactory(contextGlobals = {}) {
   for (const source of [runtime, reader, content]) new vm.Script(source).runInContext(context);
   return vm.runInContext(namespaceExpression, context);
 }
+
+test('personas can install and clear after the Tab report loaded only the shared preview runtime', async () => {
+  const document = new FakeDocument(element('body', 'body', null));
+  const context = vm.createContext({ document });
+  const sharedSource = await readFile(new URL('../../src/core/accessibility/accessible-preview-runtime.classic.js', import.meta.url), 'utf8');
+  vm.runInContext(sharedSource, context);
+  const target = { tabId: 7, windowId: 3, documentId: 'document-main', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}` };
+  const injectedFiles = [];
+  const runtime = createPersonaInjectionRuntime({ chromeApi: { scripting: {
+    async executeScript(details) {
+      assert.deepEqual(details.target, { tabId: target.tabId, documentIds: [target.documentId] });
+      let result;
+      if (details.files) {
+        injectedFiles.push(...details.files);
+        for (const file of details.files) vm.runInContext(await readFile(new URL(`../../${file}`, import.meta.url), 'utf8'), context);
+      } else {
+        result = vm.runInContext(`(${details.func.toString()})(${JSON.stringify(details.args[0])})`, context);
+        result = JSON.parse(JSON.stringify(result));
+      }
+      return [{ frameId: 0, documentId: target.documentId, result }];
+    },
+    async insertCSS() {},
+    async removeCSS() {},
+  } } });
+
+  assert.deepEqual(await runtime.apply({ target, op: 'install', mode: 'achromatopsia', leaseId: LEASE }), {
+    ok: true, documentId: target.documentId, frameId: 0, mode: 'achromatopsia',
+  });
+  assert.deepEqual(injectedFiles, [
+    'src/core/accessibility/accessible-preview-runtime.classic.js',
+    'src/personas/screen-reader-module.js',
+    'src/personas/content.js',
+  ]);
+  assert.equal(document.documentElement.classList.contains('audita-persona-achromatopsia'), true);
+  assert.deepEqual(await runtime.apply({ target, op: 'clear' }), {
+    ok: true, documentId: target.documentId, frameId: 0, mode: null,
+  });
+  assert.equal(document.documentElement.classList.contains('audita-persona-achromatopsia'), false);
+  assert.equal(vm.runInContext("Object.hasOwn(globalThis, '__auditaPersonaV1')", context), false);
+});
 
 function fixturePage() {
   const reads = { count: 0 };

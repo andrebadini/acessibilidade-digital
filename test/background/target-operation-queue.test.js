@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createTargetOperationQueue } from '../../src/background/target-operation-queue.js';
+import * as targetQueueModule from '../../src/background/target-operation-queue.js';
+import { createFakeLockManager } from '../personas/fake-lock-manager.js';
 
 const target = Object.freeze({
   tabId: 7,
@@ -127,4 +129,63 @@ test('rejects invalid targets and operations without reading accessors', async (
   });
   assert.throws(() => targetQueue.withTarget(hostile, () => {}), /alvo inválido/iu);
   assert.equal(reads, 0);
+});
+
+test('two queue instances share one exclusion boundary until the first operation settles', async () => {
+  const manager = createFakeLockManager();
+  const left = createTargetOperationQueue({ lockManager: manager });
+  const right = createTargetOperationQueue({ lockManager: manager });
+  const entered = deferred(); const release = deferred(); const events = [];
+  const first = left.withTarget(target, async lock => {
+    left.assertHeld(lock, target); events.push('audit-start'); entered.resolve();
+    await release.promise; events.push('audit-end');
+  });
+  await entered.promise;
+  const second = right.withTarget(target, () => events.push('reader'));
+  const independent = right.withTarget(otherTarget, () => events.push('other-document'));
+  await new Promise(resolve => setImmediate(resolve));
+  try { assert.deepEqual(events, ['audit-start', 'other-document']); }
+  finally { release.resolve(); await Promise.all([first, second, independent]); }
+  assert.deepEqual(events, ['audit-start', 'other-document', 'audit-end', 'reader']);
+  assert.ok(manager.calls.every(call => call.options.mode === 'exclusive'));
+});
+
+test('exported lock names use the same validated target identity and external failures fail closed', async () => {
+  assert.equal(typeof targetQueueModule.targetOperationLockName, 'function');
+  const name = targetQueueModule.targetOperationLockName(target);
+  assert.equal(name, targetQueueModule.targetOperationLockName({ tabId: 7, documentId: 'document-main' }));
+  assert.notEqual(name, targetQueueModule.targetOperationLockName(otherTarget));
+  assert.throws(() => targetQueueModule.targetOperationLockName({ tabId: 7, documentId: '' }));
+  let invoked = false;
+  const queue = createTargetOperationQueue({ lockManager: { async request() { throw new Error('locks unavailable'); } } });
+  await assert.rejects(queue.withTarget(target, () => { invoked = true; }), /locks unavailable/u);
+  assert.equal(invoked, false);
+});
+
+test('an external ifAvailable client observes the queue lock for the whole async operation', {
+  skip: typeof globalThis.navigator?.locks?.request !== 'function',
+}, async () => {
+  const manager = navigator.locks;
+  const queue = createTargetOperationQueue({ lockManager: manager });
+  const entered = deferred(); const release = deferred();
+  const operation = queue.withTarget(target, async () => { entered.resolve(); await release.promise; });
+  await entered.promise;
+  const name = targetQueueModule.targetOperationLockName(target);
+  try {
+    assert.equal(await manager.request(name, { mode: 'exclusive', ifAvailable: true }, lock => lock === null), true);
+  } finally { release.resolve(); await operation; }
+  assert.equal(await manager.request(name, { mode: 'exclusive', ifAvailable: true }, lock => lock !== null), true);
+});
+
+test('a queued operation keeps the target identity validated at admission', async () => {
+  const manager = createFakeLockManager();
+  const queue = createTargetOperationQueue({ lockManager: manager });
+  const entered = deferred(); const release = deferred();
+  const first = queue.withTarget(target, async () => { entered.resolve(); await release.promise; });
+  await entered.promise;
+  const mutable = { tabId: target.tabId, documentId: target.documentId };
+  const queued = queue.withTarget(mutable, () => {});
+  mutable.documentId = 'another-document';
+  release.resolve(); await Promise.all([first, queued]);
+  assert.equal(manager.calls[0].name, manager.calls[1].name);
 });

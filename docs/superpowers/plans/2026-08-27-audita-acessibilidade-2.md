@@ -86,7 +86,7 @@
 
 - Modificar: `package.json`
 - Criar: `package-lock.json`
-- Criar: `vendor/axe/axe.min.js`
+- Criar: `vendor/axe/axe.js`
 - Criar: `vendor/axe/LICENSE`
 - Criar: `vendor/axe/LICENSE-3RD-PARTY.txt`
 - Criar: `src/browser/axe-adapter.js`

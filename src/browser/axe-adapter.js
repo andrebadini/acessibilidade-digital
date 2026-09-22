@@ -19,8 +19,9 @@ export const AXE_RUN_CONFIG = Object.freeze({
 export const AXE_PROVENANCE = Object.freeze({
   engine: 'axe-core',
   version: '4.13.0',
-  runtimePath: 'vendor/axe/axe.min.js',
-  runtimeSha256: 'c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1',
+  // Readable non-minified runtime: Chrome Web Store rejects minified/obfuscated extension code.
+  runtimePath: 'vendor/axe/axe.js',
+  runtimeSha256: '138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88',
   packageTarballSha256: '096912f6e77b4b695fc9304b7be65091db42d98de054da674ae222a11cb33f70',
   config: AXE_RUN_CONFIG,
   gate: AXE_MV3_CSP_GATE,

@@ -605,6 +605,7 @@ test('all four screens emit only the exhaustive UI intent union', () => {
   });
   for (const button of pausedRoot.querySelectorAll('button[data-intent]')) button.click();
   assert.deepEqual(new Set(emitted.map(value => value.type)), new Set([
+    'OPEN_TAB_READING',
     'START_ATTACHED', 'OPEN_URL_FORM', 'OPEN_BATCH_FORM', 'CANCEL_AUDIT',
     'OPEN_REPORT', 'NEW_AUDIT', 'SELECT_OCCURRENCE', 'CONSULT_EVIDENCE', 'RETRY',
     'PERSONA_SELECT', 'CONFIRM_PIXEL_CAPTURE', 'SHOW_PAGE_MARKERS', 'HIGHLIGHT_PAGE_OCCURRENCE',

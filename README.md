@@ -4,6 +4,18 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.50 — conferência de leitura por Tab.** O painel oferece **Conferir leitura por Tab**,
+um relatório complementar sem áudio e sem imagens, independente da auditoria normativa. Ele apresenta a
+sequência estimada de foco, nome acessível, função, descrição, estados e anúncio estimado de cada elemento.
+Inclui campos de formulário sem os valores digitados, controles fora do Tab, conteúdo estrutural e itens
+ocultos. **Acompanhar Tab na página** mostra legenda e destaque do foco real; **Destacar** localiza um elemento
+escolhido. Exporta HTML, CSV e JSON e oferece impressão para PDF. Consulte o [guia](docs/COMO-USAR.md) e as
+[notas da versão](docs/releases/1.1.50.md) para a validação e o estado de publicação.
+
+Tab percorre controles; títulos, parágrafos e imagens podem ser lidos por outros comandos de um leitor de
+tela sem entrar nessa sequência. Um item fora do Tab não é automaticamente inacessível. A prévia é uma
+estimativa, não a fala literal de NVDA, JAWS ou VoiceOver. Alterações na página exigem atualizar a inspeção.
+
 **Versão 1.1.49 — produção.** O pacote `release/audita-acessibilidade-1.1.49.zip` (199 arquivos, digest
 `aab8b386e6ac6c3e7025ea06517a14e53e8a9b63eb6acb18318c809b79cb73a1`, reconstruível por `npm run build:release`)
 fecha as duas pontas que a 1.1.48 deixou declaradas. **N-1:** a tela de indisponibilidade volta a oferecer o

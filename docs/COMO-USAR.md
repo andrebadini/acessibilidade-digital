@@ -1,13 +1,13 @@
 # Audita Acessibilidade — instalar e usar
 
-Guia da versão 1.1.48. A disponibilidade do pacote depende do registro de entrega; este guia não constitui publicação na loja.
+Guia da versão 1.1.50. A disponibilidade do pacote depende do registro de entrega; este guia não constitui publicação na loja.
 
 ## Instalar ou atualizar, sem login
 
 1. Descompacte o ZIP entregue em uma pasta permanente.
 2. No Chrome, abra `chrome://extensions` e ative **Modo do desenvolvedor**.
 3. Escolha **Carregar sem compactação** e selecione a pasta que contém `manifest.json`.
-4. Confira a versão **1.1.48** e fixe Audita Acessibilidade na barra, se desejar.
+4. Confira a versão **1.1.50** e fixe Audita Acessibilidade na barra, se desejar.
 
 Não é preciso instalar bibliotecas, Node.js, axe-core ou criar conta. O motor já está incluído. O Modo do desenvolvedor é necessário para esta distribuição local; não implica programação pelo usuário.
 
@@ -24,6 +24,31 @@ Para atualizar uma instalação existente, exporte os relatórios que deseja gua
 7. Para uma nova avaliação, use **Refazer auditoria** e confirme a página e o modo. O relatório anterior não é apagado por essa ação.
 
 A inspeção da página atual acontece na própria página, somente para leitura: a extensão não cria aba, não navega, não rola e não move o foco, e a página permanece como você a deixou. Como o documento observado é o que está aberto, o estado atual — inclusive o que ainda não foi salvo — faz parte da avaliação. Os sinais são uma ação posterior solicitada por você, não parte da varredura invisível.
+
+## Conferir a leitura por Tab, sem áudio
+
+1. Abra a página que deseja conferir e clique no ícone da extensão.
+2. No painel, escolha **Conferir leitura por Tab**. Não é necessário iniciar uma auditoria nem permitir imagens.
+3. O relatório abre em outra aba. Consulte a **Sequência estimada de Tab**: cada linha mostra o elemento,
+   nome acessível, função, descrição, estados e anúncio estimado. Confira se esse anúncio explica corretamente
+   o controle que a pessoa vai usar.
+4. Use **Destacar** para localizar uma linha na página. A ação pode rolar até o elemento, mas não o aciona.
+5. Use **Acompanhar Tab na página** e pressione Tab ou Shift+Tab na página original. A legenda e a moldura
+   acompanham o foco, sem reproduzir áudio. **Encerrar destaques** ou Escape removem essa visualização.
+6. Confira **Fora da sequência de Tab**. Pode haver botões feitos sem suporte a teclado, controles com
+   tabindex negativo ou opções de um grupo percorridas com setas. O relatório explica o motivo observado;
+   verifique o contexto antes de concluir que há um problema.
+7. Confira **Conteúdo estrutural** e **Elementos ocultos**. Títulos, textos e imagens normalmente são lidos por
+   comandos diferentes de Tab. Elementos ocultos podem estar intencionalmente indisponíveis naquele estado.
+8. Use **Atualizar inspeção** depois de mudar a página. Uma navegação para outro documento exige abrir nova
+   conferência pelo painel. A sessão de destaques expira em dez minutos.
+9. Use **Exportar HTML**, **Exportar CSV**, **Exportar JSON** ou **Imprimir / salvar PDF** para guardar todas as
+   categorias. Filtros de tela não removem itens dos arquivos. Exporte antes de fechar ou recarregar a aba.
+
+O relatório complementar identifica seu próprio horário de inspeção e não modifica evidências nem conclusões
+da auditoria ABNT/WCAG. O inventário é limitado a 1.000 elementos em até 5.000 nós; frames e Shadow DOM fechado
+podem conter conteúdo não inspecionado. Limites e omissões são mostrados. Os valores digitados são omitidos;
+outros textos podem conter dados pessoais. Revise os arquivos antes de compartilhar.
 
 ## Outros recursos
 

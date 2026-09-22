@@ -24,7 +24,13 @@ function validatedTargetKey(target) {
   return `${tabId}\u0000${documentId}`;
 }
 
-export function createTargetOperationQueue() {
+const lockNameForKey = key => `audita:target-operation:v1:${JSON.stringify(key)}`;
+export function targetOperationLockName(target) { return lockNameForKey(validatedTargetKey(target)); }
+
+export function createTargetOperationQueue({ lockManager = null } = {}) {
+  if (lockManager !== null && typeof lockManager?.request !== 'function') {
+    throw new TypeError('Gerenciador de locks inválido.');
+  }
   const tails = new Map();
   const activeLocks = new WeakMap();
 
@@ -42,7 +48,12 @@ export function createTargetOperationQueue() {
         activeLocks.delete(lock);
       }
     };
-    const result = predecessor.then(execute, execute);
+    // The memory queue preserves local order; Web Locks serialize this worker with
+    // other extension contexts (the Tab report) for the entire operation lifetime.
+    const acquire = () => lockManager
+      ? lockManager.request(lockNameForKey(key), { mode: 'exclusive' }, execute)
+      : execute();
+    const result = predecessor.then(acquire, acquire);
     const tail = result.then(() => undefined, () => undefined);
     tails.set(key, tail);
     void tail.finally(() => {

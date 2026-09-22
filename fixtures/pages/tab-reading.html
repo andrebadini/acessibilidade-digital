@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conferência da leitura por Tab</title>
+  <style>
+    body { margin: 2rem auto; max-width: 56rem; padding: 0 1.5rem; color: #17243b; background: #fff; font: 18px/1.55 system-ui, sans-serif; }
+    section { margin-block: 2rem; padding: 1.25rem; border: 1px solid #b7c6da; border-radius: .5rem; }
+    label, input, select, textarea { display: block; margin-block: .5rem; }
+    input[type="checkbox"], input[type="radio"] { display: inline-block; }
+    button, input, select, textarea, [contenteditable], [role="button"] { padding: .5rem; font: inherit; }
+    [contenteditable] { border: 1px solid #53627b; }
+    :focus-visible { outline: 3px solid #6840c6; outline-offset: 3px; }
+    img { width: 40px; height: 40px; }
+    iframe { width: 100%; height: 110px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="static-heading">Conferência da leitura por Tab</h1>
+    <p id="static-paragraph">Texto visível que fica fora da sequência de Tab, mas pode ser lido por navegação de conteúdo.</p>
+    <img id="static-image" alt="Mapa das regiões de Mato Grosso" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23466795'/%3E%3C/svg%3E">
+    <img id="decorative-image" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='20' r='18' fill='%23cbbfe3'/%3E%3C/svg%3E">
+
+    <section aria-labelledby="order-heading">
+      <h2 id="order-heading">Ordem e nomes</h2>
+      <button id="tab-positive-two" tabindex="2">Segundo na ordem positiva</button>
+      <button id="tab-positive-one" tabindex="1">Primeiro na ordem positiva</button>
+      <button id="tab-zero" tabindex="0">Ordem natural</button>
+      <a id="image-link" href="#static-heading"><img alt="Página inicial" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Cpath d='M5 20L20 5l15 15v15H5z' fill='%23466795'/%3E%3C/svg%3E"></a>
+      <button id="image-button"><img alt="Pesquisar documentos" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='17' cy='17' r='12' fill='%23466795'/%3E%3C/svg%3E"></button>
+      <button id="labelled-button" aria-labelledby="button-label"><span aria-hidden="true">ícone</span></button>
+      <span id="button-label">Abrir opções</span>
+      <a id="tab-negative" tabindex="-1" href="#static-heading">Link fora do Tab</a>
+      <div id="custom-missing-tabindex" role="button">Ação sem acesso por Tab</div>
+      <button id="nameless-button"></button>
+      <div id="custom-disabled" role="button" tabindex="0" aria-disabled="true">Ação ARIA indisponível</div>
+      <button id="hidden-from-at" aria-hidden="true">Foco oculto da árvore acessível</button>
+    </section>
+
+    <section aria-labelledby="fields-heading">
+      <h2 id="fields-heading">Campos e privacidade</h2>
+      <label for="email">E-mail de contato</label>
+      <input id="email" type="email" autocomplete="email" value="tab-private-email@example.invalid" required aria-describedby="email-help">
+      <p id="email-help">Use o endereço de contato.</p>
+      <label for="password">Senha de acesso</label>
+      <input id="password" type="password" autocomplete="current-password" value="TAB_PRIVATE_PASSWORD_7319">
+      <label>Nome da pessoa <input id="person-name" value="TAB_PRIVATE_PERSON_7319"></label>
+      <label><input id="newsletter" type="checkbox" checked> Receber novidades</label>
+      <fieldset>
+        <legend>Forma de contato</legend>
+        <label><input id="contact-email" type="radio" name="contact" value="email"> Por e-mail</label>
+        <label><input id="contact-phone" type="radio" name="contact" value="phone" checked> Por telefone</label>
+      </fieldset>
+      <label for="region">Região</label>
+      <select id="region"><option value="">Escolha uma região</option><option value="TAB_PRIVATE_OPTION_VALUE_7319" selected>TAB_PRIVATE_OPTION_TEXT_7319</option></select>
+      <label for="notes">Observações</label>
+      <textarea id="notes">TAB_PRIVATE_TEXTAREA_7319</textarea>
+      <div id="editable-label">Anotações editáveis</div>
+      <div id="editable" contenteditable="true" role="textbox" aria-labelledby="editable-label">TAB_PRIVATE_EDITABLE_7319</div>
+      <label for="readonly">Código somente leitura</label>
+      <input id="readonly" readonly value="TAB_PRIVATE_READONLY_7319">
+    </section>
+
+    <section aria-labelledby="disabled-heading">
+      <h2 id="disabled-heading">Controles desabilitados</h2>
+      <button id="disabled-button" disabled>Controle desabilitado</button>
+      <fieldset disabled>
+        <legend>Grupo desabilitado <button id="first-legend-button">Ajuda do grupo</button></legend>
+        <label for="fieldset-input">Campo desabilitado pelo grupo</label>
+        <input id="fieldset-input" value="TAB_PRIVATE_DISABLED_7319">
+        <button id="fieldset-button">Ação desabilitada pelo grupo</button>
+        <legend><button id="second-legend-button">Ação na segunda legenda</button></legend>
+      </fieldset>
+      <div inert><button id="inert-button">Controle inerte</button></div>
+      <button id="display-hidden" style="display:none">Controle sem exibição</button>
+      <button id="visibility-hidden" style="visibility:hidden">Controle sem visibilidade</button>
+    </section>
+
+    <section aria-labelledby="boundary-heading">
+      <h2 id="boundary-heading">Conteúdo expandível e limites</h2>
+      <details id="closed-details"><summary id="closed-summary">Detalhes fechados</summary><button id="closed-details-button">Ação em detalhes fechados</button></details>
+      <details id="open-details" open><summary id="open-summary">Detalhes abertos</summary><button id="open-details-button">Ação em detalhes abertos</button></details>
+      <div id="shadow-host"><button id="slotted-button" slot="action">Ação distribuída no slot</button></div>
+      <iframe id="example-frame" title="Conteúdo incorporado de exemplo" srcdoc="<!doctype html><html lang='pt-BR'><title>Documento interno</title><body><button id='frame-button'>Ação dentro do quadro</button></body></html>"></iframe>
+      <button id="last-button">Fim da sequência principal</button>
+      <button id="hidden-descendant-button"><span aria-hidden="true">Ícone decorativo</span><span style="display:none">Texto oculto por CSS</span>Nome visível</button>
+    </section>
+  </main>
+  <script>
+    const root = document.querySelector('#shadow-host').attachShadow({ mode: 'open' });
+    root.innerHTML = '<style>button { padding: .5rem; font: inherit; }</style><button id="shadow-button">Ação no Shadow DOM aberto</button><slot name="action"></slot>';
+  </script>
+</body>
+</html>

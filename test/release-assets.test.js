@@ -13,10 +13,10 @@ test('pins and vendors only the verified axe-core 4.13.0 runtime and license fil
   assert.equal(lock.packages[''].devDependencies['axe-core'], '4.13.0');
   assert.equal(lock.packages['node_modules/axe-core'].version, '4.13.0');
   assert.deepEqual((await readdir(new URL('../vendor/axe/', import.meta.url))).sort(), [
-    'LICENSE', 'LICENSE-3RD-PARTY.txt', 'axe.min.js',
+    'LICENSE', 'LICENSE-3RD-PARTY.txt', 'axe.js',
   ]);
   for (const [path, expected] of Object.entries({
-    'vendor/axe/axe.min.js': 'c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1',
+    'vendor/axe/axe.js': '138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88',
     'vendor/axe/LICENSE': 'af175b9d96ee93c21a036152e1b905b0b95304d4ae8c2c921c7609100ba8df7e',
     'vendor/axe/LICENSE-3RD-PARTY.txt': '4f8563870d0fca38bbc3e00b6f670cb7fa9f380ba9f26a7f7d1184a6b18b1653',
   })) {
@@ -35,11 +35,11 @@ test('ships every manifest icon as a valid PNG with the declared square size', a
   }
 });
 
-test('ships three Chrome Web Store screenshots at 1280 by 800 without an alpha channel', async () => {
+test('ships the three current Tab reading screenshots at 1280 by 800 without an alpha channel', async () => {
   for (const path of [
-    'store-assets/screenshot-panel.png',
-    'store-assets/screenshot-evidence-failed.png',
-    'store-assets/screenshot-evidence-review.png',
+    'store-assets/screenshot-tab-report.png',
+    'store-assets/screenshot-tab-elements.png',
+    'store-assets/screenshot-tab-highlight.png',
   ]) {
     const bytes = await read(path);
     assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], path);
@@ -47,6 +47,14 @@ test('ships three Chrome Web Store screenshots at 1280 by 800 without an alpha c
     assert.equal(bytes.readUInt32BE(20), 800, path);
     assert.equal(bytes[25], 2, `${path}: PNG precisa ser RGB sem alfa`);
   }
+});
+
+test('ships the required small promotional image as a 440 by 280 RGB PNG', async () => {
+  const bytes = await read('store-assets/promo-small.png');
+  assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(bytes.readUInt32BE(16), 440);
+  assert.equal(bytes.readUInt32BE(20), 280);
+  assert.equal(bytes[25], 2, 'a imagem promocional precisa ser RGB sem alfa');
 });
 
 test('keeps the public listing concise, accurate and bounded by the Chrome summary limit', async () => {
@@ -65,7 +73,7 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   // The listing must describe the shipped mechanism, not the retired one: since `1c9b296` the
   // current-page audit reads the open page itself. The old assertion demanded "cópia temporária
   // e inativa" here, which is how a false claim survived five documents and three reviews.
-  assert.match(listing, /página original[\s\S]*coleta lê a própria página[\s\S]*sem criar aba/iu);
+  assert.match(listing, /coleta lê a própria página original[\s\S]*sem criar aba/iu);
   assert.doesNotMatch(listing, /cópia temporária e inativa/iu);
   assert.match(listing, /2 a 20 URLs[\s\S]*relatório consolidado/iu);
   assert.match(listing, /URLs em lote nos três modos/iu);
@@ -85,14 +93,17 @@ test('publishes a complete privacy policy in Markdown and standalone HTML', asyn
       /controle do usuário/iu,
       /contato/iu,
     ]) assert.match(policy, expectation, `${path}: ${expectation}`);
-    assert.match(policy, /versão (?:da política )?1\.5/iu, path);
+    assert.match(policy, /versão (?:da política )?1\.6/iu, path);
     assert.match(policy, /sidePanel[\s\S]*alarms[\s\S]*contextMenus/iu, path);
     assert.match(policy, /30 dias[\s\S]*primeiro registro[\s\S]*Chrome[\s\S]*executar/iu, path);
     assert.match(policy, /antes (?:de|das) cada captura[\s\S]*intervalo técnico[\s\S]*não elimina/iu, path);
     assert.match(policy, /opcional[\s\S]*quatro downloads[\s\S]*parcial/iu, path);
     assert.doesNotMatch(policy, /não executa exclusão automática|no máximo,? 30 dias/iu, path);
-    assert.doesNotMatch(policy, /Chrome Web Store/iu,
-      `${path}: a política não pode prometer publicação ou contato por uma loja específica`);
+    assert.match(policy, /Política de Dados do Usuário da Chrome Web Store[^.]*Uso Limitado/iu, path);
+    assert.match(policy, /https:\/\/github\.com\/andrebadini\/audita-acessibilidade-privacidade\/issues/u, path);
+    assert.match(policy, /relatório complementar de Tab é transitório[\s\S]*memória[\s\S]*dez minutos/iu, path);
+    assert.doesNotMatch(policy, /(?:publicad[ao]|disponível) na Chrome Web Store|contato (?:pela|na) Chrome Web Store/iu,
+      `${path}: a declaração de Uso Limitado não deve sugerir uma publicação ou contato pela loja`);
   }
 });
 

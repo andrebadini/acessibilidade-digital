@@ -128,6 +128,7 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
       case 'OPEN_BATCH_FORM':
       case 'CANCEL_AUDIT':
       case 'OPEN_REPORT':
+      case 'OPEN_TAB_READING':
       case 'NEW_AUDIT':
       case 'SELECT_OCCURRENCE':
       case 'CONSULT_EVIDENCE':
@@ -1246,6 +1247,10 @@ function appendPersonaControls(root, document, persona, emit) {
   section.dataset.personaControls = '';
   section.setAttribute('aria-label', 'Simular experiência');
   section.append(heading(document, 2, 'Simular experiência'));
+  if (root.dataset.screen !== 'running') {
+    section.append(actionButton(document, 'Conferir leitura por Tab', 'OPEN_TAB_READING',
+      'open-tab-reading', emit, 'secondary-action'));
+  }
   const modes = document.createElement('div');
   modes.className = 'persona-mode-buttons';
   for (const [mode, label] of [['reader', 'Leitura simulada'], ['achromatopsia', 'Acromatopsia'], ['keyboard', 'Somente teclado']]) {
@@ -1256,6 +1261,8 @@ function appendPersonaControls(root, document, persona, emit) {
   }
   section.append(modes, paragraph(document, persona.message, 'persona-message'));
   section.querySelector('p').dataset.personaMessage = '';
+  if (root.dataset.screen !== 'running') section.append(paragraph(document,
+    'Relatório complementar sem áudio: sequência de Tab, nomes acessíveis e controles que podem ser pulados.', 'tab-reading-help'));
   if (persona.mode === 'reader') {
     section.dataset.readerActive = 'true';
     const caption = document.createElement('div');

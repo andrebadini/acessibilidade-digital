@@ -90,6 +90,7 @@ import {
 import { createExportLaunchAuthority } from './export-launch.js';
 import { createExportCompletionStore } from './export-completion-store.js';
 import { createTargetOperationQueue } from './target-operation-queue.js';
+import { createReadingAuditCleaner } from '../reader/audit-cleanup.js';
 import {
   createLiveAidCleanup,
 } from './live-aid-cleanup.js';
@@ -1455,7 +1456,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     chromeApi, sessionArea, now: epochNow, randomBytes: bytes,
   });
   if (await panelLaunchAuthority.initialize() !== true) throw new Error('WORKER_UNAVAILABLE');
-  const targetQueue = createTargetOperationQueue();
+  const targetQueue = createTargetOperationQueue({ lockManager: globalThis.navigator?.locks ?? null });
   const personaLeaseStore = createPersonaLeaseStore({
     sessionArea,
     lockManager: options.personaLockManager ?? globalThis.navigator?.locks,
@@ -1683,8 +1684,21 @@ async function buildDefaultRuntime(chromeApi, options) {
     pageMarkersController: pageMarkersCleanupController,
     highlightController,
   });
+  const readingAuditCleaner = createReadingAuditCleaner({ chromeApi });
   const cleanupBarrier = createLiveAidCleanup({
-    highlightCleaner: composedHighlightController,
+    highlightCleaner: {
+      async clearForTargetLocked(target, reason, lock) {
+        targetQueue.assertHeld(lock, target);
+        let highlight;
+        try { highlight = await composedHighlightController.clearForTargetLocked(target, reason, lock); }
+        catch { highlight = null; }
+        const reading = await readingAuditCleaner.clearForTarget(target);
+        if (highlight?.ok !== true || !['absent', 'clear', 'revoked'].includes(highlight.state) || reading.ok !== true) {
+          return Object.freeze({ ok: false, state: 'pending' });
+        }
+        return Object.freeze({ ok: true, state: 'clear' });
+      },
+    },
     personaCoordinator,
     targetQueue,
   });
