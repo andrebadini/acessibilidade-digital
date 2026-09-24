@@ -1262,7 +1262,7 @@ function appendPersonaControls(root, document, persona, emit) {
   section.append(modes, paragraph(document, persona.message, 'persona-message'));
   section.querySelector('p').dataset.personaMessage = '';
   if (root.dataset.screen !== 'running') section.append(paragraph(document,
-    'Relatório complementar sem áudio: sequência de Tab, nomes acessíveis e controles que podem ser pulados.', 'tab-reading-help'));
+    'Relatório complementar, com ou sem áudio: sequência de Tab, nomes acessíveis e controles que podem ser pulados.', 'tab-reading-help'));
   if (persona.mode === 'reader') {
     section.dataset.readerActive = 'true';
     const caption = document.createElement('div');

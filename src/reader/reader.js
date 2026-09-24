@@ -1,11 +1,16 @@
 import { consumeReadingLaunch, createReadingController } from './controller.js';
 import { READING_CATEGORIES, READING_EXPLANATION, READING_PRIVACY, renderReadingHtml, renderReadingCsv } from './report-model.js';
+import { TONE_LABELS, buildVerdict, entryFix, entryTone, laySummary, spokenAnnouncement, topIssues } from './plain-language.js';
+import { createSpeaker } from './speech.js';
+import { createTabWalk } from './tab-walk.js';
 
 const $ = selector => document.querySelector(selector);
 let controller = null;
 let report = null;
 let working = false;
 let ended = false;
+let walk = null;
+const speaker = createSpeaker();
 const allButtons = () => document.querySelectorAll('button');
 function status(message, error = false) { $('#status').textContent = message; $('#status').classList.toggle('error', error); }
 function text(tag, value, className) {
@@ -16,14 +21,22 @@ function text(tag, value, className) {
 }
 function setBusy(value) {
   working = value;
-  for (const button of allButtons()) button.disabled = value || !report;
-  $('#refresh').disabled = value || !controller || ended;
+  updateControls();
+}
+function updateControls() {
+  const walking = Boolean(walk?.running());
+  for (const button of allButtons()) button.disabled = working || !report;
+  $('#refresh').disabled = working || !controller || ended;
   if (ended && report) {
-    for (const button of document.querySelectorAll('#observe,#clear,#refresh,[data-highlight]')) button.disabled = true;
+    for (const button of document.querySelectorAll('#observe,#clear,#refresh,[data-highlight],#walk-tab')) button.disabled = true;
   }
+  if (walking || !report?.counts.tab) $('#walk-tab').disabled = true;
+  $('#walk-stop').disabled = !walking;
+  for (const button of document.querySelectorAll('[data-speak]')) button.disabled = working || !speaker.enabled();
 }
 
 async function run(action, message) {
+  if (walk?.running()) await stopWalk();
   if (working) return;
   setBusy(true);
   try { await action(); status(message); }
@@ -42,6 +55,7 @@ function render() {
     [report.counts.tab, 'na sequência estimada de Tab'], [report.counts.outsideTab, 'controles fora do Tab'],
     [report.counts.reading, 'elementos de leitura estrutural'], [report.counts.hidden, 'elementos ocultos'],
   ].map(([count, label]) => { const p = text('p', ''); p.append(text('strong', count), text('span', label)); return p; }));
+  renderVerdict();
   $('#limitation-list').replaceChildren(...report.limitations.map(value => text('li', value)));
   if (report.counts.truncated) $('#limitation-list').append(text('li', 'O limite de inspeção foi atingido. O inventário não cobre todos os elementos.'));
   $('#results').replaceChildren(...Object.entries(READING_CATEGORIES).map(([category, label]) => {
@@ -75,19 +89,117 @@ function render() {
       const preview = document.createElement('td'); preview.append(text('p', entry.preview || 'Prévia não disponível'));
       if (entry.description) preview.append(text('p', `Descrição: ${entry.description}`, 'muted'));
       if (entry.states.length) preview.append(text('p', `Estados: ${entry.states.join(', ')}`, 'muted'));
-      const review = document.createElement('td'); review.append(text('p', entry.reasons.join('; ') || 'Confira se o anúncio representa o elemento.', 'entry-reasons'));
+      const tone = entryTone(entry);
+      const review = document.createElement('td');
+      review.append(text('p', TONE_LABELS[tone], `tone-chip tone-${tone}`), text('p', laySummary(entry), 'lay-summary'));
+      review.append(text('p', entry.reasons.join('; ') || 'Confira se o anúncio representa o elemento.', 'entry-reasons'));
+      const actions = document.createElement('div'); actions.className = 'entry-actions';
+      const who = `${entry.name || entry.role || entry.tag}${entry.tabOrder ? `, posição ${entry.tabOrder}` : ''}`;
       if (category !== 'hidden') {
         const button = text('button', 'Destacar'); button.type = 'button'; button.dataset.highlight = entry.id;
-        button.setAttribute('aria-label', `Destacar ${entry.name || entry.role || entry.tag}${entry.tabOrder ? `, posição ${entry.tabOrder}` : ''}`);
+        button.setAttribute('aria-label', `Destacar ${who}`);
         button.addEventListener('click', () => run(() => controller.highlight(entry.id), 'Elemento destacado na página. Escape remove o destaque.'));
-        const actions = document.createElement('div'); actions.className = 'entry-actions'; actions.append(button); review.append(actions);
+        actions.append(button);
       }
+      const listen = text('button', 'Ouvir', 'speak-button'); listen.type = 'button'; listen.dataset.speak = entry.id;
+      listen.setAttribute('aria-label', `Ouvir o anúncio estimado de ${who}`);
+      listen.addEventListener('click', () => { void speaker.speak(spokenAnnouncement(entry)); status(`Lendo em voz alta: ${spokenAnnouncement(entry)}`); });
+      actions.append(listen);
+      review.append(actions);
       tr.append(shot, element, name, preview, review); tbody.append(tr);
     }
     table.append(tbody); wrapper.append(table); section.append(wrapper); return section;
   }));
   renderPageMap();
   filter();
+}
+
+
+function renderVerdict() {
+  const host = $('#verdict');
+  const verdict = buildVerdict(report.entries);
+  const box = document.createElement('div'); box.className = `verdict tone-${verdict.tone}`;
+  const { counts } = verdict;
+  box.append(text('p', verdict.phrase, 'verdict-phrase'),
+    text('p', `${counts.problem} problema(s), ${counts.review} ponto(s) a revisar e ${counts.ok} sem ponto crítico. ${counts.info} elemento(s) oculto(s) ficam fora da conta.`),
+    text('p', 'Semáforo: vermelho indica o que confunde ou bloqueia a leitura; âmbar, o que merece conferência; verde, o que parece bem. É uma estimativa para orientar a revisão humana.', 'muted'));
+  const cards = topIssues(report.entries, 5).map(entry => {
+    const tone = entryTone(entry);
+    const fix = entryFix(entry);
+    const card = document.createElement('article'); card.className = `issue-card tone-${tone}`;
+    card.append(text('h3', `${entry.tabOrder ? `Tab ${entry.tabOrder}` : READING_CATEGORIES[entry.category]} · ${TONE_LABELS[tone]}`), text('p', laySummary(entry)));
+    if (fix) {
+      card.append(text('p', `O que está errado: ${fix.problem}`), text('p', `O que fazer: ${fix.action}`));
+      const example = document.createElement('div'); example.className = 'before-after';
+      example.append(text('p', fix.before), text('p', fix.after));
+      card.append(example);
+    }
+    return card;
+  });
+  const children = [box];
+  if (cards.length) {
+    const heading = text('h3', 'O que corrigir primeiro'); heading.className = 'cards-title';
+    children.push(heading, ...cards);
+  }
+  host.replaceChildren(...children);
+}
+
+function speechNote(message) { $('#speech-note').textContent = message; }
+
+async function setSpeechMode(value) {
+  if (value === 'on') {
+    const voice = await speaker.prepare();
+    if (speaker.setEnabled(Boolean(voice))) {
+      speechNote(`Com áudio: voz “${voice.name}”, instalada neste computador. O texto não é enviado a serviços externos. Escape ou Parar interrompem a fala.`);
+    } else {
+      $('#speech-off').checked = true;
+      speechNote('Nenhuma voz em português instalada neste computador foi encontrada. A conferência continua sem áudio: vozes on-line não são usadas porque enviariam o texto da página a um serviço externo.');
+    }
+  } else {
+    speaker.setEnabled(false);
+    speechNote('Sem áudio: o percurso mostra destaque e legenda na página, sem fala.');
+  }
+  document.body.classList.toggle('speech-on', speaker.enabled());
+  updateControls();
+}
+
+const WALK_END_MESSAGES = Object.freeze({
+  done: 'Percurso concluído. Todas as paradas de Tab foram mostradas.',
+  stopped: 'Percurso interrompido.',
+  escape: 'Percurso encerrado com Escape na página.',
+  empty: 'Não há paradas de Tab nesta inspeção.',
+});
+
+function startWalk() {
+  if (!report || !controller || ended || walk?.running() || working) return;
+  let baseline = null;
+  walk = createTabWalk({
+    entries: report.entries,
+    async highlight(entry) {
+      const result = await controller.highlight(entry.id, baseline === null ? {} : { walkEscapes: baseline });
+      if (baseline === null && Number.isSafeInteger(result?.escapes)) baseline = result.escapes;
+    },
+    speak: value => speaker.speak(value),
+    cancelSpeech: () => speaker.cancel(),
+    onStep(entry, index, total) { status(`Percurso ${index + 1} de ${total}: ${spokenAnnouncement(entry)}`); },
+    onEnd(outcome, error) {
+      updateControls();
+      if (Object.hasOwn(WALK_END_MESSAGES, outcome)) { status(WALK_END_MESSAGES[outcome]); return; }
+      status(outcome === 'page-changed' || error?.code === 'PAGE_CHANGED'
+        ? 'A página foi alterada. Use Atualizar inspeção para conferir o novo estado.'
+        : 'O percurso foi interrompido porque a página mudou ou a sessão expirou. O relatório continua disponível para exportação.', true);
+    },
+  });
+  status(speaker.enabled() ? 'Percurso iniciado com áudio. Escape na página ou Parar percurso interrompem.' : 'Percurso iniciado sem áudio. Escape na página ou Parar percurso interrompem.');
+  const done = walk.start();
+  updateControls();
+  return done;
+}
+
+async function stopWalk() {
+  if (!walk) return;
+  await walk.stop();
+  updateControls();
 }
 
 function renderPageMap() {
@@ -119,7 +231,7 @@ function renderPageMap() {
     const label = (entry.preview || entry.name || 'Sem texto acessível').replace(/\s+/gu, ' ').slice(0, 180);
     const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     const box = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    box.setAttribute('class', 'map-box');
+    box.setAttribute('class', `map-box tone-${entryTone(entry)}`);
     for (const [key, value] of [['x', entry.bounds.x], ['y', entry.bounds.y], ['width', entry.bounds.width], ['height', entry.bounds.height]]) box.setAttribute(key, String(value));
     const boxWidth = Math.min(360, Math.max(120, label.length * 6.4 + 36));
     const boxHeight = 34;
@@ -162,7 +274,20 @@ $('#clear').addEventListener('click', () => run(() => controller.clear(), 'Desta
 $('#refresh').addEventListener('click', () => run(async () => { report = await controller.collect(); render(); }, 'Inspeção atualizada. Confira os elementos registrados.'));
 for (const format of ['html', 'csv', 'json']) $(`#export-${format}`).addEventListener('click', () => download(format));
 $('#print').addEventListener('click', () => window.print());
-window.addEventListener('pagehide', () => { if (controller) void controller.clear().catch(() => {}); });
+$('#walk-tab').addEventListener('click', () => { void startWalk(); });
+$('#walk-stop').addEventListener('click', () => { void stopWalk(); });
+for (const input of document.querySelectorAll('input[name="speech"]')) input.addEventListener('change', () => { if (input.checked) void setSpeechMode(input.value); });
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  if (walk?.running()) void stopWalk();
+  speaker.cancel();
+});
+window.addEventListener('pagehide', () => {
+  void walk?.stop();
+  speaker.cancel();
+  if (controller) void controller.clear().catch(() => {});
+});
+void setSpeechMode('off');
 
 async function initialize() {
   try {
@@ -172,6 +297,7 @@ async function initialize() {
     await run(async () => { report = await controller.collect(); render(); }, 'Inspeção concluída. Confira a sequência e os controles fora do Tab.');
     setTimeout(() => {
       ended = true;
+      void walk?.stop();
       void controller.clear().catch(() => {});
       setBusy(false);
       status('A sessão de destaque expirou. O relatório coletado continua disponível para exportação. Abra nova conferência para interagir com a página.');

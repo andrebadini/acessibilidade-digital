@@ -4,6 +4,13 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.52 — modo leigo e leitura em voz alta opcional.** A conferência de leitura por Tab ganha um
+resumo em linguagem simples: semáforo **Em uma frase**, cards **O que corrigir primeiro** com exemplo de antes e
+depois, semáforo por linha e mapa colorido, também no HTML e no CSV exportados. O **percurso guiado** mostra cada
+parada de Tab na página e pode ser feito **sem áudio** (padrão) ou **com áudio**, lido por uma voz instalada no
+computador; vozes on-line não são usadas. Escape na página ou **Parar percurso** interrompem. Veja as
+[notas da 1.1.52](docs/releases/1.1.52.md).
+
 **Versão 1.1.51 — reenvio à Chrome Web Store.** Mesma funcionalidade da 1.1.50; o axe-core 4.13.0 embutido
 perdeu o polyfill de `Object.create` para Internet Explorer 8, apontado pela loja como código ofuscado.
 O arquivo `vendor/axe/axe.js` é gerado por `scripts/vendor-axe.mjs` a partir do pacote oficial. Veja as

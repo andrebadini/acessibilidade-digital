@@ -152,3 +152,16 @@ test('ships beta test instructions for the complete current-page journey and dec
     assert.ok(productUi.includes(label), `o rótulo ${label} citado no roteiro não existe no produto`);
   }
 });
+
+test('a conferência de Tab documentada cita só rótulos que existem no leitor, com e sem áudio', async () => {
+  const readerUi = [await read('src/reader/index.html'), await read('src/reader/reader.js')].map(buffer => buffer.toString('utf8')).join('\n');
+  const guide = (await read('docs/COMO-USAR.md')).toString('utf8');
+  const instructions = (await read('store-assets/TEST-INSTRUCTIONS.md')).toString('utf8');
+  for (const label of ['Em uma frase', 'O que corrigir primeiro', 'Leitura em voz alta', 'Sem áudio', 'Com áudio',
+    'Percorrer a sequência de Tab', 'Parar percurso', 'Ouvir', 'Acompanhar Tab na página', 'Encerrar destaques']) {
+    assert.ok(readerUi.includes(label), `o rótulo ${label} não existe no leitor`);
+    assert.match(guide, new RegExp(label, 'u'), `o guia precisa citar ${label}`);
+    assert.match(instructions, new RegExp(label, 'u'), `o roteiro precisa citar ${label}`);
+  }
+  assert.doesNotMatch(readerUi, /Confira a leitura, sem áudio/u);
+});

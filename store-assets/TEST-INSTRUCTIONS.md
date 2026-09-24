@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.1.51
+# Instruções de teste — Audita Acessibilidade 1.1.52
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.51.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
+1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.52.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
@@ -43,10 +43,13 @@ Abra **Lote de páginas**, informe de 2 a 20 endereços HTTP ou HTTPS, um por li
 
 1. Abra uma página HTTP ou HTTPS e selecione **Conferir leitura por Tab** no painel. Esse percurso funciona sem iniciar uma auditoria e sem capturar imagens.
 2. Confira que abre um relatório complementar com data e estado da inspeção. Examine a sequência estimada de Tab, os controles fora dessa sequência, o conteúdo estrutural e os itens ocultos. Os registros devem apresentar nome, função, estados e uma prévia explicativa quando houver informação suficiente.
-3. Selecione **Acompanhar Tab na página**, volte à página de origem e use **Tab** e **Shift+Tab**. A legenda e o destaque devem acompanhar o elemento que efetivamente recebe o foco. A extensão não produz fala durante essa conferência.
+3. Selecione **Acompanhar Tab na página**, volte à página de origem e use **Tab** e **Shift+Tab**. A legenda e o destaque devem acompanhar o elemento que efetivamente recebe o foco. O acompanhamento não produz fala.
 4. Use **Destacar** para conferir um elemento explícito e **Encerrar destaques** para encerrar a visualização na página.
-5. Use **Exportar HTML**, **Exportar CSV** e **Exportar JSON** para baixar cada formato separadamente. Use **Imprimir / salvar PDF** para salvar uma versão PDF pelo diálogo de impressão. Esses arquivos registram a conferência e não alteram as conclusões, evidências ou revisões de auditorias anteriores.
-6. Exporte o que deseja guardar antes de fechar ou recarregar o relatório complementar: ele é transitório e não aparece no histórico das auditorias. Depois de dez minutos, a sessão de destaque expira e o relatório já coletado continua disponível para exportação enquanto a aba permanecer aberta.
+5. Confira o quadro **Em uma frase** e os cards **O que corrigir primeiro**: o semáforo e o texto em linguagem simples resumem a inspeção. Cada linha da tabela mostra o mesmo semáforo.
+6. Em **Leitura em voz alta**, **Sem áudio** vem marcado. Selecione **Percorrer a sequência de Tab**: a página deve mostrar cada parada, uma por vez, com moldura e legenda, sem fala. Pressione Escape na página ou **Parar percurso** para interromper.
+7. Selecione **Com áudio** e repita o percurso: o anúncio estimado de cada parada deve ser lido por uma voz instalada no computador (no macOS, por exemplo, a voz Luciana). Com áudio, o botão **Ouvir** de uma linha lê só aquele anúncio. Se o computador não tiver voz local em português, a opção volta para **Sem áudio** e explica que vozes on-line não são usadas.
+8. Use **Exportar HTML**, **Exportar CSV** e **Exportar JSON** para baixar cada formato separadamente. Use **Imprimir / salvar PDF** para salvar uma versão PDF pelo diálogo de impressão. Esses arquivos registram a conferência e não alteram as conclusões, evidências ou revisões de auditorias anteriores.
+9. Exporte o que deseja guardar antes de fechar ou recarregar o relatório complementar: ele é transitório e não aparece no histórico das auditorias. Depois de dez minutos, a sessão de destaque expira e o relatório já coletado continua disponível para exportação enquanto a aba permanecer aberta.
 
 Compare o percurso observado com os controles identificados fora da sequência de Tab. Um controle fora dessa sequência não é, por si só, uma falha: alguns componentes compostos usam as setas e outros atalhos. Confirme a operação real antes de registrar uma conclusão.
 

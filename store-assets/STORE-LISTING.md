@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.51
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.52
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
@@ -28,7 +28,9 @@ Principais recursos:
 - trecho HTML sanitizado, seletor e propriedades de acessibilidade;
 - cálculo do nome acessível e prévia explicativa do anúncio esperado por tecnologia assistiva;
 - relatório complementar de leitura por Tab, independente da auditoria e sem imagens, com sequência estimada de foco, controles fora de Tab, conteúdo estrutural e itens ocultos;
-- acompanhamento silencioso de Tab e Shift+Tab na página, com legenda e destaque do elemento observado, nome, função, estados e prévia explicativa;
+- acompanhamento de Tab e Shift+Tab na página, com legenda e destaque do elemento observado, nome, função, estados e prévia explicativa;
+- resumo em linguagem simples com semáforo, cards do que corrigir primeiro e exemplos de texto, para quem não é especialista;
+- percurso guiado pela sequência de Tab, com ou sem áudio: sem áudio é o padrão; com áudio, o anúncio estimado é lido por uma voz instalada no computador, sem vozes on-line;
 - exportação do relatório complementar em HTML, CSV e JSON, além de impressão para salvar PDF;
 - revisão assistida com registro do avaliador, decisão, data e nota;
 - relatórios locais em HTML, PDF, CSV e JSON-LD/EARL;

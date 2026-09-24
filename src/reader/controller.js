@@ -107,15 +107,16 @@ export function createReadingController(api, { tabId, documentId, sessionId }, {
       return report;
     }); } finally { busy = false; }
   }
-  async function action(type, elementId) {
+  async function action(type, elementId, extra = {}) {
     if (busy || !report || elementId && !report.entries.some(entry => entry.id === elementId)) throw failure();
     busy = true;
     try { return await withLock(async () => {
       const tab = await current();
       const active = (await api.storage.session.get(activeKey))[activeKey];
       if (active?.documentId !== documentId || active?.sessionId !== sessionId || active.expiresAt <= Date.now()) throw failure();
-      const result = await execute({ type, ...(elementId ? { elementId } : {}) });
+      const result = await execute({ type, ...(elementId ? { elementId } : {}), ...extra });
       if (result?.reason === 'page-changed') throw Object.assign(failure(), { code: 'PAGE_CHANGED' });
+      if (result?.reason === 'walk-escaped') throw Object.assign(new Error('Percurso encerrado com Escape.'), { code: 'WALK_ESCAPED' });
       if (result?.ok !== true || result.sessionId !== sessionId) throw failure();
       if (type !== 'clear') {
         await api.tabs.update(tabId, { active: true });
@@ -124,5 +125,8 @@ export function createReadingController(api, { tabId, documentId, sessionId }, {
       return result;
     }); } finally { busy = false; }
   }
-  return { collect, highlight: id => action('highlight', id), observe: () => action('observe'), clear: () => action('clear') };
+  // walkEscapes: no percurso guiado, número de Escape já vistos na página; um Escape posterior encerra o percurso.
+  const highlight = (id, { walkEscapes } = {}) => action('highlight', id,
+    Number.isSafeInteger(walkEscapes) && walkEscapes >= 0 ? { walkEscapes } : {});
+  return { collect, highlight, observe: () => action('observe'), clear: () => action('clear') };
 }

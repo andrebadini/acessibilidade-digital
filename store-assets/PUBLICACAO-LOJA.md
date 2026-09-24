@@ -1,4 +1,4 @@
-# Publicação na Chrome Web Store — 1.1.51
+# Publicação na Chrome Web Store — 1.1.52
 
 Roteiro de preparação e envio da Audita Acessibilidade. A publicação exige uma conta de desenvolvedor
 autenticada; o estado do console é a fonte para saber se o item está em rascunho, em revisão ou publicado.
@@ -29,17 +29,17 @@ não uma captura de tela nem evidência de execução do produto.
 
 ## Pacote e verificação
 
-O arquivo de envio é `release/audita-acessibilidade-1.1.51.zip`, com `manifest.json` na raiz e versão `1.1.51`.
+O arquivo de envio é `release/audita-acessibilidade-1.1.52.zip`, com `manifest.json` na raiz e versão `1.1.52`.
 O ZIP deve ser gerado somente depois da validação da implementação final. Confira o digest contra a nota
-`docs/releases/1.1.51.md`; não reutilize o digest de 1.1.50.
+`docs/releases/1.1.52.md`; não reutilize o digest de 1.1.51.
 
 Comandos de conferência local:
 
 ```sh
 AUDITA_VERIFY_SKIP_TESTS=1 npm run verify
 node --test test/release-assets.test.js test/release-package.test.js
-shasum -a 256 release/audita-acessibilidade-1.1.51.zip
-unzip -p release/audita-acessibilidade-1.1.51.zip manifest.json
+shasum -a 256 release/audita-acessibilidade-1.1.52.zip
+unzip -p release/audita-acessibilidade-1.1.52.zip manifest.json
 ```
 
 Os dois primeiros comandos verificam estrutura, política, assets e correspondência de bytes. Eles não
@@ -62,7 +62,7 @@ Copie os textos de `store-assets/STORE-LISTING.md` e confirme cada campo no cons
 | Visibilidade e regiões | Pública; todas as regiões, preservando a configuração do item existente |
 | Política de privacidade | URL HTTPS acima, com versão e conteúdo vigentes |
 | Suporte | `https://github.com/andrebadini/audita-acessibilidade-privacidade/issues` |
-| Instruções para o revisor | `store-assets/TEST-INSTRUCTIONS.md`, incluindo Tab sem áudio e exportações complementares |
+| Instruções para o revisor | `store-assets/TEST-INSTRUCTIONS.md`, incluindo o percurso de Tab com e sem áudio (voz local opcional) e exportações complementares |
 | Imagens | Ícone, `promo-small.png`, `screenshot-tab-report.png`, `screenshot-tab-elements.png` e `screenshot-tab-highlight.png` |
 
 A finalidade única inclui o relatório complementar de Tab: uma inspeção de acessibilidade independente, sem

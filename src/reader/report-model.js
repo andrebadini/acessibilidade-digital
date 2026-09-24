@@ -1,4 +1,6 @@
 import { redactSensitiveText } from '../core/privacy.js';
+import { READING_REASON_TEXT } from './reading-reasons.js';
+import { entryTone, entryFix, laySummary, buildVerdict, topIssues, TONE_LABELS } from './plain-language.js';
 
 export const READING_CATEGORIES = Object.freeze({
   tab: 'Sequência estimada de Tab',
@@ -10,36 +12,7 @@ export const READING_EXPLANATION = 'Esta é uma estimativa do anúncio, não uma
 export const READING_PRIVACY = 'Valores digitados e conteúdo marcado como privado são omitidos. As capturas de tela dos elementos e da página inteira podem conter dados pessoais visíveis no desenho; revise antes de compartilhar. Outros textos da página podem conter dados pessoais; revise antes de compartilhar. O relatório fica apenas nesta aba até você exportá-lo. A inspeção é complementar e não altera as conclusões da auditoria ABNT/WCAG.';
 const ENTRY_KEYS = ['id', 'selector', 'tag', 'role', 'name', 'description', 'states', 'preview', 'tabIndex', 'tabOrder', 'category', 'reasons', 'bounds'];
 const ID = /^[A-Za-z0-9_-]{1,128}$/u;
-const EXPLANATIONS = Object.freeze({
-  'estimated-order-not-literal-screen-reader': 'A ordem de Tab e os anúncios são estimados a partir do HTML e de ARIA. Não são uma transcrição de leitor de tela.',
-  'top-document-open-shadow-only': 'Inspeção do documento principal e dos componentes com Shadow DOM aberto.',
-  'closed-shadow-not-inspected': 'Componentes com Shadow DOM fechado não podem ser inspecionados.',
-  'editable-values-omitted': 'Valores de campos, seleções de texto e conteúdo editável foram omitidos por privacidade.',
-  'observed-state-may-change': 'Scripts, interações e alterações da página podem mudar a ordem e os anúncios. Atualize a inspeção depois de mudar o estado.',
-  'open-shadow-order-estimated': 'A ordem dentro de componentes Shadow DOM é aproximada; confirme com Tab na página.',
-  'slot-content-unavailable': 'Parte do conteúdo distribuído em componentes não pôde ser inspecionada.',
-  'node-limit-reached': 'O limite de 5.000 nós foi atingido; parte da página não foi inspecionada.',
-  'entry-limit-reached': 'O limite de 1.000 elementos foi atingido; o inventário está parcial.',
-  'text-limit-reached': 'Parte do texto excedeu o limite da prévia e foi resumida. Confira o conteúdo completo na página.',
-  'private-content-omitted': 'Conteúdo marcado como privado foi omitido. Isso não significa que ele esteja invisível para leitores de tela.',
-  'credential-content-omitted': 'Texto relacionado a credenciais foi omitido por privacidade; confira o rótulo diretamente na página.',
-  'frame-content-not-inspected': 'O conteúdo interno deste frame não foi inspecionado. Ele pode conter outras paradas de Tab.',
-  'visual-capture-unavailable': 'A captura de tela não ficou disponível nesta inspeção.',
-  'full-page-capture-unavailable': 'A captura da página inteira não ficou disponível.',
-  'element-crop-failed': 'Não foi possível recortar a imagem de alguns elementos.',
-  'not-rendered': 'Não está visível neste estado da página.',
-  inert: 'Elemento inerte: não participa da interação nem da leitura acessível neste estado.',
-  'aria-hidden': 'Oculto da árvore de acessibilidade por aria-hidden. Se recebe Tab, o foco pode ficar sem anúncio adequado.',
-  'native-disabled': 'Controle desabilitado pelo HTML; normalmente não recebe Tab neste estado.',
-  'aria-disabled-remains-focusable': 'Marcado indisponível por ARIA; essa marcação sozinha não impede receber Tab.',
-  'negative-tabindex': 'tabindex negativo: pode receber foco por script, mas está fora da sequência normal de Tab.',
-  'control-outside-tab': 'Controle fora da sequência de Tab. Confira se há uma forma adequada de operá-lo por teclado.',
-  'structural-reading-not-tab': 'Conteúdo de leitura estrutural: normalmente lido por outros comandos, sem parada de Tab.',
-  'accessible-name-unavailable': 'Nome acessível não identificado. Confira se o propósito do controle pode ser entendido.',
-  'radio-group-arrow-navigation': 'Outro botão de opção representa este grupo no Tab. As opções normalmente são percorridas com as setas.',
-  'implicit-editing-host': 'Área editável: recebe Tab mesmo sem um atributo tabindex explícito. O conteúdo digitado foi omitido.',
-});
-function explained(value) { return EXPLANATIONS[value] ?? safeText(value); }
+function explained(value) { return Object.hasOwn(READING_REASON_TEXT, value) ? READING_REASON_TEXT[value] : safeText(value); }
 
 function fail() { throw new TypeError('Inventário de leitura inválido. Refaça a inspeção.'); }
 function safeBounds(value) {
@@ -96,7 +69,60 @@ export function createReadingReport(raw, { origin = '', generatedAt = new Date()
 }
 
 const escapeHtml = value => String(value).replace(/[&<>"']/gu, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
-const EXPORT_CSS = 'body{font:16px system-ui,sans-serif;color:#172b3a;max-width:1100px;margin:2rem auto;padding:0 1rem}h1,h2{color:#163f67}p{line-height:1.6}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{border:1px solid #8195a8;padding:.7rem;vertical-align:top;overflow-wrap:anywhere;text-align:left}th{background:#eaf0f6}small{display:block}thead{display:table-header-group}tr{break-inside:avoid}section{margin:2rem 0}code{font-size:.85em}.entry-image{display:block;max-width:280px;max-height:180px;width:auto;height:auto;border:1px solid #8195a8;border-radius:4px;background:#f4f7fa}.image-missing{color:#5a6b7a;font-size:.9em}.map-frame{position:relative;display:block;width:100%;overflow:auto;border:1px solid #8195a8;background:#f4f7fa}.map-frame img.map-base{display:block;width:100%;height:auto}.map-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.map-box{fill:rgba(255,191,71,.22);stroke:#b86b00;stroke-width:1.5}.map-label-bg{fill:rgba(16,41,58,.92);stroke:#ffbf47;stroke-width:1}.map-label{fill:#fff;font:12px system-ui,sans-serif}.map-label-num{fill:#ffbf47;font:700 12px system-ui,sans-serif}@media print{body{margin:0;font-size:10pt}h2{break-after:avoid}th,td{padding:.4rem}.map-frame{overflow:visible}}';
+const TONE_CLASS = Object.freeze({ problem: 'tone-problem', review: 'tone-review', ok: 'tone-ok', info: 'tone-info' });
+// CSS do HTML exportado, uma regra por linha para leitura humana.
+const EXPORT_CSS = [
+  'body{font:16px system-ui,sans-serif;color:#172b3a;max-width:1100px;margin:2rem auto;padding:0 1rem}',
+  'h1,h2{color:#163f67}',
+  'p{line-height:1.6}',
+  'table{border-collapse:collapse;width:100%;table-layout:fixed}',
+  'th,td{border:1px solid #8195a8;padding:.7rem;vertical-align:top;overflow-wrap:anywhere;text-align:left}',
+  'th{background:#eaf0f6}',
+  'small{display:block}',
+  'thead{display:table-header-group}',
+  'tr{break-inside:avoid}',
+  'section{margin:2rem 0}',
+  'code{font-size:.85em}',
+  '.entry-image{display:block;max-width:280px;max-height:180px;width:auto;height:auto;border:1px solid #8195a8;border-radius:4px;background:#f4f7fa}',
+  '.image-missing{color:#5a6b7a;font-size:.9em}',
+  '.map-frame{position:relative;display:block;width:100%;overflow:auto;border:1px solid #8195a8;background:#f4f7fa}',
+  '.map-frame img.map-base{display:block;width:100%;height:auto}',
+  '.map-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}',
+  '.map-box{fill:rgba(255,191,71,.22);stroke:#b86b00;stroke-width:1.5}',
+  '.map-box.tone-problem{fill:rgba(198,40,40,.22);stroke:#c62828}',
+  '.map-box.tone-review{fill:rgba(249,168,37,.25);stroke:#f9a825}',
+  '.map-box.tone-ok{fill:rgba(46,125,50,.18);stroke:#2e7d32}',
+  '.map-label-bg{fill:rgba(16,41,58,.92);stroke:#ffbf47;stroke-width:1}',
+  '.map-label{fill:#fff;font:12px system-ui,sans-serif}',
+  '.map-label-num{fill:#ffbf47;font:700 12px system-ui,sans-serif}',
+  '.verdict{border-radius:.65rem;padding:1.1rem 1.25rem;margin:1.2rem 0;border:1px solid}',
+  '.verdict.tone-ok{background:#e8f5e9;border-color:#2e7d32}',
+  '.verdict.tone-review{background:#fff8e1;border-color:#f9a825}',
+  '.verdict.tone-problem{background:#fdecea;border-color:#c62828}',
+  '.verdict h2{margin-top:0}',
+  '.issue-card{border:1px solid #8195a8;border-left-width:6px;border-radius:.5rem;padding:.9rem 1rem;margin:.8rem 0;background:#fff}',
+  '.issue-card.tone-problem{border-left-color:#c62828}',
+  '.issue-card.tone-review{border-left-color:#f9a825}',
+  '.issue-card.tone-ok{border-left-color:#2e7d32}',
+  '.issue-card img{max-width:220px;max-height:140px;border:1px solid #ccc;border-radius:4px}',
+  '.before-after{background:#f7f9fb;border-left:3px solid #163f67;padding:.5rem .75rem;margin:.35rem 0}',
+  '.tech-details{margin:1rem 0;padding:.6rem;border:1px dashed #8195a8;border-radius:.4rem}',
+  '.mode-note{font-size:.92em;color:#40596d}',
+  '.map-box.tone-info{fill:rgba(96,112,128,.16);stroke:#607080}',
+  '.verdict.tone-info{background:#f4f7fa;border-color:#607080}',
+  '.issue-card.tone-info{border-left-color:#607080}',
+  '.tone-chip{display:inline-block;font-weight:700;border-radius:.3rem;padding:.05rem .45rem;margin-bottom:.3rem}',
+  '.tone-chip.tone-problem{background:#fdecea;color:#8e1c1c}',
+  '.tone-chip.tone-review{background:#fff3cd;color:#6b4a00}',
+  '.tone-chip.tone-ok{background:#e8f5e9;color:#1b5e20}',
+  '.tone-chip.tone-info{background:#eef1f4;color:#3c4a57}',
+  '@media print{',
+  '  body{margin:0;font-size:10pt}',
+  '  h2{break-after:avoid}',
+  '  th,td{padding:.4rem}',
+  '  .map-frame{overflow:visible}',
+  '}',
+].join('\n');
 
 function safePngDataUrl(value) {
   if (value === null || value === undefined) return null;
@@ -132,7 +158,7 @@ function renderPageMap(report) {
     const boxHeight = 34;
     const x = Math.max(0, Math.min(entry.bounds.x, width - boxWidth));
     const y = Math.max(0, entry.bounds.y - boxHeight - 4);
-    return `<g><rect class="map-box" x="${entry.bounds.x}" y="${entry.bounds.y}" width="${entry.bounds.width}" height="${entry.bounds.height}"></rect><rect class="map-label-bg" x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}" rx="4"></rect><text class="map-label-num" x="${x + 8}" y="${y + 21}">${escapeHtml(String(order))}.</text><text class="map-label" x="${x + 8 + String(order).length * 8 + 10}" y="${y + 21}">${escapeHtml(label)}</text></g>`;
+    return `<g><rect class="map-box ${TONE_CLASS[entryTone(entry)]}" x="${entry.bounds.x}" y="${entry.bounds.y}" width="${entry.bounds.width}" height="${entry.bounds.height}"></rect><rect class="map-label-bg" x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}" rx="4"></rect><text class="map-label-num" x="${x + 8}" y="${y + 21}">${escapeHtml(String(order))}.</text><text class="map-label" x="${x + 8 + String(order).length * 8 + 10}" y="${y + 21}">${escapeHtml(label)}</text></g>`;
   }).join('');
   return `<section class="page-map-section"><h2>Mapa de leitura da página</h2><p>Cada caixa indica o trecho da página e o texto que seria lido, precedido do número de ordem de leitura (Tab) ou da marca de leitura estrutural (L). Serve para localizar o elemento sem ler o código.</p><div class="map-frame"><img class="map-base" src="${escapeHtml(report.pageMap)}" alt="Captura da página inspecionada com caixas de anúncio" width="${Math.round(width)}" height="${Math.round(height)}"><svg class="map-overlay" viewBox="0 0 ${Math.round(width)} ${Math.round(height)}" width="${Math.round(width)}" height="${Math.round(height)}" role="img" aria-label="Mapa de leitura com ${rows.length} elementos anotados">${labels}</svg></div></section>`;
 }
@@ -154,12 +180,78 @@ export function attachReadingVisuals(report, visuals = {}) {
   };
 }
 
+function toneChip(entry) {
+  const tone = entryTone(entry);
+  return `<span class="tone-chip ${TONE_CLASS[tone]}">${escapeHtml(TONE_LABELS[tone])}</span>`;
+}
+
+function issueLabel(entry) {
+  if (entry.tabOrder) return `Tab ${entry.tabOrder}`;
+  return READING_CATEGORIES[entry.category];
+}
+
+/** Bloco "Em uma frase" e cards "O que corrigir primeiro" do modo leigo. */
+export function renderVerdictAndCards(report) {
+  const verdict = buildVerdict(report.entries);
+  const cards = topIssues(report.entries, 5).map(entry => {
+    const tone = entryTone(entry);
+    const fix = entryFix(entry);
+    const image = entry.image ? `<img src="${escapeHtml(entry.image)}" alt="Captura do elemento ${escapeHtml(entry.tag)}">` : '';
+    const fixHtml = fix
+      ? `<p><strong>O que está errado:</strong> ${escapeHtml(fix.problem)}</p>`
+        + `<p><strong>O que fazer:</strong> ${escapeHtml(fix.action)}</p>`
+        + `<div class="before-after"><div>${escapeHtml(fix.before)}</div><div>${escapeHtml(fix.after)}</div></div>`
+      : '';
+    return `<article class="issue-card ${TONE_CLASS[tone]}">`
+      + `<h3>${escapeHtml(issueLabel(entry))} · ${escapeHtml(TONE_LABELS[tone])}</h3>`
+      + `<p>${escapeHtml(laySummary(entry))}</p>${image}${fixHtml}</article>`;
+  }).join('');
+  const cardsSection = cards
+    ? `<section id="correcoes"><h2>O que corrigir primeiro</h2><p class="mode-note">Os pontos mais graves primeiro, na ordem de Tab. Cada card diz o que um leitor de tela anunciaria, o que corrigir e um exemplo.</p>${cards}</section>`
+    : '';
+  const { counts } = verdict;
+  return `<section class="verdict ${TONE_CLASS[verdict.tone]}" id="veredito"><h2>Em uma frase</h2>`
+    + `<p><strong>${escapeHtml(verdict.phrase)}</strong></p>`
+    + `<p>${counts.problem} problema(s), ${counts.review} ponto(s) a revisar e ${counts.ok} sem ponto crítico. `
+    + `${counts.info} elemento(s) oculto(s) ficam fora da conta.</p>`
+    + '<p class="mode-note">Semáforo: vermelho indica o que confunde ou bloqueia a leitura; âmbar, o que merece conferência; verde, o que parece bem. É uma estimativa para orientar a revisão humana.</p>'
+    + `</section>${cardsSection}`;
+}
+
+function renderEntryRow(entry) {
+  const image = entry.image
+    ? `<img class="entry-image" src="${escapeHtml(entry.image)}" alt="Captura do elemento ${escapeHtml(entry.tag)}${entry.tabOrder ? `, ordem ${entry.tabOrder}` : ''}">`
+    : '<span class="image-missing">Captura não disponível</span>';
+  const element = `${entry.tabOrder ?? '—'} · ${escapeHtml(entry.tag)}<small><code>${escapeHtml(entry.selector)}</code></small>`;
+  const name = `${escapeHtml(entry.name || 'Sem nome acessível')}<small>${escapeHtml(entry.role || 'Sem função identificada')}</small>`;
+  const preview = `${escapeHtml(entry.preview || 'Prévia não disponível')}<small>${escapeHtml(entry.description)}</small>`
+    + `<small>${escapeHtml(entry.states.join(', '))}</small>`;
+  const review = `${toneChip(entry)}<small>${escapeHtml(laySummary(entry))}</small>`
+    + `<small>${escapeHtml(entry.reasons.join('; ') || 'Confira se o anúncio representa o elemento.')}</small>`;
+  return `<tr><td>${image}</td><td>${element}</td><td>${name}</td><td>${preview}</td><td>${review}</td></tr>`;
+}
+
 export function renderReadingHtml(report) {
   const sections = Object.entries(READING_CATEGORIES).map(([category, label]) => {
     const rows = report.entries.filter(entry => entry.category === category);
-    return `<section><h2>${label} (${rows.length})</h2>${rows.length ? `<table><thead><tr><th scope="col">Imagem do elemento</th><th scope="col">Ordem / elemento</th><th scope="col">Nome e função</th><th scope="col">Anúncio estimado</th><th scope="col">Conferir</th></tr></thead><tbody>${rows.map(entry => `<tr><td>${entry.image ? `<img class="entry-image" src="${escapeHtml(entry.image)}" alt="Captura do elemento ${escapeHtml(entry.tag)}${entry.tabOrder ? `, ordem ${entry.tabOrder}` : ''}">` : '<span class="image-missing">Captura não disponível</span>'}</td><td>${entry.tabOrder ?? '—'} · ${escapeHtml(entry.tag)}<small><code>${escapeHtml(entry.selector)}</code></small></td><td>${escapeHtml(entry.name || 'Sem nome acessível')}<small>${escapeHtml(entry.role || 'Sem função identificada')}</small></td><td>${escapeHtml(entry.preview || 'Prévia não disponível')}<small>${escapeHtml(entry.description)}</small><small>${escapeHtml(entry.states.join(', '))}</small></td><td>${escapeHtml(entry.reasons.join('; ') || 'Confira se o anúncio representa o elemento.')}</td></tr>`).join('')}</tbody></table>` : '<p>Nenhum elemento registrado nesta categoria.</p>'}</section>`;
+    const table = rows.length
+      ? '<table><thead><tr><th scope="col">Imagem do elemento</th><th scope="col">Ordem / elemento</th>'
+        + '<th scope="col">Nome e função</th><th scope="col">Anúncio estimado</th><th scope="col">Conferir</th></tr></thead>'
+        + `<tbody>${rows.map(renderEntryRow).join('')}</tbody></table>`
+      : '<p>Nenhum elemento registrado nesta categoria.</p>';
+    return `<section><h2>${label} (${rows.length})</h2>${table}</section>`;
   }).join('');
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"><title>Conferência de leitura por Tab — Audita Acessibilidade</title><style>${EXPORT_CSS}</style></head><body><h1>Conferência de leitura por Tab</h1><p>Audita Acessibilidade · ${escapeHtml(report.origin)} · ${escapeHtml(report.generatedAt)}</p><p>${READING_EXPLANATION}</p><p>${READING_PRIVACY}</p><p>${report.counts.total} elementos registrados; ${report.counts.tab} na sequência estimada; ${report.counts.outsideTab} controles fora do Tab.</p><h2>Limites da inspeção</h2><ul>${report.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>${sections}${renderPageMap(report)}<p>Relatório complementar do estado observado. A ordem pode mudar com interações, scripts e configurações do navegador. Use a opção de impressão do navegador para salvar em PDF.</p></body></html>`;
+  const head = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">`
+    + `<title>Conferência de leitura por Tab — Audita Acessibilidade</title><style>${EXPORT_CSS}</style></head>`;
+  const intro = '<h1>Conferência de leitura por Tab</h1>'
+    + `<p>Audita Acessibilidade · ${escapeHtml(report.origin)} · ${escapeHtml(report.generatedAt)}</p>`
+    + `<p>${READING_EXPLANATION}</p><p>${READING_PRIVACY}</p>`
+    + `<p>${report.counts.total} elementos registrados; ${report.counts.tab} na sequência estimada; ${report.counts.outsideTab} controles fora do Tab.</p>`;
+  const limits = `<h2>Limites da inspeção</h2><ul>${report.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>`;
+  const footer = '<p>Relatório complementar do estado observado. A ordem pode mudar com interações, scripts e configurações do navegador. Use a opção de impressão do navegador para salvar em PDF.</p>';
+  return `${head}<body>${intro}${renderVerdictAndCards(report)}${limits}${sections}${renderPageMap(report)}${footer}</body></html>`;
 }
 
 export function renderReadingCsv(report) {
@@ -167,7 +259,8 @@ export function renderReadingCsv(report) {
     const string = String(value ?? '');
     return `"${(/^[\s]*[=+\-@\t\r]/u.test(string) ? "'" + string : string).replaceAll('"', '""')}"`;
   };
-  const rows = [['Categoria', 'Ordem Tab', 'Elemento', 'Seletor', 'Nome acessível', 'Função', 'Descrição', 'Estados', 'Anúncio estimado', 'Observações'],
-    ...report.entries.map(entry => [READING_CATEGORIES[entry.category], entry.tabOrder, entry.tag, entry.selector, entry.name, entry.role, entry.description, entry.states.join('; '), entry.preview, entry.reasons.join('; ')])];
+  const rows = [['Categoria', 'Ordem Tab', 'Elemento', 'Seletor', 'Nome acessível', 'Função', 'Descrição', 'Estados', 'Anúncio estimado', 'Observações', 'Semáforo', 'Em linguagem simples'],
+    ...report.entries.map(entry => [READING_CATEGORIES[entry.category], entry.tabOrder, entry.tag, entry.selector, entry.name, entry.role, entry.description, entry.states.join('; '), entry.preview, entry.reasons.join('; '),
+      TONE_LABELS[entryTone(entry)], laySummary(entry)])];
   return '\uFEFF' + rows.map(row => row.map(cell).join(',')).join('\r\n');
 }

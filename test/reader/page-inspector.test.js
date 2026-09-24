@@ -336,3 +336,33 @@ test('native change events replace a stale checkbox caption without reading the 
   assert.match(overlay.shadowRoot.children.map(node => node.textContent ?? '').join(' '), /Página alterada/u);
   assert.equal(h.run({ type: 'observe', sessionId: 'test-session' }).reason, 'page-changed');
 });
+
+test('guided walk: Escape on the page ends the walk before any further highlight', async () => {
+  const first = el('button', { id: 'a' }, 'Primeiro'); const second = el('button', { id: 'b' }, 'Segundo');
+  const h = await harness(first, second);
+  const [one, two] = h.collect().entries;
+  const start = h.run({ type: 'highlight', sessionId: 'test-session', elementId: one.id });
+  assert.equal(start.ok, true);
+  assert.equal(start.escapes, 0);
+  assert.equal(h.run({ type: 'highlight', sessionId: 'test-session', elementId: two.id, walkEscapes: 0 }).ok, true);
+  h.dispatch('keydown', { key: 'Escape' });
+  const stopped = h.run({ type: 'highlight', sessionId: 'test-session', elementId: one.id, walkEscapes: 0 });
+  assert.equal(stopped.ok, false);
+  assert.equal(stopped.reason, 'walk-escaped');
+  assert.equal(first.scrolls, 1, 'no scroll after the Escape');
+  // A plain highlight (outside a walk) keeps working and reports the new count.
+  const plain = h.run({ type: 'highlight', sessionId: 'test-session', elementId: one.id });
+  assert.equal(plain.ok, true);
+  assert.equal(plain.escapes, 1);
+});
+
+test('guided walk: the Escape takes precedence over a later page change', async () => {
+  const first = el('button', { id: 'a' }, 'Primeiro'); const second = el('button', { id: 'b' }, 'Segundo');
+  const h = await harness(first, second);
+  const [one, two] = h.collect().entries;
+  assert.equal(h.run({ type: 'highlight', sessionId: 'test-session', elementId: one.id }).ok, true);
+  h.dispatch('keydown', { key: 'Escape' });
+  second.setAttribute('aria-label', 'Mudou');
+  assert.equal(h.run({ type: 'highlight', sessionId: 'test-session', elementId: two.id, walkEscapes: 0 }).reason, 'walk-escaped');
+  assert.equal(h.run({ type: 'highlight', sessionId: 'test-session', elementId: two.id }).reason, 'page-changed');
+});

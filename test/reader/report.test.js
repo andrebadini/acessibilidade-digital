@@ -207,3 +207,45 @@ test('collection binds scripts to the document and refuses navigation before a l
   await assert.rejects(controller.highlight('element-1'));
   assert.equal(api.calls.filter(([type]) => type === 'update').length, 0);
 });
+
+test('highlight forwards the walk Escape baseline and maps a walk Escape to WALK_ESCAPED', async () => {
+  const api = fakeChrome();
+  const controller = controllerModule.createReadingController(api, { tabId: 7, documentId: 'document-one', sessionId: 'test-session' }, { lockManager: { request: async (_name, _options, callback) => callback({}) } });
+  await controller.collect();
+  const commands = [];
+  api.scripting.executeScript = async options => {
+    commands.push(options.args[0]);
+    const escaped = options.args[0].walkEscapes === 0;
+    return [{ frameId: 0, documentId: 'document-one', result: escaped
+      ? { version: 1, sessionId: 'test-session', ok: false, reason: 'walk-escaped', escapes: 1 }
+      : { version: 1, sessionId: 'test-session', ok: true, reason: 'highlighted', escapes: 0 } }];
+  };
+  const first = await controller.highlight('element-1');
+  assert.equal(first.escapes, 0);
+  assert.equal(Object.hasOwn(commands[0], 'walkEscapes'), false, 'a plain highlight sends no walk field');
+  await assert.rejects(controller.highlight('element-1', { walkEscapes: 0 }), error => error.code === 'WALK_ESCAPED');
+  assert.equal(commands[1].walkEscapes, 0);
+  await controller.highlight('element-1', { walkEscapes: -1 });
+  assert.equal(Object.hasOwn(commands[2], 'walkEscapes'), false, 'invalid baselines are dropped');
+});
+
+test('plain-language layer: HTML export opens with the verdict and the top fixes, escaped', () => {
+  const report = modelModule.createReadingReport(inventory([
+    row({ id: 'ok-button', tabOrder: 1, name: 'Enviar', preview: 'Enviar, botão' }),
+    row({ id: 'nameless', tabOrder: 2, name: '', preview: 'botão', reasons: ['accessible-name-unavailable'] }),
+    row({ id: 'img', tabOrder: null, tabIndex: null, category: 'reading', tag: 'img', role: 'img', name: '', preview: 'imagem' }),
+    row({ id: 'hidden', tabOrder: null, tabIndex: null, category: 'hidden', name: '<b>x</b>', reasons: ['not-rendered'] }),
+  ]), { origin: 'https://example.com', generatedAt: '2026-09-19T12:00:00.000Z' });
+  const html = modelModule.renderReadingHtml(report);
+  assert.match(html, /<section class="verdict tone-problem" id="veredito"><h2>Em uma frase<\/h2>/u);
+  assert.match(html, /2 problema\(s\), 0 ponto\(s\) a revisar e 1 sem ponto crítico\. 1 elemento\(s\) oculto\(s\)/u);
+  assert.match(html, /<h2>O que corrigir primeiro<\/h2>/u);
+  assert.ok(html.indexOf('id="veredito"') < html.indexOf('<h2>Limites da inspeção</h2>'), 'verdict comes first');
+  assert.ok(html.indexOf('Tab 2 · Problema') < html.indexOf('Conteúdo estrutural · Problema'), 'Tab order first');
+  assert.match(html, /tone-chip tone-info/u);
+  assert.doesNotMatch(html, /<b>x<\/b>/u);
+  assert.doesNotMatch(html, /<script/iu);
+  const csv = modelModule.renderReadingCsv(report);
+  assert.match(csv.split('\r\n')[0], /"Semáforo","Em linguagem simples"$/u);
+  assert.match(csv, /"Problema","Quem usa leitor de tela ouviria só “botão”/u);
+});

@@ -22,6 +22,9 @@ export function tabReadingPageCommand(command) {
   if (command.type !== 'collect') {
     if (!previous || previous.sessionId !== command.sessionId || previous.document !== document) return reply(false, 'session-unavailable');
     if (previous.expired()) { previous.dispose(); return reply(false, 'session-unavailable'); }
+    // Num percurso guiado, um Escape pressionado depois do início encerra o percurso, antes de qualquer outra verificação.
+    const walkEscapes = command.type === 'highlight' && Number.isSafeInteger(command.walkEscapes) && command.walkEscapes >= 0 ? command.walkEscapes : null;
+    if (walkEscapes !== null && previous.escapes() > walkEscapes) return { ...reply(false, 'walk-escaped'), escapes: previous.escapes() };
     if (previous.changed()) return reply(false, 'page-changed');
     return command.type === 'highlight' ? previous.highlight(command.elementId) : previous.observe();
   }
@@ -328,6 +331,8 @@ export function tabReadingPageCommand(command) {
     scanned: seen.size, omittedPrivate, truncated };
   let overlay = null; let box = null; let legend = null; let observing = false; let current = null; let timeout = null; let scheduled = null; let closed = false;
   let pageChanged = false; let mutationObserver = null;
+  // Conta os Escape na página: o percurso guiado de Tab para quando a pessoa pressiona Escape.
+  let escapes = 0;
   const ownedNodes = new WeakSet();
   const expiresAt = Date.now() + LIFETIME;
   const expired = () => closed || Date.now() >= expiresAt;
@@ -445,7 +450,7 @@ export function tabReadingPageCommand(command) {
     return [...references.values()].find(candidate => candidate.element === element);
   }
   function keyDown(event) {
-    if (event.key === 'Escape') { clear(); return; }
+    if (event.key === 'Escape') { escapes += 1; clear(); return; }
     if (observing && event.key === 'Tab') {
       root.clearTimeout(scheduled);
       scheduled = root.setTimeout(() => { if (!closed) { const reference = activeReference(); if (reference) render(reference); else hideMarker(); } }, 0);
@@ -455,7 +460,7 @@ export function tabReadingPageCommand(command) {
     const reference = references.get(id);
     if (!validReference(reference)) return reply(false, pageChanged ? 'page-changed' : 'stale-element');
     reference.element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'nearest' });
-    return reply(render(reference), 'highlighted');
+    return { ...reply(render(reference), 'highlighted'), escapes };
   }
   function observe() {
     if (expired()) { dispose(); return reply(false, 'session-unavailable'); }
@@ -465,7 +470,7 @@ export function tabReadingPageCommand(command) {
     const reference = activeReference(); if (reference) render(reference); else hideMarker();
     return reply(!pageChanged, pageChanged ? 'page-changed' : undefined);
   }
-  const state = { sessionId: command.sessionId, document, clear, dispose, expired, changed, highlight, observe };
+  const state = { sessionId: command.sessionId, document, clear, dispose, expired, changed, highlight, observe, escapes: () => escapes };
   root[key] = state;
   if (typeof root.MutationObserver === 'function') {
     mutationObserver = new root.MutationObserver(materialMutations);

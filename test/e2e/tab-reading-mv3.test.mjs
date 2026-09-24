@@ -337,3 +337,78 @@ test('panel launches and exports the visual reading report; a subsequent audit r
   assert.deepEqual(await readingRuntimeState(extension), afterAudit,
     'the old report cannot resurrect an inspector revoked by the audit');
 });
+
+test('plain-language verdict and the guided Tab walk work with and without local speech', { timeout: 120_000 }, async t => {
+  const extension = await createExtension(t);
+  const page = extension.startPage.page;
+  const panel = await extension.openSidePanelFromAction();
+  await waitForValue(panel, `Boolean(document.querySelector('button[data-intent="OPEN_TAB_READING"]:not(:disabled)'))`, Boolean,
+    { timeoutMs: 15_000 });
+  await extension.click(panel, 'button[data-intent="OPEN_TAB_READING"]');
+  const reader = await waitForReaderPage(extension);
+  const statusText = `document.querySelector('#status')?.textContent ?? ''`;
+  await waitForValue(reader, statusText, value => value.includes('Inspeção concluída'), { timeoutMs: 20_000 });
+
+  // Modo leigo: veredito, semáforo por linha e cards de correção.
+  const verdict = await evaluate(reader, `({
+    phrase: document.querySelector('#verdict .verdict-phrase')?.textContent ?? '',
+    tone: document.querySelector('#verdict .verdict')?.className ?? '',
+    cards: document.querySelectorAll('#verdict .issue-card').length,
+    chips: document.querySelectorAll('[data-entry-id] .tone-chip').length,
+    rows: document.querySelectorAll('[data-entry-id]').length,
+  })`);
+  assert.match(verdict.phrase, /^Leitura (?:com atrito|difícil|razoável)|^Boa leitura/u);
+  assert.match(verdict.tone, /tone-(?:problem|review|ok)/u);
+  assert.ok(verdict.cards > 0, 'the fixture has controls without names, so there are fixes to show');
+  assert.equal(verdict.chips, verdict.rows, 'every row carries its traffic-light label');
+
+  // Espião de fala: registra o que seria falado sem depender das vozes da máquina de teste.
+  await evaluate(reader, `(() => {
+    window.__spoken = [];
+    window.__voices = [{ name: 'Voz on-line', lang: 'pt-BR', localService: false, voiceURI: 'remote' }];
+    speechSynthesis.getVoices = () => window.__voices;
+    speechSynthesis.speak = utterance => { window.__spoken.push(utterance.text); setTimeout(() => utterance.onend?.(), 50); };
+    speechSynthesis.cancel = () => {};
+    return true;
+  })()`);
+  assert.equal(await evaluate(reader, `document.querySelector('#speech-off').checked`), true, 'audio is off by default');
+  assert.equal(await evaluate(reader, `getComputedStyle(document.querySelector('.speak-button')).display`), 'none');
+
+  // Sem áudio: o percurso destaca cada parada e não fala; Escape na página o encerra.
+  await extension.click(reader, '#walk-tab');
+  await waitForValue(reader, statusText, value => value.includes('Percurso 1 de'), { timeoutMs: 10_000 });
+  await waitForValue(page, overlayText, value => value.includes('Primeiro na ordem positiva'));
+  await waitForValue(reader, statusText, value => value.includes('Percurso 2 de'), { timeoutMs: 10_000 });
+  await waitForValue(page, overlayText, value => value.includes('Segundo na ordem positiva'));
+  assert.equal(await evaluate(reader, `document.querySelector('#walk-stop').disabled`), false);
+  await page.command('Page.bringToFront');
+  await pressKey(page, { key: 'Escape', code: 'Escape', virtualKeyCode: 27, modifiers: 0, raw: true });
+  await waitForValue(reader, statusText, value => value.includes('Percurso encerrado com Escape'), { timeoutMs: 10_000 });
+  await waitForValue(page, `document.querySelector('[data-audita-tab-reading]') === null`, Boolean);
+  assert.deepEqual(await evaluate(reader, 'window.__spoken'), [], 'the silent walk never speaks');
+
+  // Com áudio, sem voz local: a opção volta para sem áudio e explica o motivo.
+  await extension.click(reader, '#speech-on');
+  await waitForValue(reader, `document.querySelector('#speech-note')?.textContent ?? ''`, value => value.includes('Nenhuma voz em português'));
+  assert.equal(await evaluate(reader, `document.querySelector('#speech-off').checked`), true);
+
+  // Com áudio e voz local: lê cada parada; Parar interrompe.
+  await evaluate(reader, `(() => { window.__voices = [{ name: 'Voz local de teste', lang: 'pt-BR', localService: true, voiceURI: 'local' }]; return true; })()`);
+  await extension.click(reader, '#speech-on');
+  await waitForValue(reader, `document.querySelector('#speech-note')?.textContent ?? ''`, value => value.includes('Voz local de teste'));
+  assert.equal(await evaluate(reader, `getComputedStyle(document.querySelector('.speak-button')).display`), 'inline-block');
+  await extension.click(reader, '#walk-tab');
+  const spoken = await waitForValue(reader, 'window.__spoken', value => value.length >= 2, { timeoutMs: 15_000 });
+  assert.match(spoken[0], /^Tab 1\. .*Primeiro na ordem positiva/u);
+  assert.match(spoken[1], /^Tab 2\. .*Segundo na ordem positiva/u);
+  await extension.click(reader, '#walk-stop');
+  await waitForValue(reader, statusText, value => value.includes('Percurso interrompido'), { timeoutMs: 10_000 });
+  const afterStop = await evaluate(reader, 'window.__spoken.length');
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  assert.equal(await evaluate(reader, 'window.__spoken.length'), afterStop, 'nothing is spoken after Stop');
+  assertPrivateValuesAbsent(JSON.stringify(await evaluate(reader, 'window.__spoken')), 'spoken text');
+
+  // O botão Ouvir de uma linha fala só aquele anúncio.
+  await extension.click(reader, '[data-category="tab"] [data-speak]');
+  await waitForValue(reader, 'window.__spoken.length', value => value === afterStop + 1);
+});
