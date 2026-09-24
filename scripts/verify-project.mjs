@@ -13,6 +13,7 @@ import { renderPdf } from '../src/browser/render-pdf.js';
 import { AXE_MV3_CSP_GATE, AXE_PROVENANCE, AXE_RUN_CONFIG } from '../src/browser/axe-adapter.js';
 import { ANNOTATION_MAP_MV3_GATE } from '../src/browser/annotation-map.js';
 import { scanNeutralIdentity } from './verify-neutral-identity.mjs';
+import { FORBIDDEN_RUNTIME_PATTERNS, patchAxeSource } from './vendor-axe.mjs';
 import { verifyStaticReportSecurity } from './verify-report-security.mjs';
 
 const root = new URL('../', import.meta.url);
@@ -30,15 +31,17 @@ assert.equal(packageJson.devDependencies?.['axe-core'], '4.13.0', 'axe-core prec
 assert.equal(lock.packages?.['']?.devDependencies?.['axe-core'], '4.13.0', 'lock raiz precisa fixar axe-core');
 assert.equal(lock.packages?.['node_modules/axe-core']?.version, '4.13.0', 'lock precisa resolver axe-core 4.13.0');
 const axeVendorHashes = Object.freeze({
-  'axe.js': '138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88',
+  'axe.js': '12af8a1c94f7b47e5ad0cbec570cd7a3428d6ca31fa2a87277bd99e5c5654060',
   'LICENSE': 'af175b9d96ee93c21a036152e1b905b0b95304d4ae8c2c921c7609100ba8df7e',
   'LICENSE-3RD-PARTY.txt': '4f8563870d0fca38bbc3e00b6f670cb7fa9f380ba9f26a7f7d1184a6b18b1653',
 });
 assert.deepEqual((await readdir(new URL('../vendor/axe/', import.meta.url))).sort(), Object.keys(axeVendorHashes).sort(), 'vendor axe precisa conter somente runtime e licenças');
 for (const [name, expected] of Object.entries(axeVendorHashes)) {
   const digest = createHash('sha256').update(await readFile(new URL(`../vendor/axe/${name}`, import.meta.url))).digest('hex');
-  assert.equal(digest, expected, `hash oficial divergente: vendor/axe/${name}`);
+  assert.equal(digest, expected, `hash divergente: vendor/axe/${name}`);
 }
+// vendor/axe/axe.js = axe-core 4.13.0 oficial + patch legível (rejeição CWS "Red Titanium"), reproduzível.
+assert.equal(createHash('sha256').update(patchAxeSource(await readFile(new URL('../node_modules/axe-core/axe.js', import.meta.url)))).digest('hex'), axeVendorHashes['axe.js'], 'vendor/axe/axe.js precisa ser reproduzível por scripts/vendor-axe.mjs');
 assert.equal(AXE_PROVENANCE.version, '4.13.0');
 assert.equal(AXE_PROVENANCE.runtimeSha256, axeVendorHashes['axe.js']);
 assert.equal(AXE_PROVENANCE.packageTarballSha256, '096912f6e77b4b695fc9304b7be65091db42d98de054da674ae222a11cb33f70');
@@ -84,6 +87,11 @@ for (const path of await sourceFiles(new URL('src/', root))) {
   const value = await readFile(path, 'utf8');
   assert.doesNotMatch(value, /TOPSECRET|Bearer\s+[A-Za-z0-9._-]+|api[-_]?key\s*[:=]/iu, `secret scan: ${path}`);
   assert.doesNotMatch(value, /(?:src|href)\s*=\s*["']https?:\/\//iu, `remote executable scan: ${path}`);
+  for (const pattern of FORBIDDEN_RUNTIME_PATTERNS) assert.ok(!pattern.test(value), `código ofuscado (CWS): ${pattern} em ${path}`);
+}
+{
+  const vendorAxe = await text('vendor/axe/axe.js');
+  for (const pattern of FORBIDDEN_RUNTIME_PATTERNS) assert.ok(!pattern.test(vendorAxe), `código ofuscado (CWS): ${pattern} em vendor/axe/axe.js`);
 }
 
 if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {

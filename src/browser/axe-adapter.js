@@ -20,8 +20,10 @@ export const AXE_PROVENANCE = Object.freeze({
   engine: 'axe-core',
   version: '4.13.0',
   // Readable non-minified runtime: Chrome Web Store rejects minified/obfuscated extension code.
+  // Official axe-core 4.13.0 axe.js with the dead IE8 Object.create polyfill removed by
+  // scripts/vendor-axe.mjs (CWS rejection "Red Titanium"); upstream SHA-256 138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88.
   runtimePath: 'vendor/axe/axe.js',
-  runtimeSha256: '138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88',
+  runtimeSha256: '12af8a1c94f7b47e5ad0cbec570cd7a3428d6ca31fa2a87277bd99e5c5654060',
   packageTarballSha256: '096912f6e77b4b695fc9304b7be65091db42d98de054da674ae222a11cb33f70',
   config: AXE_RUN_CONFIG,
   gate: AXE_MV3_CSP_GATE,

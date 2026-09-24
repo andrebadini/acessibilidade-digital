@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.1.50
+# Instruções de teste — Audita Acessibilidade 1.1.51
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.50.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
+1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.51.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.

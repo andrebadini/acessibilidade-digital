@@ -9,6 +9,12 @@
  * distribute or in any file that contains substantial portions of this source
  * code.
  */
+/*
+ * Modificado pelo Audita Acessibilidade (scripts/vendor-axe.mjs) a partir do axe-core 4.13.0 oficial
+ * (SHA-256 138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88).
+ * Única alteração: o módulo "object-create" do core-js passa a usar Object.create nativo; o caminho
+ * alternativo para Internet Explorer 8 (documento ActiveX ou iframe) nunca executa no Chrome e foi removido.
+ */
 (function axeFunction(window) {
   var global = window;
   var document = window.document;
@@ -2860,67 +2866,9 @@
     });
     var require_object_create = __commonJS(function(exports, module) {
       'use strict';
-      var anObject = require_an_object();
-      var definePropertiesModule = require_object_define_properties();
-      var enumBugKeys = require_enum_bug_keys();
-      var hiddenKeys = require_hidden_keys();
-      var html = require_html();
-      var documentCreateElement = require_document_create_element();
-      var sharedKey = require_shared_key();
-      var GT = '>';
-      var LT = '<';
-      var PROTOTYPE = 'prototype';
-      var SCRIPT = 'script';
-      var IE_PROTO = sharedKey('IE_PROTO');
-      var EmptyConstructor = function EmptyConstructor() {};
-      var scriptTag = function scriptTag(content) {
-        return LT + SCRIPT + GT + content + LT + '/' + SCRIPT + GT;
-      };
-      var NullProtoObjectViaActiveX = function NullProtoObjectViaActiveX(activeXDocument2) {
-        activeXDocument2.write(scriptTag(''));
-        activeXDocument2.close();
-        var temp = activeXDocument2.parentWindow.Object;
-        activeXDocument2 = null;
-        return temp;
-      };
-      var NullProtoObjectViaIFrame = function NullProtoObjectViaIFrame() {
-        var iframe = documentCreateElement('iframe');
-        var JS = 'java' + SCRIPT + ':';
-        var iframeDocument;
-        iframe.style.display = 'none';
-        html.appendChild(iframe);
-        iframe.src = String(JS);
-        iframeDocument = iframe.contentWindow.document;
-        iframeDocument.open();
-        iframeDocument.write(scriptTag('document.F=Object'));
-        iframeDocument.close();
-        return iframeDocument.F;
-      };
-      var activeXDocument;
-      var _NullProtoObject = function NullProtoObject() {
-        try {
-          activeXDocument = new ActiveXObject('htmlfile');
-        } catch (error) {}
-        _NullProtoObject = typeof document != 'undefined' ? document.domain && activeXDocument ? NullProtoObjectViaActiveX(activeXDocument) : NullProtoObjectViaIFrame() : NullProtoObjectViaActiveX(activeXDocument);
-        var length = enumBugKeys.length;
-        while (length--) {
-          delete _NullProtoObject[PROTOTYPE][enumBugKeys[length]];
-        }
-        return _NullProtoObject();
-      };
-      hiddenKeys[IE_PROTO] = true;
-      module.exports = Object.create || function create(O, Properties) {
-        var result;
-        if (O !== null) {
-          EmptyConstructor[PROTOTYPE] = anObject(O);
-          result = new EmptyConstructor();
-          EmptyConstructor[PROTOTYPE] = null;
-          result[IE_PROTO] = O;
-        } else {
-          result = _NullProtoObject();
-        }
-        return Properties === void 0 ? result : definePropertiesModule.f(result, Properties);
-      };
+      // Audita Acessibilidade: o core-js original trazia aqui um polyfill de Object.create para
+      // Internet Explorer 8 e anteriores. O Chrome 116+ exigido pela extensão tem Object.create nativo.
+      module.exports = Object.create;
     });
     var require_define_built_in = __commonJS(function(exports, module) {
       'use strict';

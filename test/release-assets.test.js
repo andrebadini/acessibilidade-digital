@@ -16,7 +16,7 @@ test('pins and vendors only the verified axe-core 4.13.0 runtime and license fil
     'LICENSE', 'LICENSE-3RD-PARTY.txt', 'axe.js',
   ]);
   for (const [path, expected] of Object.entries({
-    'vendor/axe/axe.js': '138a93a4ce7b7c6c08ed84144e45dcd8cc36d2d4ff8ed673619faf0406906d88',
+    'vendor/axe/axe.js': '12af8a1c94f7b47e5ad0cbec570cd7a3428d6ca31fa2a87277bd99e5c5654060',
     'vendor/axe/LICENSE': 'af175b9d96ee93c21a036152e1b905b0b95304d4ae8c2c921c7609100ba8df7e',
     'vendor/axe/LICENSE-3RD-PARTY.txt': '4f8563870d0fca38bbc3e00b6f670cb7fa9f380ba9f26a7f7d1184a6b18b1653',
   })) {

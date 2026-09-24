@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { cp, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, utimes } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -33,7 +33,11 @@ try {
   }
   const discovered = await runtimeFiles(staging);
   const files = ['manifest.json', ...discovered.filter(path => path !== 'manifest.json')];
-  for (const path of files) await utimes(join(staging, path), releaseTimestamp, releaseTimestamp);
+  // Permissão fixa (0644, a dos pacotes anteriores) para o ZIP não depender da máquina que o gera.
+  for (const path of files) {
+    await chmod(join(staging, path), 0o644);
+    await utimes(join(staging, path), releaseTimestamp, releaseTimestamp);
+  }
   await validateCanonicalReleaseDirectory(releaseDirectory);
   await rm(output, { force: true });
   await validateCanonicalReleaseDirectory(releaseDirectory);
