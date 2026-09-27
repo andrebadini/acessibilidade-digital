@@ -148,6 +148,10 @@ test('pure click parsing never reads URL-bearing info fields or accessors', () =
   assert.deepEqual(parseContextMenuClick(info, {
     id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: '',
   }), { tabId: 17, windowId: 9 });
+  // Recurso de terceiros que nunca termina: a aba fica "loading" com o documento pronto (1.1.53).
+  assert.deepEqual(parseContextMenuClick(info, {
+    id: 17, windowId: 9, status: 'loading', url: 'https://example.test/', pendingUrl: '',
+  }), { tabId: 17, windowId: 9 });
   assert.equal(secretReads, 0);
 
   const hostileTab = { id: 17, windowId: 9, status: 'complete', pendingUrl: '' };
@@ -161,7 +165,8 @@ test('pure click parsing never reads URL-bearing info fields or accessors', () =
   for (const [badInfo, badTab] of [
     [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 2 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' }],
     [{ menuItemId: 'other', frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/' }],
-    [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'loading', url: 'https://example.test/' }],
+    [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'loading', url: 'https://example.test/', pendingUrl: 'https://next.test/' }],
+    [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'unloaded', url: 'https://example.test/' }],
     [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'chrome://settings/' }],
     [{ menuItemId: CONTEXT_MENU_IDS.page, frameId: 0 }, { id: 17, windowId: 9, status: 'complete', url: 'https://example.test/', pendingUrl: 'https://next.test/' }],
   ]) assert.equal(parseContextMenuClick(badInfo, badTab), null);

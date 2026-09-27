@@ -125,7 +125,8 @@ function sanitizeBoundary(value, seen = new WeakSet()) {
       throw new TypeError('OBSERVED_PIPELINE_DENIED');
     }
     const expected = ['length', ...Array.from({ length }, (_v, index) => String(index))];
-    if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) throw new TypeError('OBSERVED_PIPELINE_DENIED');
+    const keySet = new Set(keys); // O(n): includes() por índice era quadrático em listas grandes (1.1.53)
+    if (keys.length !== expected.length || expected.some(key => !keySet.has(key))) throw new TypeError('OBSERVED_PIPELINE_DENIED');
     return Object.freeze(Array.from({ length }, (_v, index) => {
       const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
       if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError('OBSERVED_PIPELINE_DENIED');

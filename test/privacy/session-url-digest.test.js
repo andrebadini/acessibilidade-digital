@@ -217,7 +217,9 @@ test('digests the complete canonical URL and never stores its plaintext', async 
   const changedQuery = await manager.digest('https://example.test/a?token=outro#one');
   const changedFragment = await manager.digest('https://example.test/a?token=SEGREDO-NAO-LOGAR#two');
   assert.notEqual(first, changedQuery);
-  assert.notEqual(first, changedFragment);
+  // O fragmento não escolhe outro documento: carrosséis e âncoras que trocam #... sozinhos não podem
+  // fazer a mesma página parecer outra (bateria de páginas hostis, 1.1.53).
+  assert.equal(first, changedFragment);
   assert.doesNotMatch(JSON.stringify(await sessionArea.get(null)), /SEGREDO-NAO-LOGAR/u);
   assert.equal(sessionArea.writes.length, 1, 'the same valid session key is reused');
 });

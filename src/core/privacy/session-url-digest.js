@@ -21,7 +21,18 @@ export function createSessionHmacKeyBytes(randomBytes) {
 
 export async function createSessionUrlDigest(rawUrl, sessionKey, subtle) {
   requireCanonicalHttpUrl(rawUrl);
-  return signHmac(new TextEncoder().encode(rawUrl), sessionKey, subtle);
+  return signHmac(new TextEncoder().encode(documentAddress(rawUrl)), sessionKey, subtle);
+}
+
+// O fragmento (#...) nunca escolhe outro documento no servidor: dois endereços que só diferem nele são o
+// mesmo recurso. Carrosséis, âncoras de rolagem e SPAs antigas trocam o fragmento sozinhos a cada poucos
+// segundos, e com o fragmento dentro do digest a auditoria da página atual era interrompida como se a página
+// tivesse mudado (bateria de páginas hostis, 1.1.53). A consulta (?...) continua dentro do digest: em sites
+// antigos ela escolhe outra página (index.php?pagina=2).
+export function documentAddress(rawUrl) {
+  const parsed = new URL(rawUrl);
+  parsed.hash = '';
+  return parsed.href;
 }
 
 export async function createPixelAttemptDigest(value, sessionKey, subtle) {

@@ -38,7 +38,10 @@ import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/captur
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { testedWcagRefsForCoreRule } from '../core/report/tested-criteria.js';
-import { ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE } from '../core/report/diagnostic-policy.js';
+import {
+  ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE, ELEMENT_CAPTURE_BUDGET_MESSAGE,
+  FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE,
+} from '../core/report/diagnostic-policy.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
 import {
@@ -69,6 +72,10 @@ const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_OUTPUT_INVALID',
   'ANNOTATION_MAP_TIMEOUT',
 ]);
+// Orçamento de miniaturas por página (1.1.53). Cada miniatura passa pela porta de privacidade (várias
+// injeções) e custa ~150 ms; uma vitrine com 1.800 ocorrências levava mais de 2 min só nisso e ainda mais para
+// finalizar. As ocorrências excedentes mantêm seletor, trecho e descrição; o limite vira limitação declarada.
+export const ELEMENT_CAPTURE_BUDGET = Object.freeze({ maxThumbnails: 150, maxMilliseconds: 45_000, maxEvidenceMilliseconds: 75_000 });
 const PIXEL_BOUNDARY_INTERRUPTION = new WeakSet();
 const OBSERVED_LEGACY_RASTER_BOUNDARIES = new WeakMap();
 const PASSIVE_ATTACHED_ADAPTERS = new WeakSet();
@@ -454,6 +461,25 @@ function throwIfAborted(signal) {
 
 function rethrowAbort(_error, signal) {
   if (signal?.aborted) throwIfAborted(signal);
+}
+
+const PAGE_RESPONSIVE_BUDGET_MS = 120_000;
+const PAGE_RESPONSIVE_PROBE_MS = 3_000;
+async function waitForPageResponsive(chromeAdapter, tabId, signal) {
+  if (typeof chromeAdapter?.executeScript !== 'function') return false;
+  const deadline = Date.now() + PAGE_RESPONSIVE_BUDGET_MS;
+  while (Date.now() < deadline && !signal?.aborted) {
+    let timer;
+    const answered = await Promise.race([
+      Promise.resolve(chromeAdapter.executeScript({
+        target: { tabId, frameIds: [0] }, world: 'ISOLATED', injectImmediately: true, func: () => true,
+      })).then(results => Array.isArray(results) && results[0]?.result === true, () => false),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), PAGE_RESPONSIVE_PROBE_MS); }),
+    ]).finally(() => clearTimeout(timer));
+    if (answered) return true;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  return false;
 }
 
 function probesTimedOut(raw, normalized) {
@@ -857,6 +883,12 @@ async function runLegacyAudit({
           hash: state.fullPage.hash,
         };
         state.artifacts.push(artifact);
+        const observedHeight = (pristineMetrics?.cssContentSize || pristineMetrics?.contentSize)?.height;
+        const capturedHeight = state.fullPage?.metadata?.height;
+        if (Number.isFinite(observedHeight) && Number.isFinite(capturedHeight) && capturedHeight + 1 < observedHeight) {
+          state.fullPageCapturedHeight = capturedHeight;
+          recoverable('FULL_PAGE_CAPTURE_TRUNCATED', FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE);
+        }
       }
     } catch (error) {
       if (isPixelBoundaryInterruption(error, chromeAdapter)) {
@@ -880,6 +912,12 @@ async function runLegacyAudit({
         status: 'partial', provenance: AXE_PROVENANCE, frames: [],
         diagnostics: [{ code: 'AXE_EXECUTION_FAILED', frameId: null }],
       };
+    }
+    // O prazo do axe expira do nosso lado, mas o axe continua rodando na thread da página até terminar. Se
+    // seguirmos direto, cada comando seguinte (estrutura, ambiente) esgota o próprio prazo enquanto a página
+    // está ocupada e a coleta falha. Esperamos a página voltar a responder, com teto (1.1.53).
+    if (state.rawAxe?.diagnostics?.some(entry => entry?.code === 'AXE_TIMEOUT')) {
+      await awaitStep(() => waitForPageResponsive(chromeAdapter, tab.id, signal));
     }
 
     try {
@@ -985,6 +1023,7 @@ async function runLegacyAudit({
       state.occurrences.some(occurrence => occurrence.nodeId)) {
       recoverable('ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.');
     }
+    const thumbnailBudget = { started: Date.now(), attempted: 0, reached: false };
     for (const occurrence of state.occurrences) {
       throwIfAborted(signal);
       if (state.fullPage) occurrence.evidenceIds.push(state.fullPage.evidenceId);
@@ -1000,7 +1039,14 @@ async function runLegacyAudit({
       }
       try {
         let snippet = '';
-        try {
+        // Numa página com milhares de ocorrências, um trecho de código por elemento (uma chamada CDP cada)
+        // levava minutos. Passado o orçamento da fase, os elementos restantes ficam com seletor e descrição.
+        const evidenceBudgetSpent = Date.now() - thumbnailBudget.started >= ELEMENT_CAPTURE_BUDGET.maxEvidenceMilliseconds;
+        if (evidenceBudgetSpent && !thumbnailBudget.reached) {
+          thumbnailBudget.reached = true;
+          recoverable('ELEMENT_CAPTURE_BUDGET_REACHED', ELEMENT_CAPTURE_BUDGET_MESSAGE);
+        }
+        if (!evidenceBudgetSpent) try {
           const response = await awaitStep(() => cdp.command('DOM.getOuterHTML', { backendNodeId: node.backendNodeId }));
           snippet = sanitizeHtmlSnippetSource(typeof response?.outerHTML === 'string' ? response.outerHTML : '', {
             privateTextDescendant: hasPrivateTextAncestor(node, indexes),
@@ -1010,7 +1056,14 @@ async function runLegacyAudit({
           recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: occurrence.occurrenceId });
         }
         let thumbnail = null;
-        if (canCaptureElements && !furtherPixelCaptureSuppressed) {
+        if (canCaptureElements && !furtherPixelCaptureSuppressed && !thumbnailBudget.reached &&
+          (thumbnailBudget.attempted >= ELEMENT_CAPTURE_BUDGET.maxThumbnails ||
+            Date.now() - thumbnailBudget.started >= ELEMENT_CAPTURE_BUDGET.maxMilliseconds)) {
+          thumbnailBudget.reached = true;
+          recoverable('ELEMENT_CAPTURE_BUDGET_REACHED', ELEMENT_CAPTURE_BUDGET_MESSAGE);
+        }
+        if (canCaptureElements && !furtherPixelCaptureSuppressed && !thumbnailBudget.reached) {
+          thumbnailBudget.attempted += 1;
           try {
             thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
               ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
@@ -1063,6 +1116,14 @@ async function runLegacyAudit({
           fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
           layoutMetrics: {
             ...observedMapMetrics,
+            // Captura integral truncada pelo teto de segurança: o mapa usa só a área capturada; o que ficou
+            // abaixo dela sai do mapa como ocorrência fora da imagem (mapa parcial), sem distorcer a escala.
+            ...(Number.isFinite(state.fullPageCapturedHeight) ? {
+              cssContentSize: {
+                ...(observedMapMetrics?.cssContentSize || observedMapMetrics?.contentSize || {}),
+                height: state.fullPageCapturedHeight,
+              },
+            } : {}),
             deviceScaleFactor: Number.isFinite(observedMapMetrics?.deviceScaleFactor)
               ? observedMapMetrics.deviceScaleFactor
               : state.environment.viewport.deviceScaleFactor,

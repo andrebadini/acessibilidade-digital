@@ -4,6 +4,14 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.53 — resiliência em sites reais e páginas muito grandes.** A auditoria da página atual sempre
+termina com resultado, completo ou parcial com limitações declaradas, inclusive em iframes lazy que nunca
+carregam, páginas que nunca terminam de carregar, conteúdo que muda sozinho, protótipos adulterados e vitrines
+com dezenas de milhares de elementos. Em páginas muito grandes, a captura integral, as miniaturas e o axe-core
+complementar têm tetos declarados no relatório. A tela do relatório e o HTML exportado detalham um número
+limitado de ocorrências, enquanto o JSON-LD/EARL e o CSV trazem todas. Veja as
+[notas da 1.1.53](docs/releases/1.1.53.md).
+
 **Versão 1.1.52 — modo leigo e leitura em voz alta opcional.** A conferência de leitura por Tab ganha um
 resumo em linguagem simples: semáforo **Em uma frase**, cards **O que corrigir primeiro** com exemplo de antes e
 depois, semáforo por linha e mapa colorido, também no HTML e no CSV exportados. O **percurso guiado** mostra cada

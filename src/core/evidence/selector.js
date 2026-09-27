@@ -60,21 +60,84 @@ function scopeKey(node) {
   return `${frame}\u0000${shadow}`;
 }
 
+// Contagens por índice, calculadas uma vez. Antes, cada seletor varria TODOS os nós do índice (id único,
+// atributo semântico único) e todos os irmãos de cada ancestral: numa vitrine com dezenas de milhares de
+// nós isso era quadrático e custava minutos (bateria de páginas hostis, 1.1.53). Mesmos seletores de antes.
+const INDEX_STATS = new WeakMap();
+function indexContainer(index) {
+  if (index?.byNodeId instanceof Map) return index.byNodeId;
+  if (index?.byId && typeof index.byId === 'object') return index.byId;
+  return null;
+}
+function indexSize(container) {
+  return container instanceof Map ? container.size : Object.keys(container).length;
+}
+function indexStats(index) {
+  const container = indexContainer(index);
+  if (!container) return null;
+  const size = indexSize(container);
+  const cached = INDEX_STATS.get(container);
+  if (cached && cached.size === size) return cached;
+  const ids = new Map();
+  const semantic = new Map();
+  for (const candidate of nodesFromIndex(index)) {
+    const scope = scopeKey(candidate);
+    const id = candidate?.attributes?.id;
+    if (typeof id === 'string') ids.set(`${scope}\u0000${id}`, (ids.get(`${scope}\u0000${id}`) ?? 0) + 1);
+    for (const name of SEMANTIC_ATTRIBUTES) {
+      const value = candidate?.attributes?.[name];
+      if (typeof value !== 'string') continue;
+      const key = `${scope}\u0000${tagOf(candidate)}\u0000${name}\u0000${value}`;
+      semantic.set(key, (semantic.get(key) ?? 0) + 1);
+    }
+  }
+  const stats = { size, ids, semantic, positions: new Map() };
+  INDEX_STATS.set(container, stats);
+  return stats;
+}
+
 function idIsUnique(id, node, index) {
-  return nodesFromIndex(index).filter(candidate =>
-    candidate?.attributes?.id === id && scopeKey(candidate) === scopeKey(node)
-  ).length === 1;
+  const stats = indexStats(index);
+  if (!stats) return false;
+  return stats.ids.get(`${scopeKey(node)}\u0000${id}`) === 1;
 }
 
 function semanticSelector(node, index) {
   for (const name of SEMANTIC_ATTRIBUTES) {
     const value = typeof node?.attributes?.[name] === 'string' ? node.attributes[name].trim() : '';
     if (!value || isSensitiveKeyName(`${name} ${value}`)) continue;
-    const matches = nodesFromIndex(index).filter(candidate => scopeKey(candidate) === scopeKey(node) &&
-      tagOf(candidate) === tagOf(node) && candidate?.attributes?.[name] === value);
-    if (matches.length <= 1) return `${tagOf(node)}[${name}="${escapeCssString(value)}"]`;
+    const stats = indexStats(index);
+    const matches = stats ? stats.semantic.get(`${scopeKey(node)}\u0000${tagOf(node)}\u0000${name}\u0000${value}`) ?? 0 : 0;
+    if (matches <= 1) return `${tagOf(node)}[${name}="${escapeCssString(value)}"]`;
   }
   return '';
+}
+
+function siblingPosition(parent, current, tag, index) {
+  const stats = indexStats(index);
+  const compute = () => {
+    const positions = new Map();
+    const totals = new Map();
+    const firstIndex = new Map();
+    for (const id of parent.children) {
+      const candidate = byNodeId(index, id);
+      if (!candidate) continue;
+      const candidateTag = tagOf(candidate);
+      const position = totals.get(candidateTag) ?? 0;
+      totals.set(candidateTag, position + 1);
+      const key = String(candidate.nodeId);
+      if (!firstIndex.has(`${candidateTag}\u0000${key}`)) firstIndex.set(`${candidateTag}\u0000${key}`, position);
+      positions.set(key, positions.get(key) ?? position);
+    }
+    return { firstIndex, totals };
+  };
+  let entry = stats?.positions.get(parent);
+  if (!entry) {
+    entry = compute();
+    stats?.positions.set(parent, entry);
+  }
+  const position = entry.firstIndex.get(`${tag}\u0000${String(current.nodeId)}`);
+  return { position: position ?? -1, total: entry.totals.get(tag) ?? 0 };
 }
 
 function nthPath(node, index) {
@@ -88,11 +151,8 @@ function nthPath(node, index) {
     let part = tag;
     const parent = current.parentId == null ? null : byNodeId(index, current.parentId);
     if (parent && Array.isArray(parent.children)) {
-      const siblings = parent.children.map(id => byNodeId(index, id)).filter(candidate => candidate && tagOf(candidate) === tag);
-      if (siblings.length > 1) {
-        const position = siblings.findIndex(candidate => String(candidate.nodeId) === String(current.nodeId));
-        if (position >= 0) part += `:nth-of-type(${position + 1})`;
-      }
+      const { position, total } = siblingPosition(parent, current, tag, index);
+      if (total > 1 && position >= 0) part += `:nth-of-type(${position + 1})`;
     }
     parts.unshift(part);
     current = parent;

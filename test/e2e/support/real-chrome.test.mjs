@@ -293,6 +293,20 @@ test('Pipe CDP rejects invalid UTF-8, malformed, oversized and duplicate-id fram
   });
 });
 
+test('Pipe CDP discards one late response to an expired command but still rejects a duplicate', async () => {
+  const fixture = transportFixture({ commandTimeoutMs: 10 });
+  await assert.rejects(fixture.transport.command('Busy.page'), error => error.code === 'CDP_COMMAND_TIMEOUT');
+  fixture.readable.write('{"id":1,"result":{}}\0');
+  await new Promise(resolve => setImmediate(resolve));
+  const next = fixture.transport.command('Browser.getVersion', {}, { timeoutMs: 1_000 });
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.readable.write('{"id":2,"result":{"product":"Chrome/152"}}\0');
+  assert.deepEqual(await next, { product: 'Chrome/152' });
+  const closed = fixture.transport.closed;
+  fixture.readable.write('{"id":1,"result":{}}\0');
+  await assert.rejects(closed, error => error.code === 'CDP_RESPONSE_DUPLICATE');
+});
+
 test('Pipe CDP bounds commands and rejects pending work on idempotent close', async t => {
   const fixture = transportFixture({ commandTimeoutMs: 10 });
   await assert.rejects(fixture.transport.command('Never.responds'), error => error.code === 'CDP_COMMAND_TIMEOUT');

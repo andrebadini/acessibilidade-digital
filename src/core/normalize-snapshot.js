@@ -637,6 +637,25 @@ function normalizeColumnar(raw) {
   }
   // Mirror the runtime collector's structural selector, not its ordinal: Chrome
   // includes user-agent shadow DOM in DOMSnapshot but not in document.children.
+  // Posição :nth-of-type calculada uma vez por pai (antes era quadrática em contêineres com milhares de
+  // filhos — vitrines; bateria de páginas hostis, 1.1.53). Mesmo seletor de antes.
+  const typePositions = new Map();
+  const typePosition = (parent, child) => {
+    let entry = typePositions.get(parent);
+    if (!entry) {
+      const index = new Map();
+      const totals = new Map();
+      for (const item of childrenByRecord.get(parent)) {
+        if (item.nodeType !== 1) continue;
+        const position = (totals.get(item.tagName) ?? 0) + 1;
+        totals.set(item.tagName, position);
+        index.set(item, position);
+      }
+      entry = { index, totals };
+      typePositions.set(parent, entry);
+    }
+    return { position: entry.index.get(child) ?? 0, total: entry.totals.get(child.tagName) ?? 0 };
+  };
   const runtimeSelector = record => {
     if (record.nodeType !== 1) return '';
     if (record.attributes.id && !SENSITIVE.test(record.attributes.id)) return `#${escapeCssIdentifier(record.attributes.id)}`;
@@ -646,8 +665,8 @@ function normalizeColumnar(raw) {
       let part = current.tagName;
       const parent = byDocumentAndIndex.get(`${current.documentIndex}:${current.parentIndex}`);
       if (parent?.nodeType === 1) {
-        const siblings = childrenByRecord.get(parent).filter(child => child.nodeType === 1 && child.tagName === current.tagName);
-        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        const { position, total } = typePosition(parent, current);
+        if (total > 1) part += `:nth-of-type(${position})`;
       }
       parts.unshift(part);
       let root = parent;

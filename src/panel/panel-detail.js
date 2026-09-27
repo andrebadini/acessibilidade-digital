@@ -36,8 +36,9 @@ function copyData(value, seen = new WeakMap()) {
     const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
     const length = lengthDescriptor?.value;
     const expected = ['length', ...Array.from({ length }, (_item, index) => String(index))];
+    const keySet = new Set(keys); // O(n): includes() por índice era quadrático em listas grandes (1.1.53)
     if (!Number.isSafeInteger(length) || length < 0 || length > 100_000 ||
-      keys.length !== expected.length || expected.some(key => !keys.includes(key))) detailDenied();
+      keys.length !== expected.length || expected.some(key => !keySet.has(key))) detailDenied();
     const output = [];
     seen.set(value, output);
     for (let index = 0; index < length; index += 1) {

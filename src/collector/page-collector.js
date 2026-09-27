@@ -223,6 +223,25 @@ export function collectRuntimePageData() {
       return /[a-zA-Z0-9_-]/u.test(char) ? char : `\\${char}`;
     }).join('');
   };
+  // Posição :nth-of-type calculada uma vez por pai. Antes, cada seletor varria os irmãos de cada ancestral:
+  // numa grade com 4.000 produtos no mesmo contêiner isso era quadrático e a coleta passava de 30 s
+  // (bateria de páginas hostis, 1.1.53). O seletor produzido é idêntico.
+  const typePositions = new WeakMap();
+  const typePosition = (parent, child) => {
+    let entry = typePositions.get(parent);
+    if (!entry) {
+      const index = new Map();
+      const totals = new Map();
+      for (const item of parent.children) {
+        const position = (totals.get(item.localName) ?? 0) + 1;
+        totals.set(item.localName, position);
+        index.set(item, position);
+      }
+      entry = { index, totals };
+      typePositions.set(parent, entry);
+    }
+    return { position: entry.index.get(child) ?? 0, total: entry.totals.get(child.localName) ?? 0 };
+  };
   const selector = (element) => {
     if (element.id && !sensitive.test(element.id)) return `#${cssEscape(element.id)}`;
     const parts = [];
@@ -231,8 +250,8 @@ export function collectRuntimePageData() {
       let part = current.localName;
       const parent = current.parentElement;
       if (parent) {
-        const siblings = [...parent.children].filter(item => item.localName === current.localName);
-        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        const { position, total } = typePosition(parent, current);
+        if (total > 1) part += `:nth-of-type(${position})`;
       }
       parts.unshift(part);
       const root = current.getRootNode();

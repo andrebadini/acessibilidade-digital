@@ -48,6 +48,7 @@ export const AXE_DIAGNOSTIC_CODES = Object.freeze([
   'AXE_FRAME_RESULT_INVALID',
   'AXE_RESULTS_TRUNCATED',
   'AXE_DIAGNOSTIC_UNAVAILABLE',
+  'AXE_DOCUMENT_TOO_LARGE',
 ]);
 const AXE_DIAGNOSTIC_RANK = new Map(AXE_DIAGNOSTIC_CODES.map((code, index) => [code, index]));
 const MAX_CANONICAL_DIAGNOSTICS = 64;
@@ -429,10 +430,13 @@ async function withTimeout(operation, timeoutMs, timers) {
 
 async function executeAxe(tabId, executeScript, deadline) {
   const target = { tabId, allFrames: true };
+  // `injectImmediately`: sem ele o Chrome espera cada quadro chegar a `document_idle`, e um iframe
+  // com loading="lazy" fora da área visível (ex.: mapa no rodapé) nunca chega lá — a injeção fica
+  // pendente para sempre e a auditoria trava. O quadro principal já está completo aqui.
   let injections;
   assertDeadline(deadline);
   try {
-    injections = await executeScript({ target, world: 'ISOLATED', files: [AXE_PROVENANCE.runtimePath] });
+    injections = await executeScript({ target, world: 'ISOLATED', injectImmediately: true, files: [AXE_PROVENANCE.runtimePath] });
   } catch {
     assertDeadline(deadline);
     return { status: 'partial', provenance: AXE_PROVENANCE, frames: [], diagnostics: [diagnostic('AXE_INJECTION_FAILED')] };
@@ -443,7 +447,7 @@ async function executeAxe(tabId, executeScript, deadline) {
   let runs;
   assertDeadline(deadline);
   try {
-    runs = await executeScript({ target, world: 'ISOLATED', func: runAxeInFrame, args: [AXE_RUN_CONFIG, AXE_FRAME_PROJECTION_POLICY] });
+    runs = await executeScript({ target, world: 'ISOLATED', injectImmediately: true, func: runAxeInFrame, args: [AXE_RUN_CONFIG, AXE_FRAME_PROJECTION_POLICY] });
   } catch {
     assertDeadline(deadline);
     return { status: 'partial', provenance: AXE_PROVENANCE, frames: [], diagnostics: [diagnostic('AXE_EXECUTION_FAILED')] };
@@ -481,6 +485,52 @@ async function executeAxe(tabId, executeScript, deadline) {
   };
 }
 
+// O axe roda na thread principal da página e não pode ser interrompido depois de começar. Numa vitrine com
+// ~40 mil elementos ele segurou a página por mais de 3 min: o prazo do adaptador expirava, mas a página
+// continuava ocupada e todas as etapas seguintes (estrutura, trechos, miniaturas) esperavam por ela. Acima
+// deste tamanho o motor suplementar não é iniciado; o motor próprio avalia a página inteira normalmente e o
+// relatório declara a cobertura parcial do axe (bateria de páginas hostis, 1.1.53).
+export const AXE_MAX_DOCUMENT_ELEMENTS = 12_000;
+// Aninhamento também pesa: o custo do axe cresce muito mais que linearmente com a profundidade (medido no
+// axe-core 4.13: 100 níveis ≈ 0,6 s, 200 ≈ 6 s, 300 ≈ 30 s, 450 > 2 min). Páginas antigas com tags não
+// fechadas chegam a centenas de níveis.
+export const AXE_MAX_DOCUMENT_DEPTH = 180;
+
+function countDocumentElements() {
+  let total = 0;
+  let deepest = 0;
+  const stack = [[document, 0]];
+  try {
+    while (stack.length > 0 && total <= 1_000_000) {
+      const [node, depth] = stack.pop();
+      if (depth > deepest) deepest = depth;
+      const children = node.children ?? [];
+      for (const child of children) {
+        total += 1;
+        stack.push([child, depth + 1]);
+        const shadow = child.shadowRoot;
+        if (shadow) stack.push([shadow, depth + 1]);
+      }
+    }
+  } catch { return null; }
+  return { total, deepest };
+}
+
+async function documentTooLarge(tabId, executeScript) {
+  try {
+    let timer;
+    const results = await Promise.race([
+      executeScript({ target: { tabId, frameIds: [0] }, world: 'ISOLATED', injectImmediately: true, func: countDocumentElements }),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), 10_000); }),
+    ]).finally(() => clearTimeout(timer));
+    const measured = Array.isArray(results) && results.length === 1 ? results[0]?.result : null;
+    return (Number.isSafeInteger(measured?.total) && measured.total > AXE_MAX_DOCUMENT_ELEMENTS) ||
+      (Number.isSafeInteger(measured?.deepest) && measured.deepest > AXE_MAX_DOCUMENT_DEPTH);
+  } catch {
+    return false;
+  }
+}
+
 export async function probeAxeInTab(tabId, { executeScript = defaultExecuteScript, timeoutMs = DEFAULT_TIMEOUT_MS, timers = DEFAULT_TIMERS } = {}) {
   if (!Number.isSafeInteger(tabId) || tabId < 0) throw new TypeError('O tabId do axe é inválido.');
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new TypeError('O timeout do axe é inválido.');
@@ -502,6 +552,9 @@ export async function runAxeInTab(tabId, options = {}) {
       frames: [],
       diagnostics: [diagnostic('AXE_FEATURE_DISABLED')],
     };
+  }
+  if (await documentTooLarge(tabId, options.executeScript ?? defaultExecuteScript)) {
+    return { status: 'partial', provenance: AXE_PROVENANCE, frames: [], diagnostics: [diagnostic('AXE_DOCUMENT_TOO_LARGE')] };
   }
   return probeAxeInTab(tabId, options);
 }

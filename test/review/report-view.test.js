@@ -11,7 +11,7 @@ import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { buildReportView, projectExecutive, projectLimitationClauses, renderReportView, updateReportHighlightAction } from '../../src/review/report-view.js';
+import { buildReportView, projectExecutive, projectLimitationClauses, renderReportView, REPORT_VIEW_ISSUE_DETAIL_LIMIT, updateReportHighlightAction } from '../../src/review/report-view.js';
 import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
@@ -1669,4 +1669,24 @@ test('todo controle do documento entregue tem nome acessível, no relatório e n
     assert.ok(botoes > 0, `forPrint=${forPrint}: a varredura precisa encontrar controles, senão é vacuosa`);
     assert.deepEqual(controlesSemNome(html), [], `forPrint=${forPrint}: controles sem nome acessível`);
   }
+});
+
+test('a check with thousands of occurrences keeps a bounded number of technical blocks and highlight controls', async () => {
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash }));
+  const issue = view.issues.failed[0];
+  const total = REPORT_VIEW_ISSUE_DETAIL_LIMIT * 30;
+  const source = { ...issue.occurrences[0], outcome: 'failed' };
+  issue.occurrences = Array.from({ length: total }, (_, index) => ({ ...source, occurrenceId: `occ-massa-${index + 1}` }));
+  issue.occurrenceIds = issue.occurrences.map(value => value.occurrenceId);
+  view.issues = { failed: [issue], alerts: [], humanReview: [], passed: [] };
+  const started = performance.now();
+  const root = renderReportView({ view, document: new Document(), onExport() {}, onHighlightIntent() {} });
+  assert.ok(performance.now() - started < 20_000);
+  const article = root.querySelector('[data-report-issue]');
+  assert.equal(article.querySelectorAll('[data-report-occurrence-technical]').length, REPORT_VIEW_ISSUE_DETAIL_LIMIT);
+  assert.equal(article.querySelectorAll('[data-report-highlight-control]').length, REPORT_VIEW_ISSUE_DETAIL_LIMIT);
+  const omitted = article.querySelectorAll('[data-report-omitted]').map(node => node.getAttribute('data-report-omitted'));
+  assert.deepEqual(omitted.sort(), [String(total - REPORT_VIEW_ISSUE_DETAIL_LIMIT), String(total - REPORT_VIEW_ISSUE_DETAIL_LIMIT)]);
+  assert.match(article.textContent, /exportações JSON-LD\/EARL e CSV/u);
 });

@@ -86,7 +86,8 @@ function captureArray(value) {
   let keys;
   try { keys = Reflect.ownKeys(value); } catch { denyMerge(); }
   const expected = ['length', ...Array.from({ length: value.length }, (_v, index) => String(index))];
-  if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) denyMerge();
+  const keySet = new Set(keys); // O(n): includes() por índice era quadrático em listas grandes (1.1.53)
+  if (keys.length !== expected.length || expected.some(key => !keySet.has(key))) denyMerge();
   return Array.from({ length: value.length }, (_v, index) => {
     const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
     if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) denyMerge();

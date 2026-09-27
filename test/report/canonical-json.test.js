@@ -199,3 +199,28 @@ test('omits V1 progress rather than retaining caller-controlled messages', () =>
   ];
   for (const value of invalidProgress) assert.equal(Object.hasOwn(createAuditModel(reportInput({ progress: value })), 'progress'), false);
 });
+
+test('canonical JSON keeps the exact failure path while building it only on failure', () => {
+  const sparse = [1, 2, 3];
+  delete sparse[1];
+  const extra = [1, 2];
+  extra.label = 'x';
+  const unsafe = JSON.parse('{"a":{"__proto__":1}}');
+  const cases = [
+    [{ pages: [{ nodes: [{ size: Number.NaN }] }] }, 'Número não finito no JSON canônico em $.pages[0].nodes[0].size.'],
+    [{ list: [1, sparse] }, 'Lista esparsa no JSON canônico em $.list[1][1].'],
+    [{ list: extra }, 'Propriedade inválida em lista no JSON canônico em $.list.'],
+    [unsafe, 'Chave de protótipo proibida no JSON canônico em $.a.__proto__.'],
+    [{ when: new Date(0) }, 'Objeto não simples no JSON canônico em $.when.'],
+    [{ fn: [() => 1] }, 'Valor não JSON-safe no JSON canônico em $.fn[0].'],
+  ];
+  for (const [value, message] of cases) {
+    assert.throws(() => canonicalStringify(value), error => error instanceof TypeError && error.message === message, message);
+  }
+  const cyclic = { child: {} };
+  cyclic.child.back = cyclic;
+  assert.throws(() => canonicalStringify(cyclic), { message: 'Ciclo detectado no JSON canônico em $.child.back.' });
+  const large = { items: Array.from({ length: 5_000 }, (_, index) => ({ z: index, a: [index, `v${index}`, null, true], m: { k: 'ç' } })) };
+  assert.equal(canonicalStringify(large), canonicalStringify(structuredClone(large)));
+  assert.match(canonicalStringify(large), /^\{"items":\[\{"a":\[0,"v0",null,true\],"m":\{"k":"ç"\},"z":0\}/u);
+});

@@ -8,7 +8,7 @@ import { labelComparisonFixture } from './label-comparison-fixture.js';
 import { hashAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from './annotation-map-fixture.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
-import { renderHtmlReport } from '../../src/core/report/html.js';
+import { renderHtmlReport, REPORT_OCCURRENCE_DETAIL_LIMIT, REPORT_REVIEW_DETAIL_LIMIT } from '../../src/core/report/html.js';
 import {
   canonicalBatchRuleSummary,
   canonicalCoreRuleSummary,
@@ -409,6 +409,35 @@ test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
   assert.equal((html.match(/class="occurrence-card"/gu) || []).length, 50);
   assert.equal(html.split(dataUrl).length - 1, 1);
   assert.equal((html.match(/<use href="#evidence-image-0"[^>]*><\/use>/gu) || []).length, 51);
+});
+
+test('bounds occurrence and review detail for very large pages and points to the complete exports', () => {
+  const input = structuredClone(SAMPLE_AUDIT);
+  const sourceOccurrence = input.occurrences.find(value => value.occurrenceId === 'occ-focus-review');
+  const sourceReview = input.manualReview.find(value => value.occurrenceId === 'occ-focus-review');
+  const total = REPORT_OCCURRENCE_DETAIL_LIMIT + 200;
+  input.evidence = [input.evidence[0]];
+  input.occurrences = Array.from({ length: total }, (_, index) => ({
+    ...sourceOccurrence,
+    occurrenceId: `occ-large-${index + 1}`,
+    nodeId: `n-large-${index + 1}`,
+    target: { ...structuredClone(sourceOccurrence.target), nodeId: `n-large-${index + 1}` },
+    evidenceIds: ['ev-full'],
+    evidenceRefs: ['ev-full'],
+  }));
+  input.ruleResults.find(value => value.ruleId === 'focus-order').targets = input.occurrences.map(value => value.nodeId);
+  setCoreRuleInapplicable(input, 'focus-visible');
+  input.manualReview = input.occurrences.map(occurrence => ({ ...sourceReview, occurrenceId: occurrence.occurrenceId }));
+
+  const started = performance.now();
+  const html = renderHtmlReport(createAuditModel(input));
+  assert.ok(performance.now() - started < 20_000);
+  assert.equal((html.match(/class="occurrence-card"/gu) || []).length, REPORT_OCCURRENCE_DETAIL_LIMIT);
+  assert.match(html, new RegExp(`data-report-omitted="${total - REPORT_OCCURRENCE_DETAIL_LIMIT}"`, 'u'));
+  assert.match(html, new RegExp(`data-report-omitted="${total - REPORT_REVIEW_DETAIL_LIMIT}"`, 'u'));
+  assert.match(html, /exportações JSON-LD\/EARL e CSV desta mesma auditoria/u);
+  assert.match(html, /id="ocorrencia-1"/u);
+  assert.doesNotMatch(html, new RegExp(`id="ocorrencia-${REPORT_OCCURRENCE_DETAIL_LIMIT + 1}"`, 'u'));
 });
 
 test('keeps normative tables semantic and bounded by narrow report viewports', () => {

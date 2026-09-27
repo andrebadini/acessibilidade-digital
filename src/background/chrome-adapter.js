@@ -40,6 +40,11 @@ const MAX_HIGHLIGHT_SELECTOR_BYTES = 1_000_000;
 const CAPTURE_POLICY_KEYS = ObjectFreeze([
   'version', 'mode', 'includeQuery', 'captureFullPage', 'captureElements', 'composeAnnouncementMap',
 ]);
+const EXECUTE_SCRIPT_TIMEOUT_MS = 30_000;
+const DOCUMENT_PROOF_ATTEMPTS = 3;
+const DOCUMENT_PROOF_RETRY_MS = 120;
+const SENSITIVE_PROBE_ATTEMPTS = 4;
+const SENSITIVE_PROBE_RETRY_MS = 150;
 const ATTACHED_COPY_TARGET_KEYS = ObjectFreeze(['tabId', 'windowId', 'documentId', 'urlSessionDigest']);
 
 function exactHighlightRecord(value, expectedKeys) {
@@ -482,6 +487,19 @@ function compositionDenied() {
 
 function adapterOptionsDenied() {
   return new PrimordialTypeError('AUDIT_ADAPTER_OPTIONS_DENIED');
+}
+
+// Uma aba segue "loading" enquanto qualquer recurso não termina — um pixel de rastreio que nunca responde,
+// um stream, um long-poll — mesmo com a página inteira já montada. Nesse caso a auditoria pode prosseguir
+// sobre o documento pronto (readyState "interactive" ou "complete", sem navegação pendente); um documento
+// ainda sendo montado continua recusado. (Bateria de páginas hostis, 1.1.53.)
+function documentReadyTab(tab) {
+  if (tab?.status === 'complete') return true;
+  return tab?.status === 'loading' && (tab.pendingUrl === undefined || tab.pendingUrl === '' || tab.pendingUrl === null);
+}
+
+function readParsedDocumentHref() {
+  return globalThis.document?.readyState === 'loading' ? null : globalThis.location?.href;
 }
 
 function attachedCopySourceUnavailable() {
@@ -1111,7 +1129,16 @@ export async function resolveActiveNodeId(cdp) {
 export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
   const chromeApi = requireChromeAuditAuthority(chromeAuthority);
   const options = captureAdapterOptions(rawOptions);
-  const executeScript = options => invoke(chromeApi, chromeApi.scripting, 'executeScript', options);
+  // Rede de segurança: nenhuma injeção pode prender a auditoria para sempre. Um quadro que nunca chega a
+  // responder (thread da página ocupada, diálogo modal, iframe travado) vira erro depois do prazo, e cada
+  // chamador já degrada para resultado parcial com limitação declarada. Um resultado tardio é ignorado.
+  const executeScript = options => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('SCRIPT_INJECTION_TIMEOUT')), EXECUTE_SCRIPT_TIMEOUT_MS);
+    invoke(chromeApi, chromeApi.scripting, 'executeScript', options).then(
+      value => { clearTimeout(timer); resolve(value); },
+      error => { clearTimeout(timer); reject(error); },
+    );
+  });
   const transport = createChromeDebuggerTransport(chromeApi);
   const sessionUrlDigestManager = options.sessionUrlDigestManager;
 
@@ -1284,6 +1311,7 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       rawResults = await executeScript({
         target: { tabId: input.tabId, allFrames: true },
         world: 'ISOLATED',
+        injectImmediately: true,
         func: collectHighlightStructuralProofs,
         args: [scriptCandidates],
       });
@@ -1475,6 +1503,91 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
     }
   };
 
+  const probeDocumentIdentityOnce = async tabId => {
+    try {
+      const tab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+      if (tab?.id !== tabId || !Number.isSafeInteger(tab.windowId) || !documentReadyTab(tab) || typeof tab.url !== 'string') {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      const parsed = new URL(tab.url);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== tab.url) {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      const results = await executeScript({
+        target: { tabId, frameIds: [0] },
+        world: 'ISOLATED',
+        func: readParsedDocumentHref,
+      });
+      if (!Array.isArray(results) || results.length !== 1) throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      const [result] = results;
+      if (result?.frameId !== 0 || typeof result.documentId !== 'string' || !result.documentId || result.result !== tab.url) {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      const confirmedTab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+      if (confirmedTab?.id !== tab.id || confirmedTab.windowId !== tab.windowId ||
+        !documentReadyTab(confirmedTab) || confirmedTab.url !== tab.url) {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      const urlSessionDigest = await sessionUrlDigestManager.digest(tab.url);
+      if (typeof urlSessionDigest !== 'string' || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(urlSessionDigest)) {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      const finalResults = await executeScript({
+        target: { tabId, frameIds: [0] },
+        world: 'ISOLATED',
+        func: readParsedDocumentHref,
+      });
+      if (!Array.isArray(finalResults) || finalResults.length !== 1) throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      const [finalResult] = finalResults;
+      if (finalResult?.frameId !== 0 || finalResult.documentId !== result.documentId || finalResult.result !== tab.url) {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      const finalTab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
+      if (finalTab?.id !== tab.id || finalTab.windowId !== tab.windowId ||
+        !documentReadyTab(finalTab) || finalTab.url !== tab.url) {
+        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      }
+      return Object.freeze({ tabId, windowId: tab.windowId, documentId: result.documentId, urlSessionDigest });
+    } catch {
+      throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+    }
+  };
+
+  const probeSensitiveCaptureSignalsOnce = async (tabId, expectedMainDocumentId) => {
+    try {
+      // `injectImmediately` em toda injeção allFrames: um iframe lazy fora da tela nunca chega a
+      // `document_idle` e, sem isso, a injeção nunca responde (a auditoria travava em 0%).
+      const frames = denseHighlightArray(await executeScript({
+        target: { tabId, allFrames: true },
+        world: 'ISOLATED',
+        injectImmediately: true,
+        func: () => null,
+      }), 256);
+      if (!frames || frames.length === 0) {
+        throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+      }
+      const documentIds = [];
+      let mainFrameDocumentId = null;
+      for (const rawFrame of frames) {
+        const frame = exactHighlightRecord(rawFrame, ['frameId', 'documentId', 'result']);
+        if (!frame || !Number.isSafeInteger(frame.frameId) || frame.frameId < 0 ||
+          typeof frame.documentId !== 'string' || frame.documentId.length === 0 || frame.documentId.length > 240 ||
+          frame.result !== null || documentIds.includes(frame.documentId)) {
+          throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+        }
+        if (frame.frameId === 0) mainFrameDocumentId = frame.documentId;
+        documentIds.push(frame.documentId);
+      }
+      if (mainFrameDocumentId !== expectedMainDocumentId) {
+        // Outro documento principal não é corrida de quadros: repetir não adianta.
+        throw Object.assign(new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE'), { final: true });
+      }
+      return await probeSensitiveContextInTab(tabId, { executeScript, documentIds });
+    } catch (error) {
+      throw Object.assign(new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE'), { final: error?.final === true });
+    }
+  };
+
   const adapter = {
     manifestVersion: chromeApi.runtime.manifestVersion,
     createTab(options) { return invoke(chromeApi, chromeApi.tabs, 'create', options); },
@@ -1483,52 +1596,16 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       if (!Number.isSafeInteger(tabId) || tabId < 0 || typeof sessionUrlDigestManager?.digest !== 'function') {
         throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
       }
-      try {
-        const tab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
-        if (tab?.id !== tabId || !Number.isSafeInteger(tab.windowId) || tab.status !== 'complete' || typeof tab.url !== 'string') {
-          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
+      // A prova lê o endereço da aba e o do documento em momentos diferentes; numa página que troca o próprio
+      // endereço (fragmento de carrossel, parâmetro de rastreio) as leituras podem divergir por corrida.
+      // Repetimos a prova inteira algumas vezes antes de declarar o documento indisponível.
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await probeDocumentIdentityOnce(tabId);
+        } catch (error) {
+          if (attempt >= DOCUMENT_PROOF_ATTEMPTS) throw error;
+          await new Promise(resolve => setTimeout(resolve, DOCUMENT_PROOF_RETRY_MS));
         }
-        const parsed = new URL(tab.url);
-        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.href !== tab.url) {
-          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        }
-        const results = await executeScript({
-          target: { tabId, frameIds: [0] },
-          world: 'ISOLATED',
-          func: () => globalThis.location?.href,
-        });
-        if (!Array.isArray(results) || results.length !== 1) throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        const [result] = results;
-        if (result?.frameId !== 0 || typeof result.documentId !== 'string' || !result.documentId || result.result !== tab.url) {
-          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        }
-        const confirmedTab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
-        if (confirmedTab?.id !== tab.id || confirmedTab.windowId !== tab.windowId ||
-          confirmedTab.status !== 'complete' || confirmedTab.url !== tab.url) {
-          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        }
-        const urlSessionDigest = await sessionUrlDigestManager.digest(tab.url);
-        if (typeof urlSessionDigest !== 'string' || !/^hmac-sha256:[A-Za-z0-9_-]{43}$/u.test(urlSessionDigest)) {
-          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        }
-        const finalResults = await executeScript({
-          target: { tabId, frameIds: [0] },
-          world: 'ISOLATED',
-          func: () => globalThis.location?.href,
-        });
-        if (!Array.isArray(finalResults) || finalResults.length !== 1) throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        const [finalResult] = finalResults;
-        if (finalResult?.frameId !== 0 || finalResult.documentId !== result.documentId || finalResult.result !== tab.url) {
-          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        }
-        const finalTab = await invoke(chromeApi, chromeApi.tabs, 'get', tabId);
-        if (finalTab?.id !== tab.id || finalTab.windowId !== tab.windowId ||
-          finalTab.status !== 'complete' || finalTab.url !== tab.url) {
-          throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
-        }
-        return Object.freeze({ tabId, windowId: tab.windowId, documentId: result.documentId, urlSessionDigest });
-      } catch {
-        throw new Error('TARGET_DOCUMENT_UNAVAILABLE');
       }
     },
     async getEvidenceUrl(tabId, includeQuery = false) {
@@ -1545,30 +1622,18 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
         expectedMainDocumentId.length === 0 || expectedMainDocumentId.length > 240) {
         throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
       }
-      try {
-        const frames = denseHighlightArray(await executeScript({
-          target: { tabId, allFrames: true },
-          world: 'ISOLATED',
-          func: () => null,
-        }), 256);
-        if (!frames || frames.length === 0) {
-          throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+      // Anúncios rotativos trocam o documento do iframe a cada poucos segundos: entre inventariar os quadros
+      // e inspecioná-los, um documento pode sumir e a bijeção exigida falha. Isso não é sinal sensível — é
+      // corrida. Repetimos a prova inteira (inventário + inspeção) algumas vezes; cada tentativa continua
+      // exigindo a cobertura completa, então a garantia de privacidade é a mesma.
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await probeSensitiveCaptureSignalsOnce(tabId, expectedMainDocumentId);
+        } catch (error) {
+          if (error?.final === true || attempt >= SENSITIVE_PROBE_ATTEMPTS) throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
+          await new Promise(resolve => setTimeout(resolve, SENSITIVE_PROBE_RETRY_MS * attempt));
         }
-        const documentIds = [];
-        let mainFrameDocumentId = null;
-        for (const rawFrame of frames) {
-          const frame = exactHighlightRecord(rawFrame, ['frameId', 'documentId', 'result']);
-          if (!frame || !Number.isSafeInteger(frame.frameId) || frame.frameId < 0 ||
-            typeof frame.documentId !== 'string' || frame.documentId.length === 0 || frame.documentId.length > 240 ||
-            frame.result !== null || documentIds.includes(frame.documentId)) {
-            throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
-          }
-          if (frame.frameId === 0) mainFrameDocumentId = frame.documentId;
-          documentIds.push(frame.documentId);
-        }
-        if (mainFrameDocumentId !== expectedMainDocumentId) throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE');
-        return await probeSensitiveContextInTab(tabId, { executeScript, documentIds });
-      } catch { throw new Error('SENSITIVE_CONTEXT_PROBE_UNAVAILABLE'); }
+      }
     },
     async probePrivacySignals(tabId) {
       if (!Number.isSafeInteger(tabId) || tabId < 0) throw new Error('PRIVACY_PROBE_UNAVAILABLE');
@@ -1576,6 +1641,7 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
         const results = await executeScript({
           target: { tabId, allFrames: true },
           world: 'ISOLATED',
+          injectImmediately: true,
           func: () => {
             const selectors = [
               ['password-field', 'input[type="password"]'],
@@ -1667,14 +1733,29 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
     captureElement,
     composeAnnouncementMap,
     runDynamicProbes(tabId, cdp, options = {}) { return runDynamicProbes({ adapter: createProbeAdapter(tabId, cdp), signal: options.signal }); },
-    async getEnvironment(_tabId, cdp) {
+    async getEnvironment(tabId, cdp) {
       const [version, viewport] = await Promise.allSettled([
         cdp.command('Browser.getVersion', {}),
         cdp.command('Runtime.evaluate', { expression: '({width:innerWidth,height:innerHeight,deviceScaleFactor:devicePixelRatio})', returnByValue: true }),
       ]);
       // Browser is not exposed by chrome.debugger. Its failure must not erase
       // a successful, independent measurement from the page's Runtime domain.
-      const value = viewport.status === 'fulfilled' ? viewport.value?.result?.value : null;
+      let value = viewport.status === 'fulfilled' ? viewport.value?.result?.value : null;
+      // O Runtime.evaluate roda no mundo da página: um site pode redefinir innerWidth/devicePixelRatio (ou
+      // quebrar o próprio JS) e o ambiente viraria "indisponível". O mundo isolado da extensão vê as
+      // propriedades nativas da janela e serve de segunda fonte.
+      if (![value?.width, value?.height, value?.deviceScaleFactor].every(entry => Number.isFinite(entry) && entry > 0) &&
+        Number.isSafeInteger(tabId) && tabId >= 0) {
+        try {
+          const results = await executeScript({
+            target: { tabId, frameIds: [0] },
+            world: 'ISOLATED',
+            func: () => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio }),
+          });
+          const isolated = Array.isArray(results) && results.length === 1 && results[0]?.frameId === 0 ? results[0].result : null;
+          if (isolated && typeof isolated === 'object') value = isolated;
+        } catch { /* sem segunda fonte: o ambiente continua indisponível */ }
+      }
       return {
         chromeVersion: version.status === 'fulfilled' ? String(version.value?.product || '') : '',
         viewport: { width: value?.width ?? null, height: value?.height ?? null, deviceScaleFactor: value?.deviceScaleFactor ?? null },

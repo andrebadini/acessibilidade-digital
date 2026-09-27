@@ -26,10 +26,13 @@ test('injects pinned axe locally in every isolated frame before running its pack
   assert.deepEqual(calls[0], {
     target: { tabId: 42, allFrames: true },
     world: 'ISOLATED',
+    injectImmediately: true,
     files: ['vendor/axe/axe.js'],
   });
   assert.deepEqual(calls[1].target, { tabId: 42, allFrames: true });
   assert.equal(calls[1].world, 'ISOLATED');
+  // Um iframe lazy fora da tela nunca chega a document_idle: sem injeção imediata a chamada não volta.
+  assert.equal(calls[1].injectImmediately, true);
   assert.equal(calls[1].func, adapter.runAxeInFrame);
   assert.deepEqual(calls[1].args, [adapter.AXE_RUN_CONFIG, adapter.AXE_FRAME_PROJECTION_POLICY]);
   assert.equal(result.status, 'complete');
@@ -420,4 +423,32 @@ test('revalidates the projected frame envelope with a closed catalog and saturat
   assert.doesNotMatch(JSON.stringify(raw), /TOPSECRET|private\.invalid|remote\.invalid|<input|alice-smith|patient-hiv-positive|project-phoenix|ordinary-class|customer-form|customer-411|javascript:|document\.cookie|person@example|12345678901|a8F3kP9z|failureSummary|description|help|message|"data"/iu);
   assert.deepEqual(raw.truncation.violations, { original: 101, retained: 100, truncated: true });
   assert.deepEqual(raw.violations[0].truncation.nodes, { original: 101, retained: 100, truncated: true });
+});
+
+test('does not start axe on a document too large to finish without holding the page thread', async () => {
+  const calls = [];
+  const executeScript = async options => {
+    calls.push(options);
+    if (options.func && !options.files && calls.length === 1) return [{ frameId: 0, result: { total: adapter.AXE_MAX_DOCUMENT_ELEMENTS + 1, deepest: 12 } }];
+    throw new Error('axe must not be injected');
+  };
+  const result = await adapter.runAxeInTab(42, { executeScript, timeoutMs: 100 });
+  assert.notEqual(result.status, 'disabled', 'this guard only matters while the axe gate is enabled');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].target, { tabId: 42, frameIds: [0] });
+  assert.equal(calls[0].injectImmediately, true);
+  assert.equal(result.status, 'partial');
+  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['AXE_DOCUMENT_TOO_LARGE']);
+});
+
+test('does not start axe on a pathologically deep document either', async () => {
+  const calls = [];
+  const executeScript = async options => {
+    calls.push(options);
+    if (calls.length === 1) return [{ frameId: 0, result: { total: 1_200, deepest: adapter.AXE_MAX_DOCUMENT_DEPTH + 1 } }];
+    throw new Error('axe must not be injected');
+  };
+  const result = await adapter.runAxeInTab(42, { executeScript, timeoutMs: 100 });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(result.diagnostics.map(entry => entry.code), ['AXE_DOCUMENT_TOO_LARGE']);
 });

@@ -1958,6 +1958,7 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
   const itemById = new Map(model.itemResults.map(item => [item.id, item]));
   const itemIds = new Set(itemById.keys());
   const occurrenceById = new Map();
+  const coreTargetIdsByRule = new Map();
   for (const [occurrenceIndex, occurrence] of model.occurrences.entries()) {
     const label = `Ocorrência #${occurrenceIndex + 1}`;
     const id = requiredId(occurrence?.occurrenceId, 'occurrenceId');
@@ -2011,8 +2012,7 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
       throw new TypeError(`${label} possui identidade de alvo incoerente.`);
     }
     if (occurrence.source.engine === V1_MIGRATION_DEFAULTS.sourceEngine) {
-      const authoritativeTargets = sourceRule?.targets?.length ? sourceRule.targets : [null];
-      if (!authoritativeTargets.some(target => canonicalCoreTargetNodeId(target) === occurrence.nodeId)) {
+      if (!authoritativeCoreTargetIds(sourceRule, coreTargetIdsByRule).has(occurrence.nodeId)) {
         throw new TypeError(`${label} não corresponde a alvo autoritativo da regra core.`);
       }
     }
@@ -2088,6 +2088,16 @@ function validateEquivalenceIdentity(occurrence, artifactById) {
   if (occurrence.equivalenceKey !== expectedEquivalence || occurrence.presentationTargetKey !== expectedTarget) {
     throw new TypeError('Identidade de equivalência core incoerente.');
   }
+}
+
+// Conjunto de alvos autoritativos por regra, calculado uma vez: a busca linear por ocorrência era
+// quadrática (regra com milhares de alvos × milhares de ocorrências) — 26 s numa vitrine grande (1.1.53).
+function authoritativeCoreTargetIds(sourceRule, cache) {
+  if (cache.has(sourceRule)) return cache.get(sourceRule);
+  const targets = sourceRule?.targets?.length ? sourceRule.targets : [null];
+  const ids = new Set(targets.map(canonicalCoreTargetNodeId));
+  cache.set(sourceRule, ids);
+  return ids;
 }
 
 function canonicalCoreTargetNodeId(target) {

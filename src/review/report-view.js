@@ -55,7 +55,9 @@ const SECTION_NAV_LABELS = Object.freeze([
   'Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios',
   'Matriz ABNT', 'Metodologia e evidências',
 ]);
-const MAX_GRAPH_NODES = 200_000;
+// Mesmo teto do modelo de auditoria (audit-input.js, 1.1.53).
+const MAX_GRAPH_NODES = 20_000_000;
+const MAX_ARRAY_LENGTH = 2_000_000;
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 const EVIDENCE_FRAME_BY_ARTIFACT = new WeakMap();
 const PRINT_LISTENERS_BY_WINDOW = new WeakMap();
@@ -104,7 +106,7 @@ function copyData(root) {
     if (Array.isArray(value)) {
       if (prototype !== Array.prototype) denied();
       const length = descriptors.length?.value;
-      if (!Number.isSafeInteger(length) || length < 0 || length > 100_000 || keys.length !== length + 1) denied();
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ARRAY_LENGTH || keys.length !== length + 1) denied();
       ancestors.add(value);
       const output = [];
       for (let index = 0; index < length; index += 1) {
@@ -219,12 +221,39 @@ function untestedLimitationLabel(model, value) {
 
 function countLabel(count, singular, plural) { return `${count} ${count === 1 ? singular : plural}`; }
 
-function remediationForOccurrence(model, occurrence) {
-  const rule = model.ruleResults.find(candidate => candidate.ruleId === occurrence.source.ruleId && candidate.source?.engine === 'audita-core');
+// Índices por modelo, calculados uma vez. As buscas lineares por ocorrência (ocorrência por id, regra por
+// ocorrência, alvo por regra) eram quadráticas: com ~22 mil ocorrências o relatório levava minutos para
+// abrir (bateria de páginas hostis, 1.1.53). O resultado é o mesmo: primeira regra e primeiro alvo, na ordem.
+const MODEL_INDEXES = new WeakMap();
+function modelIndexes(model) {
+  let indexes = MODEL_INDEXES.get(model);
+  if (indexes) return indexes;
+  const occurrenceById = new Map();
+  for (const row of model.occurrences) if (!occurrenceById.has(row.occurrenceId)) occurrenceById.set(row.occurrenceId, row);
+  const coreRuleById = new Map();
+  for (const candidate of model.ruleResults) {
+    if (candidate.source?.engine === 'audita-core' && !coreRuleById.has(candidate.ruleId)) coreRuleById.set(candidate.ruleId, candidate);
+  }
+  indexes = { occurrenceById, coreRuleById, targetMessages: new Map() };
+  if (Object.isFrozen(model)) MODEL_INDEXES.set(model, indexes);
+  return indexes;
+}
+
+function remediationForOccurrence(model, occurrence, indexes = modelIndexes(model)) {
+  const rule = indexes.coreRuleById.get(occurrence.source.ruleId);
+  if (!rule) return null;
+  let messages = indexes.targetMessages.get(rule);
+  if (!messages) {
+    messages = new Map();
+    for (const candidate of rule.targets ?? []) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate) || typeof candidate.message !== 'string') continue;
+      const node = candidate.nodeId === 'document' ? null : String(candidate.nodeId);
+      if (!messages.has(node)) messages.set(node, candidate.message);
+    }
+    indexes.targetMessages.set(rule, messages);
+  }
   const occurrenceNode = occurrence.nodeId === null ? null : String(occurrence.nodeId);
-  const target = rule?.targets?.find(candidate => candidate && typeof candidate === 'object' && !Array.isArray(candidate) &&
-    typeof candidate.message === 'string' && (candidate.nodeId === 'document' ? null : String(candidate.nodeId)) === occurrenceNode);
-  return target?.message ?? null;
+  return messages.get(occurrenceNode) ?? null;
 }
 
 function plainImpact(group) {
@@ -332,9 +361,12 @@ export function projectExecutive(model, summary) {
   });
 }
 
+const OFFICIAL_ITEM_BY_ID = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
+
 function projectCard(card, group, model, decisionByOccurrence) {
-  const officialItemById = new Map(NBR17225_ITEMS.map(item => [item.id, item]));
-  const occurrences = card.occurrenceIds.map(id => model.occurrences.find(row => row.occurrenceId === id)).filter(Boolean)
+  const officialItemById = OFFICIAL_ITEM_BY_ID;
+  const indexes = modelIndexes(model);
+  const occurrences = card.occurrenceIds.map(id => indexes.occurrenceById.get(id)).filter(Boolean)
     .map(occurrence => {
       const decision = decisionByOccurrence.get(occurrence.occurrenceId) ?? null;
       const legalReference = occurrence.classification === 'requirement' ? qualifiedConsumerReference({
@@ -350,7 +382,7 @@ function projectCard(card, group, model, decisionByOccurrence) {
         evidenceRefs: [...occurrence.evidenceRefs], source: copyData(occurrence.source),
         decision: decision ? copyData(decision) : null,
         legalReference: legalReference ? copyData(legalReference) : null,
-        remediation: remediationForOccurrence(model, occurrence),
+        remediation: remediationForOccurrence(model, occurrence, indexes),
       };
     });
   const remediation = occurrences.find(occurrence => occurrence.remediation !== null)?.remediation ?? null;
@@ -576,9 +608,36 @@ function plainBlock(document, name, title) {
   return block;
 }
 
+// Páginas muito grandes (marketplaces, catálogos) produzem dezenas de milhares de ocorrências. A tela de
+// relatório mostra por verificação até este número de detalhes técnicos e controles de destaque; o conjunto
+// completo permanece no modelo e nas exportações JSON-LD/EARL e CSV.
+export const REPORT_VIEW_ISSUE_DETAIL_LIMIT = 100;
+
+const EVIDENCE_ORDER = new WeakMap();
+function evidenceOrder(evidenceById) {
+  let order = EVIDENCE_ORDER.get(evidenceById);
+  if (!order || order.size !== evidenceById.size) {
+    order = new Map();
+    let index = 0;
+    for (const key of evidenceById.keys()) order.set(key, index++);
+    EVIDENCE_ORDER.set(evidenceById, order);
+  }
+  return order;
+}
+
 function correlatedEvidence(issue, evidenceById) {
   const evidenceIds = new Set(issue.occurrences.flatMap(occurrence => occurrence.evidenceRefs));
-  return [...evidenceById.values()].filter(evidence => evidenceIds.has(evidence.evidenceId));
+  const order = evidenceOrder(evidenceById);
+  return [...evidenceIds].filter(id => evidenceById.has(id))
+    .sort((left, right) => order.get(left) - order.get(right))
+    .map(id => evidenceById.get(id));
+}
+
+function appendOmittedNote(document, parent, omitted, singular, plural) {
+  if (omitted <= 0) return;
+  const note = element(document, 'p', `Mais ${countLabel(omitted, singular, plural)} desta verificação não ${omitted === 1 ? 'é exibida' : 'são exibidas'} aqui para manter o relatório utilizável; o conjunto completo está nas exportações JSON-LD/EARL e CSV.`);
+  note.setAttribute('data-report-omitted', String(omitted));
+  parent.append(note);
 }
 
 function appendTechnicalDetails(document, article, issue, evidence) {
@@ -590,7 +649,7 @@ function appendTechnicalDetails(document, article, issue, evidence) {
     element(document, 'p', `Contexto técnico: ${issue.context ?? 'não registrado'}. Página: ${issue.pageId}.`),
     element(document, 'p', `Orientação original registrada: ${issue.plainLanguage.correction}`),
   );
-  for (const occurrence of issue.occurrences) {
+  for (const occurrence of issue.occurrences.slice(0, REPORT_VIEW_ISSUE_DETAIL_LIMIT)) {
     const block = document.createElement('section');
     block.setAttribute('data-report-occurrence-technical', occurrence.occurrenceId);
     block.append(
@@ -600,7 +659,8 @@ function appendTechnicalDetails(document, article, issue, evidence) {
     );
     details.append(block);
   }
-  for (const item of evidence) {
+  appendOmittedNote(document, details, issue.occurrences.length - REPORT_VIEW_ISSUE_DETAIL_LIMIT, 'ocorrência', 'ocorrências');
+  for (const item of evidence.slice(0, REPORT_VIEW_ISSUE_DETAIL_LIMIT)) {
     const block = document.createElement('section');
     block.setAttribute('data-report-occurrence-evidence', item.evidenceId);
     block.append(
@@ -613,6 +673,7 @@ function appendTechnicalDetails(document, article, issue, evidence) {
     );
     details.append(block);
   }
+  appendOmittedNote(document, details, evidence.length - REPORT_VIEW_ISSUE_DETAIL_LIMIT, 'evidência', 'evidências');
   article.append(details);
 }
 
@@ -670,7 +731,7 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById, 
   if (highlightOptions?.enabled === true && typeof highlightOptions.onIntent === 'function' &&
     Array.isArray(highlightOptions.occurrenceIds) && highlightOptions.occurrenceIds.length > 0) {
     const total = highlightOptions.occurrenceIds.length;
-    for (const [index, occurrenceId] of highlightOptions.occurrenceIds.entries()) {
+    for (const [index, occurrenceId] of highlightOptions.occurrenceIds.slice(0, REPORT_VIEW_ISSUE_DETAIL_LIMIT).entries()) {
       const context = `${highlightOptions.issueTitle}, página ${highlightOptions.pageId}, ocorrência ${index + 1} de ${total}`;
       const control = document.createElement('div');
       control.setAttribute('data-report-live-action', 'worker-approved');
@@ -690,6 +751,7 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById, 
       control.append(button);
       article.append(control);
     }
+    appendOmittedNote(document, article, total - REPORT_VIEW_ISSUE_DETAIL_LIMIT, 'ocorrência destacável', 'ocorrências destacáveis');
   } else {
     const fallback = element(document, 'p', evidenceOnlyMessage);
     fallback.setAttribute('data-report-live-action', 'evidence-only');
@@ -758,7 +820,8 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
   impact.append(element(document, 'p', guidance.impact)); content.append(impact);
   const observed = plainBlock(document, 'observed', 'O que foi observado');
   observed.append(element(document, 'p', guidance.observed));
-  for (const row of recordedLabelComparisons(issue.abntItemIds[0], correlatedEvidence(issue, evidenceById))) {
+  const evidence = correlatedEvidence(issue, evidenceById);
+  for (const row of recordedLabelComparisons(issue.abntItemIds[0], evidence)) {
     const comparison = element(document, 'p', row.text);
     comparison.setAttribute('data-report-label-comparison', row.evidenceId);
     observed.append(comparison);
@@ -783,7 +846,6 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
   const normative = plainBlock(document, 'normative', 'Fundamentação normativa');
   normative.append(element(document, 'p', `WCAG 2.2: ${issue.wcag.join(', ') || 'sem referência'}. ABNT NBR 17225: ${abntItemsLabel(issue.abntItemIds)}.`));
   content.append(normative);
-  const evidence = correlatedEvidence(issue, evidenceById);
   appendEvidencePreview(document, content, evidence, evidenceAnchorById, issue,
     highlightOptions && ['failed', 'humanReview'].includes(group)
       ? {

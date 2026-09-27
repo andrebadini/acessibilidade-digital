@@ -10,6 +10,8 @@ export const COMPUTED_STYLE_PROPERTIES = Object.freeze([
   'transition-duration'
 ]);
 
+const STRUCTURAL_COMMAND_OPTIONS = Object.freeze({ timeoutMs: 45_000 });
+
 function defaultExecuteScript(options) {
   if (!globalThis.chrome?.scripting?.executeScript) {
     throw new Error('chrome.scripting.executeScript não está disponível.');
@@ -47,7 +49,7 @@ export async function collectPage(cdp, tabId, options = {}) {
     computedStyles: [...COMPUTED_STYLE_PROPERTIES],
     includeDOMRects: true,
     includePaintOrder: true
-  });
+  }, STRUCTURAL_COMMAND_OPTIONS);
   const domSnapshot = { ...capturedDomSnapshot, computedStyles: [...COMPUTED_STYLE_PROPERTIES] };
   const warnings = [];
   const axNodes = [];
@@ -56,7 +58,7 @@ export async function collectPage(cdp, tabId, options = {}) {
   const framesForAx = expectedFrames.length > 0 ? expectedFrames : [{ frameId: null, url: '' }];
   for (const frame of framesForAx) {
     try {
-      const response = await cdp.command('Accessibility.getFullAXTree', frame.frameId === null ? {} : { frameId: frame.frameId });
+      const response = await cdp.command('Accessibility.getFullAXTree', frame.frameId === null ? {} : { frameId: frame.frameId }, STRUCTURAL_COMMAND_OPTIONS);
       const nodes = Array.isArray(response?.nodes) ? response.nodes : [];
       axNodes.push(...nodes);
       axFrames.push({ frameId: frame.frameId, nodes });
@@ -71,9 +73,13 @@ export async function collectPage(cdp, tabId, options = {}) {
   let pageData = [];
   const executeScript = options.executeScript ?? defaultExecuteScript;
   try {
+    // `injectImmediately`: sem ele o Chrome espera cada quadro chegar a `document_idle`, e um iframe
+    // com loading="lazy" fora da área visível (ex.: mapa no rodapé) nunca chega lá — a injeção fica
+    // pendente para sempre e a auditoria trava. O quadro principal já está completo aqui.
     const results = await executeScript({
       target: { tabId, allFrames: true },
       world: 'ISOLATED',
+      injectImmediately: true,
       func: collectRuntimePageData
     });
     const extracted = safeScriptEntries(results);

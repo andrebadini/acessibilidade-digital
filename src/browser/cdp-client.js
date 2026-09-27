@@ -45,12 +45,17 @@ export function createCdpClient({ attach, detach, send, commandTimeoutMs = DEFAU
         connection = record;
       });
     },
-    command(method, params) {
+    command(method, params, options = {}) {
+      // Comandos estruturais (instantâneo do DOM, árvore de acessibilidade) podem pedir um prazo maior:
+      // numa página com dezenas de milhares de nós eles levam vários segundos, e estourar o prazo padrão
+      // tornava a coleta inteira fatal (1.1.53). Nunca menor que o padrão, nunca maior que 60 s.
+      const requested = Number.isFinite(options?.timeoutMs) ? options.timeoutMs : commandTimeoutMs;
+      const timeoutMs = Math.min(60_000, Math.max(commandTimeoutMs, requested));
       return enqueue(async () => {
         if (!connection) throw new Error('O CDP não está conectado.');
         ensureUsable();
         if (typeof method !== 'string' || !method) throw new TypeError('O método CDP é inválido.');
-        return withTimeout(() => send(connection.target, method, params), commandTimeoutMs);
+        return withTimeout(() => send(connection.target, method, params), timeoutMs);
       });
     },
     disconnect() {

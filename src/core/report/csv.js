@@ -17,7 +17,9 @@ export const OCCURRENCE_CSV_COLUMNS = Object.freeze([
 ]);
 
 const MAX_CELL_CODE_POINTS = 32_000;
-const MAX_CSV_BYTES = 8 * 1024 * 1024;
+// ~760 bytes por ocorrência: uma vitrine com 22 mil ocorrências gera ~17 MB. O teto antigo (8 MB) deixava
+// páginas grandes sem CSV; 64 MB cobre ~85 mil ocorrências e continua limitando entradas hostis (1.1.53).
+const MAX_CSV_BYTES = 64 * 1024 * 1024;
 const MAX_TOKEN_CODE_POINTS = 240;
 const MAX_LIST_ITEMS = 256;
 const TRUNCATION_MARKER = '…[truncated]';

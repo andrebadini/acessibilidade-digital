@@ -71,7 +71,8 @@ function copyPlain(value, seen = new WeakSet()) {
     const length = lengthDescriptor?.value;
     if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') || !Number.isSafeInteger(length) || length < 0) return null;
     const expected = ['length', ...Array.from({ length }, (_v, index) => String(index))];
-    if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) return null;
+    const keySet = new Set(keys); // O(n): includes() por índice era quadrático em listas grandes (1.1.53)
+    if (keys.length !== expected.length || expected.some(key => !keySet.has(key))) return null;
     const copy = [];
     for (let index = 0; index < length; index += 1) {
       const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
@@ -113,7 +114,8 @@ function snapshotModel(value, seen = new WeakMap()) {
     const length = lengthDescriptor?.value;
     if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value') || !Number.isSafeInteger(length) || length < 0) return null;
     const expected = ['length', ...Array.from({ length }, (_v, index) => String(index))];
-    if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) return null;
+    const keySet = new Set(keys); // O(n): includes() por índice era quadrático em listas grandes (1.1.53)
+    if (keys.length !== expected.length || expected.some(key => !keySet.has(key))) return null;
     const copy = [];
     seen.set(value, copy);
     for (let index = 0; index < length; index += 1) {

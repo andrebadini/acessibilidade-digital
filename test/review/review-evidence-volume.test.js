@@ -7,7 +7,8 @@ import { accessibilityGuidance } from '../../src/core/report/plain-language-guid
 
 // Execute the actual form renderer without starting its Chrome session bootstrap.
 const source = await readFile(new URL('../../src/review/review.js', import.meta.url), 'utf8');
-const renderSource = source.slice(source.indexOf('function renderCard(entry)'), source.indexOf('\nasync function start()'));
+const lookupSource = source.slice(source.indexOf('const MODEL_LOOKUPS'), source.indexOf('function evidenceFor('));
+const renderSource = lookupSource + source.slice(source.indexOf('function renderCard(entry)'), source.indexOf('\nasync function start()'));
 class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this.textContent = ''; }
   append(...children) { this.children.push(...children); }

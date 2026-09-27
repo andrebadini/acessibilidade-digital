@@ -48,7 +48,8 @@ function copyGraph(root) {
       const length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
       if (!Number.isSafeInteger(length) || length < 0 || length > MAX_ARRAY) graphDenied('array-length');
       const expected = ['length', ...Array.from({ length }, (_entry, index) => String(index))];
-      if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) graphDenied('array-shape');
+      const keySet = new Set(keys); // O(n): includes() por índice era quadrático em listas grandes (1.1.53)
+      if (keys.length !== expected.length || expected.some(key => !keySet.has(key))) graphDenied('array-shape');
       const result = [];
       for (let index = 0; index < length; index += 1) {
         const descriptor = Object.getOwnPropertyDescriptor(value, String(index));

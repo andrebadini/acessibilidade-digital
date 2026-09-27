@@ -92,6 +92,7 @@ export function renderHtmlReport(input, options = {}) {
   const decisionByOccurrence = new Map(model.reviewDecisions.map(decision => [decision.occurrenceId, decision]));
   const imageRegistry = createImageRegistry(model.evidence);
   const orderedOccurrences = prioritizeOccurrences(model.occurrences, model.pages, decisionByOccurrence);
+  const shownOccurrences = orderedOccurrences.slice(0, REPORT_OCCURRENCE_DETAIL_LIMIT);
   const csp = [
     "default-src 'none'", "img-src data:", `style-src '${REPORT_CSS_CSP_HASH}'`, `script-src '${REPORT_SCRIPT_CSP_HASH}'`,
     "connect-src 'none'", "object-src 'none'", "frame-src 'none'", "font-src 'none'", "media-src 'none'",
@@ -117,10 +118,10 @@ ${header()}
 ${sectionNavigation()}
 ${scopeSection(model)}
 ${executiveSummary(model, decisionByOccurrence)}
-${filterSection(model, orderedOccurrences)}
-${occurrenceSection(orderedOccurrences, { itemById, pageById, ruleById, artifactById, reviewByOccurrence, decisionByOccurrence, imageByEvidenceId: imageRegistry.byEvidenceId })}
+${filterSection(model, shownOccurrences)}
+${occurrenceSection(shownOccurrences, { itemById, pageById, ruleById, artifactById, reviewByOccurrence, decisionByOccurrence, imageByEvidenceId: imageRegistry.byEvidenceId }, orderedOccurrences.length)}
 ${announcementMaps(model, imageRegistry.byEvidenceId)}
-${humanReviewSection(model, itemById, decisionByOccurrence, orderedOccurrences)}
+${humanReviewSection(model, itemById, decisionByOccurrence, shownOccurrences)}
 ${widgetInventory(model)}
 ${itemMatrix(model)}
 ${evidenceAnnex(model, imageRegistry.byEvidenceId)}
@@ -444,12 +445,24 @@ function selectFilter(id, label, options) {
   return `<div class="filter-field"><label for="${id}">${escapeHtml(label)}</label><select id="${id}" name="${id}" disabled>${options.map(([value, text]) => `<option value="${escapeHtml(value)}">${escapeHtml(text)}</option>`).join('')}</select></div>`;
 }
 
-function occurrenceSection(occurrences, context) {
+// Teto de detalhamento do HTML/PDF (1.1.53). Uma vitrine com 1.500 produtos gerava 22 mil ocorrências e
+// um HTML de 100 MB que nem o navegador nem a impressão em PDF conseguiam abrir. O modelo, o JSON-LD/EARL e
+// o CSV continuam com todas as ocorrências; o HTML detalha as primeiras, na ordem de prioridade (falhas
+// antes de revisões), e diz quantas ficaram de fora e onde encontrá-las.
+export const REPORT_OCCURRENCE_DETAIL_LIMIT = 1_000;
+export const REPORT_REVIEW_DETAIL_LIMIT = 500;
+
+function omittedNote(omitted, singular, plural) {
+  return `<p class="coverage-notice" data-report-omitted="${omitted}"><strong>${escapeHtml(omitted.toLocaleString('pt-BR'))} ${escapeHtml(omitted === 1 ? singular : plural)} não ${omitted === 1 ? 'é detalhada' : 'são detalhadas'} neste relatório</strong> para mantê-lo utilizável. A lista completa, com seletor, trecho e evidência de cada ocorrência, está nas exportações JSON-LD/EARL e CSV desta mesma auditoria.</p>`;
+}
+
+function occurrenceSection(occurrences, context, total = occurrences.length) {
   const content = occurrences.length
     ? occurrences.map((occurrence, index) => occurrenceCard(occurrence, index, context)).join('')
     : '<p>Nenhuma ocorrência foi registrada no escopo observado.</p>';
+  const omitted = total - occurrences.length;
   return `<section id="ocorrencias" class="major-section" aria-labelledby="ocorrencias-titulo"><h2 id="ocorrencias-titulo">Ocorrências priorizadas</h2>
-<p class="section-intro">Falhas técnicas aparecem antes de revisões humanas; impacto, página e ordem original resolvem os demais empates.</p><div class="occurrence-list">${content}</div></section>`;
+<p class="section-intro">Falhas técnicas aparecem antes de revisões humanas; impacto, página e ordem original resolvem os demais empates.</p>${omitted > 0 ? omittedNote(omitted, 'ocorrência', 'ocorrências') : ''}<div class="occurrence-list">${content}</div></section>`;
 }
 
 function labelComparisonsHtml(itemId, evidence) {
@@ -606,13 +619,17 @@ function humanReviewSection(model, itemById, decisionByOccurrence, orderedOccurr
   const pending = model.manualReview.filter(entry => entry.status === 'unanswered').length;
   const completed = model.manualReview.filter(entry => entry.status === 'answered').length;
   const reviewSummary = `${pending} ${pending === 1 ? 'pendente' : 'pendentes'}; ${completed} ${completed === 1 ? 'concluída' : 'concluídas'}.`;
-  const cards = model.manualReview.map((entry, index) => {
+  const occurrenceById = new Map(model.occurrences.map(value => [value.occurrenceId, value]));
+  const anchorByOccurrence = new Map(orderedOccurrences.map((value, index) => [value.occurrenceId, `ocorrencia-${index + 1}`]));
+  const reviewEntries = model.manualReview.slice(0, REPORT_REVIEW_DETAIL_LIMIT);
+  const omittedReviews = model.manualReview.length - reviewEntries.length;
+  const cards = reviewEntries.map((entry, index) => {
     const item = itemById.get(entry.itemId);
-    const occurrence = model.occurrences.find(value => value.occurrenceId === entry.occurrenceId);
+    const occurrence = occurrenceById.get(entry.occurrenceId);
     const decision = decisionByOccurrence.get(entry.occurrenceId);
-    return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p><p class="human-review-note"><strong>Nota registrada:</strong> ${escapeHtml(decision.note || 'Nenhuma nota registrada.')}</p>` : ''}<p><a href="#${escapeHtml(occurrenceAnchor(orderedOccurrences, entry.occurrenceId))}">Ir para a ocorrência relacionada</a></p></article>`;
+    return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p><p class="human-review-note"><strong>Nota registrada:</strong> ${escapeHtml(decision.note || 'Nenhuma nota registrada.')}</p>` : ''}<p><a href="#${escapeHtml(anchorByOccurrence.get(entry.occurrenceId) ?? 'ocorrencias')}">Ir para a ocorrência relacionada</a></p></article>`;
   }).join('');
-  return `<section id="revisao" class="major-section" aria-labelledby="revisao-titulo"><h2 id="revisao-titulo">Revisão humana</h2><p>${escapeHtml(reviewSummary)} Respostas pendentes nunca são tratadas como conformidade. Resultado do motor e decisão humana permanecem separados.</p><div class="review-list">${cards || '<p>Nenhuma revisão humana foi registrada para este escopo.</p>'}</div></section>`;
+  return `<section id="revisao" class="major-section" aria-labelledby="revisao-titulo"><h2 id="revisao-titulo">Revisão humana</h2><p>${escapeHtml(reviewSummary)} Respostas pendentes nunca são tratadas como conformidade. Resultado do motor e decisão humana permanecem separados.</p>${omittedReviews > 0 ? omittedNote(omittedReviews, 'revisão humana', 'revisões humanas') : ''}<div class="review-list">${cards || '<p>Nenhuma revisão humana foi registrada para este escopo.</p>'}</div></section>`;
 }
 
 function widgetInventory(model) {
@@ -641,8 +658,19 @@ function evidenceAnnex(model, imageByEvidenceId) {
   }).join('')}</section>`;
 }
 
+const EVIDENCE_POSITIONS = new WeakMap();
+function evidencePosition(allEvidence, evidenceId) {
+  let positions = EVIDENCE_POSITIONS.get(allEvidence);
+  if (!positions) {
+    positions = new Map();
+    allEvidence.forEach((value, index) => { if (!positions.has(value.evidenceId)) positions.set(value.evidenceId, index); });
+    if (Object.isFrozen(allEvidence)) EVIDENCE_POSITIONS.set(allEvidence, positions);
+  }
+  return positions.get(evidenceId) ?? -1;
+}
+
 function evidenceCard(artifact, allEvidence, imageByEvidenceId, pages) {
-  const index = allEvidence.findIndex(value => value.evidenceId === artifact.evidenceId);
+  const index = evidencePosition(allEvidence, artifact.evidenceId);
   const provenance = evidenceProvenanceHtml({ ...artifact, provenance: projectEvidenceProvenance(artifact, pages) });
   if (artifact.kind === 'announcement-map') {
     const coverage = `${artifact.counts.annotated}/${artifact.counts.eligible} elegíveis anotados; ${artifact.segments.length} segmentos.`;
@@ -765,13 +793,16 @@ function confidenceLabel(confidence) {
   return ({ high: 'Alta', medium: 'Média', low: 'Baixa' })[confidence] || 'Não informada';
 }
 
-function occurrenceAnchor(occurrences, occurrenceId) {
-  const index = occurrences.findIndex(value => value.occurrenceId === occurrenceId);
-  return index >= 0 ? `ocorrencia-${index + 1}` : 'ocorrencias';
-}
-
+const EVIDENCE_INDEXES = new WeakMap();
 function evidenceIndex(artifactById, evidenceId) {
-  return [...artifactById.keys()].indexOf(evidenceId);
+  let positions = EVIDENCE_INDEXES.get(artifactById);
+  if (!positions || positions.size !== artifactById.size) {
+    positions = new Map();
+    let index = 0;
+    for (const key of artifactById.keys()) positions.set(key, index++);
+    EVIDENCE_INDEXES.set(artifactById, positions);
+  }
+  return positions.get(evidenceId) ?? -1;
 }
 
 function accessibility(value) {

@@ -78,3 +78,21 @@ test('a stable id evidence selector remains usable by the closed live-highlight 
   assert.equal(parsed.segments[0].tag, 'button');
   assert.equal(parsed.segments[0].id, 'memory-only-unnamed');
 });
+
+test('selectors for thousands of sibling products stay linear and keep their exact nth-of-type path (1.1.53)', () => {
+  const count = 6000;
+  const parent = { nodeId: 'grid', tagName: 'section', attributes: {}, parentId: null, children: [] };
+  const cards = Array.from({ length: count }, (_, position) => ({
+    nodeId: `card-${position}`, tagName: 'article', attributes: { 'aria-label': position % 2 ? 'Produto' : `Produto ${position}` },
+    parentId: 'grid', children: [],
+  }));
+  parent.children = cards.map(card => card.nodeId);
+  const all = [parent, ...cards];
+  const shared = index(all);
+  const started = Date.now();
+  const selectors = cards.map(card => buildStableSelector(card, shared).css);
+  assert.ok(Date.now() - started < 5_000, `levou ${Date.now() - started} ms`);
+  assert.equal(selectors[0], 'article[aria-label="Produto 0"]');
+  assert.equal(selectors[1], 'section > article:nth-of-type(2)', 'a repeated label falls back to the structural path');
+  assert.equal(selectors[count - 1], `section > article:nth-of-type(${count})`);
+});

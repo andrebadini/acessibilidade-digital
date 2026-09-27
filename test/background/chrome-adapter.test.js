@@ -1335,8 +1335,10 @@ test('proves a fresh top document identity without returning its raw URL', async
 test('probes sensitive capture signals only in the exact enumerated documents', async () => {
   const fake = chromeFake();
   const scriptTargets = [];
+  const immediate = [];
   fake.chromeApi.scripting.executeScript = async options => {
     scriptTargets.push(options.target);
+    immediate.push(options.injectImmediately);
     if (options.target.allFrames === true) {
       return [
         { frameId: 0, documentId: 'document-main', result: null },
@@ -1368,6 +1370,8 @@ test('probes sensitive capture signals only in the exact enumerated documents', 
     { tabId: 17, allFrames: true },
     { tabId: 17, documentIds: ['document-main', 'document-child'] },
   ]);
+  // Iframe lazy fora da tela (portal institucional real, 1.1.52): sem injeção imediata a chamada nunca volta e a auditoria trava.
+  assert.deepEqual(immediate, [true, true]);
 });
 
 test('rejects a hostile document enumeration without reading its array values', async () => {
@@ -1601,7 +1605,12 @@ test('rejects navigation or document replacement while HMAC digest is pending', 
   while (!digestStarted) await new Promise(resolve => setImmediate(resolve));
   current = { url: 'https://example.test/after', documentId: 'document-after', status: 'loading' };
   releaseDigest();
-  await assert.rejects(() => pending, /TARGET_DOCUMENT_UNAVAILABLE/u);
+  // A prova nunca mistura o digest do endereço anterior com o documento novo. Desde a 1.1.53 ela é repetida
+  // em caso de corrida: ou rejeita, ou devolve uma prova inteira do documento novo (que o chamador compara
+  // com o alvo e trata como página mudada).
+  const outcome = await pending.then(value => value, error => error);
+  if (outcome instanceof Error) assert.match(outcome.message, /TARGET_DOCUMENT_UNAVAILABLE/u);
+  else assert.equal(outcome.documentId, 'document-after');
 });
 
 test('snapshots an attached source URL only through the opaque worker contract without mutating the tab', async () => {
@@ -2178,4 +2187,56 @@ test('rejects hostile highlight adapter inputs before invoking Chrome APIs', asy
   assert.deepEqual(await adapter.injectHighlight(hostile), { ok: false, reason: 'invalid-input' });
   assert.equal(getterCalls, 0);
   assert.equal(fake.calls.filter(call => call[0] === 'script-options').length, scriptCallsBefore);
+});
+
+// Bateria de páginas hostis (1.1.53).
+test('reads the viewport from the isolated world when the page redefines its own window metrics', async () => {
+  const fake = chromeFake();
+  const targets = [];
+  fake.chromeApi.scripting.executeScript = async options => {
+    targets.push(options.target);
+    return [{ frameId: 0, documentId: 'document-a', result: { width: 1280, height: 720, deviceScaleFactor: 2 } }];
+  };
+  const adapter = createChromeAdapter(fake.chromeApi);
+  const environment = await adapter.getEnvironment(17, {
+    async command(method) {
+      if (method === 'Browser.getVersion') return { product: 'Chrome/152.0.0.0' };
+      return { result: { value: { width: 0, height: 720, deviceScaleFactor: 2 } } };
+    },
+  });
+  assert.deepEqual(environment.viewport, { width: 1280, height: 720, deviceScaleFactor: 2 });
+  assert.deepEqual(targets, [{ tabId: 17, frameIds: [0] }]);
+});
+
+test('repeats the sensitive probe when a rotating ad frame replaces its document between inventory and inspection', async () => {
+  const fake = chromeFake();
+  let inventories = 0;
+  fake.chromeApi.scripting.executeScript = async options => {
+    if (options.target.allFrames === true) {
+      inventories += 1;
+      return [
+        { frameId: 0, documentId: 'document-main', result: null },
+        { frameId: 3, documentId: `ad-document-${inventories}`, result: null },
+      ];
+    }
+    // A primeira inspeção chega depois da rotação: o documento do anúncio já é outro.
+    const adDocument = inventories === 1 ? 'ad-document-rotated' : 'ad-document-2';
+    return [
+      { frameId: 0, documentId: 'document-main', result: { password: false, otp: false, payment: false, privateMarker: false } },
+      { frameId: 3, documentId: adDocument, result: { password: false, otp: false, payment: false, privateMarker: false } },
+    ];
+  };
+  const signals = await createChromeAdapter(fake.chromeApi).probeSensitiveCaptureSignals(17, 'document-main');
+  assert.equal(inventories, 2);
+  assert.deepEqual(signals, { version: 'SensitiveCaptureSignalsV1', detected: false, categories: [] });
+});
+
+test('an injection that never answers becomes an error instead of holding the audit forever', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fake = chromeFake();
+  fake.chromeApi.scripting.executeScript = () => new Promise(() => {});
+  const adapter = createChromeAdapter(fake.chromeApi);
+  const pending = adapter.executeScript({ target: { tabId: 17, frameIds: [0] }, func: () => true });
+  t.mock.timers.tick(30_000);
+  await assert.rejects(pending, /SCRIPT_INJECTION_TIMEOUT/u);
 });

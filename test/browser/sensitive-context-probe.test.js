@@ -87,6 +87,7 @@ test('unions sensitive frame results and uses an exact isolated document target'
   });
   assert.deepEqual(calls[0].target, { tabId: 7, documentIds: ['doc-top', 'doc-child'] });
   assert.equal(calls[0].world, 'ISOLATED');
+  assert.equal(calls[0].injectImmediately, true);
   assert.equal(typeof calls[0].func, 'function');
   assert.deepEqual(signals.categories, ['password', 'otp', 'private-marker']);
 });

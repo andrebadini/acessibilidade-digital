@@ -151,7 +151,9 @@ function activeTab(value, windowId) {
   const status = own(tab, 'status');
   const url = own(tab, 'url');
   const pending = optionalOwnData(tab, 'pendingUrl');
-  return safeChromeId(id) && tabWindow === windowId && status === 'complete' && canonicalHttpUrl(url) &&
+  // "loading" sem navegação pendente é aceito aqui: um recurso de terceiros que nunca termina não impede a
+  // auditoria. A prova de documento (probeDocumentIdentity) ainda exige o documento já montado.
+  return safeChromeId(id) && tabWindow === windowId && (status === 'complete' || status === 'loading') && canonicalHttpUrl(url) &&
     !pending.invalid && (!pending.found || pending.value === null || pending.value === '') ? { id, windowId } : null;
 }
 

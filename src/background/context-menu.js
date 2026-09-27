@@ -58,7 +58,7 @@ export function parseContextMenuClick(info, tab) {
   const pendingUrl = ownData(tab, 'pendingUrl');
   if (!menuItemId.found || menuItemId.value !== CONTEXT_MENU_IDS.page || !frameId.found || frameId.value !== 0 ||
     !tabId.found || !safeChromeId(tabId.value) || !windowId.found || !safeChromeId(windowId.value) ||
-    !status.found || status.value !== 'complete' || !url.found || !canonicalHttpUrl(url.value) ||
+    !status.found || !['complete', 'loading'].includes(status.value) || !url.found || !canonicalHttpUrl(url.value) ||
     pendingUrl.invalid || (pendingUrl.found && pendingUrl.value !== null && pendingUrl.value !== '')) return null;
   return Object.freeze({ tabId: tabId.value, windowId: windowId.value });
 }

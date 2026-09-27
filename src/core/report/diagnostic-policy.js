@@ -15,6 +15,14 @@ export const ATTACHED_COPY_RELOADED_MESSAGE =
 export const DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE =
   'A página foi observada sem navegação e sem alterar foco, rolagem ou o layout final. Nas verificações com imagens, a captura de elementos pode redimensionar a área de captura por um instante e restaurá-la; páginas que reagem a redimensionamento podem registrar essa mudança. Testes interativos de teclado, redimensionamento e movimento não foram executados; revise esses aspectos manualmente.';
 
+// Páginas hostis (1.1.53): vitrines e catálogos com dezenas de milhares de px de altura ou milhares de
+// elementos. A auditoria continua completa nas regras; o que tem teto é só a quantidade de pixels, para a
+// captura não travar o navegador nem estourar o armazenamento.
+export const FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE =
+  'A página é mais alta que o limite seguro de captura; a captura integral e o mapa visual cobrem apenas a parte superior. Todas as regras continuaram avaliando a página inteira.';
+export const ELEMENT_CAPTURE_BUDGET_MESSAGE =
+  'O limite de evidências por página foi atingido; as demais ocorrências continuam no relatório com seletor e descrição, sem miniatura própria e, em páginas muito grandes, sem trecho de código.';
+
 export const EXPORT_ISSUE_MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
   REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
@@ -92,6 +100,8 @@ const technicalPageDiagnostics = [
   page({ code: 'DYNAMIC_PROBES_OMITTED_PASSIVE', message: DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE,
     statuses: ALL_TERMINAL_STATUSES, fact: 'dynamic-probes-omitted-passive', group: 'dynamic-probes', causePartial: false }),
   page({ code: 'AXE_EXECUTION_FAILED', message: 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.', fact: 'axe-partial', group: 'axe' }),
+  page({ code: 'FULL_PAGE_CAPTURE_TRUNCATED', message: FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE, fact: 'full-page-truncated' }),
+  page({ code: 'ELEMENT_CAPTURE_BUDGET_REACHED', message: ELEMENT_CAPTURE_BUDGET_MESSAGE, fact: 'element-capture-budget' }),
   page({ code: 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', message: 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.', fact: 'element-capture-skipped' }),
   page({ code: 'ANNOTATION_MAP_PARTIAL', message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.', fact: 'annotation-partial', group: 'annotation' }),
   page({ code: 'CDP_DISCONNECT_FAILED', message: 'A sessão de depuração não pôde ser encerrada automaticamente.', fact: 'cleanup-cdp', timestampScope: 'root' }),

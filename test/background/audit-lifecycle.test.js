@@ -274,3 +274,41 @@ test('a handled paused-pixel invalidation never falls through to an independent 
     'liquidator', { tabId: 17, windowId: null, reasonCode: 'TAB_LOADING' },
   ]]);
 });
+
+test('a fragment-only change of the same document never aborts the audit or resets the panel', async () => {
+  const updated = event();
+  const removed = event();
+  const windows = event();
+  const calls = [];
+  const runtime = Object.freeze({
+    authority: { async invalidateForTab() {}, async invalidateForWindow() {} },
+    auditStarter: { async abortAttachedAuditForTarget(value) { calls.push(value.reasonCode); return { aborted: false, auditId: null }; } },
+    chromeAdapter: Object.freeze({}),
+  });
+  createAuditLifecycle({
+    chromeApi: {
+      tabs: { onUpdated: updated, onRemoved: removed, query: async () => [{ id: 5, url: 'https://loja.test/vitrine?cat=1' }] },
+      windows: { onRemoved: windows },
+    },
+    getReadyRuntime: () => Promise.resolve(runtime),
+  }).register();
+  await tick();
+  // Carrossel trocando o fragmento sozinho, a partir da semente.
+  updated.emit(5, { status: 'loading', url: 'https://loja.test/vitrine?cat=1#slide-2' }, {});
+  updated.emit(5, { status: 'complete' }, {});
+  updated.emit(5, { status: 'loading', url: 'https://loja.test/vitrine?cat=1#slide-3' }, {});
+  await tick();
+  assert.deepEqual(calls, []);
+  // Outra consulta é outro endereço; recarregar (loading sem url) continua invalidando.
+  updated.emit(5, { status: 'loading', url: 'https://loja.test/vitrine?cat=2' }, {});
+  await tick();
+  updated.emit(5, { status: 'loading' }, {});
+  await tick();
+  assert.deepEqual(calls, ['TAB_LOADING', 'TAB_LOADING']);
+  // Aba sem semente: a primeira mudança invalida (conservador), as trocas de fragmento seguintes não.
+  updated.emit(6, { status: 'loading', url: 'https://outra.test/' }, {});
+  await tick();
+  updated.emit(6, { status: 'loading', url: 'https://outra.test/#topo' }, {});
+  await tick();
+  assert.deepEqual(calls, ['TAB_LOADING', 'TAB_LOADING', 'TAB_LOADING']);
+});

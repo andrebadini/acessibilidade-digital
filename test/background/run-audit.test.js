@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import {
+  ELEMENT_CAPTURE_BUDGET,
   canonicalTime,
   createOwnershipId,
   runAttachedAuditExecution,
@@ -4600,4 +4601,69 @@ test('does not let a stalled progress transport block the terminal audit model',
   assert.ok(model, 'a telemetria de progresso pendente não pode impedir o relatório');
   assert.equal(model.progress.at(-1)?.percent, 100);
   assert.ok(['complete', 'partial'].includes(model.session.status));
+});
+
+// Bateria de páginas hostis (1.1.53): o teto de pixels nunca derruba a auditoria; vira limitação declarada.
+async function attachedFullEvidence(adapter, auditId) {
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  adapter.probeDocumentIdentity = async tabId => ({ tabId, windowId: 9, documentId: 'document-a', urlSessionDigest: TEST_DIGEST });
+  return runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, [], { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+}
+
+test('a very tall page keeps a capped pristine capture, declares the truncation and maps only the captured area', async () => {
+  const page = rawPage();
+  page.layoutMetrics = { cssContentSize: { width: 800, height: 157_000 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  const clips = [];
+  let mapInput = null;
+  const adapter = fakeAdapter({
+    page, trackCaptureCalls: true,
+    composeMap: async input => { mapInput = input; return createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }); },
+  });
+  const original = adapter.connectCdp;
+  adapter.connectCdp = async (...args) => {
+    const cdp = await original(...args);
+    return { ...cdp, async command(method, params) {
+      if (method === 'Page.captureScreenshot') clips.push(params.clip);
+      return cdp.command(method, params);
+    } };
+  };
+  const result = await attachedFullEvidence(adapter, 'audit-tall-page');
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(result.model.session.status, 'partial');
+  assert.equal(clips[0].height, 16_384, 'the pristine capture never exceeds the safe device height');
+  const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
+  assert.ok(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'));
+  assert.equal(codes.includes('FULL_PAGE_CAPTURE_FAILED'), false);
+  assert.equal(result.model.evidence.find(artifact => artifact.kind === 'full-page').metadata.height, 16_384);
+  assert.equal(mapInput.layoutMetrics.cssContentSize.height, 16_384, 'the map geometry matches the captured area');
+});
+
+test('a page with more occurrences than the thumbnail budget keeps every occurrence and declares the budget', async () => {
+  const page = rawPage();
+  const count = ELEMENT_CAPTURE_BUDGET.maxThumbnails + 12;
+  page.nodes = Array.from({ length: count }, (_, index) => ({
+    backendNodeId: index + 1, tagName: 'img', attributes: { src: `/produto-${index}.png` }, text: '',
+    parentBackendNodeId: null, rect: { x: 10, y: 20 + index * 40, width: 32, height: 32 },
+  }));
+  page.layoutMetrics = { cssContentSize: { width: 800, height: 20 + count * 40 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  const adapter = fakeAdapter({
+    page, trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const result = await attachedFullEvidence(adapter, 'audit-thumbnail-budget');
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(adapter.counts.elementCalls, ELEMENT_CAPTURE_BUDGET.maxThumbnails);
+  const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
+  assert.equal(codes.filter(code => code === 'ELEMENT_CAPTURE_BUDGET_REACHED').length, 1);
+  const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+  assert.equal(elements.length, count, 'every affected element keeps selector and snippet evidence');
+  assert.equal(elements.filter(artifact => artifact.dataUrl).length, ELEMENT_CAPTURE_BUDGET.maxThumbnails);
 });

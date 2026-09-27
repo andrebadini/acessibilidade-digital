@@ -134,6 +134,10 @@ export function createCdpPipeTransport({
   let explicitlyClosed = false;
   const pending = new Map();
   const completed = new Set();
+  // Um comando que expirou pode ainda ser respondido quando a página volta a responder (por exemplo, depois
+  // de uma exportação longa ocupar o processo das páginas da extensão). Essa resposta tardia é esperada e
+  // descartada; uma segunda resposta para o mesmo id continua sendo fatal.
+  const expired = new Set();
   const eventWaiters = new Set();
   let resolveClosed;
   let rejectClosed;
@@ -188,6 +192,7 @@ export function createCdpPipeTransport({
       return;
     }
     if (!positiveInteger(message.id)) return fatal('CDP_FRAME_INVALID');
+    if (expired.delete(message.id)) { completed.add(message.id); return; }
     if (completed.has(message.id)) return fatal('CDP_RESPONSE_DUPLICATE');
     const item = pending.get(message.id);
     if (!item) return fatal('CDP_RESPONSE_UNKNOWN');
@@ -249,7 +254,7 @@ export function createCdpPipeTransport({
       return new Promise((resolvePromise, rejectPromise) => {
         const timer = setTimeout(() => {
           pending.delete(id);
-          completed.add(id);
+          expired.add(id);
           rejectPromise(fixed('CDP_COMMAND_TIMEOUT'));
         }, timeoutMs);
         pending.set(id, { resolve: resolvePromise, reject: rejectPromise, timer });
@@ -1037,6 +1042,12 @@ export async function waitForReport(launch, args) {
   return attachPage(launch, info.targetId);
 }
 
+async function downloadsLookFinished(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  if (entries.some(entry => entry.name.endsWith('.crdownload'))) return false;
+  return DOWNLOAD_FORMATS.every(format => entries.some(entry => entry.isFile() && entry.name.toLowerCase().endsWith(`.${format}`)));
+}
+
 async function readDurableExportReceipt(launch, auditId) {
   if (typeof launch?.readExportReceipt === 'function') return launch.readExportReceipt(auditId);
   const harness = await openTabHarness(launch);
@@ -1082,6 +1093,9 @@ export async function waitForFourDownloads(launch, args = {}) {
   const deadline = Date.now() + timeoutMs;
   do {
     try {
+      // Só consulta o recibo quando os quatro arquivos já estão no disco. Ler o armazenamento a cada 500 ms
+      // durante uma exportação grande acumulava leituras pesadas no mesmo processo das páginas da extensão.
+      if (!await downloadsLookFinished(directory)) throw fixed('DOWNLOAD_PROOF_PENDING');
       const receipt = await readDurableExportReceipt(launch, args.auditId);
       if (validReceipt(receipt, args.auditId)) {
         const records = await proveDownloadedFiles(directory, receipt);

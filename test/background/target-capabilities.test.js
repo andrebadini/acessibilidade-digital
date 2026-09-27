@@ -352,8 +352,10 @@ test('denies wrong removed ambiguous loading pending and privileged window claim
     ['inactive-tab', {
       tabs: { async query() { return [{ id: 41, windowId: 9, active: false, status: 'complete', url: 'https://example.test/', pendingUrl: '' }]; } },
     }],
-    ['loading-tab', {
-      tabs: { async query() { return [{ id: 41, windowId: 9, active: true, status: 'loading', url: 'https://example.test/', pendingUrl: '' }]; } },
+    // Desde a 1.1.53 "loading" sem navegação pendente é aceito (recurso de terceiros que nunca termina); a
+    // aba carregando OUTRO endereço continua recusada.
+    ['loading-navigation-tab', {
+      tabs: { async query() { return [{ id: 41, windowId: 9, active: true, status: 'loading', url: 'https://example.test/', pendingUrl: 'https://next.test/' }]; } },
     }],
     ['pending-tab', {
       tabs: { async query() { return [{ id: 41, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: 'https://next.test/' }]; } },

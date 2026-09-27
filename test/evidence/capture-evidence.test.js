@@ -146,3 +146,15 @@ test('rejects malformed or non-PNG screenshot payloads', async () => {
   await assert.rejects(captureFullPage(fakeCdp('not-base64***'), {}), /PNG|base64/i);
   await assert.rejects(captureFullPage(fakeCdp('SGVsbG8='), {}), /PNG/i);
 });
+
+test('caps the pristine capture of a very tall page at a renderer-safe height (1.1.53)', async () => {
+  const cdp = fakeCdp();
+  const capture = await captureFullPage(cdp, {
+    cssContentSize: { width: 900, height: 157_000 }, contentSize: { width: 1800, height: 314_000 },
+  });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 0, width: 900, height: 8192, scale: 1 });
+  assert.equal(capture.metadata.height, 8192, 'the captured height is what the metadata declares');
+  const normal = fakeCdp();
+  await captureFullPage(normal, { cssContentSize: { width: 800, height: 1200 } });
+  assert.equal(normal.calls[0][1].clip.height, 1200, 'ordinary pages are unchanged');
+});

@@ -481,7 +481,8 @@ function checkpointPageOrder(value) {
   if (!Number.isSafeInteger(length) || length < 1 || length > 20) throw new TypeError('Checkpoint terminal inválido.');
   const keys = Reflect.ownKeys(checkpoint.pages);
   const expected = ['length', ...Array.from({ length }, (_entry, index) => String(index))];
-  if (keys.length !== expected.length || expected.some(key => !keys.includes(key))) throw new TypeError('Checkpoint terminal inválido.');
+  const keySet = new Set(keys); // O(n): includes() por índice era quadrático em listas grandes (1.1.53)
+  if (keys.length !== expected.length || expected.some(key => !keySet.has(key))) throw new TypeError('Checkpoint terminal inválido.');
   return Array.from({ length }, (_entry, index) => {
     const row = Object.getOwnPropertyDescriptor(checkpoint.pages, String(index));
     const page = row?.enumerable && Object.hasOwn(row, 'value') ? row.value : null;
@@ -1873,6 +1874,30 @@ export function createAuditStore(options = {}) {
   let database = null;
   let opening = null;
   const owner = Object.freeze(Object.create(null));
+  // As operações de concessão e de journal da exportação só precisam saber que o modelo armazenado existe e é
+  // válido naquela revisão, mas cada uma revalidava o modelo inteiro. Em páginas com dezenas de milhares de
+  // ocorrências isso custa segundos por chamada, e a exportação faz dezenas delas: os prazos de 30 s estouravam
+  // e os downloads já concluídos eram desfeitos (1.1.53). A validação completa roda uma vez por revisão; toda
+  // gravação de modelo incrementa a revisão, e a impressão digital inclui o hash canônico completo.
+  const validatedAudits = new Map();
+  const presentCanonicalAudit = (key, value, revision) => {
+    if (value === undefined) {
+      validatedAudits.delete(key);
+      return materializeCanonicalAuditModel(key, value, { allowMissing: true });
+    }
+    const hash = value && typeof value === 'object' && value.integrity && typeof value.integrity === 'object'
+      ? value.integrity.canonicalModelHash
+      : undefined;
+    const fingerprint = value?.auditId === key && typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash) &&
+      Number.isSafeInteger(revision)
+      ? `${revision}:${value.schemaVersion}:${hash}`
+      : null;
+    if (fingerprint !== null && validatedAudits.get(key) === fingerprint) return value;
+    const canonical = materializeCanonicalAuditModel(key, value, { allowMissing: true });
+    if (fingerprint !== null && canonical?.integrity?.canonicalModelHash === hash) validatedAudits.set(key, fingerprint);
+    else validatedAudits.delete(key);
+    return canonical;
+  };
   const open = async () => {
     if (database) return database;
     if (opening) return opening;
@@ -2391,9 +2416,7 @@ export function createAuditStore(options = {}) {
         let canonicalCurrentModel;
         try {
           revision = storedRevision(currentRevisionValue);
-          canonicalCurrentModel = materializeCanonicalAuditModel(
-            key, currentModel, { allowMissing: true },
-          );
+          canonicalCurrentModel = presentCanonicalAudit(key, currentModel, revision);
         } catch (error) {
           finish(reject, error);
           try { transaction.abort(); } catch {}
@@ -2514,9 +2537,7 @@ export function createAuditStore(options = {}) {
         let canonicalCurrentModel;
         try {
           revision = storedRevision(currentRevisionValue);
-          canonicalCurrentModel = materializeCanonicalAuditModel(
-            key, currentModel, { allowMissing: true },
-          );
+          canonicalCurrentModel = presentCanonicalAudit(key, currentModel, revision);
         } catch (error) {
           finish(reject, error);
           try { transaction.abort(); } catch {}
@@ -2660,8 +2681,8 @@ export function createAuditStore(options = {}) {
         if (!modelRead || !revisionRead || !leaseRead || !attemptRead) return;
         let revision;
         try {
-          materializeCanonicalAuditModel(key, modelValue, { allowMissing: true });
           revision = storedRevision(revisionValue);
+          presentCanonicalAudit(key, modelValue, revision);
         } catch (error) {
           finish(reject, error);
           try { transaction.abort(); } catch {}
@@ -2698,8 +2719,8 @@ export function createAuditStore(options = {}) {
     const key = validId(id);
     const instant = canonicalLeaseNow(options?.now);
     const values = await readKeys([key, revisionKey(key), exportLeaseKey(key)]);
-    const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
     const revision = storedRevision(values.get(revisionKey(key)));
+    const model = presentCanonicalAudit(key, values.get(key), revision);
     const existing = model === undefined
       ? null
       : activeExportLease(values.get(exportLeaseKey(key)), key, revision, instant.nowMs);
@@ -2715,8 +2736,8 @@ export function createAuditStore(options = {}) {
     const expected = capabilityRevision(snapshotCapability, owner, key);
     const normalized = canonicalLeaseOptions(options, expected, options?.phase ?? 'delivering');
     const values = await readKeys([key, revisionKey(key), exportLeaseKey(key), exportAttemptKey(key)]);
-    const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
     const revision = storedRevision(values.get(revisionKey(key)));
+    const model = presentCanonicalAudit(key, values.get(key), revision);
     if (model === undefined || revision !== expected) throw new AuditRevisionConflictError();
     const existing = activeExportLease(values.get(exportLeaseKey(key)), key, revision, normalized.nowMs);
     if (!existing || existing.ownerId !== normalized.ownerId || existing.phase !== normalized.phase ||
@@ -2766,9 +2787,7 @@ export function createAuditStore(options = {}) {
         let canonicalCurrentModel;
         try {
           revision = storedRevision(currentRevisionValue);
-          canonicalCurrentModel = materializeCanonicalAuditModel(
-            key, currentModel, { allowMissing: true },
-          );
+          canonicalCurrentModel = presentCanonicalAudit(key, currentModel, revision);
         } catch (error) {
           finish(reject, error);
           try { transaction.abort(); } catch {}
@@ -2866,8 +2885,8 @@ export function createAuditStore(options = {}) {
   };
   const getExportDeliveryJournal = async id => {
     const key = validId(id);
-    const values = await readKeys([key, exportDeliveryKey(key)]);
-    materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
+    const values = await readKeys([key, revisionKey(key), exportDeliveryKey(key)]);
+    presentCanonicalAudit(key, values.get(key), storedRevision(values.get(revisionKey(key))));
     return canonicalDeliveryJournal(values.get(exportDeliveryKey(key)), key);
   };
   const getAuditRetention = async id => {

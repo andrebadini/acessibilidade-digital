@@ -4,8 +4,12 @@ export const AUDIT_MODEL_INPUT_ERROR_MESSAGE =
 
 const CAPTURED_AUDIT_INPUTS = new WeakSet();
 const MAX_GRAPH_DEPTH = 96;
-const MAX_GRAPH_NODES = 300_000;
-const MAX_ARRAY_LENGTH = 300_000;
+// Tetos de defesa contra entrada hostil, alinhados ao teto de observação (2 milhões de nós em
+// observation-policy.js). O teto antigo (300 mil objetos) equivalia a uma página de ~36 mil nós do DOM
+// (cada nó normalizado ocupa ~8 objetos): vitrines e marketplaces reais passam disso, e a auditoria inteira
+// terminava como "falhou" depois de concluída (bateria de páginas hostis, 1.1.53).
+const MAX_GRAPH_NODES = 20_000_000;
+const MAX_ARRAY_LENGTH = 2_000_000;
 
 export function auditModelInputError() {
   const error = new TypeError(AUDIT_MODEL_INPUT_ERROR_MESSAGE);

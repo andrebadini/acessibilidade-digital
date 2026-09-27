@@ -802,6 +802,7 @@ test('collectPage issues the minimal structural CDP commands and injects runtime
   assert.deepEqual(calls.filter(([method]) => method === 'Accessibility.getFullAXTree').map(([, params]) => params), [{ frameId: 'root' }, { frameId: 'child' }]);
   assert.equal(injections[0].target.tabId, 42);
   assert.equal(injections[0].target.allFrames, true);
+  assert.equal(injections[0].injectImmediately, true, 'um iframe lazy fora da tela não pode travar a coleta');
   assert.equal(typeof injections[0].func, 'function');
   assert.equal(raw.axTree.nodes.length, 2);
   assert.equal(raw.pageData.length, 2);

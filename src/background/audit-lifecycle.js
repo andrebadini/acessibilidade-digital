@@ -27,6 +27,38 @@ function safeChromeId(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+// Endereço do documento sem o fragmento, reduzido a um token de comparação só em memória (nunca persistido
+// nem registrado). Serve para reconhecer navegação de fragmento no mesmo documento: carrosséis, âncoras e SPAs
+// antigas trocam #... sozinhos a cada poucos segundos, e cada troca chegava aqui como "loading" + url e
+// abortava a auditoria em andamento e reiniciava o painel (bateria de páginas hostis, 1.1.53). A prova de
+// documento (documentId + digest) continua sendo a autoridade: se o documento tiver mudado de fato, ela
+// detecta.
+function addressTokenFactory() {
+  const salt = [];
+  try {
+    const bytes = new Uint32Array(2);
+    globalThis.crypto.getRandomValues(bytes);
+    salt.push(bytes[0], bytes[1]);
+  } catch { salt.push(0x811c9dc5, 0x01000193); }
+  return url => {
+    let address;
+    try {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+      parsed.hash = '';
+      address = parsed.href;
+    } catch { return null; }
+    let first = salt[0] >>> 0;
+    let second = salt[1] >>> 0;
+    for (let index = 0; index < address.length; index += 1) {
+      const code = address.charCodeAt(index);
+      first = Math.imul(first ^ code, 0x01000193) >>> 0;
+      second = Math.imul(second ^ code, 0x5bd1e995) >>> 0;
+    }
+    return `${first.toString(36)}.${second.toString(36)}.${address.length}`;
+  };
+}
+
 export function createAuditLifecycle(raw) {
   const input = exact(raw, ['chromeApi', 'getReadyRuntime']) ??
     exact(raw, ['chromeApi', 'getReadyRuntime', 'rebindPanelForNavigation']);
@@ -47,6 +79,8 @@ export function createAuditLifecycle(raw) {
 
   let registered = false;
   const tabTails = new Map();
+  const addressToken = addressTokenFactory();
+  const lastAddress = new Map();
 
   function scheduleTab(tabId, operation) {
     const prior = tabTails.get(tabId) ?? Promise.resolve();
@@ -123,10 +157,19 @@ export function createAuditLifecycle(raw) {
           : discarded.found && discarded.value === true
             ? 'TAB_DISCARDED'
           : null;
+    if (url.found && typeof url.value === 'string') {
+      const next = addressToken(url.value);
+      const previous = lastAddress.get(tabId);
+      if (next === null) lastAddress.delete(tabId); else lastAddress.set(tabId, next);
+      // Mesmo endereço, só o fragmento mudou, sem navegação pendente: mesmo documento.
+      if (reason && previous !== undefined && next !== null && previous === next &&
+        !(pendingUrl.found && typeof pendingUrl.value === 'string' && pendingUrl.value !== '')) return;
+    }
     if (reason) scheduleTab(tabId, () => invalidateTab(tabId, reason, changeInfo,
       reason === 'TAB_DISCARDED' ? 'discarded' : 'navigation'));
   };
   const onTabRemoved = tabId => {
+    if (safeChromeId(tabId)) lastAddress.delete(tabId);
     if (safeChromeId(tabId)) scheduleTab(tabId, () => invalidateTab(tabId, 'TAB_REMOVED', null, 'tab-removed'));
   };
   const onTabDetached = tabId => {
@@ -139,6 +182,22 @@ export function createAuditLifecycle(raw) {
     registered = true;
     updated.addListener(onUpdated);
     removed.addListener(onTabRemoved);
+    // Semente: endereço atual de cada aba, para que a primeira troca de fragmento já seja reconhecida.
+    try {
+      const pending = typeof input.chromeApi.tabs.query === 'function' ? input.chromeApi.tabs.query({}) : null;
+      if (pending && typeof pending.then === 'function') {
+        void pending.then(tabs => {
+          for (const tab of Array.isArray(tabs) ? tabs : []) {
+            const id = ownData(tab, 'id');
+            const tabUrl = ownData(tab, 'url');
+            if (!id.found || !safeChromeId(id.value) || !tabUrl.found || typeof tabUrl.value !== 'string') continue;
+            if (lastAddress.has(id.value)) continue;
+            const token = addressToken(tabUrl.value);
+            if (token !== null) lastAddress.set(id.value, token);
+          }
+        }, () => {});
+      }
+    } catch { /* sem semente: a primeira mudança de endereço de cada aba invalida, como antes */ }
     if (detachedAvailable) detached.addListener(onTabDetached);
     windowRemoved.addListener(onWindowRemoved);
     return true;

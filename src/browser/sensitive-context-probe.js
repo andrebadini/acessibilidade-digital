@@ -154,7 +154,7 @@ export async function probeSensitiveContextInTab(tabId, options) {
   if (!validTabId(tabId) || !input) throw unavailable();
   const target = Object.freeze({ tabId, documentIds: input.targetDocumentIds });
   try {
-    const flags = aggregate(await input.executeScript({ target, world: 'ISOLATED', func: inspectSensitiveContext }), input.expectedDocumentIds);
+    const flags = aggregate(await input.executeScript({ target, world: 'ISOLATED', injectImmediately: true, func: inspectSensitiveContext }), input.expectedDocumentIds);
     if (!flags) throw unavailable();
     return detectSensitiveCaptureSignalsV1(flags);
   } catch { throw unavailable(); }

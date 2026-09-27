@@ -1383,7 +1383,9 @@ function validPanelActiveTab(tab, windowId) {
   const pendingUrl = readOptionalDataProperty(tab, 'pendingUrl');
   return tabId.found && safeChromeId(tabId.value) && tabWindowId.found && tabWindowId.value === windowId &&
     active.found && active.value === true &&
-    status.found && status.value === 'complete' && url.found && canonicalHttpUrl(url.value) &&
+    // "loading" sem navegação pendente: um recurso que nunca termina não impede a auditoria (1.1.53); a prova
+    // de documento ainda exige o documento montado.
+    status.found && (status.value === 'complete' || status.value === 'loading') && url.found && canonicalHttpUrl(url.value) &&
     !pendingUrl.invalid && (!pendingUrl.found || pendingUrl.value === null || pendingUrl.value === '');
 }
 function canonicalHttpUrl(value) {

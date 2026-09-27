@@ -567,7 +567,20 @@ export function isPairedCredentialIdentity(value) {
   const plain = text.replace(CAMEL_MARK_GLOBAL, '').toLowerCase();
   return isSensitiveKeyName(text) && !languageFamilyExemption(plain);
 }
-export function isSensitiveKeyName(value) {
+export const isSensitiveKeyName = memoizePureKey(isSensitiveKeyNameUncached);
+function memoizePureKey(fn) {
+  const cache = new Map();
+  return value => {
+    if (typeof value !== 'string' || value.length > 512) return fn(value);
+    const hit = cache.get(value);
+    if (hit !== undefined) return hit;
+    const result = fn(value);
+    if (cache.size >= 20_000) cache.clear();
+    cache.set(value, result);
+    return result;
+  };
+}
+function isSensitiveKeyNameUncached(value) {
   const text = String(value ?? '');
   // A lista fechada e o prefixo arbitrário decidem como SEMPRE decidiram: nada de exceção aqui, senão
   // `pin`/`pins` (palavra da língua na prosa e chave de banco no identificador) voltariam a passar.
@@ -971,9 +984,13 @@ export function redactCredentialLabelTail(value) {
 // 1.1.33 mediu vazando (M1).
 const LABEL_WORD = new RegExp(String.raw`^[(\[]?[\p{L}\p{N}\u0001]{1,24}[)\]]?$`, 'u');
 const SEPARATOR_NOISE = /^[-–—:]+$/u;
+// Compilada uma vez: a versão anterior recompilava esta regex enorme a cada string e respondia por 11 s de
+// CPU numa vitrine de 40 mil nós (bateria de páginas hostis, 1.1.53). Sem flag `g`, `test` não guarda estado.
+let SPACED_LABEL_FIRST_WORD = null;
 function spacedLabelTailIndex(text) {
   const tokens = [...String(text ?? '').matchAll(/\S+/gu)].map(match => ({ value: match[0], index: match.index }));
-  const firstWord = new RegExp(`^(?:${VALUE_LABEL_ADJACENT_SOURCE})$`, 'iu');
+  SPACED_LABEL_FIRST_WORD ??= new RegExp(`^(?:${VALUE_LABEL_ADJACENT_SOURCE})$`, 'iu');
+  const firstWord = SPACED_LABEL_FIRST_WORD;
   for (let index = 0; index < tokens.length; index += 1) {
     if (!firstWord.test(tokens[index].value)) continue;
     for (let end = index; end < tokens.length && end - index <= 8; end += 1) {
@@ -1179,6 +1196,10 @@ const NAMED_ENTITIES = [
  * as enxerga. Três passagens cobrem a dupla codificação medida pelas revisões.
  */
 export function decodeForMatching(value) {
+  return decodeForMatchingCached(value);
+}
+const decodeForMatchingCached = memoizePureKey(decodeForMatchingUncached);
+function decodeForMatchingUncached(value) {
   let text = String(value ?? '');
   for (let pass = 0; pass < 3; pass += 1) {
     const next = NAMED_ENTITIES
@@ -1201,7 +1222,28 @@ export function decodeForMatching(value) {
 }
 
 const MARKUP_BEARING = /<\/?[a-z][a-z0-9-]*(?:\s[^<>]*)?>/iu;
-function redactStringValue(value) {
+
+// As funções de tarja abaixo são puras (a saída depende só do texto). Numa página grande as mesmas strings
+// se repetem dezenas de milhares de vezes — valores de estilo, rótulos de botão, nomes de atributo — e a
+// normalização de uma vitrine de 40 mil nós levava ~1 min só tarjando o que já tinha sido tarjado. Cache
+// limitado em memória, só para strings curtas; o conteúdo nunca sai do processo.
+const PURE_CACHE_LIMIT = 20_000;
+const PURE_CACHE_MAX_LENGTH = 512;
+function memoizePure(fn) {
+  const cache = new Map();
+  return value => {
+    const text = typeof value === 'string' ? value : null;
+    if (text === null || text.length > PURE_CACHE_MAX_LENGTH) return fn(value);
+    const hit = cache.get(text);
+    if (hit !== undefined) return hit;
+    const result = fn(value);
+    if (cache.size >= PURE_CACHE_LIMIT) cache.clear();
+    cache.set(text, result);
+    return result;
+  };
+}
+const redactStringValue = memoizePure(redactStringValueUncached);
+function redactStringValueUncached(value) {
   // Mesmo pré-filtro na porta do modelo: a maior parte das strings (URL, id, classe, rótulo curto) não
   // contém radical nenhum e não precisa pagar a varredura.
   if (!mayCarryCredential(value)) return String(value ?? '');

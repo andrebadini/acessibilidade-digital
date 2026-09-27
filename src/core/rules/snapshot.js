@@ -174,12 +174,23 @@ export function probeCoverageCantTell(document, key) {
   return document?.probeCoverage?.[key] === 'cantTell';
 }
 
-export function orderTargets(targets, nodes) {
+// As posições dependem só da lista de nós, que é a mesma para todas as regras de uma auditoria: calcular
+// uma vez por lista (130 regras × 48 mil nós custavam ~7 s numa vitrine grande; 1.1.53).
+const TARGET_POSITIONS = new WeakMap();
+function targetPositions(nodes) {
+  const cached = TARGET_POSITIONS.get(nodes);
+  if (cached && cached.length === nodes.length) return cached.positions;
   const positions = new Map();
   nodes.forEach((node, index) => {
     const id = nodeIdOf(node);
     if (id !== null && !positions.has(String(id))) positions.set(String(id), index);
   });
+  if (Array.isArray(nodes) && Object.isFrozen(nodes)) TARGET_POSITIONS.set(nodes, { length: nodes.length, positions });
+  return positions;
+}
+
+export function orderTargets(targets, nodes) {
+  const positions = targetPositions(nodes);
 
   return targets.map((value, index) => ({ value, index })).sort((left, right) => {
     const leftPosition = positions.get(String(left.value?.nodeId));

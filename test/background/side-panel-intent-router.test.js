@@ -1216,8 +1216,9 @@ test('denies an unverified claimed window and unsafe active tab before probe pre
         { id: 18, windowId: 9, active: true, status: 'complete', url: 'https://example.test/other', pendingUrl: '' },
       ]; } },
     }],
-    ['loading', {
-      tabs: { async query() { return [{ id: 17, windowId: 9, active: true, status: 'loading', url: 'https://example.test/', pendingUrl: '' }]; } },
+    // "loading" sem navegação pendente é aceito desde a 1.1.53; carregando outro endereço, não.
+    ['loading-navigation', {
+      tabs: { async query() { return [{ id: 17, windowId: 9, active: true, status: 'loading', url: 'https://example.test/', pendingUrl: 'https://private.test/next' }]; } },
     }],
     ['pending', {
       tabs: { async query() { return [{ id: 17, windowId: 9, active: true, status: 'complete', url: 'https://example.test/', pendingUrl: 'https://private.test/token' }]; } },

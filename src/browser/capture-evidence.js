@@ -56,8 +56,36 @@ async function capture(cdp, params, kind, metadata = {}) {
   };
 }
 
+// Teto de segurança da captura integral, medido na bateria de páginas hostis (1.1.53). Uma vitrine com
+// 4.000 produtos tinha 157 mil px de altura: o Chrome gerou um PNG de 37 MB em 11 s e o renderizador ficou
+// ocupado depois disso, derrubando por tempo esgotado os comandos CDP seguintes — a auditoria inteira
+// falhava por causa de uma imagem. 16.384 px de dispositivo é o limite usual de textura do Chrome; o teto de
+// pixels protege páginas muito largas. Acima disso, capturamos só a parte superior e quem chama declara a
+// limitação (a altura capturada fica em `metadata.height`).
+export const FULL_PAGE_CAPTURE_LIMITS = Object.freeze({ maxDeviceHeight: 16_384, maxDevicePixels: 40_000_000 });
+
+function deviceScale(metrics = {}) {
+  const css = metrics.cssContentSize;
+  const device = metrics.contentSize;
+  const ratio = Number.isFinite(css?.width) && css.width > 0 && Number.isFinite(device?.width) && device.width > 0
+    ? device.width / css.width
+    : Number.isFinite(metrics.deviceScaleFactor) && metrics.deviceScaleFactor > 0 ? metrics.deviceScaleFactor : 1;
+  return Math.min(4, Math.max(1, ratio));
+}
+
+/** Altura CSS que a captura integral pode cobrir com segurança para a largura e escala observadas. */
+export function safeFullPageCaptureHeight(width, height, scale = 1) {
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) return height;
+  const byHeight = FULL_PAGE_CAPTURE_LIMITS.maxDeviceHeight / scale;
+  const byPixels = FULL_PAGE_CAPTURE_LIMITS.maxDevicePixels / (width * scale * scale);
+  return Math.min(height, Math.max(1, Math.floor(Math.min(byHeight, byPixels))));
+}
+
 export async function captureFullPage(cdp, metrics = {}) {
   const size = dimensions(metrics);
+  if (size.width !== null && size.height !== null) {
+    size.height = safeFullPageCaptureHeight(size.width, size.height, deviceScale(metrics));
+  }
   const clip = size.width !== null && size.height !== null
     ? { x: 0, y: 0, width: size.width, height: size.height, scale: 1 }
     : null;

@@ -97,8 +97,8 @@ function renderDeletedAudit() {
 
 function reportOccurrence(occurrenceId) {
   if (typeof occurrenceId !== 'string' || !auditModel || !Array.isArray(auditModel.occurrences)) return null;
-  const matches = auditModel.occurrences.filter(value => value?.occurrenceId === occurrenceId);
-  return matches.length === 1 ? matches[0] : null;
+  const { occurrenceCounts, occurrenceById } = modelLookups(auditModel);
+  return occurrenceCounts.get(occurrenceId) === 1 ? occurrenceById.get(occurrenceId) : null;
 }
 
 function announceReportHighlight(message) {
@@ -353,9 +353,47 @@ function appendText(parent, tag, value, className) {
   return element;
 }
 
+// Páginas muito grandes podem gerar milhares de revisões pendentes. Buscas lineares por cartão tornavam a
+// abertura do relatório quadrática, e milhares de formulários deixavam a aba inutilizável. Os índices são
+// calculados uma vez por modelo e a lista mostra um lote limitado; as demais revisões aparecem ao reabrir
+// o relatório depois de registrar as decisões deste lote.
+const REVIEW_CARD_LIMIT = 100;
+const MODEL_LOOKUPS = new WeakMap();
+function modelLookups(model) {
+  let lookups = MODEL_LOOKUPS.get(model);
+  if (!lookups) {
+    const evidence = Array.isArray(model?.evidence) ? model.evidence : [];
+    const occurrenceCounts = new Map();
+    const occurrenceById = new Map();
+    for (const value of Array.isArray(model?.occurrences) ? model.occurrences : []) {
+      const id = value?.occurrenceId;
+      occurrenceCounts.set(id, (occurrenceCounts.get(id) ?? 0) + 1);
+      if (!occurrenceById.has(id)) occurrenceById.set(id, value);
+    }
+    const itemById = new Map();
+    for (const value of Array.isArray(model?.itemResults) ? model.itemResults : []) {
+      if (!itemById.has(value?.id)) itemById.set(value?.id, value);
+    }
+    const evidencePositions = new Map();
+    evidence.forEach((value, index) => {
+      const positions = evidencePositions.get(value?.evidenceId) ?? [];
+      positions.push(index);
+      evidencePositions.set(value?.evidenceId, positions);
+    });
+    lookups = { evidence, occurrenceCounts, occurrenceById, itemById, evidencePositions };
+    if (model && typeof model === 'object') MODEL_LOOKUPS.set(model, lookups);
+  }
+  return lookups;
+}
+
 function evidenceFor(occurrence) {
-  const ids = new Set(occurrence.evidenceRefs || occurrence.evidenceIds || []);
-  return (Array.isArray(auditModel.evidence) ? auditModel.evidence : []).filter(item => ids.has(item.evidenceId));
+  const { evidence, evidencePositions } = modelLookups(auditModel);
+  const positions = [];
+  for (const id of new Set(occurrence.evidenceRefs || occurrence.evidenceIds || [])) {
+    positions.push(...(evidencePositions.get(id) ?? []));
+  }
+  // Mantém a ordem do modelo, como a filtragem linear anterior.
+  return positions.sort((left, right) => left - right).map(index => evidence[index]);
 }
 
 function nextUnanswered(card) {
@@ -458,8 +496,9 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
 }
 
 function renderCard(entry) {
-  const occurrence = auditModel.occurrences.find(value => value.occurrenceId === entry.occurrenceId);
-  const item = auditModel.itemResults.find(value => value.id === entry.itemId);
+  const { occurrenceById, itemById } = modelLookups(auditModel);
+  const occurrence = occurrenceById.get(entry.occurrenceId);
+  const item = itemById.get(entry.itemId);
   if (!occurrence || !item) return;
   const card = document.createElement('details');
   card.className = 'review-card';
@@ -563,7 +602,12 @@ async function start() {
   if (reportSessionState === 'result') {
     connectReportHighlightState();
   }
-  for (const entry of getPendingReviewEntries(auditModel)) renderCard(entry);
+  const pendingEntries = getPendingReviewEntries(auditModel);
+  for (const entry of pendingEntries.slice(0, REVIEW_CARD_LIMIT)) renderCard(entry);
+  if (pendingEntries.length > REVIEW_CARD_LIMIT) {
+    const note = appendText(list, 'p', `Mostrando as primeiras ${REVIEW_CARD_LIMIT} de ${pendingEntries.length} revisões humanas pendentes. Registre as decisões deste lote e reabra o relatório para ver as próximas; todas as ocorrências permanecem nas exportações.`);
+    note.setAttribute('data-review-omitted', String(pendingEntries.length - REVIEW_CARD_LIMIT));
+  }
   const latest = await store.getLatest();
   status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true ? EXPORT_CLEANUP_MESSAGE
     : reportStatusLine(summary);
