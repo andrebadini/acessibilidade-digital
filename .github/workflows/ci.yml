@@ -51,6 +51,8 @@ jobs:
 
       - name: Conferir pacote de release
         run: |
-          test -f release/audita-acessibilidade-*.zip
-          shasum -a 256 release/audita-acessibilidade-*.zip
-          unzip -p release/audita-acessibilidade-*.zip manifest.json | python3 -c "import sys,json; m=json.load(sys.stdin); print('manifest', m['version'])"
+          VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")
+          PKG="release/audita-acessibilidade-${VERSION}.zip"
+          test -f "$PKG"
+          shasum -a 256 "$PKG"
+          unzip -p "$PKG" manifest.json | python3 -c "import sys,json; m=json.load(sys.stdin); assert m['version']=='$VERSION', m; print('manifest', m['version'])"
