@@ -318,6 +318,27 @@ function textResize(snapshot) {
   });
 }
 
+// Scripts de leitura da direita para a esquerda (Unicode moderno). Usado quando o motor não
+// expõe `Intl.Locale#getTextInfo` (Node 22 e anteriores), para a regra não cair em `cantTell`
+// só por falta da API.
+const RTL_SCRIPTS = new Set(['Arab', 'Hebr', 'Syrc', 'Thaa', 'Nkoo', 'Adlm']);
+
+function readingDirectionOf(language) {
+  try {
+    const locale = new Intl.Locale(language);
+    if (locale.language === 'und') return null;
+    const maximized = locale.maximize();
+    if (!maximized?.script) return null;
+    if (typeof locale.getTextInfo === 'function') {
+      const info = locale.getTextInfo();
+      if (info?.direction === 'ltr' || info?.direction === 'rtl') return info.direction;
+    }
+    return RTL_SCRIPTS.has(maximized.script) ? 'rtl' : 'ltr';
+  } catch {
+    return null;
+  }
+}
+
 function textBlockAlignment(snapshot) {
   return visualResult(snapshot, ({ nodes, document }) => {
     const index = nodeIndex(nodes);
@@ -346,11 +367,7 @@ function textBlockAlignment(snapshot) {
       const ancestry = ancestorNodes(node, index);
       const languageNode = [node, ...ancestry.ancestors].find(item => attribute(item, 'lang') !== undefined);
       const language = languageNode ? attribute(languageNode, 'lang') : ancestry.complete ? document.language : '';
-      let readingDirection;
-      try {
-        const locale = new Intl.Locale(language);
-        if (locale.language !== 'und' && locale.maximize().script) readingDirection = locale.getTextInfo().direction;
-      } catch { /* Missing or unsupported language data is not proof of alignment. */ }
+      const readingDirection = readingDirectionOf(language);
       let align = normalizeText(node.textAlign).toLowerCase();
       if (align === 'start' || align === 'end') {
         const direction = node.styles?.direction;
