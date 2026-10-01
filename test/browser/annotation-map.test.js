@@ -652,7 +652,9 @@ test('times out a stalled bitmap allocation, closes the late bitmap and avoids a
   }), error => error instanceof AnnotationMapError && error.code === 'ANNOTATION_MAP_TIMEOUT');
 
   resolveBitmap({ close() { closes += 1; } });
-  await Promise.resolve();
+  // O fechamento do bitmap tardio acontece numa microtask seguinte; sob carga (CI) um único
+  // `await Promise.resolve()` não basta e o contador ainda está em 0.
+  for (let tick = 0; tick < 20 && closes === 0; tick += 1) await Promise.resolve();
   assert.equal(closes, 1);
   assert.equal(allocations, 1, 'somente o canvas transitório de métricas pode ter sido alocado');
 });
