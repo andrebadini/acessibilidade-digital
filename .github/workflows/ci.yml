@@ -1,0 +1,53 @@
+# CI da Audita Acessibilidade
+#
+# Os GitHub-hosted runners estão esgotados; este workflow roda SOMENTE no runner
+# self-hosted deste repositório (`mac-mini-andre-acessibilidade-digital`), labels
+# `self-hosted` + `local-mac`. Não usar `ubuntu-latest` nem qualquer hosted runner.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: verify-and-test
+    runs-on: [self-hosted, local-mac]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify (manifest, CSP, axe, identidade neutra)
+        run: AUDITA_VERIFY_SKIP_TESTS=1 npm run verify
+
+      - name: Testes lógicos (sem E2E de Chrome)
+        run: |
+          node --test \
+            test/background/*.test.js \
+            test/panel/*.test.js \
+            test/core/*.test.js \
+            test/browser/*.test.js \
+            test/privacy/*.test.js \
+            test/integration/*.test.js \
+            test/storage/*.test.js \
+            test/release-package.test.js \
+            test/release-assets.test.js
+
+      - name: Conferir pacote de release
+        run: |
+          test -f release/audita-acessibilidade-*.zip
+          shasum -a 256 release/audita-acessibilidade-*.zip
+          unzip -p release/audita-acessibilidade-*.zip manifest.json | python3 -c "import sys,json; m=json.load(sys.stdin); print('manifest', m['version'])"
