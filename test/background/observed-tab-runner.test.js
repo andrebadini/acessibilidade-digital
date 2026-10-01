@@ -65,10 +65,8 @@ function ownedPrivacyGate({ policy, calls, consentId = null, sensitive = SENSITI
   });
   return createPixelPrivacyGateV1({
     pixelState: {
-      async pause(value) {
-        calls.push('pause');
-        return suspension({ state: 'paused', resumePhase: null, token: 'B'.repeat(21) + 'Q', categories: value.categories });
-      },
+      // O portão nunca pausa: sinal sensível não barra a captura.
+      async pause() { calls.push('pause'); throw new Error('PIXEL_GATE_MUST_NOT_PAUSE'); },
       async gateRunnerStart(value) {
         calls.push('gate');
         return {
@@ -96,17 +94,10 @@ async function observedResult(input, status = 'partial') {
 }
 
 function makePrivacyGate({ policy = FULL_POLICY, calls = [], consentId = null, sensitive = SENSITIVE_SIGNALS } = {}) {
-  const suspension = {
-    version: 'AuditSuspensionV1', revision: 1, auditId: 'audit-1', consentId: 'B'.repeat(21) + 'Q',
-    tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST,
-    mode: policy.mode, capturePolicy: policy, categories: sensitive.categories,
-    issuedAt: 1_800_000_000_000, updatedAt: 1_800_000_000_001, expiresAt: 1_800_000_600_000,
-    cleanupAttempts: 0, cleanupNotBefore: null, state: 'paused', resumePhase: null,
-    revokeReason: null, source: { kind: 'attached' },
-  };
   return createPixelPrivacyGateV1({
     pixelState: {
-      async pause(value) { calls.push(['pause', value]); return suspension; },
+      // O portão nunca pausa: sinal sensível não barra a captura.
+      async pause() { calls.push(['pause']); throw new Error('PIXEL_GATE_MUST_NOT_PAUSE'); },
       async gateRunnerStart() { throw new Error('unexpected resume'); },
     },
     consentId, authorityExpiresAt: 1_900_000_000_000,
@@ -233,30 +224,44 @@ test('no-pixels completes without privacy gate, consent, probe or pixel calls', 
   assert.deepEqual(calls, ['probe', 'probe']);
 });
 
-test('sensitive attached preflight pauses after started and returns the exact canonical variant', async () => {
+test('sensitive attached preflight arms and the audit proceeds to a terminal result', async () => {
   const calls = [];
   const gate = makePrivacyGate({ policy: FULL_POLICY, calls });
   const { input, calls: runnerCalls } = fixture({
     policy: FULL_POLICY, privacyGate: gate,
     pipelineMarker: true, startedMarker: true,
+    pipelineServices: {
+      async collectObservedPage({ observedTarget }) {
+        runnerCalls.push('pipeline');
+        const boundary = createPixelRasterBoundaryV1({
+          auditId: 'audit-1', observedTarget, capturePolicy: FULL_POLICY, privacyGate: gate,
+          async probeDocumentIdentity() { return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+          async probeSensitiveCaptureSignals() { return SENSITIVE_SIGNALS; }, signal: undefined,
+          async captureFullPage() { calls.push('full-page'); },
+          async captureElement() { calls.push('element'); },
+        });
+        await boundary.captureFullPage();
+        return { snapshot: { title: 'safe' } };
+      },
+    },
     adapter: { async probeSensitiveCaptureSignals() { calls.push('sensitive-probe'); return SENSITIVE_SIGNALS; } },
   });
   const result = await runObservedTabAudit(input);
-  assert.deepEqual(result, {
-    status: 'privacy-paused', model: null,
-    observedTarget: {
-      version: 'ObservedTargetV1', kind: 'attached', tabId: 7, windowId: 3,
-      documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST,
-    },
-    observationState: 'observed', ownershipState: 'attached', signals: SENSITIVE_SIGNALS,
+  assert.equal(result.status, 'partial');
+  assert.equal(result.model.auditId, 'audit-1');
+  assert.deepEqual(result.observedTarget, {
+    version: 'ObservedTargetV1', kind: 'attached', tabId: 7, windowId: 3,
+    documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST,
   });
-  assert.equal(calls.filter(call => Array.isArray(call) && call[0] === 'pause').length, 1);
+  assert.equal(result.observationState, 'observed');
+  assert.equal(result.ownershipState, 'attached');
+  assert.equal(calls.filter(call => Array.isArray(call) && call[0] === 'pause').length, 0);
   assert.equal(runnerCalls.filter(call => call === 'started').length, 1);
-  assert.equal(runnerCalls.includes('pipeline'), false);
-  assert.equal(calls.includes('after-pixels'), false);
+  assert.equal(runnerCalls.includes('pipeline'), true);
+  assert.equal(calls.includes('full-page'), true);
 });
 
-test('fresh owned pixel audit pauses with zero raster and retains the exact owner for consent', async () => {
+test('fresh owned pixel audit with sensitive signals proceeds and captures without pausing', async () => {
   const calls = [];
   const gate = ownedPrivacyGate({ policy: FULL_POLICY, calls });
   let state = 'created';
@@ -267,6 +272,19 @@ test('fresh owned pixel audit pauses with zero raster and retains the exact owne
       kind: 'owned-disposable', ownershipId: 'ownership-1', navigationToken: NAV_TOKEN,
       cleanupMode: 'pre-observation-failure', pageId: 'page-1',
     },
+    pipelineServices: {
+      async collectObservedPage({ observedTarget }) {
+        const boundary = createPixelRasterBoundaryV1({
+          auditId: 'audit-1', observedTarget, capturePolicy: FULL_POLICY, privacyGate: gate,
+          async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
+          async probeSensitiveCaptureSignals() { return SENSITIVE_SIGNALS; }, signal: undefined,
+          async captureFullPage() { calls.push('raster'); },
+          async captureElement() { calls.push('element'); },
+        });
+        await boundary.captureFullPage();
+        return { snapshot: { title: 'safe' } };
+      },
+    },
     adapter: {
       async createTab() { calls.push('create'); return { id: 41, windowId: 3 }; },
       async resolveNavigationToken() { calls.push('vault'); return 'https://example.test/a'; },
@@ -275,27 +293,28 @@ test('fresh owned pixel audit pauses with zero raster and retains the exact owne
       async getEvidenceUrl() { return EVIDENCE; },
       async probeDocumentIdentity() { return { tabId: 41, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST }; },
       async probeSensitiveCaptureSignals() { return SENSITIVE_SIGNALS; },
-      async removeTab() { calls.push('raster-or-remove'); },
+      async removeTab() { calls.push('remove'); },
       ownedTabs: {
         async registerCreated() { state = 'created'; return ownedRecord({ state, cleanupMode: 'pre-observation-failure' }); },
         async get() { return ownedRecord({ state, cleanupMode: 'pre-observation-failure' }); },
         async transition({ fromState, toState }) {
           assert.equal(state, fromState);
           state = toState;
-          if (toState === 'retained-for-consent') throw new Error('commit-then-throw');
           return ownedRecord({ state, cleanupMode: 'pre-observation-failure' });
         },
-        async removeOwned() { throw new Error('must retain consent'); },
-        async markCleanupPending() { throw new Error('must retain consent'); },
+        async removeOwned() { throw new Error('must retain review'); },
+        async markCleanupPending() { throw new Error('must not pending'); },
       },
     },
   });
 
   const result = await runObservedTabAudit(input);
-  assert.equal(result.status, 'privacy-paused');
-  assert.equal(result.ownershipState, 'retained-for-consent');
-  assert.equal(state, 'retained-for-consent');
-  assert.equal(calls.includes('raster-or-remove'), false);
+  assert.equal(result.status, 'partial');
+  assert.equal(result.model.auditId, 'audit-1');
+  assert.equal(result.ownershipState, 'retained-for-review');
+  assert.equal(state, 'retained-for-review');
+  assert.equal(calls.includes('raster'), true);
+  assert.equal(calls.includes('pause'), false);
 });
 
 test('owned consent resume CASes retained owner and captures without create navigate or vault reuse', async () => {

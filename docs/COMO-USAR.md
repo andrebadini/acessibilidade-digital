@@ -17,7 +17,7 @@ Para atualizar uma instalação existente, exporte os relatórios que deseja gua
 
 1. Abra uma página HTTP/HTTPS e clique no ícone da extensão. O painel lateral ficará ao lado da página.
 2. Escolha **Evidência completa**, **Somente elementos** ou **Sem imagens**. Oculte dados pessoais antes de permitir capturas.
-3. Use **Auditar a página atual**. O painel mostra o progresso. Numa página **sem** conteúdo sensível os modos com foto concluem **sem** pedir confirmação; quando houver conteúdo potencialmente sensível, o painel **pausa** e pede autorização — confirme ou cancele, e sem confirmação a captura não prossegue. Se a auditoria não puder prosseguir no modo escolhido, o painel **explica** o que aconteceu e sugere refazer no modo sem pixels; ele não volta ao início em silêncio.
+3. Use **Auditar a página atual**. O painel mostra o progresso. Os modos com foto **sempre concluem** sem pedir confirmação: não há pausa por conteúdo sensível (quem audita não usa senha nem dados sensíveis). Se a auditoria não puder prosseguir no modo escolhido, o painel **explica** o que aconteceu e sugere refazer no modo sem pixels; ele não volta ao início em silêncio.
 4. Consulte o sumário. Clique em um cartão para filtrar e expanda um item ABNT para entender os resultados e as orientações.
 5. Use **Mostrar sinais na página** e **Destacar elemento**, quando disponíveis, para localizar um achado. A moldura se refere ao elemento confirmado; se a página mudou ou o alvo não puder ser localizado, consulte a captura histórica.
 6. Use **Abrir relatório completo**. A exportação entrega **HTML, PDF, CSV e JSON**. O HTML oferece detalhes expansíveis; o PDF reúne orientações essenciais e evidências sem repetir o dossiê de cada ocorrência. **Imprimir resumo / salvar PDF** gera uma edição executiva separada, que não substitui o relatório completo.
@@ -64,7 +64,7 @@ outros textos podem conter dados pessoais. Revise os arquivos antes de compartil
 ## Outros recursos
 
 - **Outra URL:** informe o endereço e escolha o modo de evidência. O endereço é aberto em uma aba temporária inativa, removida ao final.
-- **Lote de páginas:** informe de 2 a 20 URLs, uma por linha. O resultado é consolidado; não há descoberta ilimitada de links. Cada página é aberta em aba temporária inativa e cada página sensível exige confirmação própria.
+- **Lote de páginas:** informe de 2 a 20 URLs, uma por linha. O resultado é consolidado; não há descoberta ilimitada de links. Cada página é aberta em aba temporária inativa.
 - **Personas:** leitor de tela com prévia falada/legenda, acromatopsia e navegação por teclado. São apoios de teste, não substitutos da experiência real de uma pessoa com deficiência. Use os controles de encerramento e Escape quando disponível.
 - **Revisão humana:** leia o guia e registre conclusão, nome, data e nota. Não transforme dúvida em falha confirmada. O histórico acompanha a revisão exportada.
 

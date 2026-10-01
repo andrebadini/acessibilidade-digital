@@ -9,7 +9,7 @@ import test from 'node:test';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const releaseDirectory = fileURLToPath(new URL('../release/', import.meta.url));
-const packageName = 'audita-acessibilidade-1.1.53.zip';
+const packageName = 'audita-acessibilidade-1.1.54.zip';
 // The digest of the artifact that is actually delivered. It is recorded here so a source change
 // that was not followed by a rebuild fails the suite: the test builds from the current tree, so a
 // stale release/audita-acessibilidade-1.1.15.zip and a drifted source cannot both stay green.
@@ -17,7 +17,7 @@ const packageName = 'audita-acessibilidade-1.1.53.zip';
 // fresh build alone was not enough: an independent review replaced release/audita-acessibilidade-1.1.19.zip
 // with garbage bytes and the suite stayed green, because the digest never touched the delivered
 // file. That is the same hole that let the 1.1.15 artifact be overwritten unnoticed.
-const deliveredPackageSha256 = '47b6fcc5a032f109a49f2a4a14b5f156aea148ad8451ddacd09fa7df22ae97f8';
+const deliveredPackageSha256 = 'fb76253dd46af9ba5b43835674613072a3e56e9a2cd1026f97347f3574a5b82f';
 // The artifact the independent review approved, kept in release/ so the evidence of what was
 // reviewed survives even though the source has moved past it and it is no longer reproducible from
 // HEAD. It stays reconstructible from its own commit, 49d70ca, which was verified by rebuilding.

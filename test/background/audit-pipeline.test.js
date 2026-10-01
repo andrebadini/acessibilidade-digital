@@ -153,22 +153,13 @@ test('pixel service that ignores the unsettled barrier cannot persist a terminal
   assert.equal(persisted, 0);
 });
 
-test('sensitive preflight confirms started once and stops collection, rules and persistence', async () => {
-  const counts = { started: 0, collect: 0, rules: 0, persist: 0 };
+test('sensitive signals never bar the audit: preflight arms and collection, rules and persistence all run', async () => {
+  const counts = { started: 0, collect: 0, rules: 0, persist: 0, pause: 0, raster: 0 };
   const signals = Object.freeze({ version: 'SensitiveCaptureSignalsV1', detected: true, categories: Object.freeze(['password']) });
   const gate = createPixelPrivacyGateV1({
     pixelState: {
-      async pause(value) {
-        return {
-          version: 'AuditSuspensionV1', revision: 1, auditId: value.auditId, consentId: 'B'.repeat(21) + 'Q',
-          tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: EVIDENCE, urlSessionDigest: DIGEST,
-          mode: PIXEL_POLICY.mode, capturePolicy: PIXEL_POLICY, categories: signals.categories,
-          issuedAt: 1_800_000_000_000, updatedAt: 1_800_000_000_001, expiresAt: 1_800_000_600_000,
-          cleanupAttempts: 0, cleanupNotBefore: null, state: 'paused', resumePhase: null,
-          revokeReason: null, source: { kind: 'attached' },
-        };
-      },
-      async gateRunnerStart() { throw new Error('unexpected'); },
+      async pause() { counts.pause += 1; throw new Error('unexpected pause'); },
+      async gateRunnerStart() { throw new Error('unexpected resume'); },
     },
     consentId: null, authorityExpiresAt: 1_900_000_000_000,
     commitClock: pixelClock(), async afterPixels() {},
@@ -177,15 +168,32 @@ test('sensitive preflight confirms started once and stops collection, rules and 
   const runner = createObservedPipelineRunner({
     checkpointRecorder: { ...recorder(), async started() { counts.started += 1; } }, privacyGate: gate, pixelPreflight,
     services: {
-      ...services(), async collectObservedPage() { counts.collect += 1; },
-      async runCoreRules() { counts.rules += 1; }, async persistAuditModel() { counts.persist += 1; },
+      ...services(),
+      async collectObservedPage() {
+        counts.collect += 1;
+        const boundary = createPixelRasterBoundaryV1({
+          auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY, privacyGate: gate,
+          async probeDocumentIdentity() {
+            return { tabId: 7, windowId: 3, documentId: 'doc-1', urlSessionDigest: DIGEST };
+          },
+          async probeSensitiveCaptureSignals() { return signals; },
+          signal: undefined,
+          async captureFullPage() { counts.raster += 1; },
+          async captureElement() {},
+        });
+        await boundary.captureFullPage();
+        return { snapshot: { title: 'safe' } };
+      },
+      async runCoreRules() { counts.rules += 1; return { ruleResults: [] }; },
+      async persistAuditModel() { counts.persist += 1; },
     },
   });
-  await assert.rejects(() => runner({
+  const result = await runner({
     auditId: AUDIT_ID, observedTarget: TARGET, capturePolicy: PIXEL_POLICY,
     signal: undefined, beforePersist: BEFORE_PERSIST,
-  }), /PIXEL_PRIVACY_GATE_DENIED/u);
-  assert.deepEqual(counts, { started: 1, collect: 0, rules: 0, persist: 0 });
+  });
+  assert.equal(result.model.auditId, AUDIT_ID);
+  assert.deepEqual(counts, { started: 1, collect: 1, rules: 1, persist: 1, pause: 0, raster: 1 });
 });
 
 test('accepts owned-disposable V2 target and preserves its closed ownership fields', () => {

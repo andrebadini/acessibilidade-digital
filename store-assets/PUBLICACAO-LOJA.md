@@ -1,4 +1,4 @@
-# Publicação na Chrome Web Store — 1.1.53
+# Publicação na Chrome Web Store — 1.1.54
 
 Roteiro de preparação e envio da Audita Acessibilidade. A publicação exige uma conta de desenvolvedor
 autenticada; o estado do console é a fonte para saber se o item está em rascunho, em revisão ou publicado.
@@ -29,17 +29,17 @@ não uma captura de tela nem evidência de execução do produto.
 
 ## Pacote e verificação
 
-O arquivo de envio é `release/audita-acessibilidade-1.1.53.zip`, com `manifest.json` na raiz e versão `1.1.53`.
+O arquivo de envio é `release/audita-acessibilidade-1.1.54.zip`, com `manifest.json` na raiz e versão `1.1.54`.
 O ZIP deve ser gerado somente depois da validação da implementação final. Confira o digest contra a nota
-`docs/releases/1.1.53.md`; não reutilize o digest de 1.1.52.
+`docs/releases/1.1.54.md`; não reutilize o digest de 1.1.52.
 
 Comandos de conferência local:
 
 ```sh
 AUDITA_VERIFY_SKIP_TESTS=1 npm run verify
 node --test test/release-assets.test.js test/release-package.test.js
-shasum -a 256 release/audita-acessibilidade-1.1.53.zip
-unzip -p release/audita-acessibilidade-1.1.53.zip manifest.json
+shasum -a 256 release/audita-acessibilidade-1.1.54.zip
+unzip -p release/audita-acessibilidade-1.1.54.zip manifest.json
 ```
 
 Os dois primeiros comandos verificam estrutura, política, assets e correspondência de bytes. Eles não

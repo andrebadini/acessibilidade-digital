@@ -298,35 +298,36 @@ function safePauseExpression() {
 }
 
 async function waitForBatchPrivacyPause(extension, panel, pageNumber = 1) {
+  // TRAVA REMOVIDA: o lote não pausa por sinal sensível. Prova a ausência de diálogo de autorização
+  // enquanto o lote avança (running/result).
   try {
-    const observed = await extension.waitForValue(panel, safePauseExpression(), value =>
+    const observed = await extension.waitForValue(panel, `(()=>{
+      const root=document.querySelector('[data-screen]');
+      return {
+        screen:root?.dataset.screen??null,
+        sessionStatus:root?.dataset.sessionStatus??null,
+        confirma:Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')),
+        fieldError:document.querySelector('.field-error')?.textContent??null
+      };
+    })()`, value =>
       ['unavailable', 'result'].includes(value?.screen) ||
       value?.screen === 'initial' && typeof value.fieldError === 'string' && value.fieldError.length > 0 ||
-      value?.screen === 'running' && value?.sessionStatus === 'privacy-paused' && value.pageNumber === pageNumber, {
+      value?.screen === 'running' && value?.confirma !== true, {
         timeoutMs: pageNumber === 1 ? 30_000 : 90_000,
         intervalMs: 50,
       });
-    const valid = observed?.screen === 'running' && observed?.sessionStatus === 'privacy-paused' &&
-      observed.pageNumber === pageNumber && observed.total === 2 &&
-      observed.categories?.includes('Campo de senha') &&
-      observed.categories?.includes('Conteúdo marcado como privado') &&
-      /Continuar e capturar/u.test(observed.confirm ?? '') &&
-      /Cancelar auditoria/u.test(observed.cancel ?? '');
-    if (!valid) throw new Error(`P5B_BATCH_START_REJECTED:${JSON.stringify(observed)}`);
+    if (observed?.confirma === true) throw new Error(`P5B_BATCH_PRIVACY_PAUSE_UNEXPECTED:${JSON.stringify(observed)}`);
     return observed;
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith('P5B_BATCH_START_REJECTED:')) throw error;
+    if (error instanceof Error && error.message.startsWith('P5B_BATCH_PRIVACY_PAUSE_UNEXPECTED:')) throw error;
     const safe = await extension.evaluate(panel, `(()=>({
       screen:document.querySelector('[data-screen]')?.dataset.screen??null,
       sessionStatus:document.querySelector('[data-screen]')?.dataset.sessionStatus??null,
-      pageNumber:document.querySelector('[data-page-number]')?.getAttribute('data-page-number')??null,
-      total:document.querySelector('[data-total]')?.getAttribute('data-total')??null,
-      selected:document.querySelector('input[name="capture-mode"]:checked')?.value??null,
-      categories:[...document.querySelectorAll('.privacy-signals li')].map(item=>item.textContent),
+      confirma:Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')),
       fieldError:document.querySelector('.field-error')?.textContent??null,
       status:document.querySelector('[role="status"]')?.textContent??null
     }))()`);
-    throw new Error(`P5B_BATCH_PRIVACY_PAUSE_MISSING:${JSON.stringify(safe)}`, { cause: error });
+    throw new Error(`P5B_BATCH_START_FAILED:${JSON.stringify(safe)}`, { cause: error });
   }
 }
 
@@ -658,7 +659,7 @@ async function openAndProveConsolidatedReport(extension, panel, auditId, model) 
     /^[a-f0-9]{64}$/u.test(row.sha256)), true, 'P5B_REPORT_EXPORT_INCOMPLETE');
 }
 
-test('full-evidence batch resumes after restart, separately confirms both sensitive hidden pages, and exports their report', {
+test('full-evidence batch completes sensitive pages without privacy pause and exports their report', {
   timeout: 600_000,
 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real de lote com pixels.');
@@ -705,88 +706,13 @@ test('full-evidence batch resumes after restart, separately confirms both sensit
   await startFullEvidenceBatch(extension, panel, rawUrlA, rawUrlB);
   await waitForBatchPrivacyPause(extension, panel);
   const paused = await readPausedPersistence(extension);
-  assert.match(paused.auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u, 'P5B_PAUSED_AUDIT_ID_MISSING');
-  assert.deepEqual(paused.active, { state: 'privacy-paused', mode: 'batch' }, 'P5B_BATCH_NOT_DURABLY_PAUSED');
-  assert.equal(paused.owners.length, 1, 'P5B_PAUSED_OWNER_COUNT_INVALID');
-  assert.deepEqual(paused.owners[0], {
-    tabId: paused.owners[0].tabId,
-    state: 'retained-for-consent',
-    cleanupMode: 'always',
-    activeAuditMatch: true,
-  }, 'P5B_PAUSED_OWNER_STATE_INVALID');
-  assert.equal(Number.isSafeInteger(paused.owners[0].tabId), true, 'P5B_PAUSED_TAB_ID_INVALID');
-  assert.equal(paused.parentReportPresent, false, 'P5B_PARENT_REPORT_WRITTEN_BEFORE_CONSENT');
-  assert.equal(paused.childReportPresent, false, 'P5B_CHILD_REPORT_WRITTEN_BEFORE_CONSENT');
-  assert.equal(paused.sessionRasterCount, 0, 'P5B_SESSION_RASTER_WRITTEN_BEFORE_CONSENT');
-  assert.equal(paused.durableRasterCount, 0, 'P5B_DURABLE_RASTER_WRITTEN_BEFORE_CONSENT');
-  assert.deepEqual(paused.completedProgressPageIds, [], 'P5B_PAGE_COMPLETED_BEFORE_CONSENT');
-  await assertAndArmPrivateOwnerContinuity(extension, paused);
-  assert.deepEqual(await readPausedTabTimeline(extension, paused.owners[0].tabId), {
-    createdCount: 1,
-    firstMatchesPaused: true,
-    firstInactive: true,
-    ownedActivations: 0,
-    originalOnlyActive: true,
-    sourceUpdateCount: 0,
-  }, 'P5B_FIRST_PAGE_WAS_VISIBLE_OR_REPLACED');
+  assert.match(paused.auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u, 'P5B_AUDIT_ID_MISSING');
+  assert.notEqual(paused.active?.state, 'privacy-paused', 'P5B_BATCH_MUST_NOT_PAUSE');
   await assertOriginalPageIntact(extension, originalIdentity);
-
-  await stopServiceWorker(extension);
-  await proveReplacementServiceWorker(extension);
-  await waitForBatchPrivacyPause(extension, panel);
-  const rehydrated = await readPausedPersistence(extension);
-  assert.equal(rehydrated.auditId, paused.auditId, 'P5B_BATCH_ID_CHANGED_AFTER_RESTART');
-  assert.deepEqual(rehydrated.active, paused.active, 'P5B_BATCH_PAUSE_NOT_REHYDRATED');
-  assert.equal(rehydrated.owners.length, 1, 'P5B_OWNER_MISSING_AFTER_RESTART');
-  assert.equal(rehydrated.owners[0].tabId, paused.owners[0].tabId, 'P5B_TAB_CHANGED_AFTER_RESTART');
-  assert.equal(rehydrated.parentReportPresent, false, 'P5B_REPORT_APPEARED_DURING_RESTART');
-  assert.equal(rehydrated.sessionRasterCount, 0, 'P5B_RASTER_APPEARED_DURING_RESTART');
-  assert.equal(rehydrated.durableRasterCount, 0, 'P5B_DURABLE_RASTER_APPEARED_DURING_RESTART');
-  const continuityAfterRestart = await readPrivateOwnerContinuity(extension);
-  assert.deepEqual({
-    currentPresent: continuityAfterRestart?.currentPresent,
-    currentState: continuityAfterRestart?.currentState,
-    currentSameTab: continuityAfterRestart?.currentSameTab,
-  }, {
-    currentPresent: true,
-    currentState: 'retained-for-consent',
-    currentSameTab: true,
-  }, 'P5B_PRIVATE_OWNER_CHANGED_AFTER_RESTART');
-
-  await confirmOnce(extension, panel);
-  await waitForBatchPrivacyPause(extension, panel, 2);
-  const secondPause = await readPausedPersistence(extension, 2);
-  assert.equal(secondPause.auditId, paused.auditId, 'P5B_BATCH_ID_CHANGED_AT_SECOND_CONSENT');
-  assert.deepEqual(secondPause.active, paused.active, 'P5B_SECOND_PAGE_NOT_DURABLY_PAUSED');
-  assert.equal(secondPause.owners.length, 1, 'P5B_SECOND_PAUSED_OWNER_COUNT_INVALID');
-  assert.equal(secondPause.owners[0].state, 'retained-for-consent', 'P5B_SECOND_OWNER_DID_NOT_WAIT_FOR_CONSENT');
-  assert.notEqual(secondPause.owners[0].tabId, paused.owners[0].tabId, 'P5B_SECOND_PAGE_REUSED_FIRST_TAB');
-  assert.equal(secondPause.parentReportPresent, false, 'P5B_PARENT_REPORT_BEFORE_SECOND_CONSENT');
-  assert.equal(secondPause.childReportPresent, false, 'P5B_SECOND_CHILD_REPORT_BEFORE_CONSENT');
-  assert.equal(secondPause.sessionRasterCount, 0, 'P5B_RASTER_RETAINED_IN_SESSION_WHILE_SECOND_PAGE_PAUSED');
-  assert.equal(secondPause.durableRasterCount, 0, 'P5B_REPORT_RASTER_WRITTEN_BEFORE_SECOND_CONSENT');
-  assert.deepEqual(secondPause.completedProgressPageIds, ['page-1'], 'P5B_SECOND_PAUSE_LOST_FIRST_PAGE_PROGRESS');
-  const ownerContinuity = await readPrivateOwnerContinuity(extension);
-  assert.equal(ownerContinuity?.states.some(item => item.state === 'observing' && item.sameTab === true), true,
-    'P5B_SAME_PRIVATE_OWNER_DID_NOT_RESUME');
-  assert.equal(ownerContinuity?.states.filter(item => item.state === 'observing').length, 1,
-    'P5B_CONFIRMATION_WAS_REPLAYED');
-  assert.equal(ownerContinuity?.states.some(item => item.state === 'removed' && item.sameTab === true), true,
-    'P5B_FIRST_PRIVATE_OWNER_WAS_NOT_CLEANED');
-  await assertOriginalPageIntact(extension, originalIdentity);
-  await assertAndArmPrivateOwnerContinuity(extension, secondPause, 2);
-  await confirmOnce(extension, panel);
   const auditId = await waitForBatchResult(extension, panel, paused.auditId);
-  assert.equal(auditId, paused.auditId, 'P5B_BATCH_ID_CHANGED_AFTER_CONFIRMATION');
-  const secondOwnerContinuity = await readPrivateOwnerContinuity(extension);
-  assert.equal(secondOwnerContinuity?.states.some(item => item.state === 'observing' && item.sameTab === true), true,
-    'P5B_SECOND_PRIVATE_OWNER_DID_NOT_RESUME');
-  assert.equal(secondOwnerContinuity?.states.filter(item => item.state === 'observing').length, 1,
-    'P5B_SECOND_CONFIRMATION_WAS_REPLAYED');
-  assert.equal(secondOwnerContinuity?.states.some(item => item.state === 'removed' && item.sameTab === true), true,
-    'P5B_SECOND_PRIVATE_OWNER_WAS_NOT_CLEANED');
+  assert.equal(auditId, paused.auditId, 'P5B_BATCH_ID_CHANGED');
 
-  assert.deepEqual(await readFinalTabTimeline(extension, paused.owners[0].tabId), {
+  assert.deepEqual(await readFinalTabTimeline(extension, paused.owners[0]?.tabId ?? -1), {
     createdCount: 2,
     allCreatedInactive: true,
     firstMatchesPaused: true,

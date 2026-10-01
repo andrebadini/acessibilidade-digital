@@ -1063,11 +1063,26 @@ test('batch pixel gate stores parent authority while projecting the exact child 
     authorityExpiresAt: 1_788_000_500_000,
     capturePolicy,
   };
-  const pausedGate = serviceWorkerModule.createBatchPagePixelPrivacyGateV1(gateInput);
-  assert.deepEqual(await pausedGate.preflight({
+  const freshGate = serviceWorkerModule.createBatchPagePixelPrivacyGateV1(gateInput);
+  assert.deepEqual(await freshGate.preflight({
     auditId: childAuditId, observedTarget: target, capturePolicy, signals,
-  }), { status: 'privacy-paused', signals });
-  const suspension = await pixelState.readSuspension(batchAuditId);
+  }), { status: 'armed' });
+  assert.equal(await pixelState.readSuspension(batchAuditId), null);
+  assert.equal(await pixelState.readSuspension(childAuditId), null);
+
+  // Semeia o estado pausado legado diretamente (sem passar pela trava removida) para exercitar
+  // a retomada com a autoridade do pai projetada para o filho.
+  const suspension = await pixelState.pause({
+    auditId: batchAuditId,
+    observedTarget: {
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+      tabId: target.tabId, windowId: target.windowId, documentId: target.documentId,
+      urlEvidence: target.urlEvidence, urlSessionDigest: target.urlSessionDigest,
+      cleanupMode: 'always', pageId,
+    },
+    mode: capturePolicy.mode, capturePolicy, categories: signals.categories,
+    authorityExpiresAt: 1_788_000_500_000,
+  });
   assert.equal(suspension.auditId, batchAuditId);
   assert.deepEqual(suspension.source, {
     kind: 'owned-disposable', ownershipId, cleanupMode: 'always', pageId,
@@ -1989,7 +2004,7 @@ test('default runtime bootstraps the operational adapter through a trusted Chrom
   assert.deepEqual(env.createdTabs, [{ active: false }]);
 });
 
-test('current-page full-evidence pauses before raster when the inactive attached copy contains sensitive content', async () => {
+test('current-page full-evidence captures raster despite sensitive content in the inactive attached copy', async () => {
   const documentTargets = [];
   const rawUrl = 'https://example.test/';
   let rasterCalls = 0;
@@ -2079,10 +2094,9 @@ test('current-page full-evidence pauses before raster when the inactive attached
   assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
   assert.match(started.sessionCapabilityId, /^[A-Za-z0-9_-]{22}$/u);
   const completion = await started.completion;
-  assert.deepEqual(completion, {
-    ok: true, auditId, state: 'privacy-paused', revision: null,
-  });
-  assert.equal(rasterCalls, 0);
+  // Sinal sensível NUNCA pausa: o terminal não é `privacy-paused` e a captura raster prossegue.
+  assert.notEqual(completion.state, 'privacy-paused');
+  assert.equal(rasterCalls > 0, true, 'sensitive signals must not block raster capture');
   assert.equal(documentTargets.length > 0, true);
 });
 

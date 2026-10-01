@@ -136,11 +136,9 @@ async function rasterFixture({
   return { boundary, gate, cleanup };
 }
 
-// ACHADO A-1 DA REVISÃO DO CONSERTO, no lado do portão: quando a página revela sinal sensível DEPOIS de o
-// portão armar sem pausa (a re-sondagem do limite de raster detecta), a tentativa DIRETA precisa ser
-// aposentada ANTES de a pausa ser criada — senão o marcador direto convive com o consentido e a auditoria
-// consentida morre. O portão chama `onRetireDirect` antes de `pixelState.pause` nos dois pontos de pausa.
-test('arming without signals prepares the direct attempt, and a later pause retires it before pausing', async () => {
+// TRAVA REMOVIDA (decisão de produto): sinal sensível NUNCA pausa nem recusa a captura. Quem audita
+// não usa senha nem dados sensíveis; o portão arma e o raster segue com ou sem sinal.
+test('sensitive signals never pause: the gate arms and the raster proceeds', async () => {
   const sequence = [];
   const gate = createPixelPrivacyGateV1({
     pixelState: {
@@ -153,25 +151,23 @@ test('arming without signals prepares the direct attempt, and a later pause reti
     async onRetireDirect() { sequence.push('retired'); },
   });
   assert.equal(
-    (await gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: EMPTY })).status,
+    (await gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE })).status,
     'armed',
   );
-  assert.deepEqual(sequence, ['armed'], 'sem sinal sensível o portão arma e prepara a tentativa direta');
-  // Sinal aparece entre o armar e o primeiro raster: a re-sondagem pausa — e aposenta a direta ANTES.
+  assert.deepEqual(sequence, ['armed'], 'sinal sensível no preflight não pausa: o portão arma');
   const boundary = createPixelRasterBoundaryV1({
     auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, privacyGate: gate,
     probeDocumentIdentity: async () => PROOF,
     probeSensitiveCaptureSignals: async () => SENSITIVE,
     signal: new AbortController().signal,
-    captureFullPage: async () => { throw new Error('raster não pode começar depois da pausa'); },
-    captureElement: async () => { throw new Error('raster não pode começar depois da pausa'); },
+    captureFullPage: async () => 'full',
+    captureElement: async () => 'element',
   });
-  // A pausa interrompe o raster (é o sinal que o pipeline converte em pausa de consentimento).
-  await assert.rejects(() => boundary.captureFullPage(), /PIXEL_PRIVACY_GATE_DENIED/u);
-  assert.deepEqual(sequence, ['armed', 'retired', 'pause'], 'a direta sai de cena antes da pausa');
+  assert.equal(await boundary.captureFullPage(), 'full');
+  assert.deepEqual(sequence, ['armed'], 'não há pausa nem aposentadoria da tentativa direta');
 });
 
-test('a pause at preflight does not retire anything (the gate never armed)', async () => {
+test('preflight with sensitive signals still arms and never calls pause', async () => {
   const sequence = [];
   const gate = createPixelPrivacyGateV1({
     pixelState: {
@@ -186,8 +182,8 @@ test('a pause at preflight does not retire anything (the gate never armed)', asy
   const preflight = await gate.preflight({
     auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE,
   });
-  assert.equal(preflight.status, 'privacy-paused');
-  assert.deepEqual(sequence, ['pause'], 'sem armar não há tentativa direta a aposentar');
+  assert.equal(preflight.status, 'armed');
+  assert.deepEqual(sequence, ['armed']);
 });
 
 test('a gate without the direct-attempt hooks keeps the exact five-key shape', async () => {
@@ -283,33 +279,28 @@ test('owned raster re-proves immediately before each later thumbnail and stops a
   assert.equal(didPixelRasterTargetChangeV1(boundary), true);
 });
 
-test('owned sensitive pause rejects a foreign ownership source before any raster authorization', async () => {
+test('owned target with sensitive signals still arms without any pause', async () => {
   let pauses = 0;
   const gate = createPixelPrivacyGateV1({
     pixelState: {
       async pause() {
         pauses += 1;
-        return {
-          ...suspension(),
-          source: {
-            kind: 'owned-disposable', ownershipId: 'ownership-foreign',
-            cleanupMode: 'pre-observation-failure', pageId: 'page-1',
-          },
-        };
+        return suspension();
       },
       async gateRunnerStart() { throw new Error('must-not-resume'); },
     },
     consentId: null, authorityExpiresAt: 1_900_000_000_000,
     commitClock: commitClock(), async afterPixels() {},
   });
-  await assert.rejects(() => gate.preflight({
+  const result = await gate.preflight({
     auditId: 'audit-1', observedTarget: OWNED_TARGET,
     capturePolicy: POLICY, signals: SENSITIVE,
-  }), /PIXEL_PRIVACY_GATE_DENIED/u);
-  assert.equal(pauses, 1);
+  });
+  assert.equal(result.status, 'armed');
+  assert.equal(pauses, 0);
 });
 
-test('later raster refuses sensitive categories added after the first captured pixel', async () => {
+test('later raster allows sensitive categories added after the first captured pixel', async () => {
   let signalReads = 0;
   let rasters = 0;
   const { boundary } = await rasterFixture({
@@ -322,12 +313,11 @@ test('later raster refuses sensitive categories added after the first captured p
   });
 
   assert.equal(await boundary.captureFullPage(), 'full');
-  await assert.rejects(() => boundary.captureElement(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
-  assert.equal(signalReads, 3);
-  assert.equal(rasters, 1, 'no later raster may include a newly detected sensitive category');
+  assert.equal(await boundary.captureElement(), 'element');
+  assert.equal(rasters, 2, 'nova categoria sensível não barra o raster seguinte');
 });
 
-test('first raster refuses a sensitive category added while one-shot consent is being authorized', async () => {
+test('first raster proceeds when a sensitive category appears during authorization', async () => {
   const consentId = 'A'.repeat(21) + 'Q';
   const expanded = Object.freeze({
     version: 'SensitiveCaptureSignalsV1', detected: true,
@@ -344,12 +334,12 @@ test('first raster refuses a sensitive category added while one-shot consent is 
     captureFullPage: async () => { rasters += 1; return 'full'; },
   });
 
-  await assert.rejects(() => boundary.captureFullPage(), /PIXEL_CAPTURE_BOUNDARY_DENIED/u);
+  assert.equal(await boundary.captureFullPage(), 'full');
+  assert.equal(rasters, 1, 'categoria sensível nova não recusa a captura');
   assert.equal(signalReads, 2);
-  assert.equal(rasters, 0, 'authorization for earlier categories cannot cover a newly detected category');
-  assert.equal(settleRefusedPixelRasterV1(boundary), true);
+  assert.equal(didPixelRasterStartV1(boundary), true);
   assert.equal(assertPixelPipelineAuthorizedV1(gate, { auditId: 'audit-1', capturePolicy: POLICY }), true);
-  assert.deepEqual(await gate.afterPixels({ auditId: 'audit-1', pixelStarted: false }), { status: 'settled' });
+  assert.deepEqual(await gate.afterPixels({ auditId: 'audit-1', pixelStarted: true }), { status: 'settled' });
   assert.deepEqual(cleanup, ['after']);
 });
 
@@ -620,25 +610,21 @@ test('pipeline preflight validates its binding before probing', async () => {
   assert.equal(probes, 0);
 });
 
-test('pause and resume results must preserve the exact policy, evidence, expiry and consent binding', async t => {
-  for (const scenario of [
-    { name: 'mode mismatch', pauseValue: { ...suspension(), mode: 'element-only' } },
-    { name: 'evidence mismatch', pauseValue: { ...suspension(), urlEvidence: { ...TARGET.urlEvidence, redactedSegments: TARGET.urlEvidence.redactedSegments + 1 } } },
-    { name: 'expiry above authority', pauseValue: suspension({ expiresAt: 1_900_000_000_001 }) },
-  ]) await t.test(scenario.name, async () => {
-    const { gate } = fixture(scenario);
-    await assert.rejects(() => gate.preflight({
-      auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE,
-    }), /PIXEL_PRIVACY_GATE_DENIED/u);
-  });
-
+test('resumed consent results must preserve the exact policy, evidence, expiry and consent binding', async t => {
   const currentConsentId = 'A'.repeat(21) + 'Q';
   for (const scenario of [
     { name: 'ready foreign consent', gateResult: 'ready', runnerSuspension: suspension({ state: 'resuming', resumePhase: 'runner-started', consentId: 'C'.repeat(21) + 'Q' }) },
-    { name: 'repaused same consent', gateResult: 'repaused', runnerSuspension: suspension({ consentId: currentConsentId }) },
+    { name: 'repaused foreign consent', gateResult: 'repaused', runnerSuspension: suspension({ consentId: 'C'.repeat(21) + 'Q' }) },
+    { name: 'repaused same consent is not a lock', gateResult: 'repaused', runnerSuspension: suspension({ consentId: currentConsentId }) },
   ]) await t.test(scenario.name, async () => {
     const { gate } = fixture({ ...scenario, consentId: currentConsentId });
     await gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: EMPTY });
+    if (scenario.name === 'repaused same consent is not a lock') {
+      assert.deepEqual(await gate.authorizeFirstPixel({
+        auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, proof: PROOF, signals: SENSITIVE,
+      }), { status: 'ready' });
+      return;
+    }
     await assert.rejects(() => gate.authorizeFirstPixel({
       auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, proof: PROOF, signals: SENSITIVE,
     }), /PIXEL_PRIVACY_GATE_DENIED/u);
@@ -646,85 +632,55 @@ test('pause and resume results must preserve the exact policy, evidence, expiry 
 });
 
 test('concurrent preflight and final authorization can perform each FSM transition only once', async t => {
-  await t.test('preflight pause', async () => {
+  await t.test('preflight arms only once even with sensitive signals', async () => {
     const hold = deferred();
-    let pauses = 0;
-    const { gate } = fixture();
-    const original = gate;
-    const suspensionGate = createPixelPrivacyGateV1({
+    let armed = 0;
+    const gate = createPixelPrivacyGateV1({
       pixelState: {
-        async pause(value) {
-          pauses += 1;
-          await hold.promise;
-          return {
-            version: 'AuditSuspensionV1', revision: 1, auditId: value.auditId, consentId: 'B'.repeat(21) + 'Q',
-            tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: TARGET.urlEvidence,
-            urlSessionDigest: DIGEST, mode: POLICY.mode, capturePolicy: POLICY, categories: SENSITIVE.categories,
-            issuedAt: 1_800_000_000_000, updatedAt: CLOCK_EPOCH, expiresAt: 1_800_000_600_000,
-            cleanupAttempts: 0, cleanupNotBefore: null, state: 'paused', resumePhase: null,
-            revokeReason: null, source: { kind: 'attached' },
-          };
-        },
+        async pause() { throw new Error('unexpected pause'); },
         async gateRunnerStart() { throw new Error('unexpected'); },
       },
       consentId: null, authorityExpiresAt: 1_900_000_000_000,
       commitClock: commitClock(), async afterPixels() {},
+      async onArmedDirect() { armed += 1; await hold.promise; },
     });
-    assert.equal(isPixelPrivacyGateV1(original), true);
-    const first = suspensionGate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE });
+    const first = gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE });
     await Promise.resolve();
-    const second = suspensionGate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE });
+    const second = gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE });
     hold.resolve();
     const outcomes = await Promise.allSettled([first, second]);
     assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1);
     assert.equal(outcomes.filter(outcome => outcome.status === 'rejected' && /PIXEL_PRIVACY_GATE_DENIED/u.test(String(outcome.reason))).length, 1);
-    assert.equal(pauses, 1);
+    assert.equal(armed, 1);
   });
 
-  await t.test('final pause', async () => {
-    const hold = deferred();
-    let pauses = 0;
-    const suspensionGate = createPixelPrivacyGateV1({
+  await t.test('final authorization is ready exactly once even with sensitive signals', async () => {
+    const gate = createPixelPrivacyGateV1({
       pixelState: {
-        async pause(value) {
-          pauses += 1;
-          await hold.promise;
-          return {
-            version: 'AuditSuspensionV1', revision: 1, auditId: value.auditId, consentId: 'B'.repeat(21) + 'Q',
-            tabId: 7, windowId: 3, documentId: 'doc-1', urlEvidence: TARGET.urlEvidence,
-            urlSessionDigest: DIGEST, mode: POLICY.mode, capturePolicy: POLICY, categories: SENSITIVE.categories,
-            issuedAt: 1_800_000_000_000, updatedAt: CLOCK_EPOCH, expiresAt: 1_800_000_600_000,
-            cleanupAttempts: 0, cleanupNotBefore: null, state: 'paused', resumePhase: null,
-            revokeReason: null, source: { kind: 'attached' },
-          };
-        },
+        async pause() { throw new Error('unexpected pause'); },
         async gateRunnerStart() { throw new Error('unexpected'); },
       },
       consentId: null, authorityExpiresAt: 1_900_000_000_000,
-      commitClock: commitClock(), async afterPixels() {},
+      commitClock: commitClock([CLOCK_EPOCH, CLOCK_EPOCH + 1]), async afterPixels() {},
     });
-    await suspensionGate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: EMPTY });
+    await gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: EMPTY });
     const request = { auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, proof: PROOF, signals: SENSITIVE };
-    const first = suspensionGate.authorizeFirstPixel(request);
+    const first = gate.authorizeFirstPixel(request);
     await Promise.resolve();
-    const second = suspensionGate.authorizeFirstPixel(request);
-    hold.resolve();
+    const second = gate.authorizeFirstPixel(request);
     const outcomes = await Promise.allSettled([first, second]);
     assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1);
     assert.equal(outcomes.filter(outcome => outcome.status === 'rejected' && /PIXEL_PRIVACY_GATE_DENIED/u.test(String(outcome.reason))).length, 1);
-    assert.equal(pauses, 1);
   });
 });
 
-test('initial sensitive preflight pauses exactly once and never settles pixels', async () => {
+test('initial sensitive preflight arms without pausing', async () => {
   const { gate, calls } = fixture();
   const result = await gate.preflight({
     auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE,
   });
-  assert.deepEqual(result, { status: 'privacy-paused', signals: SENSITIVE });
-  assert.equal(calls.filter(([name]) => name === 'pause').length, 1);
-  await gate.afterPixels({ auditId: 'audit-1', pixelStarted: false });
-  assert.equal(calls.filter(([name]) => name === 'after-pixels').length, 0);
+  assert.deepEqual(result, { status: 'armed' });
+  assert.equal(calls.filter(([name]) => name === 'pause').length, 0);
 });
 
 test('a ready gate without a raster commit or explicit settle cannot attest the pipeline', async () => {
@@ -748,27 +704,25 @@ test('a ready gate without a raster commit or explicit settle cannot attest the 
   assert.equal(calls.filter(([name]) => name === 'after-pixels').length, 1);
 });
 
-test('fresh sensitive signals repause initial or resumed attempts without authorizing pixels', async t => {
+test('fresh sensitive signals never repause: authorization becomes ready', async t => {
   for (const scenario of [
-    { name: 'initial', consentId: null, gateResult: 'ready', expectedCall: 'pause' },
-    { name: 'resumed', consentId: 'A'.repeat(21) + 'Q', gateResult: 'repaused', expectedCall: 'gate-runner' },
+    { name: 'initial', consentId: null, gateResult: 'ready' },
+    {
+      name: 'resumed', consentId: 'A'.repeat(21) + 'Q', gateResult: 'repaused',
+      runnerSuspension: suspension({ consentId: 'A'.repeat(21) + 'Q' }),
+    },
   ]) await t.test(scenario.name, async () => {
     const { gate, calls } = fixture(scenario);
     await gate.preflight({
       auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY,
-      signals: scenario.consentId ? SENSITIVE : EMPTY,
+      signals: EMPTY,
     });
     const result = await gate.authorizeFirstPixel({
       auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, proof: PROOF, signals: SENSITIVE,
     });
-    assert.deepEqual(result, { status: 'privacy-paused', signals: SENSITIVE });
-    assert.equal(calls.filter(([name]) => name === scenario.expectedCall).length, 1);
-    await gate.afterPixels({ auditId: 'audit-1', pixelStarted: false });
+    assert.deepEqual(result, { status: 'ready' });
+    assert.equal(calls.filter(([name]) => name === 'pause').length, 0);
     assert.equal(calls.filter(([name]) => name === 'after-pixels').length, 0);
-    assert.throws(
-      () => assertPixelPipelineAuthorizedV1(gate, { auditId: 'audit-1', capturePolicy: POLICY }),
-      /PIXEL_PRIVACY_GATE_DENIED/u,
-    );
   });
 });
 
@@ -844,10 +798,11 @@ test('a private cleanup failure is closed and cannot replay the callback', async
   assert.equal(cleanupCalls, 1);
 });
 
-test('a private pause failure is normalized without disclosure', async () => {
+test('pause is never invoked even if pixelState.pause would fail', async () => {
+  let pauseCalls = 0;
   const gate = createPixelPrivacyGateV1({
     pixelState: {
-      async pause() { throw new Error('PRIVATE_PAUSE_DETAIL'); },
+      async pause() { pauseCalls += 1; throw new Error('PRIVATE_PAUSE_DETAIL'); },
       async gateRunnerStart() { throw new Error('unexpected'); },
     },
     consentId: null,
@@ -855,17 +810,21 @@ test('a private pause failure is normalized without disclosure', async () => {
     commitClock: commitClock(),
     async afterPixels() {},
   });
-  await assert.rejects(
-    () => gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE }),
-    error => error?.message === 'PIXEL_PRIVACY_GATE_DENIED' && !String(error).includes('PRIVATE_PAUSE_DETAIL'),
-  );
+  assert.deepEqual(await gate.preflight({
+    auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: SENSITIVE,
+  }), { status: 'armed' });
+  assert.deepEqual(await gate.authorizeFirstPixel({
+    auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, proof: PROOF, signals: SENSITIVE,
+  }), { status: 'ready' });
+  assert.equal(pauseCalls, 0);
 });
 
-test('a private final pause failure remains cleanup-eligible exactly once', async () => {
+test('authorize with sensitive signals settles without any pause call', async () => {
   let cleanupCalls = 0;
+  let pauseCalls = 0;
   const gate = createPixelPrivacyGateV1({
     pixelState: {
-      async pause() { throw new Error('PRIVATE_FINAL_PAUSE_DETAIL'); },
+      async pause() { pauseCalls += 1; throw new Error('PRIVATE_FINAL_PAUSE_DETAIL'); },
       async gateRunnerStart() { throw new Error('unexpected'); },
     },
     consentId: null,
@@ -874,12 +833,10 @@ test('a private final pause failure remains cleanup-eligible exactly once', asyn
     async afterPixels() { cleanupCalls += 1; },
   });
   await gate.preflight({ auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, signals: EMPTY });
-  await assert.rejects(
-    () => gate.authorizeFirstPixel({
-      auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, proof: PROOF, signals: SENSITIVE,
-    }),
-    error => error?.message === 'PIXEL_PRIVACY_GATE_DENIED' && !String(error).includes('PRIVATE_FINAL_PAUSE_DETAIL'),
-  );
+  assert.deepEqual(await gate.authorizeFirstPixel({
+    auditId: 'audit-1', observedTarget: TARGET, capturePolicy: POLICY, proof: PROOF, signals: SENSITIVE,
+  }), { status: 'ready' });
   await gate.afterPixels({ auditId: 'audit-1', pixelStarted: false });
   assert.equal(cleanupCalls, 1);
+  assert.equal(pauseCalls, 0);
 });

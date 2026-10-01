@@ -4,11 +4,9 @@ import { realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { startFixtureServer, launchUnpackedExtension, resolveRealChromeTestBinary, evaluate, waitForValue, click } from './support/real-chrome.mjs';
 
-// GUARDA DO CAMINHO CONSENTIDO na página atual, nos DOIS modos com foto: numa página COM sinal sensível a
-// auditoria tem de PAUSAR e pedir autorização antes de qualquer raster, e só depois da confirmação chegar a
-// `result`. Este arquivo não é oráculo de um defeito (o caminho consentido já funcionava na 1.1.47): ele é a
-// rede que impede o conserto da tentativa direta (1.1.48) de afrouxar o consentimento — a captura autorizada
-// SEM pausa ganhou companheiro próprio, e o caminho COM pausa continua tendo de pausar.
+// TRAVA REMOVIDA (decisão de produto): página COM sinal sensível (senha / área privada) NÃO pausa a
+// auditoria. Quem audita não usa senha nem dados sensíveis; os modos com foto concluem direto em `result`,
+// sem diálogo de autorização. Este arquivo é a guarda de que a trava não volta.
 const RAIZ = process.env.AUDITA_EXT_PATH ?? await realpath(fileURLToPath(new URL('../../', import.meta.url)));
 
 // Fixture COM sinal sensível: campo de senha e área marcada como privada pelo produto.
@@ -21,7 +19,7 @@ const DOCUMENTO = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"
 <button id="sem-nome"></button></main></body></html>`;
 
 for (const modo of ['full-evidence', 'element-only']) {
-  test(`página atual com sinal sensível em ${modo}: pausa, autorização e só então o resultado`, { timeout: 300_000 }, async t => {
+  test(`página atual com sinal sensível em ${modo}: conclui sem pedir autorização`, { timeout: 300_000 }, async t => {
     const fixture = await startFixtureServer(t, new Map([
       ['/sensivel', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: DOCUMENTO }],
     ]));
@@ -46,25 +44,20 @@ for (const modo of ['full-evidence', 'element-only']) {
         tela: document.querySelector('[data-screen]')?.dataset.screen ?? null,
         confirma: Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')),
       }))()`;
-      // A pausa tem de aparecer; antes dela NÃO pode existir resultado.
-      const pausa = await waitForValue(panel, leitura, value => value?.confirma === true,
-        { timeoutMs: 60_000, intervalMs: 100 });
-      assert.equal(pausa.confirma, true, 'a auditoria com sinal sensível tem de pedir autorização');
-      assert.notEqual(pausa.tela, 'result', 'nenhum resultado pode existir antes da autorização');
-      t.diagnostic(`modo=${modo} pausa=confirmada`);
-      await click(panel, '[data-action="confirm-pixel-capture"]');
       const limite = Date.now() + 90_000;
       let desfecho = null;
       const telas = [];
       do {
         desfecho = await evaluate(panel, leitura);
-        if (desfecho?.tela === 'result') break;
+        if (desfecho?.tela === 'result' || desfecho?.tela === 'unavailable') break;
+        assert.notEqual(desfecho?.confirma, true, 'a trava de consentimento não deve aparecer');
         if (telas.at(-1)?.tela !== desfecho?.tela) telas.push(desfecho);
         await new Promise(resolve => setTimeout(resolve, 250));
       } while (Date.now() < limite);
       assert.equal(desfecho?.tela, 'result',
-        `depois de autorizar, a auditoria de ${modo} tem de concluir; telas observadas: ${JSON.stringify(telas)}`);
-      t.diagnostic(`modo=${modo} desfecho=result`);
+        `sinal sensível não barra a auditoria de ${modo}; telas observadas: ${JSON.stringify(telas)}`);
+      assert.equal(desfecho.confirma, false, 'nenhum diálogo de autorização');
+      t.diagnostic(`modo=${modo} desfecho=result sem confirmação`);
     } finally {
       await extension.close();
     }

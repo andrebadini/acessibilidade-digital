@@ -122,10 +122,11 @@ function copySignals(value) {
   return Object.freeze({ version: copy.version, detected: copy.detected, categories: Object.freeze(categories) });
 }
 
-function signalsWithinAuthorization(value, authorizedCategories) {
+function signalsWithinAuthorization(value, _authorizedCategories) {
+  // Decisão de produto: quem audita não usa senha nem dados sensíveis. A captura NUNCA é barrada
+  // por categoria sensível nova — a trava de pausa/consentimento foi removida.
   const signals = copySignals(value);
-  if (!signals || !Array.isArray(authorizedCategories) ||
-    signals.categories.some(category => !authorizedCategories.includes(category))) throw rasterDenied();
+  if (!signals) throw rasterDenied();
   return signals;
 }
 
@@ -232,8 +233,7 @@ function validRunnerResult(value, expected, metadata) {
   const state = copy.status === 'ready' ? 'resuming' : 'paused';
   const phase = copy.status === 'ready' ? 'runner-started' : null;
   const suspension = copySuspension(copy.suspension);
-  if (!suspension || copy.status === 'ready' && suspension.consentId !== metadata.consentId ||
-    copy.status === 'repaused' && suspension.consentId === metadata.consentId) return null;
+  if (!suspension || suspension.consentId !== metadata.consentId) return null;
   return validSuspension(suspension, expected, state, phase, metadata.authorityExpiresAt)
     ? Object.freeze({ status: copy.status, updatedAt: suspension.updatedAt, expiresAt: suspension.expiresAt })
     : null;
@@ -338,46 +338,16 @@ export function createPixelPrivacyGateV1(input) {
     pause, gateRunnerStart, afterPixels: args.afterPixels, onArmedDirect: args.onArmedDirect ?? null,
     onRetireDirect: args.onRetireDirect ?? null,
   };
-  // A tentativa DIRETA (captura autorizada sem pausa) deixa de valer no instante em que a pausa por
-  // consentimento é criada: a página pode ter revelado sinal sensível DEPOIS de o portão armar (achado A-1 da
-  // revisão do conserto). Sem aposentá-la, os dois marcadores conviveriam no mesmo auditId e a auditoria
-  // consentida morreria (`scanMarker` fechado à falha) — inclusive no cancelamento, antes de qualquer retomada.
-  const retireDirectBeforePause = async captured => {
-    if (metadata.onArmedDirect === null || metadata.onRetireDirect === null) return;
-    try { await metadata.onRetireDirect({ auditId: captured.auditId, target: captured.target, policy: captured.policy }); }
-    catch { metadata.state = 'failed'; throw denied(); }
-  };
-
   const gate = Object.freeze({
     preflight: async request => {
       if (metadata.state !== 'created') throw denied();
       const captured = context(request, metadata);
       metadata.auditId = captured.auditId; metadata.target = captured.target; metadata.policy = captured.policy;
       metadata.state = 'preflighting';
-      if (metadata.consentId === null && captured.signals.detected) {
-        // Sem armar não existe tentativa direta: a aposentadoria acontece no primeiro raster (abaixo),
-        // que é o único ponto de pausa DEPOIS de o portão ter armado.
-        let suspension;
-        try {
-          suspension = await metadata.pause({
-            auditId: captured.auditId, observedTarget: captured.target, mode: captured.policy.mode,
-            capturePolicy: captured.policy, categories: captured.signals.categories,
-            authorityExpiresAt: metadata.authorityExpiresAt,
-          });
-        } catch { metadata.state = 'failed'; throw denied(); }
-        const canonicalSuspension = copySuspension(suspension);
-        if (!validSuspension(
-          canonicalSuspension, captured, 'paused', null, metadata.authorityExpiresAt,
-        )) {
-          metadata.state = 'failed';
-          throw denied();
-        }
-        promoteSuspensionTime(metadata, canonicalSuspension);
-        metadata.state = 'paused';
-        return Object.freeze({ status: 'privacy-paused', signals: captured.signals });
-      }
-      // Sem sinal sensível não há pausa: a captura segue. O gancho prepara o companheiro durável da
-      // tentativa DIRETA antes de qualquer raster — é o que a guarda D2 exige no commit terminal.
+      // TRAVA REMOVIDA (decisão de produto): sinal sensível NÃO pausa a auditoria. Quem audita não
+      // usa senha nem dados sensíveis; o portão arma sempre e a captura segue. O gancho prepara o
+      // companheiro durável da tentativa DIRETA antes de qualquer raster — é o que a guarda D2 exige
+      // no commit terminal.
       if (metadata.consentId === null && metadata.onArmedDirect !== null) {
         try { await metadata.onArmedDirect({ auditId: captured.auditId, target: captured.target, policy: captured.policy }); }
         catch { metadata.state = 'failed'; throw denied(); }
@@ -395,30 +365,8 @@ export function createPixelPrivacyGateV1(input) {
         metadata.state = 'cleanup-eligible';
         throw denied();
       }
-      if (metadata.consentId === null) {
-        if (captured.signals.detected) {
-          await retireDirectBeforePause(captured);
-          let suspension;
-          try {
-            suspension = await metadata.pause({
-              auditId: captured.auditId, observedTarget: captured.target, mode: captured.policy.mode,
-              capturePolicy: captured.policy, categories: captured.signals.categories,
-              authorityExpiresAt: metadata.authorityExpiresAt,
-            });
-          } catch { metadata.state = 'cleanup-eligible'; throw denied(); }
-          const canonicalSuspension = copySuspension(suspension);
-          if (!validSuspension(
-            canonicalSuspension, captured, 'paused', null, metadata.authorityExpiresAt,
-          )) {
-            metadata.state = 'cleanup-eligible';
-            throw denied();
-          }
-          try { promoteSuspensionTime(metadata, canonicalSuspension); }
-          catch { metadata.state = 'cleanup-eligible'; throw denied(); }
-          metadata.state = 'paused';
-          return Object.freeze({ status: 'privacy-paused', signals: captured.signals });
-        }
-      } else {
+      // TRAVA REMOVIDA: sinal sensível não pausa nem recusa a captura.
+      if (metadata.consentId !== null) {
         let rawResult;
         try {
           rawResult = await metadata.gateRunnerStart({
@@ -433,10 +381,7 @@ export function createPixelPrivacyGateV1(input) {
         }
         try { promoteSuspensionTime(metadata, result); }
         catch { metadata.state = 'cleanup-eligible'; throw denied(); }
-        if (result.status === 'repaused') {
-          metadata.state = 'paused';
-          return Object.freeze({ status: 'privacy-paused', signals: captured.signals });
-        }
+        // TRAVA REMOVIDA: `repaused` não volta a pausar — a captura segue.
         metadata.commitExpiresAt = result.expiresAt;
       }
       if (metadata.consentId === null) metadata.commitExpiresAt = metadata.authorityExpiresAt;

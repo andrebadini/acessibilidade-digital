@@ -4,6 +4,12 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.54 — sem trava de privacidade na auditoria.** Quem audita não usa senha nem dados
+sensíveis: a pausa e a confirmação de captura por conteúdo sensível foram removidas. Páginas com
+campo de senha ou área privada concluem em `result` nos modos com foto, sem diálogo. O mesmo vale
+para sinal que aparece no meio da auditoria e para páginas de URL/lote. Veja as
+[notas da 1.1.54](docs/releases/1.1.54.md).
+
 **Versão 1.1.53 — resiliência em sites reais e páginas muito grandes.** A auditoria da página atual sempre
 termina com resultado, completo ou parcial com limitações declaradas, inclusive em iframes lazy que nunca
 carregam, páginas que nunca terminam de carregar, conteúdo que muda sozinho, protótipos adulterados e vitrines
@@ -537,7 +543,7 @@ Abra a página que deseja examinar, clique no ícone da extensão e escolha um d
 - **Somente elementos:** limita as capturas aos elementos relacionados às ocorrências.
 - **Sem imagens:** executa a auditoria sem capturar pixels.
 
-Selecione **Auditar a página atual**. Abrir o painel não inicia a coleta: esse botão é a confirmação explícita. A inspeção acontece na própria página e somente para leitura: a extensão não cria aba, não navega, não rola, não move o foco e não desenha destaques durante a coleta, de modo que a página permanece visível e ativa como você a deixou. Como o documento observado é o que está aberto, o estado atual — inclusive o que ainda não foi salvo — faz parte da avaliação. Nos modos com imagens, a extensão pausa antes da primeira captura quando identifica conteúdo potencialmente sensível; nesse caso, a pessoa usuária decide se continua ou cancela. Também é possível escolher **Outra URL**, informar um endereço HTTP ou HTTPS e usar os mesmos três modos; nesse caminho o endereço é aberto em uma aba temporária inativa, removida ao final. Em **Lote de páginas**, informe de 2 a 20 URLs, uma por linha, e escolha o modo de evidência para gerar um relatório consolidado; cada página também é aberta em aba temporária inativa. Cada página sensível exige sua própria confirmação antes das capturas.
+Selecione **Auditar a página atual**. Abrir o painel não inicia a coleta: esse botão é a confirmação explícita. A inspeção acontece na própria página e somente para leitura: a extensão não cria aba, não navega, não rola, não move o foco e não desenha destaques durante a coleta, de modo que a página permanece visível e ativa como você a deixou. Como o documento observado é o que está aberto, o estado atual — inclusive o que ainda não foi salvo — faz parte da avaliação. Nos modos com imagens a captura segue sem pedir autorização: não há pausa por conteúdo sensível (quem audita não usa senha nem dados sensíveis). Também é possível escolher **Outra URL**, informar um endereço HTTP ou HTTPS e usar os mesmos três modos; nesse caminho o endereço é aberto em uma aba temporária inativa, removida ao final. Em **Lote de páginas**, informe de 2 a 20 URLs, uma por linha, e escolha o modo de evidência para gerar um relatório consolidado; cada página também é aberta em aba temporária inativa.
 
 O painel apresenta as cinco etapas da avaliação. O indicador aparece ao lado da etapa atual e as etapas concluídas recebem um ✓ verde. Em lotes, as etapas acompanham a página em análise, enquanto a barra indica o avanço do lote inteiro. Se uma página não puder ser aberta ou observada, o relatório registra a falha e o lote segue após confirmar a limpeza daquela tentativa.
 

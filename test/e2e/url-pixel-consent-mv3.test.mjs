@@ -100,27 +100,33 @@ function pauseExpression() {
 }
 
 async function waitForPrivacyPause(extension, panel) {
-  let paused;
-  try {
-    paused = await extension.waitForValue(panel, pauseExpression(), value =>
-      value?.screen === 'running' && value?.sessionStatus === 'privacy-paused' &&
-      value?.categories?.includes('Campo de senha') && value?.categories?.includes('Conteúdo marcado como privado') &&
-      /Continuar e capturar/u.test(value?.confirm ?? '') && /Cancelar auditoria/u.test(value?.cancel ?? ''), {
-      timeoutMs: 30_000, intervalMs: 50,
-    });
-  } catch {
-    const diagnostic = await extension.evaluate(panel, `(() => ({
+  // TRAVA REMOVIDA: sinal sensível não pausa. Este helper prova a AUSÊNCIA de pausa e de diálogo
+  // de autorização enquanto a auditoria avança (running com auditId, ou já em resultado).
+  let last = null;
+  const limite = Date.now() + 30_000;
+  do {
+    last = await extension.evaluate(panel, `(() => ({
       screen:document.querySelector('[data-screen]')?.dataset.screen??null,
       sessionStatus:document.querySelector('[data-screen]')?.dataset.sessionStatus??null,
-      categories:[...document.querySelectorAll('.privacy-signals li')].map(item=>item.textContent),
-      selected:document.querySelector('input[name="capture-mode"]:checked')?.value??null,
-      status:document.querySelector('[role="status"]')?.textContent??null,
-      fieldError:document.querySelector('.field-error')?.textContent??null
+      confirma:Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')),
     }))()`);
-    const attempt = await readPrivateAttempt(extension).catch(() => ({ unavailable: true }));
-    throw new Error(`PRIVACY_PAUSE_TIMEOUT:${JSON.stringify({ diagnostic, attempt })}`);
-  }
-  return paused;
+    if (last?.confirma === true) {
+      throw new Error(`PRIVACY_PAUSE_UNEXPECTED:${JSON.stringify(last)}`);
+    }
+    if (last?.screen === 'result' || last?.screen === 'unavailable') return last;
+    if (last?.screen === 'running') {
+      const attempt = await readPrivateAttempt(extension).catch(() => null);
+      if (attempt?.auditId) return last;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < limite);
+  const diagnostic = await extension.evaluate(panel, `(() => ({
+    screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+    sessionStatus:document.querySelector('[data-screen]')?.dataset.sessionStatus??null,
+    status:document.querySelector('[role="status"]')?.textContent??null,
+    fieldError:document.querySelector('.field-error')?.textContent??null
+  }))()`);
+  throw new Error(`AUDIT_DID_NOT_START:${JSON.stringify({ diagnostic, last })}`);
 }
 
 async function readPrivateAttempt(extension, auditId = null) {
@@ -145,19 +151,13 @@ async function readPrivateAttempt(extension, auditId = null) {
 }
 
 async function assertPausedPersistence(extension) {
+  // TRAVA REMOVIDA: não há mais estado `privacy-paused` nem owner retido para consentimento.
+  // O helper passa a devolver a tentativa em andamento/resultado, com o owner da aba temporária.
   const state = await readPrivateAttempt(extension);
   assert.match(state.auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-  assert.deepEqual(state.active, { state: 'privacy-paused', mode: 'single' });
+  assert.notEqual(state.active?.state, 'privacy-paused', 'a trava de consentimento não deve existir');
   assert.equal(state.owners.length, 1);
-  assert.deepEqual(state.owners[0], {
-    tabId: state.owners[0].tabId,
-    windowId: state.owners[0].windowId,
-    state: 'retained-for-consent',
-    cleanupMode: 'pre-observation-failure',
-  });
   assert.equal(Number.isSafeInteger(state.owners[0].tabId), true);
-  assert.equal(state.reportPresent, false);
-  assert.equal(state.sessionRasterDataUrls, 0);
   return state;
 }
 
@@ -613,7 +613,7 @@ async function assertHostStayedActive(extension, ownerTabId) {
   assert.equal(proof.ownerActivations, 0);
 }
 
-test('URL pixel modes pause, survive worker restart, remain one-shot and clean owned tabs', { timeout: 600_000 }, async t => {
+test('URL pixel modes complete without privacy pause and clean owned tabs', { timeout: 600_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real de consentimento por URL.');
   await access(chromeBinary, fsConstants.X_OK);
   const fixture = await startFixtureServer(t, new Map([
@@ -662,28 +662,18 @@ test('URL pixel modes pause, survive worker restart, remain one-shot and clean o
     hostIdentity = null;
   };
 
-  await t.test('full-evidence persists no raster before consent and rehydrates after worker restart', async () => {
+  await t.test('full-evidence completes without privacy pause and keeps the host tab active', async () => {
     await ensureChrome();
     const resources = { auditId: null, ownerTabId: null, report: null, deleted: false, cleaned: false };
     try {
       await resetTabVisibilityProof(extension);
       await startUrlAudit(extension, panel, rawUrl, 'full-evidence');
       await waitForPrivacyPause(extension, panel);
-      const paused = await assertPausedPersistence(extension);
-      resources.auditId = paused.auditId;
-      resources.ownerTabId = paused.owners[0].tabId;
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
-
-      await stopServiceWorker(extension);
-      await proveReplacementServiceWorker(extension);
-      const rehydrated = await assertPausedPersistence(extension);
-      assert.equal(rehydrated.auditId, paused.auditId);
-      assert.equal(rehydrated.owners[0].tabId, paused.owners[0].tabId);
-      await waitForPrivacyPause(extension, panel);
-
-      await confirmOnce(extension, panel);
+      const running = await assertPausedPersistence(extension);
+      resources.auditId = running.auditId;
+      resources.ownerTabId = running.owners[0]?.tabId ?? null;
       const auditId = await waitForResult(extension, panel);
-      assert.equal(auditId, paused.auditId);
+      assert.equal(auditId, running.auditId);
       const evidence = await readReportEvidence(extension, auditId);
       assert.equal(evidence.revision, 1);
       assert.ok(['complete', 'partial'].includes(evidence.status));
@@ -691,7 +681,6 @@ test('URL pixel modes pause, survive worker restart, remain one-shot and clean o
       assert.ok(evidence.elements >= 1, JSON.stringify(evidence));
       assert.deepEqual(evidence.forbidden, []);
       assertSafeEvidenceUrls(evidence, fixture.origin);
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
       await openAndProveReport(extension, panel, auditId, rawUrl, {
         minimumImages: 1, limitation: null,
       }, resources);
@@ -707,13 +696,11 @@ test('URL pixel modes pause, survive worker restart, remain one-shot and clean o
       await resetTabVisibilityProof(extension);
       await startUrlAudit(extension, panel, rawUrl, 'element-only');
       await waitForPrivacyPause(extension, panel);
-      const paused = await assertPausedPersistence(extension);
-      resources.auditId = paused.auditId;
-      resources.ownerTabId = paused.owners[0].tabId;
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
-      await confirmOnce(extension, panel);
+      const running = await assertPausedPersistence(extension);
+      resources.auditId = running.auditId;
+      resources.ownerTabId = running.owners[0]?.tabId ?? null;
       const auditId = await waitForResult(extension, panel);
-      assert.equal(auditId, paused.auditId);
+      assert.equal(auditId, running.auditId);
       const evidence = await readReportEvidence(extension, auditId);
       assert.equal(evidence.fullPage, 0);
       assert.ok(evidence.elements >= 1, JSON.stringify(evidence));
@@ -721,7 +708,6 @@ test('URL pixel modes pause, survive worker restart, remain one-shot and clean o
       assert.equal(evidence.diagnosticCodes.includes('PIXEL_CAPTURE_OMITTED'), false);
       assert.deepEqual(evidence.forbidden, []);
       assertSafeEvidenceUrls(evidence, fixture.origin);
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
       await openAndProveReport(extension, panel, auditId, rawUrl, {
         minimumImages: 1,
         limitation: /captura integral.*omitida|FULL_PAGE_CAPTURE_OMITTED/iu,
@@ -732,61 +718,5 @@ test('URL pixel modes pause, survive worker restart, remain one-shot and clean o
     }
   });
 
-  await t.test('cancel while paused removes only the owned tab and produces no report', async () => {
-    await ensureChrome();
-    const resources = { auditId: null, ownerTabId: null, report: null, deleted: false, cleaned: false };
-    try {
-      await resetTabVisibilityProof(extension);
-      await startUrlAudit(extension, panel, rawUrl, 'full-evidence');
-      await waitForPrivacyPause(extension, panel);
-      const paused = await assertPausedPersistence(extension);
-      resources.auditId = paused.auditId;
-      resources.ownerTabId = paused.owners[0].tabId;
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
-      await extension.click(panel, 'button[data-intent="CANCEL_AUDIT"]');
-      await extension.waitForValue(panel,
-        `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial', {
-          timeoutMs: 30_000, intervalMs: 50,
-        });
-      await assertAttemptRemoved(extension, paused.auditId, paused.owners[0].tabId);
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
-      assert.deepEqual(await extension.identityOf(extension.startPage), hostIdentity);
-      resources.cleaned = true;
-    } finally {
-      await finishCleanup(resources);
-    }
-  });
-
-  await t.test('navigation A to B while paused denies consent, removes the owner and produces no report', async () => {
-    await ensureChrome();
-    const resources = { auditId: null, ownerTabId: null, report: null, deleted: false, cleaned: false };
-    try {
-      await resetTabVisibilityProof(extension);
-      await startUrlAudit(extension, panel, rawUrl, 'full-evidence');
-      await waitForPrivacyPause(extension, panel);
-      const paused = await assertPausedPersistence(extension);
-      resources.auditId = paused.auditId;
-      resources.ownerTabId = paused.owners[0].tabId;
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
-      assert.equal(await extension.evaluate(extension.harnessPage, `new Promise(resolve=>{
-        chrome.tabs.update(${JSON.stringify(paused.owners[0].tabId)},{url:${JSON.stringify(changedUrl)}},tab=>
-          resolve(!chrome.runtime.lastError&&tab?.id===${JSON.stringify(paused.owners[0].tabId)}));
-      })`, { awaitPromise: true }), true);
-      const drift = await waitForNavigationDriftOutcome(extension, paused.owners[0].tabId, changedUrl);
-      if (classifyNavigationDrift(drift, changedUrl) === 'document-b') {
-        const stillPaused = await extension.evaluate(panel, pauseExpression());
-        if (stillPaused?.screen === 'running' && stillPaused?.sessionStatus === 'privacy-paused') {
-          await confirmOnce(extension, panel);
-        }
-      }
-      await assertAttemptRemoved(extension, paused.auditId, paused.owners[0].tabId);
-      await assertHostStayedActive(extension, paused.owners[0].tabId);
-      assert.deepEqual(await extension.identityOf(extension.startPage), hostIdentity);
-      resources.cleaned = true;
-    } finally {
-      await finishCleanup(resources);
-    }
-  });
-
-  t.diagnostic('Chrome=152; source=single-url; modes=full-evidence,element-only; worker-restart=rehydrated; pre-consent-raster=0; one-shot=confirmed; cancel-cleanup=owned-only; document-drift=denied');
+  t.diagnostic('Chrome=152; source=single-url; modes=full-evidence,element-only; privacy-pause=removed');
 });
