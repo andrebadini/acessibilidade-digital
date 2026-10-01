@@ -30,6 +30,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Dependências (axe-core para verify/vendor)
+        run: npm install --no-audit --no-fund
+
       - name: Verify (manifest, CSP, axe, identidade neutra)
         run: AUDITA_VERIFY_SKIP_TESTS=1 npm run verify
 
