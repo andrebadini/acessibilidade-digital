@@ -730,7 +730,9 @@ code {
 .report-action { min-inline-size: min(100%, 240px); }
 .report-ready { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; padding: 10px; border: 1px solid #b2d8c5; border-radius: 10px; background: #f0f8f3; }
 .report-ready h2,
-.report-ready .report-launch-status { grid-column: 1 / -1; }
+.report-ready .report-launch-status,
+.report-ready .report-ready-guide { grid-column: 1 / -1; }
+.report-ready-guide { margin: 0 0 4px; font-size: 14px; line-height: 1.5; color: #284b3a; }
 .report-ready button { min-inline-size: 0; inline-size: 100%; }
 .report-ready h2,
 .page-marker-review h2 {

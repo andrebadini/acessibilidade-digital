@@ -25,6 +25,7 @@ const HEADERS = [
   'frame_path', 'accessible_preview', 'accessible_preview_source',
   'evidence_refs', 'consumer_basis_ref', 'evidence_hashes',
   'canonical_model_hash', 'evidence_manifest_hash',
+  'review_answer', 'review_decided_at', 'reviewed_item_outcome', 'review_note',
 ];
 const DETAIL_MARKER = '[detalhe disponível somente no HTML/JSON]';
 const VERIFIED_OPTIONS = Object.freeze({
@@ -60,7 +61,7 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
   const csv = renderOccurrenceCsv(verified);
   const records = parseQuotedCsv(csv);
 
-  assert.equal(OCCURRENCE_CSV_VERSION, 'audita-occurrences-v2');
+  assert.equal(OCCURRENCE_CSV_VERSION, 'audita-occurrences-v3');
   assert.deepEqual(OCCURRENCE_CSV_COLUMNS, HEADERS);
   assert.equal(renderOccurrenceCsv(verified), csv);
   assert.deepEqual([...new TextEncoder().encode(csv).subarray(0, 3)], [0xef, 0xbb, 0xbf]);
@@ -68,7 +69,7 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
   assert.deepEqual(records[0], HEADERS);
   assert.deepEqual(records.slice(1).map(row => row[2]), verified.occurrences.map(value => value.occurrenceId));
   assert.deepEqual(asRecord(records[1]), {
-    csv_schema_version: 'audita-occurrences-v2',
+    csv_schema_version: 'audita-occurrences-v3',
     audit_id: 'audit-sample-20260826',
     occurrence_id: 'occ-focus-failed',
     page_id: 'page-1',
@@ -98,6 +99,10 @@ test('serializes a deterministic RFC 4180 occurrence table with fixed versioned 
     evidence_hashes: `ev-full=${verified.evidence[0].hash};ev-control=${verified.evidence[1].hash}`,
     canonical_model_hash: verified.integrity.canonicalModelHash,
     evidence_manifest_hash: verified.integrity.evidenceManifestHash,
+    review_answer: '',
+    review_decided_at: '',
+    reviewed_item_outcome: '',
+    review_note: '',
   });
   const assisted = asRecord(records[2]);
   assert.equal(assisted.outcome, 'cantTell');
@@ -634,3 +639,22 @@ function parseQuotedCsv(csv) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
+
+test('v3 carries the human review answer and keeps the consumer basis restricted to requirements', async () => {
+  const { applyReviewDecisions, createReviewDecision } = await import('../../src/core/review/decisions.js');
+  const reviewed = applyReviewDecisions(SAMPLE_AUDIT, [createReviewDecision({
+    auditId: SAMPLE_AUDIT.auditId, itemId: '5.1.4', occurrenceId: 'occ-focus-review', answer: 'não conforme',
+    note: 'A seleção salta do topo para o rodapé.', evaluator: 'Fiscal Ana', decidedAt: '2026-08-27T12:00:00.000Z', mode: 'assisted',
+  })]);
+  const records = parseQuotedCsv(renderOccurrenceCsv(await verifiedAudit(reviewed))).slice(1).map(asRecord);
+  const row = records.find(record => record.occurrence_id === 'occ-focus-review');
+  assert.equal(row.review_answer, 'nao_conforme');
+  assert.equal(row.review_decided_at, '2026-08-27T12:00:00.000Z');
+  assert.equal(row.reviewed_item_outcome, 'failed');
+  assert.equal(row.review_note, DETAIL_MARKER, 'a nota livre fica no HTML/JSON');
+  assert.equal(row.consumer_basis_ref, 'br.consumer.accessibility.fixed.v2', 'não conforme humano com descrição, em requisito');
+  assert.equal(records.find(record => record.occurrence_id === 'occ-focus-failed').review_answer, '');
+  for (const record of records) {
+    if (record.classification !== 'requirement') assert.equal(record.consumer_basis_ref, '', record.occurrence_id);
+  }
+});

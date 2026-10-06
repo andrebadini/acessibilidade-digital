@@ -448,8 +448,15 @@ function assertManualReview(entry) {
 }
 
 function assertDecision(decision) {
-  assertAllowedRecord(decision, set('answer auditId decidedAt decisionId evaluator itemId mode note occurrenceId'));
+  assertAllowedRecord(decision, set('answer auditId decidedAt decisionId evaluator itemId mode note occurrenceId revisions'));
   for (const key of ['decisionId', 'auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode']) requireOwn(decision, key);
+  if (decision.revisions !== undefined) {
+    assertArray(decision.revisions);
+    for (const revision of decision.revisions) {
+      assertAllowedRecord(revision, set('answer decidedAt evaluator note'));
+      for (const key of ['answer', 'evaluator', 'decidedAt']) requireOwn(revision, key);
+    }
+  }
 }
 
 function assertReport(report) {

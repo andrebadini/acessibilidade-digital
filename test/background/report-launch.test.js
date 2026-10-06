@@ -997,3 +997,54 @@ test('report audit cleanup tab removal event cannot revoke a subsequently queued
   assert.equal(opened.tabId, 41);
   assert.equal(env.tabs.has(41), true);
 });
+
+test('page aids act only on the proven audited tab, per tab, and are reversible', async () => {
+  const sourceSessionAuthority = {
+    async reauthorizeReportSource() {
+      return { ok: true, state: 'result', windowId: 7, live: true, binding: {
+        kind: 'attached', tabId: 17, documentId: 'target-document', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+      } };
+    },
+  };
+  const input = fixture({ sourceSessionAuthority });
+  const aids = [];
+  input.chromeApi.tabs.setZoomSettings = async (tabId, settings) => { aids.push(['zoom-settings', tabId, settings]); };
+  input.chromeApi.tabs.setZoom = async (tabId, factor) => { aids.push(['zoom', tabId, factor]); };
+  input.chromeApi.tabs.getZoom = async tabId => { aids.push(['get-zoom', tabId]); return 1.25; };
+  const realGet = input.chromeApi.tabs.get;
+  input.chromeApi.tabs.get = async tabId => (tabId === 17 ? { id: 17, windowId: 7, width: 1280 } : realGet(tabId));
+  input.chromeApi.scripting = {
+    async insertCSS(options) { aids.push(['insert-css', options.target.tabId, options.target.documentIds, options.origin]); },
+    async removeCSS(options) { aids.push(['remove-css', options.target.tabId, options.target.documentIds, options.origin]); },
+  };
+  const opening = input.authority.openRegisteredReport({
+    auditId: 'audit-1', windowId: 7, sourceSessionCapabilityId: 'S'.repeat(22), sourceSessionState: 'result',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  await opening;
+  const request = aid => input.authority.applyPageAid({
+    sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-1', sender: input.sender, aid,
+  });
+  assert.deepEqual(await request('zoom-200'), { ok: true, aid: 'zoom-200', state: 'applied', zoomPercent: 200 });
+  assert.deepEqual(await request('reflow-320'), { ok: true, aid: 'reflow-320', state: 'applied', zoomPercent: 400 });
+  assert.deepEqual(await request('text-spacing'), { ok: true, aid: 'text-spacing', state: 'applied', zoomPercent: null });
+  assert.deepEqual(await request('reset'), { ok: true, aid: 'reset', state: 'reset', zoomPercent: null });
+  // O zoom anterior (125%) é lido uma vez e devolvido no "voltar ao normal"; a folha de espaçamento vale só
+  // para o documento provado.
+  assert.deepEqual(aids, [
+    ['get-zoom', 17], ['zoom-settings', 17, { mode: 'automatic', scope: 'per-tab' }], ['zoom', 17, 2],
+    ['zoom-settings', 17, { mode: 'automatic', scope: 'per-tab' }], ['zoom', 17, 4],
+    ['insert-css', 17, ['target-document'], 'USER'],
+    ['remove-css', 17, ['target-document'], 'USER'], ['zoom', 17, 1.25],
+  ]);
+  aids.length = 0;
+  assert.deepEqual(await request('text-spacing'), { ok: true, aid: 'text-spacing', state: 'applied', zoomPercent: null });
+  assert.deepEqual(await request('reset'), { ok: true, aid: 'reset', state: 'reset', zoomPercent: null });
+  assert.deepEqual(aids, [['insert-css', 17, ['target-document'], 'USER'], ['remove-css', 17, ['target-document'], 'USER']],
+    'só o espaçamento foi aplicado: o zoom da pessoa não é tocado');
+  assert.equal((await request('script')).ok, false);
+  assert.equal((await input.authority.applyPageAid({
+    sessionCapabilityId: 'X'.repeat(22), auditId: 'audit-1', sender: input.sender, aid: 'zoom-200',
+  })).ok, false);
+});

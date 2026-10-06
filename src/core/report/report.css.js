@@ -150,7 +150,17 @@ th{background:#eef4f8;color:#14212b}
 .report-view-document #report-section-3,.report-view-document #report-section-4{display:block;width:100%}
 .report-view-document #report-section-3 h2,.report-view-document #report-section-4 h2{font-size:1.1rem;margin-top:1rem;border:0}
 @media(max-width:40rem){.report-view-document #report-section-3,.report-view-document #report-section-4{display:block;width:100%}}
-@media print{.report-view-document #report-section-3{display:none!important}[data-report-metrics]{print-color-adjust:exact}}
+@media print{[data-report-metrics]{print-color-adjust:exact}.report-view-document #report-section-3{break-before:page}}
+.findings-cta{margin:1rem 0;padding:.8rem 1rem;border:2px solid #003b71;border-radius:.5rem;background:#eef4f8}
+.findings-cta h3{margin:0 0 .35rem}
+.findings-score{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem;margin:1rem 0}
+.findings-score>div{padding:.6rem .8rem;border:1px solid #738596;border-left:.4rem solid #738596;border-radius:.4rem}
+.findings-score dt{font-weight:700}.findings-score dd{margin:0;font-size:1.8rem;font-weight:800}
+[data-findings-tone="failed"]{border-left-color:#8b1e1e!important}[data-findings-tone="passed"]{border-left-color:#236b3b!important}[data-findings-tone="pending"]{border-left-color:#6b4e00!important}
+[data-findings-item]{margin:1rem 0;padding:.8rem;border:1px solid #738596;border-left:.45rem solid #8b1e1e;border-radius:.45rem;break-inside:avoid;overflow-wrap:anywhere}
+[data-findings-item] h4{margin:0 0 .3rem}
+.findings-citation{padding:.55rem .7rem;border-left:.3rem solid #003b71;background:#f7fafc;font-family:Georgia,serif}
+@media (min-width:48rem){.findings-score{grid-template-columns:repeat(4,minmax(0,1fr))}}
 [data-review-history]{margin-block:1rem}
 [data-review-history]>ol{padding-left:1.6rem}
 [data-review-record]{margin-block:1rem;padding:.8rem;border:1px solid #738596;border-left:.3rem solid #6b4e00;border-radius:.4rem;min-width:0;overflow-wrap:anywhere}
@@ -177,7 +187,6 @@ th{background:#eef4f8;color:#14212b}
   [data-review-record] dt,[data-review-record] h3{break-after:avoid}
   [data-report-print-controls]{display:none!important}
   .report-view-document[data-print-layout="summary"] #report-section-2,
-  .report-view-document[data-print-layout="summary"] #report-section-3,
   .report-view-document[data-print-layout="summary"] #report-section-4,
   .report-view-document[data-print-layout="summary"] #report-section-5,
   .report-view-document[data-print-layout="summary"] [data-report-annex]{display:none!important}
@@ -209,4 +218,4 @@ th{background:#eef4f8;color:#14212b}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-/08lFCZuvLDTCWc9EohNL3ysHAvD/2TEmNj21sRMFis=';
+export const REPORT_CSS_CSP_HASH = 'sha256-lIvtFIQ9ThFALMm9fQ8EAprD7q3MiGR+r+EzvDbKzOc=';

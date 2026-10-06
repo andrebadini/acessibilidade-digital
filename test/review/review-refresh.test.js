@@ -4,7 +4,7 @@ import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 
 const source = await readFile(new URL('../../src/review/review.js', import.meta.url), 'utf8');
-const saveSource = source.slice(source.indexOf('async function saveDecision('), source.indexOf('\nfunction renderCard('));
+const saveSource = source.slice(source.indexOf('async function saveDecision('), source.indexOf('\nfunction nextUnanswered('));
 const refreshStart = source.indexOf('async function refreshCommittedReport(');
 const refreshSource = refreshStart < 0 ? '' : source.slice(refreshStart, source.indexOf('\nasync function saveDecision('));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };

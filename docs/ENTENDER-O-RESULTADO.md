@@ -14,10 +14,12 @@ O relatório apoia a análise técnica de quem o lê, mas não equivale a certif
 
 Antes de reutilizar o material — num relatório interno, numa conversa com quem mantém o site, numa pesquisa, numa aula ou em qualquer análise de terceiros —, confira a URL, a data, o viewport quando disponível, os avisos de cobertura, as evidências e cada decisão de revisão. Identifique a pessoa avaliadora e descreva o contexto necessário. “Pular revisão” mantém o caso indeterminado.
 
+O **Quadro de constatações** organiza o resultado pelos requisitos da norma (a conformidade regular depende de todos eles; as recomendações contam para a conformidade plena). “Atendido” significa atendido no que foi observado naquela página e momento; “sem conclusão” não é aprovação nem reprovação. Os parágrafos para citação reúnem data e hora no fuso registrado, página, elemento, constatação, item da norma e evidência; são um ponto de partida que deve ser conferido por quem os utiliza. As respostas humanas possíveis são conforme, não conforme, não foi possível determinar e não se aplica; uma resposta revista guarda a anterior no histórico.
+
 ## Arquivos gerados
 
 - HTML: leitura acessível e autocontida do relatório.
-- CSV: tabela das ocorrências para triagem e análise complementar.
+- CSV: tabela das ocorrências para triagem e análise complementar. Desde o esquema `audita-occurrences-v3`, inclui a resposta humana (`review_answer`), sua data (`review_decided_at`) e o resultado do item depois da revisão (`reviewed_item_outcome`); a nota livre fica no HTML/JSON.
 - JSON-LD: registro técnico no vocabulário EARL, com o modelo auditado e a declaração de independência da ferramenta.
 - PDF: impressão local do mesmo HTML. Navegadores que não aceitam parâmetros experimentais podem gerar PDF sem marcação estrutural adicional; a limitação é registrada. Se a impressão falhar, HTML, CSV e JSON-LD continuam disponíveis.
 

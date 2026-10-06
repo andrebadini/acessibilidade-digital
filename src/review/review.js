@@ -1,16 +1,20 @@
 import { createReviewDecision } from '../core/review/decisions.js';
-import { accessibilityGuidance } from '../core/report/plain-language-guidance.js';
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
 import { buildCompleteReportSummary } from '../panel/panel-summary.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
-import { createAuthorizedReviewDecisionCommitter, getPendingReviewEntries, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
+import { createAuthorizedReviewDecisionCommitter, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
+import {
+  ANSWER_LABELS, CLASSIFICATION_WORDS, GLOSSARY, IMAGE_PURPOSES, LAY_ANSWERS, LAY_GROUPS, PAGE_AID_DESCRIPTIONS, PAGE_AIDS,
+  aidLabel, buildLayReviewPlan, draftFinding, formatLocalInstant, imageFindingText, imagePlan, layReviewProgress,
+} from '../core/report/lay-review.js';
 import { applyReportSourceControls, buildReportView, renderReportView, updateReportHighlightAction } from './report-view.js';
 import { REPORT_PORT_NAME } from '../background/report-port.js';
 import { createReportHighlightPolicy } from './report-highlight-policy.js';
 
-const ANSWERS = ['conforme', 'não conforme', 'não foi possível determinar'];
+// Respostas canônicas: conforme, não conforme, não foi possível determinar e não se aplica. A tela as
+// oferece em linguagem simples (LAY_ANSWERS): Sim, Não, Não consegui verificar, Não existe nesta página.
 const list = document.querySelector('#review-list');
 const reportRoot = document.querySelector('#report-root');
 const reviewControls = document.querySelector('.review-controls');
@@ -345,19 +349,12 @@ function safeAuditId() {
   return normalizeReviewAuditId(value);
 }
 
-function appendText(parent, tag, value, className) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  element.textContent = value;
-  parent.append(element);
-  return element;
-}
 
 // Páginas muito grandes podem gerar milhares de revisões pendentes. Buscas lineares por cartão tornavam a
 // abertura do relatório quadrática, e milhares de formulários deixavam a aba inutilizável. Os índices são
-// calculados uma vez por modelo e a lista mostra um lote limitado; as demais revisões aparecem ao reabrir
-// o relatório depois de registrar as decisões deste lote.
-const REVIEW_CARD_LIMIT = 100;
+// calculados uma vez por modelo e a revisão guiada mostra um lote limitado de cartões por parte; o botão
+// "Mostrar mais" carrega o lote seguinte.
+const REVIEW_CARD_LIMIT = 40;
 const MODEL_LOOKUPS = new WeakMap();
 function modelLookups(model) {
   let lookups = MODEL_LOOKUPS.get(model);
@@ -386,22 +383,6 @@ function modelLookups(model) {
   return lookups;
 }
 
-function evidenceFor(occurrence) {
-  const { evidence, evidencePositions } = modelLookups(auditModel);
-  const positions = [];
-  for (const id of new Set(occurrence.evidenceRefs || occurrence.evidenceIds || [])) {
-    positions.push(...(evidencePositions.get(id) ?? []));
-  }
-  // Mantém a ordem do modelo, como a filtragem linear anterior.
-  return positions.sort((left, right) => left - right).map(index => evidence[index]);
-}
-
-function nextUnanswered(card) {
-  let next = card.nextElementSibling;
-  while (next?.classList.contains('answered')) next = next.nextElementSibling;
-  if (next) next.open = true;
-  (next?.querySelector('summary') || document.querySelector('a[href="#report-root"]'))?.focus();
-}
 
 function mountReportView(view) {
   const previousTarget = reportRoot.querySelector('[data-review-controls-target]');
@@ -415,7 +396,8 @@ function mountReportView(view) {
     } : null,
   });
   const reviewTarget = report.querySelector('[data-review-controls-target]');
-  reviewTarget.open = previousTarget?.open === true;
+  // A revisão guiada abre por padrão: é o caminho principal de quem não tem formação técnica.
+  reviewTarget.open = previousTarget ? previousTarget.open === true : true;
   // Keep the actual forms: notes, pending buttons and their handlers are not rebuilt.
   reviewTarget.parentElement.insertBefore(reviewControls, reviewTarget);
   reviewTarget.append(list);
@@ -444,14 +426,16 @@ async function refreshCommittedReport(committed) {
   return true;
 }
 
-async function saveDecision(occurrence, answer, note, card, trigger) {
-  if (!auditModel || !reportSessionCapabilityId) return;
+// Uma decisão por ocorrência, pelo canal autorizado. `final` marca a última gravação de uma
+// resposta: só ela marca o cartão como respondido e leva ao próximo cartão pendente.
+async function saveDecision(occurrence, answer, note, card, trigger, { revise = false, final = true } = {}) {
+  if (!auditModel || !reportSessionCapabilityId) return false;
   const session = reportSessionCapabilityId;
   const evaluatorName = evaluator.value.trim();
   if (!evaluatorName) {
     status.textContent = 'Informe o nome da pessoa avaliadora antes de responder.';
     evaluator.focus();
-    return;
+    return false;
   }
   const decision = createReviewDecision({
     auditId: auditModel.auditId, itemId: occurrence.itemId, occurrenceId: occurrence.occurrenceId,
@@ -466,6 +450,7 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
       occurrenceId: authorizedDecision.occurrenceId, answer: authorizedDecision.answer,
       evaluator: authorizedDecision.evaluator, decidedAt: authorizedDecision.decidedAt,
       mode: authorizedDecision.mode, note: authorizedDecision.note ?? '',
+      ...(revise ? { revise: true } : {}),
     }),
     loadReportRevision: auditId => store.getReportRevision(auditId),
     controls: card.querySelectorAll('button'),
@@ -475,12 +460,14 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
       if (pending) status.textContent = `Salvando decisão para o item ${occurrence.itemId}.`;
     },
   });
-  if (committed.status === 'duplicate') return;
-  if (!auditModel || auditModel.auditId !== decision.auditId || reportSessionCapabilityId !== session) return;
+  if (committed.status === 'duplicate') return false;
+  if (!auditModel || auditModel.auditId !== decision.auditId || reportSessionCapabilityId !== session) return false;
   card.removeAttribute('aria-busy');
-  card.classList.add('answered');
-  nextUnanswered(card);
-  if (committed.modelRevision <= reportModelRevision) return;
+  if (final) {
+    card.classList.add('answered');
+    nextUnanswered(card);
+  }
+  if (committed.modelRevision <= reportModelRevision) return true;
   auditModel = committed.model;
   reportModelRevision = committed.modelRevision;
   status.textContent = `Decisão salva para o item ${occurrence.itemId}. Atualizando o relatório.`;
@@ -493,89 +480,639 @@ async function saveDecision(occurrence, answer, note, card, trigger) {
       status.textContent = `Decisão salva para o item ${occurrence.itemId}, mas não foi possível atualizar a visualização. Reabra o relatório para consultar e imprimir a revisão atualizada.`;
     }
   }
+  return true;
 }
 
-function renderCard(entry) {
-  const { occurrenceById, itemById } = modelLookups(auditModel);
-  const occurrence = occurrenceById.get(entry.occurrenceId);
-  const item = itemById.get(entry.itemId);
-  if (!occurrence || !item) return;
-  const card = document.createElement('details');
-  card.className = 'review-card';
-  card.id = `review-${occurrence.occurrenceId.replace(/[^A-Za-z0-9_-]/gu, '-')}`;
-  appendText(card, 'summary', `Item ${item.id} — ${entry.question || item.title}`);
-  const guidance = accessibilityGuidance({ itemId: item.id, title: item.title, outcome: 'cantTell',
-    observed: entry.reason || occurrence.justification || item.humanReason });
-  appendText(card, 'h3', 'Como revisar este resultado');
-  appendText(card, 'p', guidance.impact);
-  appendText(card, 'p', guidance.observed);
-  const steps = document.createElement('ol');
-  for (const step of guidance.reviewSteps) appendText(steps, 'li', step);
-  card.append(steps);
-  appendText(card, 'p', guidance.example);
-  appendText(card, 'p', 'Escolha “conforme” somente se você conseguiu verificar que o requisito é atendido; “não conforme” se confirmou a barreira. Se não conseguiu testar ou ficou em dúvida, escolha “não foi possível determinar”. A dúvida não deve virar aprovação nem reprovação. Descreva na nota o que testou e o que aconteceu.');
-  appendText(card, 'p', `ABNT NBR 17225 — item ${item.id} (${item.classification || 'classificação não informada'}).`);
-  if (typeof item.printedId === 'string' && item.printedId !== item.id) {
-    appendText(card, 'p', `Nota editorial: a impressão consultada mostra “${item.printedId}”; esta ferramenta usa a referência normalizada “${item.id}” da Seção 5, sem atribuir errata à ABNT.`);
+function nextUnanswered(card) {
+  const key = typeof card?.getAttribute === 'function' ? card.getAttribute('data-lay-card') : null;
+  if (key) { advanceFrom(key); return; }
+  let next = card.nextElementSibling;
+  while (next?.classList.contains('answered')) next = next.nextElementSibling;
+  if (next) next.open = true;
+  (next?.querySelector('summary') || document.querySelector('a[href="#report-root"]'))?.focus();
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Revisão guiada (linguagem simples). A pessoa responde sobre o que vê; cada resposta grava, pelo
+// mesmo canal autorizado de antes, uma decisão canônica por ocorrência. Os cartões são atualizados
+// um a um, para que notas ainda não salvas em outros cartões nunca se percam.
+// ---------------------------------------------------------------------------------------------
+
+const layState = {
+  cardNodes: new Map(),
+  openCards: new Set(),
+  revising: new Set(),
+  imagePurpose: new Map(),
+  imageFollowUps: new Map(),
+  visible: { requirement: REVIEW_CARD_LIMIT, recommendation: REVIEW_CARD_LIMIT },
+  showRecommendations: true,
+  activeAids: new Set(),
+  header: null,
+  aidBar: null,
+};
+
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+function button(text, className, onClick) {
+  const node = el('button', text, className);
+  node.type = 'button';
+  node.addEventListener('click', onClick);
+  return node;
+}
+
+function cardDomId(key) {
+  return `lay-card-${key.replace(/[^A-Za-z0-9_-]/gu, '-')}`;
+}
+
+function capitalized(value) {
+  return value ? `${value.charAt(0).toLocaleUpperCase('pt-BR')}${value.slice(1)}` : value;
+}
+
+function questionAnswered(question) {
+  return question.entries.every(value => value.decision);
+}
+
+function cardTitle(card) {
+  if (card.elementLevel) return capitalized(card.element?.label ?? 'Elemento da página');
+  const question = card.questions[0];
+  return question ? question.item.title : 'Pergunta sobre a página';
+}
+
+function evaluatorNameOrWarn() {
+  const name = evaluator.value.trim();
+  if (!name) {
+    status.textContent = 'Antes de responder, informe o nome da pessoa avaliadora no campo acima.';
+    evaluator.focus();
+    return null;
   }
-  const wcag = (item.wcag || []).map(reference => `${reference.id || reference} nível ${reference.level || ''}`.trim()).join(', ');
-  appendText(card, 'p', `WCAG: ${wcag || 'sem referência vinculada'}.`);
-  appendText(card, 'p', `Razão: ${entry.reason || occurrence.justification || item.humanReason || 'revisão humana necessária'}.`);
-  const technical = document.createElement('details');
-  appendText(technical, 'summary', 'Consultar código e evidências desta revisão');
-  card.append(technical);
-  for (const evidence of evidenceFor(occurrence)) {
-    if (evidence.selector?.css) appendText(technical, 'code', `Seletor: ${evidence.selector.css}`);
-    if (evidence.snippet) appendText(technical, 'code', evidence.snippet);
-    // The original full-page image is already in the report annex. Refer to it
-    // instead of embedding the same potentially large raster in every form.
-    if (evidence.kind === 'full-page') {
-      const anchor = evidenceAnchorById.get(evidence.evidenceId);
-      if (anchor) {
-        const link = appendText(technical, 'a', 'Ver captura completa da página nas evidências');
-        link.href = `#${anchor}`;
-        link.addEventListener('click', event => {
-          const target = document.getElementById(anchor);
-          if (!target) return;
-          event.preventDefault();
-          for (let parent = target.parentElement; parent; parent = parent.parentElement) {
-            if (parent.tagName === 'DETAILS') parent.open = true;
-          }
-          target.setAttribute('tabindex', '-1'); target.focus(); target.scrollIntoView({ block: 'start' });
-        });
-      } else appendText(technical, 'p', 'Captura completa indisponível nesta revisão.');
-      continue;
-    }
-    if (isSafeEvidenceImageUrl(evidence.dataUrl, chrome.runtime.getURL('/'))) {
-      const image = document.createElement('img');
-      image.className = 'evidence-media';
-      image.src = evidence.dataUrl;
-      image.alt = evidence.kind === 'full-page' ? 'Captura completa da página auditada' : `Captura do elemento relacionado ao item ${item.id}`;
-      technical.append(image);
-    }
+  if ([...name].length > 160) {
+    status.textContent = 'O nome da pessoa avaliadora pode ter no máximo 160 caracteres.';
+    evaluator.focus();
+    return null;
   }
-  const noteLabel = appendText(card, 'label', 'Nota opcional');
+  return name;
+}
+
+function noteProblem(note, required) {
+  const text = typeof note === 'string' ? note.trim() : '';
+  if (required && !text) return 'Descreva o que você constatou antes de registrar “não atende”. Essa frase vai para o quadro de constatações.';
+  if ([...text].length > 4000) return 'A descrição pode ter no máximo 4.000 caracteres.';
+  return null;
+}
+
+// Grava várias respostas (as ocorrências de uma pergunta, ou todas as perguntas de uma imagem) em
+// sequência. Cada uma passa pela autorização do relatório; uma falha interrompe e é anunciada.
+async function commitAnswers(card, plan, trigger) {
+  if (!auditModel || !reportSessionCapabilityId) return false;
+  if (!evaluatorNameOrWarn()) return false;
+  const node = layState.cardNodes.get(card.key);
+  if (!node) return false;
+  let saved = 0;
+  for (const { target, answer, note, itemId } of plan) {
+    const text = typeof note === 'string' ? note.trim() : '';
+    // Uma ocorrência já decidida só é regravada quando a pessoa pediu "Rever resposta"; uma nova
+    // tentativa depois de falha parcial não cria revisão falsa da resposta que já estava salva.
+    const revising = layState.revising.has(`${card.key}|${itemId ?? target.entry.itemId}`);
+    if (target.decision && (!revising || (target.decision.answer === answer && (target.decision.note ?? '') === text))) continue;
+    try {
+      if (await saveDecision(target.occurrence, answer, text, node, trigger, {
+        revise: Boolean(target.decision), final: false,
+      })) saved += 1;
+    } catch (error) {
+      node.removeAttribute('aria-busy');
+      status.textContent = describeSaveFailure(error);
+      refreshLayCard(card.key);
+      return false;
+    }
+    if (!auditModel) return false;
+  }
+  for (const key of [...layState.revising]) if (key.startsWith(`${card.key}|`)) layState.revising.delete(key);
+  const fresh = refreshLayCard(card.key);
+  status.textContent = saved > 0
+    ? 'Resposta salva. O relatório e o quadro de constatações foram atualizados.'
+    : 'Nada a salvar: essa resposta já estava registrada.';
+  if (fresh?.classList.contains('answered')) {
+    layState.openCards.delete(card.key);
+    fresh.open = false;
+    advanceFrom(card.key);
+  } else if (fresh) {
+    // Ainda há perguntas neste cartão: o foco vai para a próxima sem resposta.
+    fresh.open = true;
+    fresh.querySelector('.lay-answer-form button, .lay-image-classifier button')?.focus();
+  }
+  return true;
+}
+
+function describeSaveFailure(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+  if (/mudou repetidamente/u.test(message)) return 'A auditoria mudou durante o salvamento. Tente responder de novo.';
+  if (/não foi autorizada/u.test(message)) return 'A resposta não foi aceita: o relatório perdeu a autorização. Reabra o relatório pelo painel e tente de novo.';
+  return 'Não foi possível salvar a resposta. Confira o nome da pessoa avaliadora e o tamanho da descrição e tente de novo.';
+}
+
+async function requestPageAid(aid) {
+  if (reportSessionState !== 'result' || !auditModel?.auditId || !reportSessionCapabilityId) {
+    status.textContent = 'As ajudas na página só funcionam enquanto a página auditada continua aberta na aba original.';
+    return;
+  }
+  const response = await sendWorkerRequest({
+    type: 'REPORT_PAGE_AID', sessionCapabilityId: reportSessionCapabilityId, auditId: auditModel.auditId, aid,
+  });
+  if (response?.ok === true) {
+    if (aid === 'reset') layState.activeAids.clear(); else layState.activeAids.add(aid);
+    updateAidBar();
+    status.textContent = aid === 'reset'
+      ? 'A página auditada voltou ao normal.'
+      : `Aplicado na página auditada: ${PAGE_AID_DESCRIPTIONS[aid]}${response.zoomPercent ? ` (zoom de ${response.zoomPercent}%)` : ''}. Observe a página e volte a esta aba para responder.`;
+    return;
+  }
+  status.textContent = 'Não foi possível aplicar a ajuda na página auditada. Ela pode ter sido fechada, recarregada ou alterada.';
+}
+
+function updateAidBar() {
+  const bar = layState.aidBar;
+  if (!bar) return;
+  bar.replaceChildren();
+  bar.hidden = layState.activeAids.size === 0;
+  if (!layState.activeAids.size) return;
+  const active = [...layState.activeAids].map(value => PAGE_AID_DESCRIPTIONS[value]).join(' e ');
+  bar.append(el('p', `Ajuda ativa na página auditada: ${active}. Lembre-se de registrar na descrição que a verificação usou essa ajuda.`));
+  bar.append(button('Voltar a página ao normal', 'lay-aid-reset', () => { void requestPageAid('reset'); }));
+}
+
+function aidControls(aid) {
+  if (!aid) return null;
+  const wrap = el('div', undefined, 'lay-aids');
+  if (aid === 'tab' || aid === 'grayscale') {
+    wrap.append(el('p', aid === 'tab'
+      ? 'Ajuda: vá para a página auditada, clique numa área vazia e use a tecla Tab. No painel lateral, “Conferir leitura por Tab” mostra a sequência com explicações.'
+      : 'Ajuda: no painel lateral, “Acromatopsia” mostra a página em tons de cinza, para ver o que depende só da cor.'));
+    wrap.append(button('Ir para a página auditada', 'lay-aid', () => { void returnToAuditedPage(); }));
+    return wrap;
+  }
+  const pageAid = PAGE_AIDS[aid];
+  if (!pageAid) return null;
+  wrap.append(button(aidLabel(aid), 'lay-aid', () => { void requestPageAid(pageAid); }));
+  wrap.append(button('Voltar ao normal', 'lay-aid-reset', () => { void requestPageAid('reset'); }));
+  return wrap;
+}
+
+function highlightableOccurrence(card) {
+  const entries = card.questions.flatMap(question => question.entries);
+  const usable = entries.find(value => !value.decision && reportOccurrence(value.occurrence.occurrenceId)) ??
+    entries.find(value => value.decision?.answer === 'não conforme' && reportOccurrence(value.occurrence.occurrenceId));
+  return usable?.occurrence.occurrenceId ?? null;
+}
+
+async function showOnPage(card, trigger) {
+  const occurrenceId = highlightableOccurrence(card);
+  if (!occurrenceId) {
+    status.textContent = 'O destaque ao vivo vale para perguntas pendentes ou respondidas com “Não”. Use a captura registrada no cartão.';
+    return;
+  }
+  trigger.disabled = true;
+  try {
+    const available = await handleReportHighlightIntent({ type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId }, { announce: false });
+    if (!available || highlightAvailability.get(occurrenceId)?.state !== 'available') {
+      status.textContent = 'Não é possível destacar este elemento agora (a página pode ter mudado). Use a captura registrada no cartão.';
+      return;
+    }
+    if (await handleReportHighlightIntent({ type: 'HIGHLIGHT_OCCURRENCE', occurrenceId }, { announce: false })) {
+      status.textContent = 'O elemento está destacado na página auditada. Volte a esta aba para responder.';
+    }
+  } finally { trigger.disabled = false; }
+}
+
+function objectBlock(card) {
+  const block = el('div', undefined, 'lay-object');
+  const evidence = card.evidence;
+  if (evidence && isSafeEvidenceImageUrl(evidence.dataUrl, chrome.runtime.getURL('/'))) {
+    const image = document.createElement('img');
+    image.className = 'lay-thumb';
+    image.src = evidence.dataUrl;
+    image.alt = `Captura do elemento: ${card.element?.label ?? 'elemento da página'}`;
+    block.append(image);
+  }
+  const facts = document.createElement('dl');
+  const fact = (label, value) => { facts.append(el('dt', label), el('dd', value)); };
+  if (card.elementLevel) {
+    fact('O que é', capitalized(card.element?.roleWord ?? 'elemento'));
+    fact('Nome lido pela extensão', card.element?.name ? `“${card.element.name}”` : 'nenhum (o leitor de tela não teria o que anunciar)');
+    if (card.element?.visibleText && card.element.visibleText !== card.element.name) fact('Texto visível', `“${card.element.visibleText}”`);
+    if (card.imageCard) {
+      const alt = card.element?.altAttribute;
+      fact('Texto alternativo', alt === null ? 'ausente' : alt === '' ? 'vazio (marcada como enfeite)' : alt ? `“${alt}”` : 'não informado');
+    }
+  } else {
+    fact('Onde olhar', 'Na página auditada como um todo.');
+  }
+  block.append(facts);
+  if (card.elementLevel && reportSessionState === 'result' && highlightableOccurrence(card)) {
+    const show = button('Mostrar na página', 'lay-show', event => { void showOnPage(card, event.currentTarget); });
+    block.append(show);
+  }
+  return block;
+}
+
+function answeredLine(question, card) {
+  const decisions = question.entries.map(value => value.decision).filter(Boolean);
+  const latest = [...decisions].sort((a, b) => a.decidedAt.localeCompare(b.decidedAt)).at(-1);
+  const wrap = el('div', undefined, 'lay-answered');
+  wrap.setAttribute('data-lay-answer', latest.answer);
+  const revisions = latest.revisions?.length ? ` · revista ${latest.revisions.length} ${latest.revisions.length === 1 ? 'vez' : 'vezes'}` : '';
+  wrap.append(el('p', `Resposta registrada: ${ANSWER_LABELS[latest.answer]} — ${latest.evaluator}, ${formatLocalInstant(latest.decidedAt, auditModel.timezone)}${revisions}.`));
+  if (latest.note) wrap.append(el('p', `Descrição: ${latest.note}`, 'lay-answered-note'));
+  wrap.append(button('Rever resposta', 'lay-revise', () => {
+    layState.revising.add(`${card.key}|${question.itemId}`);
+    refreshLayCard(card.key);
+  }));
+  return wrap;
+}
+
+function answerForm(card, question) {
+  const form = el('div', undefined, 'lay-answer-form');
+  const answers = el('div', undefined, 'lay-answers');
+  const finding = el('div', undefined, 'lay-finding');
+  finding.hidden = true;
+  const findingLabel = el('label', 'O que você constatou (obrigatório para “Não”). Esta frase vai para o quadro de constatações; ajuste o rascunho ao que você viu.');
+  const findingText = document.createElement('textarea');
+  findingText.rows = 4;
+  findingText.maxLength = 4000;
+  findingText.value = draftFinding({ itemId: question.itemId, element: card.element, hint: question.hints[0], aids: [...layState.activeAids] });
+  findingLabel.append(findingText);
+  const noteBox = document.createElement('details');
+  noteBox.className = 'lay-note';
+  noteBox.append(el('summary', 'Acrescentar observação (opcional)'));
   const note = document.createElement('textarea');
-  note.rows = 3;
-  noteLabel.append(note);
-  const answers = document.createElement('div');
-  answers.className = 'answers';
-  for (const answer of ANSWERS) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = answer;
-    button.addEventListener('click', () => {
-      void saveDecision(occurrence, answer, note.value, card, button).catch(() => { status.textContent = 'Não foi possível salvar a decisão.'; });
+  note.rows = 2;
+  note.maxLength = 4000;
+  note.setAttribute('aria-label', `Observação opcional sobre o item ${question.itemId}`);
+  noteBox.append(note);
+  const targets = () => question.entries;
+  const submit = async (answer, text, trigger, required = false) => {
+    const problem = noteProblem(text, required);
+    if (problem) { status.textContent = problem; (required ? findingText : note).focus(); return; }
+    await commitAnswers(card, targets().map(target => ({ target, answer, note: text, itemId: question.itemId })), trigger);
+  };
+  for (const option of LAY_ANSWERS) {
+    // Em cartões de elemento, "não existe nesta página" seria estranho: o elemento existe, o item é que não se aplica.
+    const label = option.answer === 'não se aplica' && card.elementLevel ? 'Não se aplica a este elemento' : option.label;
+    const choice = button(label, `lay-answer lay-answer--${option.answer.replace(/\s+/gu, '-')}`, event => {
+      if (option.answer === 'não conforme') {
+        finding.hidden = false;
+        findingText.focus();
+        return;
+      }
+      void submit(option.answer, note.value, event.currentTarget);
     });
-    answers.append(button);
+    choice.setAttribute('data-lay-answer', option.answer);
+    choice.title = option.meaning;
+    answers.append(choice);
   }
-  const skip = document.createElement('button');
-  skip.type = 'button';
-  skip.textContent = 'Pular revisão';
-  skip.addEventListener('click', () => { status.textContent = 'Revisão pulada; o resultado permanece indeterminado.'; nextUnanswered(card); });
-  answers.append(skip);
-  card.append(answers);
-  list.append(card);
+  answers.append(button('Pular revisão por enquanto', 'lay-skip', () => {
+    status.textContent = 'Pergunta pulada; ela continua sem conclusão e pode ser respondida depois.';
+    advanceFrom(card.key);
+  }));
+  const confirm = button('Registrar “não atende”', 'lay-confirm-fail', event => {
+    void submit('não conforme', findingText.value, event.currentTarget, true);
+  });
+  const cancel = button('Cancelar', 'lay-cancel', () => { finding.hidden = true; });
+  const findingActions = el('div', undefined, 'lay-finding-actions');
+  findingActions.append(confirm, cancel);
+  finding.append(findingLabel, findingActions);
+  form.append(answers, finding, noteBox);
+  return form;
+}
+
+function questionBlock(card, question) {
+  const item = question.item;
+  const node = el('li', undefined, 'lay-question');
+  node.setAttribute('data-lay-question', question.itemId);
+  node.append(el('p', question.guide?.question ?? `A página atende a “${item.title}”?`, 'lay-q'));
+  const meta = `ABNT NBR 17225 — item ${item.id} · ${CLASSIFICATION_WORDS[item.classification] ?? 'item'} · ${item.title}`;
+  node.append(el('p', meta, 'lay-meta'));
+  if (typeof item.printedId === 'string' && item.printedId !== item.id) {
+    node.append(el('p', `Nota editorial: a impressão consultada mostra “${item.printedId}”; esta ferramenta usa a referência normalizada “${item.id}” da Seção 5.`, 'lay-meta'));
+  }
+  for (const hint of question.hints) node.append(el('p', `Pista da extensão: ${hint}`, 'lay-hint'));
+  if (question.alreadyFailed) node.append(el('p', 'A verificação automática já registrou falha neste elemento para este item. Sua resposta confirma ou não a suspeita do outro motor.', 'lay-hint'));
+  const how = document.createElement('details');
+  how.className = 'lay-how';
+  how.append(el('summary', 'Como verificar'));
+  const steps = document.createElement('ol');
+  for (const step of question.guide?.steps ?? []) steps.append(el('li', step));
+  how.append(steps);
+  const aids = aidControls(question.guide?.aid);
+  if (aids) how.append(aids);
+  if (question.guide?.technical) how.append(el('p', 'Este item depende de exame do código. Sem apoio técnico, “Não consegui verificar” é a resposta honesta; ela não aprova nem reprova.', 'lay-hint'));
+  node.append(how);
+  for (const term of question.guide?.terms ?? []) {
+    if (GLOSSARY[term]) {
+      const p = el('p', undefined, 'lay-term');
+      p.append(el('dfn', term), document.createTextNode(`: ${GLOSSARY[term]}`));
+      node.append(p);
+    }
+  }
+  const revising = layState.revising.has(`${card.key}|${question.itemId}`);
+  if (questionAnswered(question) && !revising) node.append(answeredLine(question, card));
+  else {
+    if (revising) node.append(el('p', 'Revendo a resposta. A anterior continua registrada no histórico.', 'lay-hint'));
+    node.append(answerForm(card, question));
+  }
+  return node;
+}
+
+function imageClassifier(card) {
+  const section = el('section', undefined, 'lay-image-classifier');
+  section.append(el('p', 'Para que serve esta imagem?', 'lay-q'));
+  section.append(el('p', 'Uma resposta aqui resolve os itens 5.2.1 a 5.2.6 desta imagem. Se preferir, responda item por item mais abaixo.', 'lay-meta'));
+  const options = el('div', undefined, 'lay-purposes');
+  options.setAttribute('role', 'group');
+  options.setAttribute('aria-label', 'Finalidade da imagem');
+  const chosen = layState.imagePurpose.get(card.key) ?? null;
+  for (const purpose of IMAGE_PURPOSES) {
+    const choice = button(purpose.label, 'lay-purpose', () => {
+      layState.imagePurpose.set(card.key, purpose.id);
+      layState.imageFollowUps.set(card.key, new Map());
+      refreshLayCard(card.key);
+      layState.cardNodes.get(card.key)?.querySelector('.lay-image-plan')?.focus();
+    });
+    choice.setAttribute('aria-pressed', String(chosen === purpose.id));
+    choice.append(el('small', `Ex.: ${purpose.example}`));
+    options.append(choice);
+  }
+  section.append(options);
+  if (!chosen) return section;
+  const plan = imagePlan({ purpose: chosen, element: card.element });
+  const followUps = layState.imageFollowUps.get(card.key) ?? new Map();
+  const box = el('div', undefined, 'lay-image-plan');
+  box.tabIndex = -1;
+  box.append(el('p', 'Com essa resposta, a extensão conclui:', 'lay-meta'));
+  const list = document.createElement('ul');
+  const questionsById = new Map(card.questions.map(question => [question.itemId, question]));
+  const failing = [];
+  let complete = true;
+  for (const [itemId, step] of Object.entries(plan)) {
+    const question = questionsById.get(itemId);
+    if (!question) continue;
+    const row = el('li');
+    const label = `${itemId} ${question.item.title}`;
+    if (step.answer) {
+      row.append(el('span', `${label}: ${ANSWER_LABELS[step.answer]} — ${step.reason}.`));
+      if (step.answer === 'não conforme') failing.push({ itemId, reason: step.reason });
+    } else {
+      const answer = followUps.get(itemId) ?? null;
+      row.append(el('span', `${label}: ${step.followUp}`));
+      for (const [label, value] of [['Sim', 'conforme'], ['Não', 'não conforme'], ['Não sei', 'não foi possível determinar']]) {
+        const choice = button(label, 'lay-answer', () => {
+          followUps.set(itemId, value); layState.imageFollowUps.set(card.key, followUps); refreshLayCard(card.key);
+        });
+        choice.setAttribute('aria-pressed', String(answer === value));
+        row.append(choice);
+      }
+      if (!answer) complete = false;
+      if (answer === 'não conforme') failing.push({ itemId, reason: `a resposta à pergunta “${step.followUp}” foi “não”` });
+    }
+    list.append(row);
+  }
+  box.append(list);
+  const findingLabel = el('label', 'Descrição da constatação (usada nos itens que não atendem; ajuste ao que você viu):');
+  const findingText = document.createElement('textarea');
+  findingText.rows = 3;
+  findingText.maxLength = 4000;
+  findingText.value = failing.map(value => imageFindingText({
+    itemId: value.itemId, element: card.element, reason: value.reason, withItem: failing.length > 1,
+  })).join(' ');
+  findingLabel.append(findingText);
+  if (failing.length) box.append(findingLabel);
+  const purposeLabel = IMAGE_PURPOSES.find(value => value.id === chosen)?.label ?? chosen;
+  const save = button('Registrar as respostas desta imagem', 'lay-confirm', async event => {
+    if (!complete) { status.textContent = 'Responda às perguntas de acompanhamento antes de registrar.'; return; }
+    const problem = failing.length ? noteProblem(findingText.value, true) : null;
+    if (problem) { status.textContent = problem; findingText.focus(); return; }
+    const entries = [];
+    for (const [itemId, step] of Object.entries(plan)) {
+      const question = questionsById.get(itemId);
+      if (!question) continue;
+      const answer = step.answer ?? followUps.get(itemId);
+      const note = answer === 'não conforme' ? findingText.value
+        : answer === 'não se aplica' ? `Finalidade informada: ${purposeLabel}. Não se aplica porque ${step.reason}.`
+          : answer === 'não foi possível determinar' ? `Finalidade informada: ${purposeLabel}. Sem conclusão: “${step.followUp}” — a pessoa avaliadora não soube responder.`
+            : `Finalidade informada: ${purposeLabel}.${step.reason ? ` ${capitalized(step.reason)}.` : ''}`;
+      for (const target of question.entries) entries.push({ target, answer, note, itemId });
+    }
+    await commitAnswers(card, entries, event.currentTarget);
+  });
+  box.append(save);
+  section.append(box);
+  return section;
+}
+
+function renderCardNode(card) {
+  const node = document.createElement('details');
+  node.className = 'lay-card';
+  node.id = cardDomId(card.key);
+  node.setAttribute('data-lay-card', card.key);
+  node.setAttribute('data-lay-group', card.groupId);
+  node.classList.toggle('answered', card.answered);
+  node.open = layState.openCards.has(card.key);
+  node.addEventListener('toggle', () => {
+    if (node.open) layState.openCards.add(card.key); else layState.openCards.delete(card.key);
+  });
+  const summary = el('summary');
+  summary.append(el('span', cardTitle(card), 'lay-card-title'));
+  const pending = card.questions.filter(question => !questionAnswered(question)).length;
+  summary.append(el('span', pending === 0 ? 'respondido' : `${pending} ${pending === 1 ? 'pergunta' : 'perguntas'}`, `lay-badge${pending === 0 ? ' lay-badge--done' : ''}`));
+  if (!card.requirement) summary.append(el('span', 'recomendação', 'lay-badge lay-badge--rec'));
+  node.append(summary);
+  node.append(objectBlock(card));
+  const allPending = card.questions.every(question => question.entries.every(value => !value.decision));
+  if (card.imageCard && allPending && card.questions.some(question => question.itemId.startsWith('5.2.'))) {
+    node.append(imageClassifier(card));
+    const byItem = document.createElement('details');
+    byItem.className = 'lay-by-item';
+    byItem.append(el('summary', 'Responder os itens de imagem um por um'));
+    const imageList = el('ol', undefined, 'lay-questions');
+    const others = el('ol', undefined, 'lay-questions');
+    for (const question of card.questions) {
+      (question.itemId.startsWith('5.2.') ? imageList : others).append(questionBlock(card, question));
+    }
+    byItem.append(imageList);
+    node.append(byItem);
+    if (others.childElementCount) node.append(others);
+  } else {
+    const list = el('ol', undefined, 'lay-questions');
+    for (const question of card.questions) list.append(questionBlock(card, question));
+    node.append(list);
+  }
+  return node;
+}
+
+function currentPlan() {
+  return auditModel ? buildLayReviewPlan(auditModel) : [];
+}
+
+function renderProgress(plan) {
+  const header = layState.header;
+  if (!header) return;
+  const progress = layReviewProgress(plan);
+  const box = header.querySelector('[data-lay-progress]');
+  box.replaceChildren();
+  for (const [kind, label] of [['requirement', 'Requisitos (obrigatórios)'], ['recommendation', 'Recomendações (opcionais)']]) {
+    const value = progress[kind];
+    if (!value.total) continue;
+    const line = el('p', `${label}: ${value.answered} de ${value.total} perguntas respondidas`);
+    const meter = document.createElement('progress');
+    meter.max = value.total;
+    meter.value = value.answered;
+    meter.setAttribute('aria-label', label);
+    box.append(line, meter);
+  }
+}
+
+function advanceFrom(key) {
+  const nodes = [...list.querySelectorAll('details.lay-card')];
+  const index = nodes.findIndex(node => node.getAttribute('data-lay-card') === key);
+  const next = nodes.slice(index + 1).find(node => !node.classList.contains('answered') && !node.closest('[hidden]'));
+  if (next) {
+    next.open = true;
+    layState.openCards.add(next.getAttribute('data-lay-card'));
+    next.querySelector('summary')?.focus();
+  } else {
+    document.querySelector('a[href="#report-root"]')?.focus();
+  }
+}
+
+function refreshLayCard(key) {
+  const plan = currentPlan();
+  renderProgress(plan);
+  const card = plan.find(value => value.key === key);
+  const old = layState.cardNodes.get(key);
+  if (!card || !old) return;
+  const fresh = renderCardNode(card);
+  old.replaceWith(fresh);
+  layState.cardNodes.set(key, fresh);
+  updateGroupCounts(plan);
+  return fresh;
+}
+
+function updateGroupCounts(plan) {
+  for (const counter of list.querySelectorAll('[data-lay-group-count]')) {
+    const [part, groupId] = counter.getAttribute('data-lay-group-count').split(':');
+    const cards = plan.filter(card => (card.requirement ? 'requirement' : 'recommendation') === part && card.groupId === groupId);
+    const pending = cards.filter(card => !card.answered).length;
+    counter.textContent = pending ? `${pending} de ${cards.length} pendentes` : 'tudo respondido';
+  }
+}
+
+function renderPart(plan, part) {
+  const cards = plan.filter(card => (card.requirement ? 'requirement' : 'recommendation') === part);
+  const container = el('section', undefined, `lay-part lay-part--${part}`);
+  container.setAttribute('data-lay-part', part);
+  if (!cards.length) return null;
+  container.append(el('h3', part === 'requirement'
+    ? 'Parte 1 — Requisitos (obrigatórios para a conformidade regular)'
+    : 'Parte 2 — Recomendações (opcionais; contam para a conformidade plena)'));
+  const limit = layState.visible[part];
+  let shown = 0;
+  for (const group of LAY_GROUPS) {
+    const groupCards = cards.filter(card => card.groupId === group.id);
+    if (!groupCards.length) continue;
+    const groupNode = el('section', undefined, 'lay-group');
+    groupNode.id = `lay-${part}-${group.id}`;
+    const heading = el('h4', group.label);
+    const counter = el('span', '', 'lay-group-count');
+    counter.setAttribute('data-lay-group-count', `${part}:${group.id}`);
+    heading.append(document.createTextNode(' '), counter);
+    groupNode.append(heading, el('p', group.description, 'lay-meta'));
+    for (const card of groupCards) {
+      if (shown >= limit) break;
+      const node = renderCardNode(card);
+      layState.cardNodes.set(card.key, node);
+      groupNode.append(node);
+      shown += 1;
+    }
+    if (groupNode.querySelector('details.lay-card')) container.append(groupNode);
+    if (shown >= limit) break;
+  }
+  if (cards.length > shown) {
+    const more = button(`Mostrar mais ${Math.min(REVIEW_CARD_LIMIT, cards.length - shown)} de ${cards.length - shown} cartões restantes`, 'lay-more', () => {
+      layState.visible[part] += REVIEW_CARD_LIMIT;
+      renderLayReview();
+    });
+    more.setAttribute('data-review-omitted', String(cards.length - shown));
+    container.append(more);
+  }
+  return container;
+}
+
+function renderLayHeader() {
+  const header = el('section', undefined, 'lay-header');
+  header.append(el('h3', 'Revisão guiada, em linguagem simples'));
+  header.append(el('p', 'A extensão só conclui sozinha o que consegue medir. O restante depende do seu olhar. Aqui as perguntas são sobre o que você vê na página; suas respostas são traduzidas para os itens da ABNT NBR 17225:2025 e alimentam o quadro de constatações.'));
+  const howto = el('ol', undefined, 'lay-howto');
+  for (const step of [
+    'Informe seu nome no campo “Nome da pessoa avaliadora”, acima.',
+    'Comece pela Parte 1 (requisitos). Abra um cartão, leia a pergunta e use “Mostrar na página” para ver o elemento destacado.',
+    'Responda “Sim”, “Não”, “Não consegui verificar” ou “Não existe nesta página” (nos elementos, “Não se aplica a este elemento”). Na dúvida, “Não consegui verificar”: ela não aprova nem reprova.',
+    'Ao responder “Não”, descreva o que constatou. A frase vai para o quadro de constatações, pronta para citar.',
+    'Errou? Use “Rever resposta”. A resposta anterior fica guardada no histórico.',
+  ]) howto.append(el('li', step));
+  header.append(howto);
+  const progress = el('div', undefined, 'lay-progress');
+  progress.setAttribute('data-lay-progress', '');
+  header.append(progress);
+  const toggleLabel = el('label', undefined, 'lay-toggle');
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.checked = layState.showRecommendations;
+  toggle.addEventListener('change', () => {
+    layState.showRecommendations = toggle.checked;
+    const part = list.querySelector('[data-lay-part="recommendation"]');
+    if (part) part.hidden = !toggle.checked;
+  });
+  toggleLabel.append(toggle, document.createTextNode(' Mostrar também as recomendações (opcionais)'));
+  header.append(toggleLabel);
+  const glossary = document.createElement('details');
+  glossary.className = 'lay-glossary';
+  glossary.append(el('summary', 'Glossário: o que significam os termos'));
+  const terms = document.createElement('dl');
+  for (const [term, definition] of Object.entries(GLOSSARY)) terms.append(el('dt', capitalized(term)), el('dd', definition));
+  glossary.append(terms);
+  header.append(glossary);
+  const aidBar = el('div', undefined, 'lay-aid-bar');
+  aidBar.setAttribute('role', 'status');
+  aidBar.hidden = true;
+  layState.aidBar = aidBar;
+  header.append(aidBar);
+  layState.header = header;
+  return header;
+}
+
+function renderLayReview() {
+  layState.cardNodes.clear();
+  const plan = currentPlan();
+  list.replaceChildren();
+  if (!plan.length) {
+    list.append(el('p', 'Não há perguntas de revisão humana nesta auditoria.'));
+    return;
+  }
+  list.append(renderLayHeader());
+  for (const part of ['requirement', 'recommendation']) {
+    const node = renderPart(plan, part);
+    if (!node) continue;
+    if (part === 'recommendation') node.hidden = !layState.showRecommendations;
+    list.append(node);
+  }
+  renderProgress(plan);
+  updateGroupCounts(plan);
+  updateAidBar();
 }
 
 async function start() {
@@ -602,12 +1139,7 @@ async function start() {
   if (reportSessionState === 'result') {
     connectReportHighlightState();
   }
-  const pendingEntries = getPendingReviewEntries(auditModel);
-  for (const entry of pendingEntries.slice(0, REVIEW_CARD_LIMIT)) renderCard(entry);
-  if (pendingEntries.length > REVIEW_CARD_LIMIT) {
-    const note = appendText(list, 'p', `Mostrando as primeiras ${REVIEW_CARD_LIMIT} de ${pendingEntries.length} revisões humanas pendentes. Registre as decisões deste lote e reabra o relatório para ver as próximas; todas as ocorrências permanecem nas exportações.`);
-    note.setAttribute('data-review-omitted', String(pendingEntries.length - REVIEW_CARD_LIMIT));
-  }
+  renderLayReview();
   const latest = await store.getLatest();
   status.textContent = latest?.auditId === id && latest?.exportCleanupPending === true ? EXPORT_CLEANUP_MESSAGE
     : reportStatusLine(summary);

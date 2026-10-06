@@ -66,7 +66,20 @@ outros textos podem conter dados pessoais. Revise os arquivos antes de compartil
 - **Outra URL:** informe o endereço e escolha o modo de evidência. O endereço é aberto em uma aba temporária inativa, removida ao final.
 - **Lote de páginas:** informe de 2 a 20 URLs, uma por linha. O resultado é consolidado; não há descoberta ilimitada de links. Cada página é aberta em aba temporária inativa.
 - **Personas:** leitor de tela com prévia falada/legenda, acromatopsia e navegação por teclado. São apoios de teste, não substitutos da experiência real de uma pessoa com deficiência. Use os controles de encerramento e Escape quando disponível.
-- **Revisão humana:** leia o guia e registre conclusão, nome, data e nota. Não transforme dúvida em falha confirmada. O histórico acompanha a revisão exportada.
+- **Revisão guiada (revisão humana):** no relatório, a seção “Revisão humana guiada” reúne as perguntas que dependem do seu olhar, em linguagem simples e agrupadas pelo que você vê (página inteira, imagens, links, botões, formulários, teclado, cores, texto, organização, mídia e tempo). Os requisitos (obrigatórios) vêm primeiro; as recomendações ficam numa segunda parte, opcional. Veja a seção abaixo.
+
+## Revisão guiada e quadro de constatações
+
+A extensão só conclui sozinha o que consegue medir. O restante é perguntado a você, sem exigir conhecimento de HTML:
+
+1. Abra o relatório completo e informe seu nome em **Nome da pessoa avaliadora**.
+2. Em **Revisão guiada**, abra um cartão. Cada cartão mostra o elemento (captura, nome lido pela extensão e, quando houver, uma **pista** do que foi medido) e o botão **Mostrar na página**, que destaca o elemento na aba auditada.
+3. Leia a pergunta e, se precisar, **Como verificar**. Algumas perguntas têm ajudas na própria página: **Ampliar para 200%**, **Ver como celular (320 px)**, **Aplicar espaçamento de leitura** e **Voltar ao normal**. Elas só mudam a apresentação na aba auditada e são desfeitas com **Voltar ao normal**.
+4. Responda **Sim**, **Não**, **Não consegui verificar** ou **Não existe nesta página**. Na dúvida, use **Não consegui verificar**: ela não aprova nem reprova. Ao responder **Não**, descreva o que constatou; um rascunho editável já vem preenchido.
+5. Nas imagens, uma única pergunta (“Para que serve esta imagem?”) resolve os itens 5.2.1 a 5.2.6, combinando sua resposta com o texto alternativo que a extensão leu.
+6. Errou? Use **Rever resposta**. A resposta anterior continua registrada no histórico.
+
+O **Quadro de constatações** lista os 96 requisitos da ABNT NBR 17225:2025 na situação observada: não atendidos, atendidos, não aplicáveis e sem conclusão. Cada requisito não atendido traz o elemento, a constatação (automática ou humana, com nome e hora) e um parágrafo pronto para citação, com a evidência. Use **Copiar texto para citação** e confira o texto antes de usá-lo. O quadro também aparece no HTML e no PDF exportados.
 
 ## Entender os resultados
 

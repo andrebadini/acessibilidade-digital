@@ -12,7 +12,11 @@ import { listedLimitations, viewportSummary } from '../core/report/text-policy.j
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
 import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/plain-language-guidance.js';
-import { projectReviewHistory, humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from '../core/report/human-review-presentation.js';
+import { projectReviewHistory, humanReviewMetadata, humanReviewHeading, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from '../core/report/human-review-presentation.js';
+import {
+  buildFindingsBoard, FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence,
+} from '../core/report/findings-board.js';
+import { compareItemIds } from '../core/report/lay-review.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -45,14 +49,14 @@ const NO_ABNT_ITEM_LABEL = 'Sem item ABNT associado';
 const SECTION_TITLES = Object.freeze([
   'Sumário executivo e limitações críticas',
   'Cobertura e quatro grupos de resultado',
-  'Não conformidades priorizadas',
-  'Revisões humanas e conclusões registradas',
+  FINDINGS_BOARD_TITLE,
+  'Revisão humana guiada e conclusões registradas',
   'Mapas de anúncios',
   'Matriz completa dos 146 itens',
   'Metodologia, fontes, integridade, evidências técnicas e anexos',
 ]);
 const SECTION_NAV_LABELS = Object.freeze([
-  'Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios',
+  'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
   'Matriz ABNT', 'Metodologia e evidências',
 ]);
 // Mesmo teto do modelo de auditoria (audit-input.js, 1.1.53).
@@ -454,7 +458,7 @@ export function projectMatrix(model) {
     wcag: item.wcag.map(reference => ({ id: reference.id, level: reference.level })),
     evaluation: item.evaluation, ruleIds: [...item.ruleIds], humanReason: item.humanReason,
     outcome: item.outcome,
-  })).sort((left, right) => left.id.localeCompare(right.id)));
+  })).sort((left, right) => compareItemIds(left.id, right.id)));
 }
 
 export function buildReportView({ model: inputModel, summary: inputSummary, modelRevision, modelHash } = {}) {
@@ -479,6 +483,7 @@ export function buildReportView({ model: inputModel, summary: inputSummary, mode
       exports: projectExports(model),
       matrix: projectMatrix(model),
       reviewHistory: projectReviewHistory(model),
+      findingsBoard: buildFindingsBoard(model),
     });
   } catch (error) {
     if (error instanceof TypeError && error.message === 'REPORT_VIEW_DENIED') throw error;
@@ -689,7 +694,7 @@ function appendHumanHistory(document, parent, entries, evidenceAnchorById) {
   for (const entry of entries) {
     const card = document.createElement('li'); card.setAttribute('data-review-record', entry.occurrenceId);
     card.setAttribute('data-review-answer', entry.answer);
-    card.append(element(document, 'h3', `Item ${entry.itemId} da ABNT NBR 17225:2025`));
+    card.append(element(document, 'h3', humanReviewHeading(entry)));
     const metadata = document.createElement('dl');
     for (const [label, value] of humanReviewMetadata(entry)) {
       metadata.append(element(document, 'dt', label), element(document, 'dd', value));
@@ -772,7 +777,8 @@ function itemCheckPresentation(issue, itemId) {
   const occurrences = issue.occurrences.filter(occurrence => itemId === NO_ABNT_ITEM ? !occurrence.itemId : occurrence.itemId === itemId);
   const outcomes = occurrences.map(occurrence => occurrence.outcome === 'failed' || occurrence.decision?.answer === 'não conforme' ? 'failed'
     : occurrence.decision?.answer === 'conforme' ? 'passed'
-      : occurrence.decision?.answer === 'não foi possível determinar' ? 'cantTell' : occurrence.outcome);
+      : occurrence.decision?.answer === 'não se aplica' ? 'inapplicable'
+        : occurrence.decision?.answer === 'não foi possível determinar' ? 'cantTell' : occurrence.outcome);
   if (issue.occurrences.length === 0) outcomes.push(issue.displayOutcome);
   const outcome = outcomes.includes('failed') ? 'failed' : outcomes.some(value => ['cantTell', 'untested'].includes(value)) ? 'cantTell'
     : outcomes.includes('passed') ? 'passed' : outcomes.length ? 'inapplicable' : 'untested';
@@ -1003,6 +1009,123 @@ function installPrintPresentation(document, root) {
   });
 }
 
+function findingsCallToAction(document, board) {
+  const box = document.createElement('aside');
+  box.setAttribute('class', 'findings-cta');
+  box.setAttribute('data-findings-cta', '');
+  box.append(element(document, 'h3', 'Situação dos requisitos obrigatórios'));
+  box.append(element(document, 'p', scoreboardSentence(board.scoreboard)));
+  const links = document.createElement('p');
+  const toBoard = element(document, 'a', 'Ver o quadro de constatações');
+  toBoard.setAttribute('href', '#report-section-3');
+  const toReview = element(document, 'a', board.scoreboard.pending > 0
+    ? `Fazer a revisão guiada (${board.scoreboard.pending} ${board.scoreboard.pending === 1 ? 'requisito' : 'requisitos'} sem conclusão)`
+    : 'Abrir a revisão guiada');
+  toReview.setAttribute('href', '#report-section-4');
+  links.append(toBoard, element(document, 'span', ' · '), toReview);
+  box.append(links);
+  return box;
+}
+
+function copyText(text, button) {
+  const done = () => { button.textContent = 'Texto copiado'; };
+  try {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (clipboard && typeof clipboard.writeText === 'function') {
+      clipboard.writeText(text).then(done, () => { button.textContent = 'Selecione o texto e copie'; });
+      return;
+    }
+  } catch { /* cai na orientação manual */ }
+  button.textContent = 'Selecione o texto e copie';
+}
+
+function appendFindingsBoard(document, parent, board) {
+  parent.append(element(document, 'p', FINDINGS_BOARD_INTRO));
+  const score = document.createElement('dl');
+  score.setAttribute('class', 'findings-score');
+  score.setAttribute('data-findings-score', '');
+  for (const [label, value, tone] of [
+    ['Não atendidos', board.scoreboard.notMet, 'failed'],
+    ['Atendidos', board.scoreboard.met, 'passed'],
+    ['Não aplicáveis', board.scoreboard.notApplicable, 'inapplicable'],
+    ['Sem conclusão', board.scoreboard.pending, 'pending'],
+  ]) {
+    const cell = document.createElement('div');
+    cell.setAttribute('data-findings-tone', tone);
+    cell.append(element(document, 'dt', label), element(document, 'dd', String(value)));
+    score.append(cell);
+  }
+  parent.append(score);
+  parent.append(element(document, 'p', `${scoreboardSentence(board.scoreboard)} ${FINDINGS_BOARD_LIMIT}`, 'findings-limit'));
+
+  const notMet = document.createElement('section');
+  notMet.setAttribute('data-findings-group', 'not-met');
+  notMet.append(element(document, 'h3', `Requisitos não atendidos (${board.groups.notMet.length})`));
+  if (!board.groups.notMet.length) notMet.append(element(document, 'p', 'Nenhum requisito foi dado como não atendido até agora. Isso não significa conformidade: veja os itens sem conclusão.'));
+  for (const entry of board.groups.notMet) {
+    const article = document.createElement('article');
+    article.setAttribute('data-findings-item', entry.itemId);
+    article.append(element(document, 'h4', `Item ${entry.itemId} — ${entry.title} (requisito)`));
+    article.append(element(document, 'p', `Como foi concluído: ${entry.method}.`, 'findings-method'));
+    const list = document.createElement('ol');
+    for (const finding of entry.findings) {
+      const row = document.createElement('li');
+      row.setAttribute('data-findings-occurrence', finding.occurrenceId);
+      if (finding.element) row.append(element(document, 'p', `Elemento: ${finding.element}`, 'findings-element'));
+      row.append(element(document, 'p', finding.source === 'human'
+        ? `Constatação (revisão humana de ${finding.evaluator}, ${finding.decidedAtLabel}): ${finding.text}`
+        : `Constatação (verificação automática): ${finding.text}`));
+      const citation = element(document, 'p', finding.citation, 'findings-citation');
+      citation.setAttribute('data-findings-citation', '');
+      row.append(citation);
+      const copy = element(document, 'button', 'Copiar texto para citação');
+      copy.setAttribute('type', 'button');
+      copy.setAttribute('data-findings-copy', '');
+      copy.addEventListener('click', () => copyText(finding.citation, copy));
+      row.append(copy);
+      list.append(row);
+    }
+    article.append(list);
+    notMet.append(article);
+  }
+  parent.append(notMet);
+
+  const met = document.createElement('section');
+  met.setAttribute('data-findings-group', 'met');
+  met.append(element(document, 'h3', `Requisitos atendidos no que foi observado (${board.groups.met.length})`));
+  const metList = document.createElement('ul');
+  for (const entry of board.groups.met) {
+    metList.append(element(document, 'li', `Item ${entry.itemId} — ${entry.title}. Como foi concluído: ${entry.method}${
+      entry.evaluators.length ? ` (${entry.evaluators.join(', ')}, ${entry.decidedAtLabel})` : ''}.`));
+  }
+  if (!board.groups.met.length) metList.append(element(document, 'li', 'Nenhum requisito foi dado como atendido até agora.'));
+  met.append(metList);
+  parent.append(met);
+
+  const others = document.createElement('details');
+  others.setAttribute('data-findings-group', 'others');
+  others.append(element(document, 'summary', `Não aplicáveis (${board.groups.notApplicable.length}) e sem conclusão (${board.groups.pending.length})`));
+  others.append(element(document, 'h4', 'Não aplicáveis'));
+  const naList = document.createElement('ul');
+  for (const entry of board.groups.notApplicable) naList.append(element(document, 'li', `Item ${entry.itemId} — ${entry.title}`));
+  if (!board.groups.notApplicable.length) naList.append(element(document, 'li', 'Nenhum.'));
+  others.append(naList);
+  others.append(element(document, 'h4', 'Sem conclusão (dependem de revisão humana ou de condições não observadas)'));
+  const pendingList = document.createElement('ul');
+  for (const entry of board.groups.pending) pendingList.append(element(document, 'li', `Item ${entry.itemId} — ${entry.title}`));
+  if (!board.groups.pending.length) pendingList.append(element(document, 'li', 'Nenhum.'));
+  others.append(pendingList);
+  parent.append(others);
+
+  const recommendations = board.recommendations;
+  parent.append(element(document, 'p', `Recomendações (contam só para a conformidade plena): ${recommendations.failed} não atendidas, ${recommendations.passed} atendidas, ${recommendations.inapplicable} não aplicáveis e ${recommendations.pending} sem conclusão. Os detalhes estão em “Resultados” e na matriz.`, 'findings-recommendations'));
+  const legal = document.createElement('details');
+  legal.setAttribute('data-findings-legal', '');
+  legal.append(element(document, 'summary', 'Base consumerista padronizada (opcional, para quem analisa relações de consumo)'));
+  legal.append(element(document, 'p', board.legalParagraph));
+  parent.append(legal);
+}
+
 export function renderReportView({ view, document, onExport, onHighlightIntent = null } = {}) {
   if (!view || view.version !== 1 || !document || typeof document.createElement !== 'function' ||
     typeof onExport !== 'function' || ![null, 'function'].includes(onHighlightIntent === null ? null : typeof onHighlightIntent)) denied();
@@ -1063,6 +1186,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     metrics.append(card);
   }
   executive.append(metrics);
+  executive.append(findingsCallToAction(document, view.findingsBoard));
   executive.append(checklistElement(document, view.checklist, view.technicalEvidence));
   const limitations = document.createElement('details');
   limitations.setAttribute('data-report-limitations', '');
@@ -1152,15 +1276,17 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   root.append(coverage);
 
   const failed = section(document, 2);
-  failed.append(element(document, 'p', 'Use o cartão “Não conformidades” no sumário para filtrar as verificações agrupadas por item.'));
+  failed.setAttribute('data-findings-board', '');
+  appendFindingsBoard(document, failed, view.findingsBoard);
   root.append(failed);
 
   const review = section(document, 3);
   appendHumanHistory(document, review, view.reviewHistory ?? [], evidenceAnchorById);
-  review.append(element(document, 'p', 'O cartão “Suspeitas a confirmar” reúne indícios concretos. As demais perguntas ficam no checklist separado, sem conclusão ou aplicabilidade estabelecida. Os formulários abaixo permitem registrar conclusões para ambos.'));
+  review.append(element(document, 'p', 'A revisão guiada reúne as suspeitas a confirmar e as perguntas do checklist separado, agrupadas pelo que você vê na página. Cada resposta é registrada com nome, data e hora e atualiza o quadro de constatações.'));
   const reviewForms = document.createElement('details');
   reviewForms.setAttribute('data-review-controls-target', '');
-  reviewForms.append(element(document, 'summary', 'Abrir os formulários de revisão humana'));
+  reviewForms.open = true;
+  reviewForms.append(element(document, 'summary', 'Revisão guiada: responder às perguntas'));
   review.append(reviewForms);
   root.append(review);
 

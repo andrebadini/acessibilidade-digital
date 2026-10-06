@@ -81,6 +81,7 @@ function displayOutcomeForOccurrences(occurrences, decisionByOccurrence) {
     const answer = decisionByOccurrence.get(occurrence.occurrenceId)?.answer;
     if (answer === 'não conforme') return 'failed';
     if (answer === 'conforme') return 'passed';
+    if (answer === 'não se aplica') return 'inapplicable';
     return 'cantTell';
   }));
 }

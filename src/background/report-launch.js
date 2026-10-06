@@ -12,6 +12,9 @@ const REPORT_INTENTS = Object.freeze([
 ]);
 const BASE_REPORT_INTENTS = Object.freeze(['export', 'review-commit', 'delete-audit', 'delete-all']);
 const REPORT_INTENT_SET = new Set(REPORT_INTENTS);
+const PAGE_AIDS = new Set(['zoom-200', 'reflow-320', 'text-spacing', 'reset']);
+// Espaçamentos da WCAG 1.4.12 / ABNT 5.12.1 a 5.12.4, aplicados juntos e sem alterar outros estilos.
+const TEXT_SPACING_CSS = '* { line-height: 1.5 !important; letter-spacing: 0.12em !important; word-spacing: 0.16em !important; } p { margin-bottom: 2em !important; }';
 const SHARED_QUEUES = new WeakMap();
 
 const launchKey = auditId => `audita:report-launch:v1:${auditId}`;
@@ -160,6 +163,8 @@ export function createReportLaunchAuthority(raw) {
     return record?.auditId === auditId ? record : null;
   };
   const getConsumer = id => CAPABILITY.test(id ?? '') ? stored(input.sessionArea, consumerKey(id), consumerRecord) : Promise.resolve(null);
+  // Estado das ajudas de verificação por aba (zoom anterior e folha de espaçamento), só em memória.
+  const pageAidState = new Map();
 
   async function focusConnected(record, expectedAuditId) {
     const now = readEpoch(input.epochNow);
@@ -312,7 +317,7 @@ export function createReportLaunchAuthority(raw) {
     });
   }
 
-  async function returnToSource({ sessionCapabilityId, auditId, sender } = {}) {
+  async function authorizedSourceBinding({ sessionCapabilityId, auditId, sender } = {}) {
     const authorized = await authorizeIntent({
       sessionCapabilityId, auditId, intent: 'return-source', sender,
     });
@@ -337,24 +342,86 @@ export function createReportLaunchAuthority(raw) {
     const binding = currentAttachedBinding(proof?.binding);
     if (proof?.ok !== true || proof.state !== 'result' || proof.live !== true ||
       !safeId(proof.windowId) || !binding) return fail('REPORT_RETURN_DENIED');
+    return freeze({ ok: true, windowId: proof.windowId, tabId: binding.tabId, documentId: binding.documentId });
+  }
+
+  async function focusSource(source) {
+    await input.chromeApi.windows.update(source.windowId, { focused: true });
+    await input.chromeApi.tabs.update(source.tabId, { active: true });
+  }
+
+  async function returnToSource({ sessionCapabilityId, auditId, sender } = {}) {
+    const source = await authorizedSourceBinding({ sessionCapabilityId, auditId, sender });
+    if (source.ok !== true) return source;
     try {
-      await input.chromeApi.windows.update(proof.windowId, { focused: true });
-      await input.chromeApi.tabs.update(binding.tabId, { active: true });
+      await focusSource(source);
       if (typeof input.sourcePanelAuthority?.hasOpenPanelForSource === 'function') {
         let alreadyOpen = false;
         try {
           alreadyOpen = await input.sourcePanelAuthority.hasOpenPanelForSource({
-            tabId: binding.tabId,
-            windowId: proof.windowId,
+            tabId: source.tabId,
+            windowId: source.windowId,
           });
         } catch {
           alreadyOpen = false;
         }
         if (alreadyOpen === true) return freeze({ ok: true, state: 'source-focused' });
       }
-      await input.chromeApi.sidePanel.open({ tabId: binding.tabId });
+      await input.chromeApi.sidePanel.open({ tabId: source.tabId });
       return freeze({ ok: true, state: 'source-focused' });
     } catch { return fail('REPORT_RETURN_DENIED'); }
+  }
+
+  // Ajudas de verificação para a revisão guiada. Todas são reversíveis com 'reset' e só agem na aba
+  // auditada, já provada pela sessão de origem: zoom por aba (não grava preferência do site) e uma
+  // folha de estilo de espaçamento inserida e removida pela própria extensão.
+  async function applyPageAid({ sessionCapabilityId, auditId, sender, aid } = {}) {
+    if (!PAGE_AIDS.has(aid)) return fail('PAGE_AID_DENIED');
+    const source = await authorizedSourceBinding({ sessionCapabilityId, auditId, sender });
+    if (source.ok !== true) return source.code === 'CONTEXT_DENIED' ? source : fail('PAGE_AID_DENIED');
+    const tabs = input.chromeApi.tabs;
+    const scripting = input.chromeApi.scripting;
+    if (typeof tabs.setZoom !== 'function' || typeof tabs.setZoomSettings !== 'function' ||
+      typeof scripting?.insertCSS !== 'function' || typeof scripting.removeCSS !== 'function') {
+      return fail('PAGE_AID_UNAVAILABLE');
+    }
+    // O documento provado pela sessão de origem: se a aba navegou, a folha não cai em outra página.
+    const target = { tabId: source.tabId, documentIds: [source.documentId] };
+    const state = pageAidState.get(source.tabId) ?? { documentId: source.documentId, priorZoom: null, spacing: false };
+    if (state.documentId !== source.documentId) { state.documentId = source.documentId; state.priorZoom = null; state.spacing = false; }
+    try {
+      await focusSource(source);
+      if (aid === 'zoom-200' || aid === 'reflow-320') {
+        if (state.priorZoom === null && typeof tabs.getZoom === 'function') {
+          try { state.priorZoom = await tabs.getZoom(source.tabId); } catch { state.priorZoom = 0; }
+        }
+        if (state.priorZoom === null) state.priorZoom = 0;
+        await tabs.setZoomSettings(source.tabId, { mode: 'automatic', scope: 'per-tab' });
+        let factor = 2;
+        if (aid === 'reflow-320') {
+          const tab = await tabs.get(source.tabId);
+          const width = Number.isFinite(tab?.width) && tab.width > 0 ? tab.width : 1280;
+          // WCAG 1.4.10: 320 px CSS equivalem a 400% de zoom numa janela de 1280 px.
+          factor = Math.min(5, Math.max(1, width / 320));
+        }
+        await tabs.setZoom(source.tabId, factor);
+        pageAidState.set(source.tabId, state);
+        return freeze({ ok: true, aid, state: 'applied', zoomPercent: Math.round(factor * 100) });
+      }
+      if (aid === 'text-spacing') {
+        if (!state.spacing) await scripting.insertCSS({ target, css: TEXT_SPACING_CSS, origin: 'USER' });
+        state.spacing = true;
+        pageAidState.set(source.tabId, state);
+        return freeze({ ok: true, aid, state: 'applied', zoomPercent: null });
+      }
+      if (state.spacing) {
+        try { await scripting.removeCSS({ target, css: TEXT_SPACING_CSS, origin: 'USER' }); } catch { /* documento já mudou */ }
+      }
+      // Só mexe no zoom se uma ajuda o alterou, e devolve exatamente o fator que a pessoa usava.
+      if (state.priorZoom !== null) await tabs.setZoom(source.tabId, state.priorZoom);
+      pageAidState.delete(source.tabId);
+      return freeze({ ok: true, aid, state: 'reset', zoomPercent: null });
+    } catch { return fail('PAGE_AID_FAILED'); }
   }
 
   async function validateConsumer(sessionCapabilityId, auditId) {
@@ -608,7 +675,7 @@ export function createReportLaunchAuthority(raw) {
   }
 
   return freeze({
-    openRegisteredReport, connect, authorizeIntent, authorizeExport, returnToSource,
+    openRegisteredReport, connect, authorizeIntent, authorizeExport, returnToSource, applyPageAid,
     validateConsumer, getLaunch, getConsumer,
     handleTabUpdated, handleTabRemoved, handleWindowRemoved,
     clearAudit,

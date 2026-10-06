@@ -526,3 +526,24 @@ test('is total for primitive array proxy and throwing-descriptor inputs', () => 
     assert.deepEqual(parseWorkerMessage(value), { ok: false, code: 'UNKNOWN_MESSAGE' });
   }
 });
+
+test('guided review: "não se aplica", an explicit revise flag and the bounded page aids', () => {
+  const base = {
+    type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    itemId: '5.2.6', occurrenceId: 'occurrence-1', answer: 'não se aplica', evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-30T12:00:00.000Z', mode: 'assisted', note: '',
+  };
+  assert.equal(parseWorkerMessage(base).ok, true);
+  assert.equal(parseWorkerMessage({ ...base, revise: true }).ok, true);
+  assert.equal(parseWorkerMessage({ ...base, revise: false }).ok, false, 'revise só existe como pedido explícito');
+  assert.equal(parseWorkerMessage({ ...base, revise: 'true' }).ok, false);
+  assert.equal(parseWorkerMessage({ ...base, answer: 'talvez' }).ok, false);
+  for (const aid of ['zoom-200', 'reflow-320', 'text-spacing', 'reset']) {
+    assert.equal(parseWorkerMessage({ type: 'REPORT_PAGE_AID', sessionCapabilityId: SESSION, auditId: 'audit-1', aid }).ok, true, aid);
+  }
+  for (const message of [
+    { type: 'REPORT_PAGE_AID', sessionCapabilityId: SESSION, auditId: 'audit-1', aid: 'inject-script' },
+    { type: 'REPORT_PAGE_AID', sessionCapabilityId: SESSION, auditId: 'audit-1', aid: 'zoom-200', css: '*{}' },
+    { type: 'REPORT_PAGE_AID', sessionCapabilityId: 'curto', auditId: 'audit-1', aid: 'reset' },
+  ]) assert.equal(parseWorkerMessage(message).ok, false, JSON.stringify(message));
+});

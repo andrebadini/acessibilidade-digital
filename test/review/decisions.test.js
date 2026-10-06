@@ -417,3 +417,69 @@ test('rejects audit models whose contractual IDs are inherited or ambiguous', ()
   Object.assign(inheritedAudit, { itemResults: [], occurrences: [], ruleResults: [], manualReview: [], reviewDecisions: [] });
   assert.throws(() => applyReviewDecisions(inheritedAudit, []), /modelo|própr/i);
 });
+
+// ---- Revisão leiga: "não se aplica" e revisão de decisão com trilha preservada ----
+import { deriveReviewedItemOutcome, reviseReviewDecision, REVIEW_ANSWERS } from '../../src/core/review/decisions.js';
+
+test('offers four canonical answers, including "não se aplica"', () => {
+  assert.deepEqual([...REVIEW_ANSWERS], ['conforme', 'não conforme', 'não foi possível determinar', 'não se aplica']);
+  assert.equal(decision('occ-a', 'não se aplica').answer, 'não se aplica');
+});
+
+test('"não se aplica" closes an item as inapplicable only when every occurrence says so', () => {
+  const both = applyReviewDecisions(model(), [decision('occ-a', 'não se aplica'), decision('occ-b', 'não se aplica')]);
+  assert.equal(both.itemResults.find(item => item.id === '5.1.2').outcome, 'inapplicable');
+  const mixed = applyReviewDecisions(model(), [decision('occ-a', 'não se aplica'), decision('occ-b', 'conforme')]);
+  assert.equal(mixed.itemResults.find(item => item.id === '5.1.2').outcome, 'passed');
+  const partial = applyReviewDecisions(model(), [decision('occ-a', 'não se aplica')]);
+  assert.equal(partial.itemResults.find(item => item.id === '5.1.2').outcome, 'cantTell');
+  const failed = applyReviewDecisions(model(), [decision('occ-a', 'não se aplica'), decision('occ-b', 'não conforme', { note: 'x' })]);
+  assert.equal(failed.itemResults.find(item => item.id === '5.1.2').outcome, 'failed');
+  assert.equal(deriveReviewedItemOutcome('failed', [{}], [{ answer: 'não se aplica' }]), 'failed');
+  assert.equal(deriveReviewedItemOutcome('cantTell', [{}, {}], []), 'cantTell');
+});
+
+test('a revised decision replaces the current answer and keeps the previous one in its trail', () => {
+  const first = decision('occ-a', 'não conforme', { note: 'Botão sem nome.' });
+  const reviewed = applyReviewDecisions(model(), [first]);
+  const revised = reviseReviewDecision(first, {
+    auditId: 'audit-1', itemId: '5.1.2', occurrenceId: 'occ-a', answer: 'não foi possível determinar',
+    evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T15:00:00.000Z', mode: 'assisted',
+  });
+  assert.equal(revised.decisionId, 'occ-a');
+  assert.deepEqual(revised.revisions, [{
+    answer: 'não conforme', evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T14:00:00.000Z', note: 'Botão sem nome.',
+  }]);
+  const after = applyReviewDecisions(reviewed, [revised]);
+  assert.equal(after.reviewDecisions.length, 1);
+  assert.equal(after.reviewDecisions[0].answer, 'não foi possível determinar');
+  assert.equal(after.itemResults.find(item => item.id === '5.1.2').outcome, 'cantTell');
+  const again = reviseReviewDecision(revised, {
+    auditId: 'audit-1', itemId: '5.1.2', occurrenceId: 'occ-a', answer: 'conforme',
+    evaluator: 'Fiscal Bia', decidedAt: '2026-08-26T16:00:00.000Z', mode: 'assisted',
+  });
+  assert.equal(again.revisions.length, 2);
+  assert.equal(applyReviewDecisions(after, [again]).reviewDecisions[0].revisions.length, 2);
+});
+
+test('a replacement without the exact previous answer in its trail is still refused', () => {
+  const first = decision('occ-a', 'não conforme', { note: 'Botão sem nome.' });
+  const reviewed = applyReviewDecisions(model(), [first]);
+  const forged = createReviewDecision({ ...decision('occ-a', 'conforme'), decidedAt: '2026-08-26T15:00:00.000Z',
+    revisions: [{ answer: 'conforme', evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T14:00:00.000Z' }] });
+  assert.throws(() => applyReviewDecisions(reviewed, [forged]), /imutável/u);
+  const silent = createReviewDecision({ ...decision('occ-a', 'conforme'), decidedAt: '2026-08-26T15:00:00.000Z' });
+  assert.throws(() => applyReviewDecisions(reviewed, [silent]), /imutável/u);
+  assert.throws(() => createReviewDecision({ ...decision('occ-a', 'conforme'),
+    revisions: [{ answer: 'conforme', evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T15:00:00.000Z' }] }), /anteceder/u);
+  assert.throws(() => reviseReviewDecision(first, {
+    auditId: 'audit-1', itemId: '5.1.2', occurrenceId: 'occ-b', answer: 'conforme',
+    evaluator: 'Fiscal Ana', decidedAt: '2026-08-26T15:00:00.000Z', mode: 'assisted',
+  }), /mesma ocorrência/u);
+});
+
+test('a first decision cannot arrive with an invented trail of previous answers', () => {
+  const forged = createReviewDecision({ ...decision('occ-a', 'conforme'), decidedAt: '2026-08-26T15:00:00.000Z',
+    revisions: [{ answer: 'não conforme', evaluator: 'Outra Pessoa', decidedAt: '2026-08-26T14:00:00.000Z', note: 'nunca existiu' }] });
+  assert.throws(() => applyReviewDecisions(model(), [forged]), /respostas anteriores/u);
+});

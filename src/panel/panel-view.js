@@ -612,6 +612,7 @@ function renderResult(document, view, emit, onEvent) {
   reportStatus.dataset.reportLaunchStatus = '';
   ready.append(
     heading(document, 2, 'Seu relatório está pronto'),
+    paragraph(document, 'No relatório: o quadro de constatações dos requisitos obrigatórios, com frases prontas para citar, e a revisão guiada, em linguagem simples, para concluir o que depende do seu olhar.', 'report-ready-guide'),
     actionButton(document, 'Abrir relatório completo', 'OPEN_REPORT', 'open-report', emit, 'primary-action report-action'),
     actionButton(document, 'Refazer auditoria', 'NEW_AUDIT', 'new-audit', emit, 'secondary-action', {},
       view.highlight.state === 'busy' || ['showing', 'hiding'].includes(view.markers.status)),

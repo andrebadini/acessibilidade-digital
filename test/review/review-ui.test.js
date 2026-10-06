@@ -22,13 +22,16 @@ test('review page leaves its one polite live announcement to the rendered report
   assert.doesNotMatch(html, /(?:src|href)="https?:\/\//i);
 });
 
-test('review script renders snippets inertly, offers exactly three answers and never auto-selects', async () => {
+test('review script renders snippets inertly, offers the four lay answers and never auto-selects', async () => {
   const source = await read('src/review/review.js');
   assert.match(source, /createElement/);
   assert.match(source, /isSafeEvidenceImageUrl/);
   assert.match(source, /textContent/);
   assert.doesNotMatch(source, /innerHTML/);
-  for (const answer of ['conforme', 'não conforme', 'não foi possível determinar']) assert.match(source, new RegExp(answer, 'u'));
+  for (const answer of ['conforme', 'não conforme', 'não foi possível determinar', 'não se aplica']) assert.match(source, new RegExp(answer, 'u'));
+  assert.match(source, /LAY_ANSWERS/u);
+  assert.match(source, /REPORT_PAGE_AID/u);
+  assert.match(source, /revise: true/u);
   assert.match(source, /Pular revisão/);
   assert.match(source, /REPORT_CONNECT/u);
   assert.match(source, /\['result',\s*'view-only'\]\.includes\(connection\.state\)/u);

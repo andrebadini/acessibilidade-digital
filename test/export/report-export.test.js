@@ -310,7 +310,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   assert.match(result.html, /data-report-outcome/u);
   assert.match(result.html, /data-report-coverage[^>]*>[\s\S]*não é nota, certificação/iu);
   assert.equal((result.html.match(/<button type="button" class="summary-card" data-report-metric="(?:failed|alerts|humanReview|passed)"/gu) ?? []).length, 4);
-  for (const label of ['Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências']) {
+  for (const label of ['Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências']) {
     assert.match(result.html, new RegExp(`>${label}<`, 'u'));
   }
   assert.match(result.html, /Os filtros exigem JavaScript local\. Todos os registros continuam disponíveis/u);

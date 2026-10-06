@@ -3,92 +3,109 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { isSafeEvidenceImageUrl } from '../../src/review/review-state.js';
-import { accessibilityGuidance } from '../../src/core/report/plain-language-guidance.js';
+import * as layReview from '../../src/core/report/lay-review.js';
 
-// Execute the actual form renderer without starting its Chrome session bootstrap.
+// Executa o renderizador real dos cartões da revisão guiada, sem iniciar a sessão do Chrome.
 const source = await readFile(new URL('../../src/review/review.js', import.meta.url), 'utf8');
-const lookupSource = source.slice(source.indexOf('const MODEL_LOOKUPS'), source.indexOf('function evidenceFor('));
-const renderSource = lookupSource + source.slice(source.indexOf('function renderCard(entry)'), source.indexOf('\nasync function start()'));
+const uiStart = source.indexOf('const layState = {');
+const uiEnd = source.indexOf('\nasync function start()');
+const renderSource = source.slice(uiStart, uiEnd);
+
 class Element {
-  constructor(tag) { this.tagName = tag; this.children = []; this.textContent = ''; }
+  constructor(tag) { this.tagName = tag; this.children = []; this.textContent = ''; this.attributes = {}; this.classList = { toggle() {}, contains: () => false, add() {} }; }
   append(...children) { this.children.push(...children); }
   addEventListener() {}
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] ?? null; }
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
 }
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1l8AAAAASUVORK5CYII=';
-function fixture({ kind = 'full-page', anchor = 'report-evidence-3', dataUrl = png } = {}) {
-  const document = { createElement: tag => new Element(tag) };
-  const evidence = { evidenceId: 'ev-1', kind, dataUrl, selector: { css: '#observed' }, snippet: '<button>Observado</button>' };
-  const auditModel = {
-    occurrences: [{ occurrenceId: 'occ-1', itemId: '5.2.1', evidenceRefs: ['ev-1'] }],
-    itemResults: [{ id: '5.2.1', title: 'Alternativa textual', classification: 'requirement', wcag: [{ id: '1.1.1', level: 'A' }] }],
-    evidence: [evidence],
-  };
-  const before = structuredClone(auditModel);
-  const list = new Element('div');
-  let validations = 0;
-  const render = runInNewContext(`${renderSource}\nrenderCard;`, {
-    document, auditModel, list, accessibilityGuidance,
-    evidenceAnchorById: new Map(anchor === null ? [] : [['ev-1', anchor]]),
-    evidenceFor: occurrence => auditModel.evidence.filter(item => occurrence.evidenceRefs.includes(item.evidenceId)),
-    appendText(parent, tag, text) { const node = document.createElement(tag); node.textContent = text; parent.append(node); return node; },
-    isSafeEvidenceImageUrl(value, base) { validations += 1; return isSafeEvidenceImageUrl(value, base); },
-    chrome: { runtime: { getURL: () => 'chrome-extension://extension/' } },
-    ANSWERS: ['conforme', 'não conforme', 'não foi possível determinar'],
-    saveDecision() {}, nextUnanswered() {}, status: {},
-  });
+
+function model({ pageLevelCount = 0, dataUrl = png } = {}) {
+  const occurrences = [{ occurrenceId: 'occ-img', itemId: '5.2.1', pageId: 'page-1', outcome: 'cantTell', mode: 'assisted',
+    target: { nodeId: 'n-1' }, evidenceRefs: ['ev-full', 'ev-img'], source: { engine: 'audita-core', ruleId: 'content-image-alternative' }, ruleId: 'content-image-alternative' }];
+  const manualReview = [{ occurrenceId: 'occ-img', itemId: '5.2.1', ruleId: 'content-image-alternative', mode: 'assisted', status: 'unanswered' }];
+  for (let index = 0; index < pageLevelCount; index += 1) {
+    const id = `occ-page-${index}`;
+    occurrences.push({ occurrenceId: id, itemId: '5.13.1', pageId: `page-${index + 2}`, outcome: 'cantTell', mode: 'assisted',
+      target: { nodeId: null }, evidenceRefs: ['ev-full'], source: { engine: 'audita-core', ruleId: 'page-title' }, ruleId: 'page-title' });
+    manualReview.push({ occurrenceId: id, itemId: '5.13.1', ruleId: 'page-title', mode: 'assisted', status: 'unanswered' });
+  }
   return {
-    auditModel, before, list, get validations() { return validations; },
-    render: () => render({ occurrenceId: 'occ-1', itemId: '5.2.1', question: 'Revisar o elemento?' }),
+    auditId: 'audit-1', timezone: 'America/Cuiaba', occurrences, manualReview, reviewDecisions: [],
+    itemResults: [
+      { id: '5.2.1', title: 'Texto alternativo para imagens de conteúdo', classification: 'requirement', printedId: '5.2.1', outcome: 'cantTell' },
+      { id: '5.13.1', title: 'Título da página', classification: 'requirement', printedId: '5.13.1', outcome: 'cantTell' },
+    ],
+    evidence: [
+      { evidenceId: 'ev-full', kind: 'full-page', dataUrl: png },
+      { evidenceId: 'ev-img', kind: 'element', nodeId: 'n-1', dataUrl, snippet: '<img width="20">', accessibility: { role: 'image', name: '' } },
+    ],
+    ruleResults: [{ ruleId: 'content-image-alternative', targets: [{ nodeId: 'n-1', data: { reason: 'unknown-image-purpose' } }] }],
   };
 }
-function descendants(root) { return root.children.flatMap(child => [child, ...descendants(child)]); }
 
-test('human review forms start collapsed and explain the decision with a guide and a hypothetical example', () => {
-  const run = fixture(); run.render();
-  const card = run.list.children[0];
-  assert.equal(card.tagName, 'details');
-  assert.notEqual(card.open, true);
-  assert.equal(card.children[0].tagName, 'summary');
-  const text = descendants(card).map(node => node.textContent).join(' ');
-  assert.match(text, /Como revisar/iu);
-  assert.match(text, /exemplo/iu);
-  assert.match(text, /não foi possível determinar/iu);
-  assert.equal(descendants(card).filter(node => node.tagName === 'button').length, 4);
+function fixture(options) {
+  const auditModel = model(options);
+  const before = structuredClone(auditModel);
+  let validations = 0;
+  const context = {
+    ...layReview, auditModel, document: { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) },
+    REVIEW_CARD_LIMIT: 40, reportSessionState: 'result', evaluator: { value: '' }, status: {}, list: new Element('div'),
+    reportOccurrence: () => true,
+    isSafeEvidenceImageUrl(value, base) { validations += 1; return isSafeEvidenceImageUrl(value, base); },
+    chrome: { runtime: { getURL: () => 'chrome-extension://extension/' } },
+  };
+  const api = runInNewContext(`${renderSource}\n({ renderCardNode, plan: () => buildLayReviewPlan(auditModel) });`, context);
+  return { api, auditModel, before, get validations() { return validations; } };
+}
+
+function descendants(root) { return (root.children ?? []).flatMap(child => [child, ...descendants(child)]); }
+
+test('guided review cards start collapsed, ask in plain words and offer the four lay answers', () => {
+  const run = fixture({ pageLevelCount: 1 });
+  const plan = run.api.plan();
+  const pageCard = plan.find(card => !card.elementLevel);
+  const node = run.api.renderCardNode(pageCard);
+  assert.equal(node.tagName, 'details');
+  assert.notEqual(node.open, true);
+  const text = descendants(node).map(child => child.textContent).join(' ');
+  assert.match(text, /aba do navegador/u);
+  assert.match(text, /Como verificar/u);
+  const answers = descendants(node).filter(child => child.tagName === 'button').map(child => child.textContent);
+  for (const label of ['Sim', 'Não', 'Não consegui verificar', 'Não existe nesta página', 'Pular revisão por enquanto']) {
+    assert.ok(answers.includes(label), label);
+  }
   assert.deepEqual(run.auditModel, run.before);
 });
 
-test('many review forms reference the original full-page annex without copying or decoding its pixels', () => {
-  const run = fixture();
-  for (let index = 0; index < 3000; index += 1) run.render();
-  const nodes = descendants(run.list);
+test('many page-level cards never copy or decode the full-page capture', () => {
+  const run = fixture({ pageLevelCount: 3000 });
+  const plan = run.api.plan();
+  assert.equal(plan.filter(card => !card.elementLevel).length, 3000);
+  const nodes = plan.filter(card => !card.elementLevel).flatMap(card => descendants(run.api.renderCardNode(card)));
   assert.equal(nodes.filter(node => node.tagName === 'img').length, 0);
   assert.equal(run.validations, 0);
-  const links = nodes.filter(node => node.tagName === 'a');
-  assert.equal(links.length, 3000);
-  assert.equal(links.every(link => link.href === '#report-evidence-3'), true);
-  assert.equal(links.every(link => link.textContent === 'Ver captura completa da página nas evidências'), true);
   assert.deepEqual(run.auditModel, run.before);
 });
 
-test('element thumbnails remain local and validated, with inert selector and snippet text', () => {
-  const run = fixture({ kind: 'element' }); run.render();
-  const nodes = descendants(run.list);
+test('element thumbnails remain local and validated, and image cards offer the purpose question', () => {
+  const run = fixture();
+  const card = run.api.plan().find(value => value.elementLevel);
+  assert.equal(card.imageCard, true);
+  const nodes = descendants(run.api.renderCardNode(card));
   const images = nodes.filter(node => node.tagName === 'img');
   assert.equal(images.length, 1);
   assert.equal(images[0].src, png);
+  assert.match(images[0].alt, /imagem sem nome/u);
   assert.equal(run.validations, 1);
-  assert.equal(nodes.some(node => node.tagName === 'code' && node.textContent === 'Seletor: #observed'), true);
-  assert.equal(nodes.some(node => node.tagName === 'code' && node.textContent === '<button>Observado</button>'), true);
-  assert.deepEqual(run.auditModel, run.before);
-  const unsafe = fixture({ kind: 'element', dataUrl: 'https://example.test/image.png' }); unsafe.render();
-  assert.equal(descendants(unsafe.list).some(node => node.tagName === 'img'), false);
-});
-
-test('an unavailable full-page anchor never produces a broken or external link', () => {
-  const run = fixture({ anchor: null }); run.render();
-  const nodes = descendants(run.list);
-  assert.equal(nodes.some(node => node.tagName === 'a' || node.tagName === 'img'), false);
-  assert.equal(nodes.some(node => /Captura completa indisponível/u.test(node.textContent)), true);
+  assert.ok(nodes.some(node => node.textContent === 'Para que serve esta imagem?'));
+  assert.ok(nodes.some(node => /não consegue saber sozinha/u.test(node.textContent)), 'a pista do motor aparece em linguagem simples');
+  assert.equal(nodes.some(node => node.tagName === 'code'), false, 'o cartão leigo não mostra código');
+  const unsafe = fixture({ dataUrl: 'https://example.test/image.png' });
+  const unsafeCard = unsafe.api.plan().find(value => value.elementLevel);
+  assert.equal(descendants(unsafe.api.renderCardNode(unsafeCard)).some(node => node.tagName === 'img'), false);
 });
 
 test('review bootstrap correlates annex anchors with the same sorted ReportView evidence', () => {

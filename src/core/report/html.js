@@ -15,7 +15,8 @@ import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO } from '../evidence/annotation-ma
 import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
 import { readerMapPresentation, READER_MAP_INTRO } from './reader-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from './evidence-provenance.js';
-import { humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from './human-review-presentation.js';
+import { humanReviewHeading, humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from './human-review-presentation.js';
+import { FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence } from './findings-board.js';
 
 const OUTCOME = Object.freeze({
   passed: { label: 'Atendido no escopo observado', icon: '✓' },
@@ -277,7 +278,7 @@ function renderReportViewDocument(model, view, options = {}) {
   }).join('');
   const section = (index, body) => `<section id="report-section-${index + 1}" aria-labelledby="report-heading-${index + 1}"><h2 id="report-heading-${index + 1}">${escapeHtml(viewSectionTitle(index))}</h2>${body}</section>`;
   const delivery = deliveryIdentity === null ? '' : `<p><strong>ExportDeliveryIdentityV1:</strong> auditoria ${escapeHtml(deliveryIdentity.auditId)}; revisão ${deliveryIdentity.modelRevision}; hash ${escapeHtml(deliveryIdentity.modelHash)}; tentativa ${escapeHtml(deliveryIdentity.attemptId)}.</p>`;
-  const navigationLabels = ['Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências'];
+  const navigationLabels = ['Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios', 'Matriz ABNT', 'Metodologia e evidências'];
   const navigation = `<div data-report-navigation><nav class="section-nav" aria-label="Seções do relatório"><strong>Ir para</strong><ul>${navigationLabels.map((navigationLabel, index) => `<li><a href="#report-section-${index + 1}">${escapeHtml(navigationLabel)}</a></li>`).join('')}</ul></nav></div>`;
   const coverage = view.executive.coverage.status === 'available' ? view.executive.coverage.percent : 'indisponível';
   const limitationsList = listedLimitations(view.executive.limitations);
@@ -309,7 +310,7 @@ function renderReportViewDocument(model, view, options = {}) {
     : evidence);
   const annex = forPrint ? `<p>URL e período de observação constam no escopo. O inventário abaixo preserva IDs e hashes; código integral, nomes, anúncios e correlações por elemento estão no HTML/JSON desta revisão.</p><table><thead><tr><th>Evidência</th><th>Tipo / estado</th><th>Seletor / hash</th></tr></thead><tbody>${view.technicalEvidence.map(evidence => `<tr id="${evidenceAnchorById.get(evidence.evidenceId)}"><th scope="row">${escapeHtml(evidence.evidenceId)}</th><td>${escapeHtml(evidence.kind)} / ${escapeHtml(evidence.state ?? 'não registrado')}<br>${escapeHtml(evidence.pageId)}<br>Recebida (UTC): ${escapeHtml(evidence.metadata?.captureReceivedAt ?? 'não registrado')}</td><td>${escapeHtml(evidence.selector?.css ?? 'página')}<br>${escapeHtml(evidence.hash ?? 'hash não registrado')}</td></tr>`).join('')}</tbody></table>${view.technicalEvidence.filter(evidence => safePng(evidence.dataUrl) && !firstPreviewByEvidence.has(evidence.evidenceId)).map(evidence => `<figure><img class="evidence-media" src="${escapeHtml(evidence.dataUrl)}" alt="${escapeHtml(evidence.evidenceId)}"><figcaption>${escapeHtml(evidence.evidenceId)}</figcaption></figure>`).join('')}` : annexEvidence.map(evidence => `<article class="evidence-card" id="${evidenceAnchorById.get(evidence.evidenceId)}" data-report-evidence="${escapeHtml(evidence.evidenceId)}" data-evidence-kind="${escapeHtml(evidence.kind)}"><h4>${escapeHtml(evidence.evidenceId)} — ${escapeHtml(label(evidence.kind, evidenceKindLabels, 'Evidência registrada'))}</h4>${evidenceProvenanceHtml(evidence)}<p><strong>Seletor:</strong> ${escapeHtml(evidence.selector?.css ?? 'não registrado')}</p><p><strong>Snippet:</strong> ${escapeHtml(evidence.snippet ?? 'não disponível')}</p>${firstPreviewByEvidence.has(evidence.evidenceId) ? `<p><a href="#${firstPreviewByEvidence.get(evidence.evidenceId)}">Consultar captura ${escapeHtml(evidence.evidenceId)}</a> apresentada nas ocorrências; o registro original e seu hash permanecem acima.</p>` : safePng(evidence.dataUrl) ? `<img class="evidence-media" src="${escapeHtml(evidence.dataUrl)}" alt="${escapeHtml(`${label(evidence.kind, evidenceKindLabels, 'Evidência registrada')} local da evidência ${evidence.evidenceId}`)}">` : '<p><strong>Imagem segura:</strong> PNG local não disponível.</p>'}</article>`).join('');
   const documentHtml = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${csp}"><title>Relatório de auditoria — Audita Acessibilidade</title><style>${REPORT_CSS}</style></head><body class="report-view-document">${header()}<main id="conteudo"><h1>Relatório de auditoria de acessibilidade</h1><p class="report-static-identity">Escopo avaliado: ${escapeHtml(view.executive.identity.finalUrl)}.</p>
-${section(0, `<p data-report-outcome><strong>Estado da auditoria:</strong> ${escapeHtml(label(view.executive.status, statusLabels))}.</p><div data-report-coverage><strong>Cobertura automática: ${escapeHtml(coverage)}.</strong> Mede os testes do motor próprio com conclusão automática (passed, failed ou inapplicable), divididos pelo inventário desse motor nas páginas tentadas; não é nota, certificação ou declaração de conformidade.</div><div class="summary-grid" data-report-metrics>${['failed','alerts','humanReview','passed'].map(metric).join('')}</div><p>Formatos desta entrega: HTML, PDF, CSV e JSON.</p><details data-report-limitations><summary>Limitações registradas (${limitationsList.length})${limitationSummaryHtml}</summary><ul>${limitationsList.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação crítica registrada.</li>'}</ul></details>`)}
+${section(0, `<p data-report-outcome><strong>Estado da auditoria:</strong> ${escapeHtml(label(view.executive.status, statusLabels))}.</p><div data-report-coverage><strong>Cobertura automática: ${escapeHtml(coverage)}.</strong> Mede os testes do motor próprio com conclusão automática (passed, failed ou inapplicable), divididos pelo inventário desse motor nas páginas tentadas; não é nota, certificação ou declaração de conformidade.</div><div class="summary-grid" data-report-metrics>${['failed','alerts','humanReview','passed'].map(metric).join('')}</div>${findingsCallToActionHtml(view.findingsBoard)}<p>Formatos desta entrega: HTML, PDF, CSV e JSON.</p><details data-report-limitations><summary>Limitações registradas (${limitationsList.length})${limitationSummaryHtml}</summary><ul>${limitationsList.map(value => `<li>${escapeHtml(value)}</li>`).join('') || '<li>Nenhuma limitação crítica registrada.</li>'}</ul></details>`)}
 <p data-report-summary-note>Resumo executivo — não substitui o relatório completo. Fichas, capturas, anúncios, conclusões humanas detalhadas e evidências individuais estão no relatório completo da mesma auditoria e revisão.</p>
 ${forPrint ? '' : '<div data-report-print-controls><button type="button" data-report-print-summary>Imprimir resumo / salvar PDF</button><p data-report-print-status role="status">Resumo: totais, limitações, matriz ABNT e metodologia, sem fichas, capturas e conclusões humanas detalhadas. No diálogo de impressão, escolha Salvar como PDF.</p></div>'}
 ${resultsOverviewHtml(view)}
@@ -318,7 +319,7 @@ ${forPrint ? `<section data-print-observation-scope><h2>Escopo e período observ
 ${forPrint ? '<p data-print-reading-note><strong>PDF de leitura:</strong> verificações agrupadas, orientações essenciais e evidências apresentadas uma vez. Não repete o dossiê de cada ocorrência. O HTML contém as orientações completas e detalhes expansíveis; o JSON conserva todos os registros técnicos. Os arquivos se referem à mesma revisão e hash.</p>' : ''}
 ${navigation}<div class="filter-actions"><button type="button" data-report-clear-filters>Mostrar todos os resultados</button><p role="status" data-report-filter-status></p></div><noscript><p>Os filtros exigem JavaScript local. Todos os registros continuam disponíveis nos expansores abaixo.</p></noscript>
 ${section(1, itemGroups)}
-${section(2, '<p>As não conformidades estão nas verificações agrupadas por item acima.</p>')}
+${section(2, findingsBoardHtml(view.findingsBoard))}
 ${section(3, reportHumanHistory(view.reviewHistory ?? [], evidenceAnchorById) + '<p>Indícios e sinais inconclusivos dos motores estão agrupados por item; não são barreiras confirmadas. Quando falta a correlação com um elemento, é necessário localizar e reproduzir a situação antes de concluir. Perguntas gerais ficam no checklist separado do HTML.</p>')}
 ${section(4, reportViewReaderMaps(view))}
 ${section(5, `<details data-report-matrix><summary>Consultar a matriz completa dos 146 itens</summary><div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(label(row.classification, classificationLabels))}</td><td>${escapeHtml(label(row.outcome, outcomeLabels))}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div></details>`)}
@@ -327,12 +328,36 @@ ${section(6, `<p>Versão da extensão que realizou a auditoria: ${escapeHtml(mod
   return forPrint ? documentHtml.replace(/<details(?![^>]*\bopen\b)(?=[\s>])/gu, '<details open') : documentHtml;
 }
 
+function findingsCallToActionHtml(board) {
+  if (!board) return '';
+  return `<aside class="findings-cta" data-findings-cta><h3>Situação dos requisitos obrigatórios</h3><p>${escapeHtml(scoreboardSentence(board.scoreboard))}</p><p><a href="#report-section-3">Ver o quadro de constatações</a></p></aside>`;
+}
+
+function findingsBoardHtml(board) {
+  if (!board) return '<p>Quadro de constatações indisponível nesta versão do relatório.</p>';
+  const score = [['Não atendidos', board.scoreboard.notMet, 'failed'], ['Atendidos', board.scoreboard.met, 'passed'],
+    ['Não aplicáveis', board.scoreboard.notApplicable, 'inapplicable'], ['Sem conclusão', board.scoreboard.pending, 'pending']]
+    .map(([name, value, tone]) => `<div data-findings-tone="${tone}"><dt>${escapeHtml(name)}</dt><dd>${value}</dd></div>`).join('');
+  const notMet = board.groups.notMet.map(entry => `<article data-findings-item="${escapeHtml(entry.itemId)}"><h4>Item ${escapeHtml(entry.itemId)} — ${escapeHtml(entry.title)} (requisito)</h4><p class="findings-method">Como foi concluído: ${escapeHtml(entry.method)}.</p><ol>${entry.findings.map(finding => `<li data-findings-occurrence="${escapeHtml(finding.occurrenceId)}">${finding.element ? `<p class="findings-element">Elemento: ${escapeHtml(finding.element)}</p>` : ''}<p>${escapeHtml(finding.source === 'human' ? `Constatação (revisão humana de ${finding.evaluator}, ${finding.decidedAtLabel}): ${finding.text}` : `Constatação (verificação automática): ${finding.text}`)}</p><p class="findings-citation" data-findings-citation>${escapeHtml(finding.citation)}</p></li>`).join('')}</ol></article>`).join('')
+    || '<p>Nenhum requisito foi dado como não atendido até agora. Isso não significa conformidade: veja os itens sem conclusão.</p>';
+  const met = board.groups.met.map(entry => `<li>Item ${escapeHtml(entry.itemId)} — ${escapeHtml(entry.title)}. Como foi concluído: ${escapeHtml(entry.method)}${entry.evaluators.length ? ` (${escapeHtml(entry.evaluators.join(', '))}, ${escapeHtml(entry.decidedAtLabel)})` : ''}.</li>`).join('')
+    || '<li>Nenhum requisito foi dado como atendido até agora.</li>';
+  const list = entries => entries.map(entry => `<li>Item ${escapeHtml(entry.itemId)} — ${escapeHtml(entry.title)}</li>`).join('') || '<li>Nenhum.</li>';
+  const recommendations = board.recommendations;
+  return `<p>${escapeHtml(FINDINGS_BOARD_INTRO)}</p><dl class="findings-score" data-findings-score>${score}</dl><p class="findings-limit">${escapeHtml(`${scoreboardSentence(board.scoreboard)} ${FINDINGS_BOARD_LIMIT}`)}</p>` +
+    `<section data-findings-group="not-met"><h3>Requisitos não atendidos (${board.groups.notMet.length})</h3>${notMet}</section>` +
+    `<section data-findings-group="met"><h3>Requisitos atendidos no que foi observado (${board.groups.met.length})</h3><ul>${met}</ul></section>` +
+    `<details data-findings-group="others"><summary>Não aplicáveis (${board.groups.notApplicable.length}) e sem conclusão (${board.groups.pending.length})</summary><h4>Não aplicáveis</h4><ul>${list(board.groups.notApplicable)}</ul><h4>Sem conclusão (dependem de revisão humana ou de condições não observadas)</h4><ul>${list(board.groups.pending)}</ul></details>` +
+    `<p class="findings-recommendations">${escapeHtml(`Recomendações (contam só para a conformidade plena): ${recommendations.failed} não atendidas, ${recommendations.passed} atendidas, ${recommendations.inapplicable} não aplicáveis e ${recommendations.pending} sem conclusão.`)}</p>` +
+    `<details data-findings-legal><summary>Base consumerista padronizada (opcional, para quem analisa relações de consumo)</summary><p>${escapeHtml(board.legalParagraph)}</p></details>`;
+}
+
 function viewSectionTitle(index) {
   return [
     'Sumário executivo e limitações críticas',
     'Cobertura e quatro grupos de resultado',
-    'Não conformidades priorizadas',
-    'Revisões humanas e conclusões registradas',
+    FINDINGS_BOARD_TITLE,
+    'Revisão humana guiada e conclusões registradas',
     'Mapas de anúncios',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
@@ -343,7 +368,7 @@ function reportHumanHistory(entries, evidenceAnchorById) {
   if (!entries.length) return `<p data-review-history-empty>${HUMAN_REVIEW_EMPTY}</p>`;
   return `<details data-review-history><summary>Conclusões humanas registradas (${entries.length})</summary><p>${HUMAN_REVIEW_DESCRIPTION}</p><ol>${entries.map(entry => {
     const links = entry.evidenceRefs.map(id => evidenceAnchorById.get(id)).filter(Boolean);
-    return `<li data-review-record="${escapeHtml(entry.occurrenceId)}" data-review-answer="${escapeHtml(entry.answer)}"><h3>Item ${escapeHtml(entry.itemId)} da ABNT NBR 17225:2025</h3><dl>${humanReviewMetadata(entry).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>${links.length ? links.map((anchor, index) => `<a data-report-consult-evidence href="#${anchor}">Consultar evidência ${index + 1}</a>`).join(' ') : '<p>Nenhuma evidência correlata foi registrada para esta ocorrência.</p>'}</li>`;
+    return `<li data-review-record="${escapeHtml(entry.occurrenceId)}" data-review-answer="${escapeHtml(entry.answer)}"><h3>${escapeHtml(humanReviewHeading(entry))}</h3><dl>${humanReviewMetadata(entry).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>${links.length ? links.map((anchor, index) => `<a data-report-consult-evidence href="#${anchor}">Consultar evidência ${index + 1}</a>`).join(' ') : '<p>Nenhuma evidência correlata foi registrada para esta ocorrência.</p>'}</li>`;
   }).join('')}</ol></details>`;
 }
 
@@ -627,7 +652,7 @@ function humanReviewSection(model, itemById, decisionByOccurrence, orderedOccurr
     const item = itemById.get(entry.itemId);
     const occurrence = occurrenceById.get(entry.occurrenceId);
     const decision = decisionByOccurrence.get(entry.occurrenceId);
-    return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p><p class="human-review-note"><strong>Nota registrada:</strong> ${escapeHtml(decision.note || 'Nenhuma nota registrada.')}</p>` : ''}<p><a href="#${escapeHtml(anchorByOccurrence.get(entry.occurrenceId) ?? 'ocorrencias')}">Ir para a ocorrência relacionada</a></p></article>`;
+    return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p>${decision.revisions?.length ? `<p><strong>Respostas anteriores substituídas:</strong> ${escapeHtml(decision.revisions.map(revision => `${reviewAnswerLabel(revision.answer)} (${revision.evaluator}, ${revision.decidedAt})`).join('; '))}.</p>` : ''}<p class="human-review-note"><strong>Nota registrada:</strong> ${escapeHtml(decision.note || 'Nenhuma nota registrada.')}</p>` : ''}<p><a href="#${escapeHtml(anchorByOccurrence.get(entry.occurrenceId) ?? 'ocorrencias')}">Ir para a ocorrência relacionada</a></p></article>`;
   }).join('');
   return `<section id="revisao" class="major-section" aria-labelledby="revisao-titulo"><h2 id="revisao-titulo">Revisão humana</h2><p>${escapeHtml(reviewSummary)} Respostas pendentes nunca são tratadas como conformidade. Resultado do motor e decisão humana permanecem separados.</p>${omittedReviews > 0 ? omittedNote(omittedReviews, 'revisão humana', 'revisões humanas') : ''}<div class="review-list">${cards || '<p>Nenhuma revisão humana foi registrada para este escopo.</p>'}</div></section>`;
 }
@@ -749,6 +774,7 @@ function prioritizeOccurrences(occurrences, pages, decisionByOccurrence) {
 function effectiveOccurrenceOutcome(occurrence, decision) {
   if (occurrence.outcome === 'failed' || decision?.answer === 'não conforme') return 'failed';
   if (decision?.answer === 'conforme') return 'passed';
+  if (decision?.answer === 'não se aplica') return 'inapplicable';
   if (decision?.answer === 'não foi possível determinar') return 'cantTell';
   return occurrence.outcome;
 }
@@ -782,7 +808,7 @@ function pageStatus(status) {
 }
 
 function reviewAnswerLabel(answer) {
-  return ({ conforme: 'Conforme', 'não conforme': 'Não conforme', 'não foi possível determinar': 'Não foi possível determinar' })[answer] || 'Pendente';
+  return ({ conforme: 'Conforme', 'não conforme': 'Não conforme', 'não foi possível determinar': 'Não foi possível determinar', 'não se aplica': 'Não se aplica' })[answer] || 'Pendente';
 }
 
 function modeLabel(mode) {

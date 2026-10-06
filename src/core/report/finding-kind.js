@@ -12,9 +12,11 @@ const CONCRETE_REASONS = new Set([
 export function findingKind(occurrence, rule, decision) {
   const outcome = ['failed', 'passed'].includes(occurrence.outcome) ? occurrence.outcome
     : decision?.answer === 'não conforme' ? 'failed'
-      : decision?.answer === 'conforme' ? 'passed' : occurrence.outcome;
+      : decision?.answer === 'conforme' ? 'passed'
+        : decision?.answer === 'não se aplica' ? 'inapplicable' : occurrence.outcome;
   if (outcome === 'failed') return occurrence.classification === 'requirement' ? 'detected' : 'advisory';
-  if (outcome === 'passed') return 'positive';
+  // "Não se aplica" encerra a pergunta sem barreira: fica com os resultados resolvidos.
+  if (outcome === 'passed' || outcome === 'inapplicable') return 'positive';
   if (outcome === 'cantTell' && occurrence.source.engine === 'axe-core' &&
     ['violations', 'incomplete'].includes(occurrence.engineResultType)) return 'suspected';
   if (outcome === 'cantTell' && occurrence.source.engine === 'audita-core' &&

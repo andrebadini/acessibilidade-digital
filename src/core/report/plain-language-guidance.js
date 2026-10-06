@@ -96,6 +96,27 @@ const SPACING_REVIEW = [
 ];
 
 const SPECIFIC = {
+  // O requisito (mínimo) recebe os limites e a forma de conferir; antes eles só apareciam na
+  // recomendação 5.11.2, e o requisito pedia uma "ferramenta apropriada" sem dizer qual.
+  '5.11.3': {
+    steps: ['Identifique o texto e seu fundo no estado indicado pela evidência; a extensão já mede o contraste e mostra o valor encontrado.',
+      'Compare com o mínimo deste requisito: 4,5:1 para texto comum ou 3:1 para texto grande (pelo menos 18 pt, ou 14 pt em negrito). Logotipos, texto desativado e texto apenas decorativo são exceções.',
+      'Se precisar medir de novo, use o medidor de contraste das ferramentas do navegador (botão direito no texto > Inspecionar > amostra de cor) ou peça apoio técnico; não estime pela captura de tela.'],
+    example: 'um aviso cinza-claro sobre fundo branco com contraste de 1,9:1 fica abaixo do mínimo de 4,5:1 e é difícil de ler para quem tem baixa visão.'
+  },
+  // Zoom e texto ampliado são conferidos com o próprio teclado, não com leitor de tela.
+  '5.13.5': {
+    impact: 'Pessoas com baixa visão ampliam a página para conseguir ler. Se a página bloqueia o zoom, principalmente no celular, elas ficam sem acesso ao conteúdo.',
+    steps: ['Amplie a página com Ctrl e + (no Mac, Cmd e +) até 200% e veja se o conteúdo aumenta.',
+      'No celular, tente ampliar com dois dedos. O bloqueio costuma vir de uma instrução no código (por exemplo, user-scalable=no), que a extensão aponta quando a encontra.',
+      'Volte ao tamanho normal com Ctrl e 0 (no Mac, Cmd e 0).']
+  },
+  '5.12.7': {
+    impact: 'Pessoas com baixa visão aumentam o texto para ler. Se a página corta, sobrepõe ou esconde conteúdo quando ampliada, elas perdem informação ou funções.',
+    steps: ['Amplie a página com Ctrl e + (no Mac, Cmd e +) até 200%.',
+      'Percorra a página e verifique se algum texto sumiu, ficou cortado ou sobreposto, ou se é preciso rolar para os lados para ler uma linha.',
+      'Volte ao tamanho normal com Ctrl e 0 (no Mac, Cmd e 0).']
+  },
   '5.11.2': {
     steps: [...PROFILES['5.11'].steps,
       'Compare separadamente os dois limites: 5.11.3 (mínimo, requisito) pede 4,5:1 para texto comum ou 3:1 para texto grande; 5.11.2 (aprimorado, recomendação) pede 7:1 ou 4,5:1, respectivamente. Texto grande tem pelo menos 18 pt, ou 14 pt em negrito. Considere as exceções da norma para logotipos e texto em plano secundário.',

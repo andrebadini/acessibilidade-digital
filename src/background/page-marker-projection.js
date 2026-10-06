@@ -39,9 +39,11 @@ function classificationFor(occurrence, decision) {
   const originalOutcome = occurrence.outcome;
   const displayOutcome = ['failed', 'passed'].includes(originalOutcome) ? originalOutcome
     : decision?.answer === 'não conforme' ? 'failed'
-      : decision?.answer === 'conforme' ? 'passed' : 'cantTell';
+      : decision?.answer === 'conforme' ? 'passed'
+        : decision?.answer === 'não se aplica' ? 'inapplicable' : 'cantTell';
   const normative = occurrence.classification === 'requirement';
   const group = displayOutcome === 'passed' ? 'passed'
+    : displayOutcome === 'inapplicable' ? null
     : displayOutcome === 'failed' ? (normative ? 'failed' : 'alerts')
       : ['requirement', 'recommendation'].includes(occurrence.classification) ? 'humanReview' : null;
   return { originalOutcome, displayOutcome, classification: group ? classifyPanelResultV1(group) : null };

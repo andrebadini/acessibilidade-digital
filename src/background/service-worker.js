@@ -17,7 +17,7 @@ import { createBlobUrlPortBridgeV1 } from './blob-url-port.js';
 import { BLOB_URL_PORT_NAME } from '../export/blob-url-protocol.js';
 import { createBatchProgressStoreV1 } from './batch-progress-store.js';
 import { createAuditDeletedEvent } from '../core/audit-deleted-event.js';
-import { applyReviewDecisions, createReviewDecision } from '../core/review/decisions.js';
+import { applyReviewDecisions, createReviewDecision, reviseReviewDecision } from '../core/review/decisions.js';
 import { createAuditModel } from '../core/report/audit-model.js';
 import { createPanelResultBundleV1 } from '../panel/panel-result-bundle.js';
 import {
@@ -1207,15 +1207,23 @@ export function createReportOperations({
     }
   }
 
-  async function commitReviewDecision(input) {
-    let decision;
-    try { decision = createReviewDecision(input); }
+  async function commitReviewDecision(input, { revise = false } = {}) {
+    let requested;
+    try { requested = createReviewDecision(input); }
     catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' }); }
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
-        const snapshot = await auditStore.getAuditSnapshot(decision.auditId);
-        if (snapshot?.model?.auditId !== decision.auditId || !snapshot.capability) {
+        const snapshot = await auditStore.getAuditSnapshot(requested.auditId);
+        if (snapshot?.model?.auditId !== requested.auditId || !snapshot.capability) {
           return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+        }
+        // A trilha da revisão é montada aqui, a partir do snapshot autoritativo, nunca pela página.
+        const existing = snapshot.model.reviewDecisions?.find(value => value?.occurrenceId === requested.occurrenceId);
+        let decision = requested;
+        if (revise === true) {
+          if (!existing) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+          try { decision = reviseReviewDecision(existing, input); }
+          catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' }); }
         }
         if (!await clearHighlightAudit(decision.auditId, 'review-commit')) {
           return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });

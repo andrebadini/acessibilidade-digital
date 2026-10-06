@@ -11,7 +11,7 @@ import {
   OUTCOMES,
   TEST_MODES,
 } from '../result.js';
-import { createReviewDecision, REVIEW_MODES } from '../review/decisions.js';
+import { createReviewDecision, deriveReviewedItemOutcome, REVIEW_MODES } from '../review/decisions.js';
 import { canonicalStringify } from './canonical-json.js';
 import { isCompatibleCoreTestedWcagRefs } from './tested-criteria.js';
 import { projectClosedAuditShape } from './closed-schema.js';
@@ -608,7 +608,7 @@ function projectManualReview(entries) {
 
 function projectReviewDecisions(entries) {
   return entries.map(entry => projectRecord(entry, [
-    'answer', 'auditId', 'decidedAt', 'decisionId', 'evaluator', 'itemId', 'mode', 'note', 'occurrenceId',
+    'answer', 'auditId', 'decidedAt', 'decisionId', 'evaluator', 'itemId', 'mode', 'note', 'occurrenceId', 'revisions',
   ]));
 }
 
@@ -1103,16 +1103,6 @@ function validateCantTellOrigins(occurrences, ruleById, { queueByOccurrence }) {
       throw new TypeError('Ocorrência inconclusiva revisável não possui fila humana coerente.');
     }
   }
-}
-
-function deriveReviewedItemOutcome(originalOutcome, occurrences, decisions) {
-  if (originalOutcome === 'failed' || decisions.some(decision => decision.answer === 'não conforme')) {
-    return 'failed';
-  }
-  if (decisions.length === occurrences.length && decisions.every(decision => decision.answer === 'conforme')) {
-    return 'passed';
-  }
-  return 'cantTell';
 }
 
 function deriveItemReviewSummary(decisions) {
@@ -2420,6 +2410,12 @@ function validateReview(model, { itemIds, itemById, occurrenceById }) {
     if (!queue || queue.mode !== normalized.mode) throw new TypeError('Decisão não corresponde à fila de revisão.');
     for (const field of ['auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode', 'note']) {
       if (decision[field] !== normalized[field]) throw new TypeError(`Decisão ${decisionId} não está em forma canônica.`);
+    }
+    if (canonicalStringify(decision.revisions ?? null) !== canonicalStringify(normalized.revisions ?? null)) {
+      throw new TypeError(`Decisão ${decisionId} não está em forma canônica.`);
+    }
+    if ((normalized.revisions ?? []).some(revision => revision.decidedAt < model.timestamps.endedAt)) {
+      throw new TypeError('Revisão de decisão não pode anteceder o término da observação técnica.');
     }
     decisionIds.add(decisionId);
     decisionByOccurrence.set(normalized.occurrenceId, normalized);

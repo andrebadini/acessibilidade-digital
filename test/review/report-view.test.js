@@ -714,7 +714,7 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   });
   assert.deepEqual(Object.keys(view), [
     'version', 'auditId', 'modelRevision', 'modelHash', 'filters', 'executive', 'issues',
-    'checklist', 'technicalEvidence', 'readerMaps', 'methodology', 'exports', 'matrix', 'reviewHistory',
+    'checklist', 'technicalEvidence', 'readerMaps', 'methodology', 'exports', 'matrix', 'reviewHistory', 'findingsBoard',
   ]);
   assert.deepEqual(Object.keys(view.filters), ['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
   assert.deepEqual(Object.keys(view.issues), ['failed', 'alerts', 'humanReview', 'passed']);
@@ -814,7 +814,8 @@ test('human history displays exact decisions once with literal notes and correla
   assert.equal(history.querySelectorAll('[data-review-record]').length, 2);
   const first = history.querySelector('[data-review-record="occ-cross-page"]');
   const second = history.querySelector('[data-review-record="occ-focus-review"]');
-  assert.match(first.textContent, /Bruno.*29\/08\/2026.*11:00:00.*conforme/su);
+  // Hora local no fuso registrado pela auditoria, sem milissegundos (correção C3 da revisão leiga).
+  assert.match(first.textContent, /Bruno.*29\/08\/2026, 07:00:00 \(America\/Cuiaba, UTC−04:00\).*Conforme/su);
   assert.match(first.textContent, /Nenhuma nota registrada/u);
   assert.match(second.textContent, /Ana <img src=x>/u);
   assert.ok(second.textContent.includes(hostile));
@@ -924,8 +925,8 @@ test('live report puts the decision summary before compact navigation and expose
   assert.deepEqual(root.querySelectorAll('h2').map(node => node.textContent), [
     'Sumário executivo e limitações críticas',
     'Cobertura e quatro grupos de resultado',
-    'Não conformidades priorizadas',
-    'Revisões humanas e conclusões registradas',
+    'Quadro de constatações (requisitos da ABNT NBR 17225:2025)',
+    'Revisão humana guiada e conclusões registradas',
     'Mapas de anúncios',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
@@ -954,7 +955,7 @@ test('live report puts the decision summary before compact navigation and expose
     '#report-section-5', '#report-section-6', '#report-section-7',
   ]);
   assert.deepEqual(navigation.querySelectorAll('a').map(link => link.textContent), [
-    'Sumário', 'Resultados', 'Não conformidades', 'Revisões humanas', 'Anúncios',
+    'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
     'Matriz ABNT', 'Metodologia e evidências',
   ]);
   assert.ok(firstSection.querySelector('[data-report-outcome]'));
@@ -982,8 +983,12 @@ test('live report puts the decision summary before compact navigation and expose
     if (child.getAttribute('data-report-metrics') !== null) return 'metrics';
     if (child.getAttribute('data-report-executive-actions') !== null) return 'actions';
     if (child.getAttribute('data-report-limitations') !== null) return 'limitations';
+    if (child.getAttribute('data-findings-cta') !== null) return 'findings';
     return child.tagName.toLowerCase();
-  }), ['h2', 'outcome', 'section', 'coverage', 'metrics', 'details', 'actions', 'limitations']);
+  }), ['h2', 'outcome', 'section', 'coverage', 'metrics', 'findings', 'details', 'actions', 'limitations']);
+  // A situação dos requisitos obrigatórios aparece logo depois dos totais, com atalho para o quadro.
+  assert.match(firstSection.querySelector('[data-findings-cta]').textContent, /Dos 96 requisitos da norma/u);
+  assert.equal(firstSection.querySelector('[data-findings-cta]').querySelectorAll('a')[0].getAttribute('href'), '#report-section-3');
   assert.equal(root.querySelectorAll('button[data-report-export]').length, 1);
   assert.equal(firstSection.querySelector('[data-report-executive-actions]').querySelectorAll('button[data-report-export]').length, 1);
   root.querySelector('button[data-report-export]').click();

@@ -77,15 +77,21 @@ async function canonicalReviewTransition(id, model, snapshotCapability, owner) {
     if (candidate.auditId !== auditId) throw new TypeError();
     const baseByOccurrence = new Map(base.reviewDecisions.map(decision => [decision.occurrenceId, decision]));
     const additions = [];
+    let revisedCount = 0;
     for (const decision of candidate.reviewDecisions) {
       const prior = baseByOccurrence.get(decision.occurrenceId);
       if (prior) {
-        if (canonicalStringify(prior) !== canonicalStringify(decision)) throw new TypeError();
+        if (canonicalStringify(prior) === canonicalStringify(decision)) continue;
+        // Revisão: a validade da trilha (anterior preservada e posterior no tempo) é conferida por
+        // applyReviewDecisions logo abaixo, que recusa qualquer outra substituição.
+        additions.push(decision);
+        revisedCount += 1;
       } else {
         additions.push(decision);
       }
     }
-    if (candidate.reviewDecisions.length !== base.reviewDecisions.length + additions.length || additions.length === 0) {
+    if (candidate.reviewDecisions.length !== base.reviewDecisions.length + additions.length - revisedCount ||
+      additions.length === 0) {
       throw new TypeError();
     }
     const expected = createAuditModel(applyReviewDecisions(base, additions));

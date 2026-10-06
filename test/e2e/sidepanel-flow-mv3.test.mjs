@@ -466,41 +466,51 @@ for (const scenario of [
       assert.deepEqual(await markerRecordFingerprint(extension, auditId), { ...fingerprint, revision: fingerprint.revision + 1 });
       if (!scenario.idle) await step('LIVE_REVIEW_REFRESH', async () => {
         const prerequisites = await extension.evaluate(report, `(() => ({
-          cards:document.querySelectorAll('#review-list > details').length,
+          cards:document.querySelectorAll('#review-list details.lay-card').length,
           target:Boolean(document.querySelector('[data-review-controls-target]')),
           evaluator:Boolean(document.querySelector('#review-evaluator')),
           identity:/Revisão do modelo: [0-9]+/.test(document.querySelector('[data-report-section="7"]')?.textContent??'')
         }))()`);
         assert.ok(prerequisites.cards >= 2 && prerequisites.target && prerequisites.evaluator && prerequisites.identity,
           JSON.stringify(prerequisites));
+        // Revisão guiada: um cartão de pergunta única recebe "Não" com a constatação; o cartão seguinte
+        // guarda uma observação ainda não salva, que precisa sobreviver à atualização do relatório.
         const beforeReview = await extension.evaluate(report, `(() => {
-          const cards=[...document.querySelectorAll('#review-list > details')];
-          if(cards.length<2)throw Error('REVIEW_FIXTURE_TOO_SMALL');
+          const cards=[...document.querySelectorAll('#review-list details.lay-card')];
+          const single=cards.findIndex(card=>card.querySelectorAll('.lay-question').length===1&&card.querySelector('.lay-answer-form')&&
+            /· requisito ·/u.test(card.querySelector('.lay-meta')?.textContent??''));
+          if(single<0||single+1>=cards.length)throw Error('REVIEW_FIXTURE_TOO_SMALL');
+          const first=cards[single], next=cards.slice(single+1).find(card=>card.querySelector('.lay-note textarea'));
+          if(!next)throw Error('REVIEW_FIXTURE_TOO_SMALL');
           document.querySelector('[data-review-controls-target]').open=true;
-          cards[0].open=true;
+          first.open=true;
           document.querySelector('#review-evaluator').value='Avaliadora QA';
-          cards[1].querySelector('textarea').value='Nota ainda não salva';
-          window.__reviewPreserved={list:document.querySelector('#review-list'),evaluator:document.querySelector('#review-evaluator'),next:cards[1]};
+          next.querySelector('.lay-note textarea').value='Nota ainda não salva';
+          window.__reviewPreserved={list:document.querySelector('#review-list'),evaluator:document.querySelector('#review-evaluator'),next,
+            key:first.getAttribute('data-lay-card')};
           const methodology=document.querySelector('[data-report-section="7"]').textContent;
           const before=Number(methodology.match(/Revisão do modelo: ([0-9]+)/)[1]);
-          cards[0].querySelector('textarea').value='Barreira confirmada no teste local';
-          [...cards[0].querySelectorAll('button')].find(node=>node.textContent==='não conforme').click();
+          first.querySelector('[data-lay-answer="não conforme"]').click();
+          first.querySelector('.lay-finding textarea').value='Barreira confirmada no teste local';
+          first.querySelector('.lay-confirm-fail').click();
           return before;
         })()`, { userGesture: true });
         const savedStatus = await extension.waitForValue(report, `document.querySelector('#review-status').textContent`,
-          value => /Decisão salva.*Relatório atualizado|[Nn]ão foi possível/u.test(value), { timeoutMs: 15_000, intervalMs: 50 });
-        assert.match(savedStatus, /Decisão salva.*Relatório atualizado/u);
+          value => /Resposta salva|[Nn]ão foi possível/u.test(value), { timeoutMs: 15_000, intervalMs: 50 });
+        assert.match(savedStatus, /Resposta salva/u);
         const refreshed = await extension.evaluate(report, `(() => {
           const kept=window.__reviewPreserved;
           const text=document.querySelector('[data-report-section="7"]').textContent;
+          const answeredCard=[...kept.list.querySelectorAll('details.lay-card')].find(card=>card.getAttribute('data-lay-card')===kept.key);
           return {revision:Number(text.match(/Revisão do modelo: ([0-9]+)/)[1]),
             sameForms:document.querySelector('#review-list')===kept.list&&document.querySelector('#review-evaluator')===kept.evaluator,
-            note:kept.next.querySelector('textarea').value,evaluator:kept.evaluator.value,
-            focus:document.activeElement===kept.next.querySelector('summary'),
-            open:kept.next.open&&document.querySelector('[data-review-controls-target]').open,
-            answered:kept.list.firstElementChild.classList.contains('answered'),
+            note:kept.next.querySelector('.lay-note textarea').value,evaluator:kept.evaluator.value,
+            focus:kept.next.contains(document.activeElement),
+            open:document.querySelector('[data-review-controls-target]').open,
+            answered:Boolean(answeredCard?.classList.contains('answered')),
             matrixRows:document.querySelectorAll('[data-report-matrix] tbody tr').length,
             history:document.querySelector('[data-review-history]')?.textContent??'',
+            board:document.querySelector('[data-findings-board]')?.textContent??'',
             hash:text.match(/Integridade: ([a-f0-9]{64})/)[1]};
         })()`);
         assert.ok(refreshed.revision > beforeReview);
@@ -509,6 +519,7 @@ for (const scenario of [
         assert.equal(refreshed.evaluator, 'Avaliadora QA');
         assert.equal(refreshed.matrixRows, 146);
         assert.ok(refreshed.history.includes('Avaliadora QA') && refreshed.history.includes('Barreira confirmada no teste local'));
+        assert.ok(refreshed.board.includes('Barreira confirmada no teste local'), 'a constatação chega ao quadro de constatações');
         const durable = await extension.evaluate(extension.harnessPage, `(async()=>{
           const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
           const revision=await store.getReportRevision(${JSON.stringify(auditId)});

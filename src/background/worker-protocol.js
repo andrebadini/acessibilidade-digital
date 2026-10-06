@@ -7,7 +7,8 @@ const REVIEW_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'motor']);
 const READER_ACTIONS = new Set(['previous', 'repeat', 'pause', 'resume', 'next', 'stop']);
 const AUTONOMOUS_PERSONA_REASONS = new Set(['emergency-stop', 'lifecycle-stop', 'reader-terminal']);
-const REVIEW_ANSWERS = new Set(['conforme', 'não conforme', 'não foi possível determinar']);
+const REVIEW_ANSWERS = new Set(['conforme', 'não conforme', 'não foi possível determinar', 'não se aplica']);
+const PAGE_AIDS = new Set(['zoom-200', 'reflow-320', 'text-spacing', 'reset']);
 const REVIEW_MODES = new Set(['assisted', 'manual']);
 const HIGHLIGHT_NONCE = /^[A-Za-z0-9_-]{22}$/u;
 const CONSENT_ID = /^[A-Za-z0-9_-]{21}[AQgw]$/u;
@@ -57,6 +58,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
     'type', 'sessionCapabilityId', 'auditId', 'itemId', 'occurrenceId',
     'answer', 'evaluator', 'decidedAt', 'mode', 'note',
   ],
+  REPORT_PAGE_AID: ['type', 'sessionCapabilityId', 'auditId', 'aid'],
   REPORT_DELETE_AUDIT: ['type', 'sessionCapabilityId', 'auditId'],
   REPORT_DELETE_ALL_AUDITS: ['type', 'sessionCapabilityId', 'auditId'],
   GET_HIGHLIGHT_STATE: ['type', 'sessionCapabilityId', 'auditId'],
@@ -76,7 +78,9 @@ export function parseWorkerMessage(message) {
   if (!type.found || !Object.hasOwn(MESSAGE_SCHEMAS, type.value)) return failure('UNKNOWN_MESSAGE');
   const copy = copyExactDataRecord(message, MESSAGE_SCHEMAS[type.value]) ??
     (type.value === 'REPORT_REQUEST_EXPORT'
-      ? copyExactDataRecord(message, [...MESSAGE_SCHEMAS[type.value], 'deleteAfterCompleteExport']) : null);
+      ? copyExactDataRecord(message, [...MESSAGE_SCHEMAS[type.value], 'deleteAfterCompleteExport'])
+      : type.value === 'REPORT_COMMIT_REVIEW_DECISION'
+        ? copyExactDataRecord(message, [...MESSAGE_SCHEMAS[type.value], 'revise']) : null);
   if (!copy) return failure('INVALID_MESSAGE');
   if (!hasFlatPrimitiveShape(copy)) return failure('INVALID_MESSAGE');
   const byteLength = capturedUtf8Length(copy);
@@ -194,7 +198,11 @@ function validWorkerEnvelope(value) {
       validReviewId(value.itemId) && validReviewId(value.occurrenceId) &&
       REVIEW_ANSWERS.has(value.answer) && REVIEW_MODES.has(value.mode) &&
       canonicalInstant(value.decidedAt) && boundedCanonicalText(value.evaluator, 160, false) &&
-      boundedCanonicalText(value.note, 4_000, true);
+      boundedCanonicalText(value.note, 4_000, true) &&
+      (!Object.hasOwn(value, 'revise') || value.revise === true);
+  }
+  if (value.type === 'REPORT_PAGE_AID') {
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && PAGE_AIDS.has(value.aid);
   }
   if (value.type === 'EXPORT_COMPLETE') {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && validAttemptId(value.attemptId);

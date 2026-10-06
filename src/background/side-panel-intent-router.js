@@ -804,7 +804,7 @@ export function createSidePanelIntentRouter(raw) {
         auditId: envelope.auditId, itemId: envelope.itemId, occurrenceId: envelope.occurrenceId,
         answer: envelope.answer, evaluator: envelope.evaluator, decidedAt: envelope.decidedAt,
         mode: envelope.mode, note: envelope.note,
-      });
+      }, { revise: envelope.revise === true });
       const authorizedAt = input.modelNow();
       if (typeof authorizedAt !== 'string' || new Date(authorizedAt).toISOString() !== authorizedAt) {
         return fail('REPORT_OPERATION_DENIED');
@@ -996,6 +996,9 @@ export function createSidePanelIntentRouter(raw) {
       deleteAfterCompleteExport: envelope.deleteAfterCompleteExport === true,
     }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_COMMIT_REVIEW_DECISION') return mutateReport(envelope, request.sender, 'review-commit');
+    if (envelope.type === 'REPORT_PAGE_AID') return input.reportLaunch?.applyPageAid?.({
+      sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId, sender: request.sender, aid: envelope.aid,
+    }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_DELETE_AUDIT') return mutateReport(envelope, request.sender, 'delete-audit');
     if (envelope.type === 'REPORT_DELETE_ALL_AUDITS') return mutateReport(envelope, request.sender, 'delete-all');
     if (envelope.type === 'EXPORT_CONNECT') return input.exportLaunch?.connect?.({ auditId: envelope.auditId, sender: request.sender }) ?? fail('FEATURE_UNAVAILABLE');

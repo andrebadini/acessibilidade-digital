@@ -1,10 +1,12 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
+import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import { registeredOccurrenceSource } from '../provenance.js';
 import { auditModelInputError } from './audit-input.js';
 import { isAuditIntegrityVerified } from './integrity.js';
 import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
 
-export const OCCURRENCE_CSV_VERSION = 'audita-occurrences-v2';
+// v3 (revisão leiga): colunas da revisão humana e base consumerista restrita a requisitos.
+export const OCCURRENCE_CSV_VERSION = 'audita-occurrences-v3';
 export const OCCURRENCE_CSV_COLUMNS = Object.freeze([
   'csv_schema_version', 'audit_id', 'occurrence_id', 'page_id', 'page_url',
   'observed_at', 'outcome', 'classification', 'impact', 'confidence',
@@ -14,6 +16,7 @@ export const OCCURRENCE_CSV_COLUMNS = Object.freeze([
   'frame_path', 'accessible_preview', 'accessible_preview_source',
   'evidence_refs', 'consumer_basis_ref', 'evidence_hashes',
   'canonical_model_hash', 'evidence_manifest_hash',
+  'review_answer', 'review_decided_at', 'reviewed_item_outcome', 'review_note',
 ]);
 
 const MAX_CELL_CODE_POINTS = 32_000;
@@ -35,6 +38,13 @@ const CLASSIFICATION_LABEL = Object.freeze({
   'best-practice': 'Boa prática',
   editorial: 'Observação editorial',
 });
+// Respostas humanas em tokens estáveis, sem acentos, para planilhas e filtros.
+const REVIEW_ANSWER_TOKEN = Object.freeze({
+  conforme: 'conforme',
+  'não conforme': 'nao_conforme',
+  'não foi possível determinar': 'indeterminado',
+  'não se aplica': 'nao_se_aplica',
+});
 const OUTCOME_LABEL = Object.freeze({
   passed: 'conformidade observada',
   failed: 'não conformidade observada',
@@ -51,6 +61,8 @@ export function renderOccurrenceCsv(input, options = {}) {
   const model = input;
   const pageById = new Map(model.pages.map(page => [page.pageId, page]));
   const evidenceById = new Map(model.evidence.map(evidence => [evidence.evidenceId, evidence]));
+  const decisionByOccurrence = new Map((model.reviewDecisions ?? []).map(decision => [decision.occurrenceId, decision]));
+  const itemById = new Map(model.itemResults.map(item => [item.id, item]));
   const deliveryIdentity = options?.deliveryIdentity === undefined ? null : createExportDeliveryIdentityV1(options.deliveryIdentity);
   const columns = deliveryIdentity === null ? OCCURRENCE_CSV_COLUMNS : [
     ...OCCURRENCE_CSV_COLUMNS,
@@ -103,10 +115,13 @@ export function renderOccurrenceCsv(input, options = {}) {
       projectedDetail(occurrence.accessiblePreview),
       projectedDetail(previewEvidence?.accessibility?.nameSource),
       strictTokenList(occurrence.evidenceRefs, ';'),
-      strictToken(occurrence.legalAnalysis?.basisRef),
+      // A base consumerista só acompanha requisitos, como no painel e no relatório: recomendação não
+      // atendida não demonstra, isoladamente, descumprimento do mínimo (ABNT NBR 17225:2025, seção 4).
+      consumerBasisCell(occurrence, decisionByOccurrence.get(occurrence.occurrenceId)),
       verifiedEvidenceHashList(occurrence.evidenceRefs, referencedEvidence),
       strictSha256(model.integrity?.canonicalModelHash),
       strictSha256(model.integrity?.evidenceManifestHash),
+      ...reviewColumns(decisionByOccurrence.get(occurrence.occurrenceId), itemById.get(occurrence.itemId)),
     ];
     const record = serializeRecord(deliveryIdentity === null ? values : [...values,
       'ExportDeliveryIdentityV1', deliveryIdentity.auditId, String(deliveryIdentity.modelRevision),
@@ -117,6 +132,28 @@ export function renderOccurrenceCsv(input, options = {}) {
     records.push(record);
   }
   return `\uFEFF${records.join('\r\n')}\r\n`;
+}
+
+// Mesmo portão do relatório: falha automática com base registrada, ou "não conforme" humano com
+// descrição, sempre em requisito.
+function consumerBasisCell(occurrence, decision) {
+  if (occurrence.classification !== 'requirement') return '';
+  const automatic = strictToken(occurrence.legalAnalysis?.basisRef);
+  if (automatic) return automatic;
+  const reviewed = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme' &&
+    typeof decision.note === 'string' && decision.note.length > 0;
+  return reviewed ? CONSUMER_ACCESSIBILITY_FIXED_BASIS.id : '';
+}
+
+function reviewColumns(decision, item) {
+  if (!decision) return ['', '', '', ''];
+  return [
+    REVIEW_ANSWER_TOKEN[decision.answer] ?? '',
+    strictInstant(decision.decidedAt),
+    item?.review ? strictToken(item.outcome) : '',
+    // A nota é texto livre da pessoa avaliadora: fica no HTML/JSON, como os demais detalhes.
+    projectedDetail(decision.note),
+  ];
 }
 
 function serializeRecord(values) {

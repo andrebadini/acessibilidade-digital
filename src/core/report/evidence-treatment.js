@@ -32,7 +32,7 @@ function treatmentTone(occurrence) {
   if (occurrence.outcome === 'failed' || answer === 'não conforme') {
     return occurrence.classification === 'recommendation' ? 'advisory' : 'failed';
   }
-  if (answer === 'conforme') return null;
+  if (answer === 'conforme' || answer === 'não se aplica') return null;
   if (occurrence.outcome === 'cantTell' || answer === 'não foi possível determinar') return 'review';
   return null;
 }

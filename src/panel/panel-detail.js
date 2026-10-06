@@ -216,6 +216,7 @@ function expectedDisplayOutcome(occurrences, decisionByOccurrence) {
     const answer = decisionByOccurrence.get(occurrence.occurrenceId)?.answer;
     if (answer === 'não conforme') return 'failed';
     if (answer === 'conforme') return 'passed';
+    if (answer === 'não se aplica') return 'inapplicable';
     return 'cantTell';
   });
   return outcomes.reduce((best, outcome) => priority[outcome] > priority[best] ? outcome : best, 'inapplicable');
@@ -274,7 +275,8 @@ function buildPanelDetailFromCanonical(model, summary, occurrenceId) {
   const title = item?.title ?? rule?.summary ?? occurrence.justification;
   const reason = occurrence.justification || rule?.summary || title;
   const selectedOutcome = ['failed', 'passed'].includes(occurrence.outcome) ? occurrence.outcome
-    : decision?.answer === 'não conforme' ? 'failed' : decision?.answer === 'conforme' ? 'passed' : occurrence.outcome;
+    : decision?.answer === 'não conforme' ? 'failed' : decision?.answer === 'conforme' ? 'passed'
+      : decision?.answer === 'não se aplica' ? 'inapplicable' : occurrence.outcome;
   const rawCorrection = correctionFor(occurrence, rule, item);
   const guidance = accessibilityGuidance({
     itemId: item?.id, title, outcome: selectedOutcome, observed: reason,

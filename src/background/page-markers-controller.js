@@ -332,8 +332,9 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
       if (!generalSelections.has(selectionId) && !markerSelections.has(selectionId)) explicitlyUnlocated.add(selectionId);
     const decisions = new Map(snapshot.model.reviewDecisions.map(row => [row.occurrenceId, row]));
     const rules = new Map(snapshot.model.ruleResults.map(row => [JSON.stringify([row.source.engine, row.source.ruleId]), row]));
-    const findings = snapshot.model.occurrences.filter(row => findingKind(row,
-      rules.get(JSON.stringify([row.source.engine, row.source.ruleId])), decisions.get(row.occurrenceId)) !== 'checklist');
+    // "Não se aplica" encerra a pergunta sem achado: não conta como ocorrência omitida dos sinais.
+    const findings = snapshot.model.occurrences.filter(row => decisions.get(row.occurrenceId)?.answer !== 'não se aplica' &&
+      findingKind(row, rules.get(JSON.stringify([row.source.engine, row.source.ruleId])), decisions.get(row.occurrenceId)) !== 'checklist');
     return { page, targets, ordinalToSelection, selectionToOrdinal, generalSelections, explicitlyUnlocated, markerSelections,
       offered: ordinalToSelection.size, omitted: findings.filter(row => !bundle.occurrenceIds.includes(row.occurrenceId)).length };
   }

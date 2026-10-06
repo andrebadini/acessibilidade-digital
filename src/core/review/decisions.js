@@ -2,14 +2,18 @@ import { captureAuditInput } from '../report/audit-input.js';
 import { canonicalStringify } from '../report/canonical-json.js';
 import { canonicalEvaluatorSummary } from '../report/text-policy.js';
 
-const ANSWERS = Object.freeze(['conforme', 'não conforme', 'não foi possível determinar']);
+// "não se aplica" (revisão leiga): a situação do item não existe na página observada.
+const ANSWERS = Object.freeze(['conforme', 'não conforme', 'não foi possível determinar', 'não se aplica']);
 const MODES = Object.freeze(['assisted', 'manual']);
 const MAX_REVIEW_DECISIONS = 10_000;
 const MAX_EVALUATOR_CODEPOINTS = 160;
 const MAX_NOTE_CODEPOINTS = 4_000;
+// Uma decisão revista guarda, em ordem, as respostas que substituiu. A trilha nunca é apagada.
+const MAX_REVISIONS = 20;
 const DECISION_FIELDS = new Set([
-  'decisionId', 'auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode', 'note',
+  'decisionId', 'auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode', 'note', 'revisions',
 ]);
+const REVISION_FIELDS = new Set(['answer', 'evaluator', 'decidedAt', 'note']);
 
 function decisionBoundaryError(message = 'Decisão de revisão inválida.') {
   return new TypeError(message);
@@ -80,6 +84,69 @@ function boundedHumanText(value, maximum, message, { optional = false } = {}) {
   return canonical;
 }
 
+function canonicalRevisions(value, decidedAt) {
+  const list = snapshotDecisionList(value, 'As revisões da decisão');
+  if (list.length > MAX_REVISIONS) throw new TypeError('A decisão excede o limite de revisões.');
+  let previous = '';
+  return list.map(entry => {
+    if (!isPlainRecord(entry)) throw new TypeError('Revisão de decisão inválida.');
+    for (const key of Reflect.ownKeys(entry)) {
+      if (typeof key !== 'string' || !REVISION_FIELDS.has(key)) throw new TypeError('Revisão de decisão inválida.');
+    }
+    const answer = ownValue(entry, 'answer', 'A resposta revista');
+    if (!ANSWERS.includes(answer)) throw new TypeError('Resposta revista inválida.');
+    const evaluator = boundedHumanText(ownValue(entry, 'evaluator', 'O avaliador revisto'), MAX_EVALUATOR_CODEPOINTS,
+      'Avaliador da revisão inválido.');
+    const at = canonicalInstant(ownValue(entry, 'decidedAt', 'A data revista'));
+    if (at <= previous || at >= decidedAt) throw new TypeError('As revisões devem anteceder a decisão vigente, em ordem.');
+    previous = at;
+    const noteValue = Object.hasOwn(entry, 'note') ? ownValue(entry, 'note', 'A nota revista') : undefined;
+    const note = noteValue === undefined ? ''
+      : boundedHumanText(noteValue, MAX_NOTE_CODEPOINTS, 'Nota da revisão inválida.', { optional: true });
+    return { answer, evaluator, decidedAt: at, ...(note ? { note } : {}) };
+  });
+}
+
+/**
+ * Monta a decisão que substitui `existing`, preservando a trilha: a resposta anterior entra em
+ * `revisions`. A substituição só é aceita quando a nova decisão é posterior à vigente.
+ */
+export function reviseReviewDecision(existing, input) {
+  const prior = createReviewDecision(existing);
+  const { revisions: _ignored, ...rest } = captureAuditInput(input);
+  const trail = [...(prior.revisions ?? []), {
+    answer: prior.answer, evaluator: prior.evaluator, decidedAt: prior.decidedAt, ...(prior.note ? { note: prior.note } : {}),
+  }];
+  const next = createReviewDecision({ ...rest, revisions: trail });
+  if (next.occurrenceId !== prior.occurrenceId || next.itemId !== prior.itemId || next.auditId !== prior.auditId ||
+    next.mode !== prior.mode) {
+    throw new TypeError('A revisão deve tratar da mesma ocorrência.');
+  }
+  return next;
+}
+
+function isRevisionOf(existing, candidate) {
+  const prior = existing.revisions ?? [];
+  const trail = candidate.revisions ?? [];
+  if (trail.length !== prior.length + 1 || candidate.decidedAt <= existing.decidedAt) return false;
+  if (canonicalStringify(trail.slice(0, -1)) !== canonicalStringify(prior)) return false;
+  const last = trail.at(-1);
+  return canonicalStringify(last) === canonicalStringify({
+    answer: existing.answer, evaluator: existing.evaluator, decidedAt: existing.decidedAt,
+    ...(existing.note ? { note: existing.note } : {}),
+  }) && candidate.itemId === existing.itemId && candidate.mode === existing.mode;
+}
+
+/** Resultado do item depois da revisão humana. Compartilhado com a validação do modelo. */
+export function deriveReviewedItemOutcome(originalOutcome, occurrences, decisions) {
+  if (originalOutcome === 'failed' || decisions.some(decision => decision.answer === 'não conforme')) return 'failed';
+  if (decisions.length === occurrences.length && decisions.length > 0) {
+    if (decisions.every(decision => decision.answer === 'não se aplica')) return 'inapplicable';
+    if (decisions.every(decision => ['conforme', 'não se aplica'].includes(decision.answer))) return 'passed';
+  }
+  return 'cantTell';
+}
+
 function freeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
   seen.add(value);
@@ -115,7 +182,13 @@ export function createReviewDecision(input) {
   const note = noteValue === undefined
     ? ''
     : boundedHumanText(noteValue, MAX_NOTE_CODEPOINTS, 'Nota da decisão inválida.', { optional: true });
-  const canonical = { auditId, itemId, occurrenceId, answer, evaluator, decidedAt, mode, ...(note ? { note } : {}) };
+  const revisions = Object.hasOwn(captured, 'revisions')
+    ? canonicalRevisions(ownValue(captured, 'revisions', 'As revisões da decisão'), decidedAt)
+    : [];
+  const canonical = {
+    auditId, itemId, occurrenceId, answer, evaluator, decidedAt, mode, ...(note ? { note } : {}),
+    ...(revisions.length ? { revisions } : {}),
+  };
   assertJsonData(canonical, 'Decisão de revisão');
   const decisionId = occurrenceId;
   if (Object.hasOwn(captured, 'decisionId') && ownValue(captured, 'decisionId', 'O identificador da decisão') !== decisionId) {
@@ -286,10 +359,18 @@ export function applyReviewDecisions(auditModel, decisions) {
   for (const decision of normalized) {
     const existing = combinedByOccurrence.get(decision.occurrenceId);
     if (existing) {
-      if (canonicalStringify(existing) !== canonicalStringify(decision)) {
+      if (canonicalStringify(existing) === canonicalStringify(decision)) continue;
+      // A decisão só é substituída por uma revisão explícita, que carrega a anterior na trilha.
+      if (!isRevisionOf(existing, decision)) {
         throw new TypeError('A decisão imutável da ocorrência não pode ser substituída.');
       }
+      combinedByOccurrence.set(decision.occurrenceId, decision);
+      addedDecisionCount += 1;
       continue;
+    }
+    // Uma primeira decisão não pode trazer trilha: revisões só nascem substituindo uma decisão existente.
+    if (decision.revisions?.length) {
+      throw new TypeError('Uma decisão nova não pode carregar respostas anteriores.');
     }
     combinedByOccurrence.set(decision.occurrenceId, decision);
     addedDecisionCount += 1;
@@ -306,11 +387,8 @@ export function applyReviewDecisions(auditModel, decisions) {
     const occurrences = reviewableByItem.get(item.id) || [];
     const itemDecisions = occurrences.map(occurrence => combinedByOccurrence.get(occurrence.occurrenceId)).filter(Boolean);
     if (itemDecisions.length === 0) return item;
-    let reviewedOutcome = 'cantTell';
     const originalOutcome = item.originalOutcome ?? item.outcome;
-    if (originalOutcome === 'failed') reviewedOutcome = 'failed';
-    else if (itemDecisions.some(decision => decision.answer === 'não conforme')) reviewedOutcome = 'failed';
-    else if (itemDecisions.length === occurrences.length && itemDecisions.every(decision => decision.answer === 'conforme')) reviewedOutcome = 'passed';
+    const reviewedOutcome = deriveReviewedItemOutcome(originalOutcome, occurrences, itemDecisions);
     const evaluators = [...new Set(itemDecisions.map(decision => decision.evaluator))];
     const modes = [...new Set(itemDecisions.map(decision => decision.mode))];
     const latest = [...itemDecisions].sort((a, b) => a.decidedAt.localeCompare(b.decidedAt)).at(-1);
