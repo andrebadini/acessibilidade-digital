@@ -1372,6 +1372,134 @@ test('single-URL start persists bootstrap and active job before execution, then 
     /token=raw|TTTTTTTTTTTTTTTTTTTTTT|owner_O|hmac-sha256:D/iu);
 });
 
+// 1.1.55: sem pausa de privacidade, o portão da auditoria por URL arma sempre. O commit terminal com raster
+// exige a alça da tentativa DIRETA (guarda D2); antes, a auditoria de outra URL com imagens sempre terminava
+// indisponível porque o caminho por URL nunca preparava essa tentativa.
+for (const mode of ['full-evidence', 'element-only']) {
+  test(`single-URL ${mode} prepares the direct attempt when the gate arms and commits with its handle`, async () => {
+    const area = sessionArea();
+    const { authority, senderContext } = await authorityFixture(area);
+    const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+    const auditId = `audit-url-direct-${mode}`;
+    const report = await reportFixture(auditId);
+    const reportByAudit = new Map();
+    const dependencies = dependencyFixture({
+      area, authority, reportByAudit,
+      execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+    });
+    const prepares = [];
+    const handles = [];
+    const cleanups = [];
+    const directHandle = Object.freeze(Object.create(null));
+    dependencies.pixelAttemptLifecycle = {
+      ...dependencies.pixelAttemptLifecycle,
+      async prepareDirect(value) { prepares.push(structuredClone(value)); return directHandle; },
+      async commitTerminal(value) {
+        handles.push(value.attemptHandle);
+        // Mesma guarda do worker: sem alça, o commit é recusado.
+        if (value.attemptHandle !== directHandle) throw new Error('TERMINAL_COMMIT_DENIED');
+        const { attemptHandle: _attemptHandle, ...terminal } = value;
+        const committed = await dependencies.commitTerminalAudit(terminal);
+        return Object.freeze({ revision: committed.revision, modelHash: committed.modelHash });
+      },
+      async cleanup(value) { cleanups.push(structuredClone(value)); return true; },
+    };
+    const policy = createCapturePolicyV1({ mode, includeQuery: false });
+    const observedTarget = Object.freeze({
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: `owner_${'O'.repeat(22)}`,
+      tabId: 27, windowId: 9, documentId: 'url-document',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+      urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    });
+    dependencies.runUrlAuditExecution = async args => {
+      await args.onCheckpoint(report.checkpoint);
+      assert.equal(prepares.length, 0, 'a tentativa direta só nasce quando o portão arma');
+      const decision = await args.privacyGate.preflight({
+        auditId, observedTarget, capturePolicy: policy,
+        signals: { version: 'SensitiveCaptureSignalsV1', detected: true, categories: ['password'] },
+      });
+      assert.equal(decision.status, 'armed', 'sinal sensível não pausa a auditoria por URL');
+      assert.equal(prepares.length, 1);
+      await args.persistAuditModel(report.model, observedTarget);
+      return Object.freeze({
+        status: 'complete', model: report.model, observedTarget,
+        observationState: 'observed', ownershipState: 'retained-for-review',
+      });
+    };
+    dependencies.clearUrlAuditResources = async () => true;
+    const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedUrlAudit({
+      capabilityId: prepared.capabilityId, auditId, senderContext, capturePolicy: policy,
+      retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+      plan: {
+        kind: 'single', ownershipId: `owner_${'O'.repeat(22)}`, navigationToken: 'T'.repeat(22),
+        navigationPurpose: 'single-url',
+        evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?token=raw', { includeQuery: false }),
+        sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      },
+    });
+    assert.deepEqual(started.response, { ok: true, auditId, state: 'running' });
+    assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+    assert.equal(reportByAudit.has(auditId), true);
+    assert.equal(prepares.length, 1);
+    assert.equal(prepares[0].auditId, auditId);
+    assert.equal(Number.isSafeInteger(prepares[0].expiresAt), true);
+    assert.deepEqual(Object.keys(prepares[0]).sort(), ['auditId', 'expiresAt']);
+    assert.deepEqual(handles, [directHandle]);
+    // A limpeza depois do resultado usa a correlação anexada, a mesma da tentativa direta.
+    assert.deepEqual(cleanups, [{ auditId, consentId: null, expected: 'post-finish' }]);
+    assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  });
+}
+
+test('single-URL no-pixels never prepares a pixel attempt', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+  const auditId = 'audit-url-no-pixels-attempt';
+  const report = await reportFixture(auditId);
+  const reportByAudit = new Map();
+  const dependencies = dependencyFixture({
+    area, authority, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  let prepares = 0;
+  dependencies.pixelAttemptLifecycle = {
+    ...dependencies.pixelAttemptLifecycle,
+    async prepareDirect() { prepares += 1; return Object.freeze(Object.create(null)); },
+  };
+  dependencies.runUrlAuditExecution = async args => {
+    assert.equal(args.privacyGate ?? null, null);
+    await args.onCheckpoint(report.checkpoint);
+    const observedTarget = Object.freeze({
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId: `owner_${'O'.repeat(22)}`,
+      tabId: 27, windowId: 9, documentId: 'url-document',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/private', { includeQuery: false }),
+      urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    });
+    await args.persistAuditModel(report.model, observedTarget);
+    return Object.freeze({
+      status: 'complete', model: report.model, observedTarget,
+      observationState: 'observed', ownershipState: 'retained-for-review',
+    });
+  };
+  dependencies.clearUrlAuditResources = async () => true;
+  const started = await createAuthorizedAuditStarter(dependencies).beginAuthorizedUrlAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext,
+    capturePolicy: createCapturePolicyV1({ mode: 'no-pixels', includeQuery: false }),
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'single', ownershipId: `owner_${'O'.repeat(22)}`, navigationToken: 'T'.repeat(22),
+      navigationPurpose: 'single-url',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/private?token=raw', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    },
+  });
+  assert.deepEqual(await started.completion, { ok: true, auditId, state: 'result', revision: 1 });
+  assert.equal(prepares, 0);
+});
+
 test('batch start persists one active session, commits the consolidated report, and leaves no active owner', async () => {
   const area = sessionArea();
   const { authority, senderContext } = await authorityFixture(area);
@@ -1935,6 +2063,92 @@ test('worker restart reconciles a committed single-URL report without deleting i
   assert.deepEqual(session.targetBinding, { kind: 'disposable', ownershipId, state: 'retained-for-review' });
 });
 
+
+test('worker restart reconciles a committed single-URL report whose pixels used the direct attempt', async () => {
+  const area = sessionArea();
+  const { authority, senderContext } = await authorityFixture(area);
+  const prepared = await authority.prepareNavigationForPanel({ intent: 'single', senderContext });
+  const auditId = 'audit-url-direct-restart';
+  const ownershipId = `owner_${'O'.repeat(22)}`;
+  const report = await reportFixture(auditId);
+  const reportByAudit = new Map();
+  const latest = { value: null };
+  let reachedCommit;
+  const commitReached = new Promise(resolve => { reachedCommit = resolve; });
+  const policy = createCapturePolicyV1({ mode: 'element-only', includeQuery: false });
+  const first = dependencyFixture({
+    area, authority, latest, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  first.runUrlAuditExecution = async args => {
+    await args.onCheckpoint(report.checkpoint);
+    const observedTarget = Object.freeze({
+      version: 'ObservedTargetV1', kind: 'owned-disposable', ownershipId,
+      tabId: 27, windowId: 9, documentId: 'url-document',
+      urlEvidence: sanitizeEvidenceUrlV1('https://example.test/final', { includeQuery: false }),
+      urlSessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+      cleanupMode: 'pre-observation-failure', pageId: 'page-1',
+    });
+    await args.privacyGate.preflight({
+      auditId, observedTarget, capturePolicy: policy,
+      signals: { version: 'SensitiveCaptureSignalsV1', detected: false, categories: [] },
+    });
+    await args.persistAuditModel(report.model, observedTarget);
+    return Object.freeze({
+      status: 'complete', model: report.model, observedTarget,
+      observationState: 'observed', ownershipState: 'retained-for-review',
+    });
+  };
+  const commitTerminalAudit = first.commitTerminalAudit;
+  first.commitTerminalAudit = async value => {
+    await commitTerminalAudit(value);
+    reachedCommit();
+    return new Promise(() => {});
+  };
+  first.clearUrlAuditResources = async () => true;
+  const started = await createAuthorizedAuditStarter(first).beginAuthorizedUrlAudit({
+    capabilityId: prepared.capabilityId, auditId, senderContext, capturePolicy: policy,
+    retentionPreference: { version: 1, deleteAfterCompleteExport: false },
+    plan: {
+      kind: 'single', ownershipId, navigationToken: 'T'.repeat(22), navigationPurpose: 'single-url',
+      evidenceUrl: sanitizeEvidenceUrlV1('https://example.test/final', { includeQuery: false }),
+      sessionDigest: `hmac-sha256:${'D'.repeat(43)}`,
+    },
+  });
+  await commitReached;
+
+  const classifications = [];
+  const cleanups = [];
+  const recoveredDependencies = dependencyFixture({
+    area, authority, latest, reportByAudit,
+    execution: async () => { throw new Error('ATTACHED_EXECUTION_MUST_NOT_RUN'); },
+  });
+  // O marcador da tentativa direta tem a correlação anexada: lido pela alça de posse, fica bloqueado.
+  recoveredDependencies.pixelAttemptLifecycle = {
+    ...recoveredDependencies.pixelAttemptLifecycle,
+    async classify(value) {
+      classifications.push(structuredClone(value));
+      return Object.freeze({ state: Object.hasOwn(value, 'pageId') ? 'blocked' : 'terminal', handle: null });
+    },
+    async cleanup(value) { cleanups.push(structuredClone(value)); return true; },
+  };
+  recoveredDependencies.runUrlAuditExecution = async () => { throw new Error('URL_EXECUTION_MUST_NOT_RESUME'); };
+  recoveredDependencies.clearUrlAuditResources = async () => true;
+  const recovery = await createAuthorizedAuditStarter(recoveredDependencies).recoverAuthorizedAuditLifecycle();
+
+  assert.deepEqual(recovery, { ok: true, state: 'reconciled', auditId, revision: 1 });
+  assert.deepEqual(classifications, [
+    { auditId, consentId: null, pageId: 'page-1', ownershipId },
+    { auditId, consentId: null },
+  ]);
+  assert.deepEqual(cleanups, [{ auditId, consentId: null, expected: 'post-finish' }]);
+  assert.equal(reportByAudit.has(auditId), true);
+  assert.equal(await readActiveAuditJobForWorker({ sessionArea: area }), null);
+  const session = await readAuditSessionForWorker({
+    sessionArea: area, sessionCapabilityId: started.sessionCapabilityId, auditId,
+  });
+  assert.equal(session.state, 'result');
+});
 
 async function pausedSingleUrlAuditHarness(auditId, { attachedCopy = false } = {}) {
   const area = sessionArea();

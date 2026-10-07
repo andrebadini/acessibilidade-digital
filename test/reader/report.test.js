@@ -107,16 +107,20 @@ function fakeChrome() {
   };
 }
 
+// O Chrome oferece Web Locks à extensão; o Node 22 do CI não tem navigator.locks. Os testes que não tratam
+// do lock injetam um gerenciador exclusivo trivial para não depender do runtime que os executa.
+const exclusiveLock = Object.freeze({ lockManager: { request: async (_name, _options, callback) => callback({}) } });
+
 test('launch is a one-time short-lived local capability and never retains a page URL', async () => {
   assert.equal(typeof controllerModule.openReadingReport, 'function');
   const api = fakeChrome();
   await controllerModule.openReadingReport(api, { token: 'a'.repeat(43), now: 1000 });
   assert.doesNotMatch(JSON.stringify(api.records), /private|secret|example/u);
   const href = api.calls.find(([type]) => type === 'create')[1].url;
-  const source = await controllerModule.consumeReadingLaunch(api, href, 1500);
+  const source = await controllerModule.consumeReadingLaunch(api, href, 1500, exclusiveLock);
   assert.equal(source.tabId, 7);
   assert.equal(source.documentId, 'document-one', 'freeze the selected document at the launch gesture');
-  await assert.rejects(controllerModule.consumeReadingLaunch(api, href, 1600));
+  await assert.rejects(controllerModule.consumeReadingLaunch(api, href, 1600, exclusiveLock));
   api.setTab({ id: 7, url: 'chrome://extensions' });
   await assert.rejects(controllerModule.openReadingReport(api));
 });
@@ -158,7 +162,7 @@ test('the first collection cannot bind a different document after the launch cli
   const api = fakeChrome();
   await controllerModule.openReadingReport(api, { token: 'a'.repeat(43), now: 1000 });
   const href = api.calls.find(([type]) => type === 'create')[1].url;
-  const source = await controllerModule.consumeReadingLaunch(api, href, 1500);
+  const source = await controllerModule.consumeReadingLaunch(api, href, 1500, exclusiveLock);
   api.setTab({ id: 7, url: 'https://different.example', status: 'complete' });
   const calls = [];
   api.scripting.executeScript = async options => {

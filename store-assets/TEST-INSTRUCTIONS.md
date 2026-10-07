@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.1.54
+# Instruções de teste — Audita Acessibilidade 1.1.55
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.54.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
+1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.55.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
@@ -19,25 +19,26 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 3. Escolha **Evidência completa**, **Somente elementos** ou **Sem imagens**.
 4. Selecione **Auditar a página atual**. Confira o progresso por etapa: a etapa atual deve ficar indicada e cada etapa terminada deve receber uma confirmação verde antes do resultado.
    A extensão inspeciona a própria página, sem criar ou alternar abas, navegar, rolar, mover foco ou exibir destaques durante a coleta. Nos modos com imagens, a captura de regiões fora da área visível pode redimensionar a página por um instante; a geometria final é restaurada, mas uma página que reage ao redimensionamento pode alterar seu conteúdo. Confira que essa limitação aparece no relatório.
-5. Se a página contiver campo de senha, pagamento ou outro marcador sensível, confirme que a auditoria pausa antes dos pixels. Escolha **Continuar e capturar** somente depois de ocultar dados reais; também verifique que é possível cancelar.
+5. Uma página com campo de senha, pagamento ou outro marcador sensível é auditada sem pausa e sem pedido de confirmação. Oculte dados reais antes de iniciar; também é possível cancelar a auditoria em andamento.
 6. No sumário, confira os totais de falhas, alertas, revisão humana e resultados positivos, além dos filtros por impacto, WCAG e ABNT.
 7. Abra uma ocorrência. Confira a explicação, o impacto, a correção sugerida, o nome acessível, o anúncio estimado, WCAG 2.2, ABNT NBR 17225, fundamentação legal, seletor, código e evidências.
 8. Consulte a captura e as evidências da ocorrência. No painel da página original, use **Destacar elemento** ou **Mostrar sinais na página**; somente elementos cuja correspondência possa ser confirmada recebem moldura. Em **Outra URL**, **Ver e destacar na página** depende de a página auditada continuar disponível e corresponder ao documento observado. Se não houver prova do alvo, a interface deve explicar a indisponibilidade, sem inventar a posição.
 9. Selecione **Abrir relatório completo**. Uma falha de abertura deve manter o sumário e permitir nova tentativa pelo mesmo botão.
 10. No relatório, use **Imprimir resumo / salvar PDF** e escolha **Salvar como PDF** no diálogo. O resumo é uma edição executiva
     (totais, limitações, matriz ABNT e metodologia) e **não substitui** o relatório completo; confirme que ele identifica a mesma auditoria e revisão.
-11. Na aba do relatório, registre uma decisão de revisão quando aplicável e selecione **Gerar relatório atualizado**.
-12. Confirme os quatro downloads: HTML, PDF, CSV e JSON-LD/EARL.
-13. Confira que as molduras vermelha e âmbar são derivações visuais e que os PNGs originais e hashes permanecem separados.
-14. Volte à aba web e confira o destaque pelo painel após exportar. Navegue pela barra de endereço para outra página, use **Refazer auditoria** e inicie a nova avaliação. O novo resultado deve corresponder à nova página e não apagar o anterior.
+11. Na aba do relatório, informe um nome em **Nome da pessoa avaliadora** e abra a seção **Revisão guiada**. Abra um cartão da **Parte 1 — Requisitos**: ele mostra o elemento em palavras, uma pergunta simples e **Como verificar**. Use **Mostrar na página** para destacar o elemento na aba auditada. Num cartão de ampliação, use **Ampliar para 200%** e depois **Voltar ao normal**; confira que o zoom anterior da aba volta. Responda **Sim**, **Não**, **Não consegui verificar** ou **Não existe nesta página**; ao responder **Não**, a descrição da constatação é obrigatória e vem com um rascunho editável. Use **Rever resposta** para trocar uma resposta e confirme que a anterior fica no histórico. Depois selecione **Gerar relatório atualizado**.
+12. Abra o **Quadro de constatações**: ele resume os requisitos da ABNT NBR 17225:2025 como não atendidos, atendidos, não aplicáveis e sem conclusão, com frases para citação. Use **Copiar texto para citação** num item não atendido.
+13. Confirme os quatro downloads: HTML, PDF, CSV e JSON-LD/EARL. O quadro de constatações também aparece no HTML e no PDF.
+14. Confira que as molduras vermelha e âmbar são derivações visuais e que os PNGs originais e hashes permanecem separados.
+15. Volte à aba web e confira o destaque pelo painel após exportar. Navegue pela barra de endereço para outra página, use **Refazer auditoria** e inicie a nova avaliação. O novo resultado deve corresponder à nova página e não apagar o anterior.
 
 ## Outra URL
 
-Abra **Outra URL**, informe um endereço HTTP ou HTTPS e repita o percurso nos três modos. Nos modos com imagens, confirme também a pausa de privacidade, a confirmação de uso único e a geração do relatório. A página original deve continuar ativa durante a coleta.
+Abra **Outra URL**, informe um endereço HTTP ou HTTPS e repita o percurso nos três modos. Nos modos com imagens, confirme que o relatório traz as capturas, sem pausa de privacidade. A página original deve continuar ativa durante a coleta.
 
 ## Lote de páginas
 
-Abra **Lote de páginas**, informe de 2 a 20 endereços HTTP ou HTTPS, um por linha, e escolha um dos três modos de evidência. Confira as cinco etapas da página atual, a barra de avanço do lote inteiro, o relatório consolidado e a presença de resultados de todas as páginas. Nos modos com imagens, cada página sensível deve solicitar sua própria confirmação. Uma página que não puder ser observada deve aparecer como tentativa não concluída no relatório, sem impedir as próximas após a limpeza da tentativa. Durante toda a coleta, as páginas devem ser avaliadas em abas temporárias inativas: a aba original deve permanecer visível, sem rolagem, troca de foco, destaque ou navegação perceptível.
+Abra **Lote de páginas**, informe de 2 a 20 endereços HTTP ou HTTPS, um por linha, e escolha um dos três modos de evidência. Confira as cinco etapas da página atual, a barra de avanço do lote inteiro, o relatório consolidado e a presença de resultados de todas as páginas. Uma página que não puder ser observada deve aparecer como tentativa não concluída no relatório, sem impedir as próximas após a limpeza da tentativa. Durante toda a coleta, as páginas devem ser avaliadas em abas temporárias inativas: a aba original deve permanecer visível, sem rolagem, troca de foco, destaque ou navegação perceptível.
 
 ## Conferência de leitura por Tab
 

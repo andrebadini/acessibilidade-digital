@@ -2098,11 +2098,26 @@ export function createAuthorizedAuditStarter(input) {
             sessionArea, urlRequestedEvidenceStorageKey(active.auditId), requestedEvidence,
             value => urlRequestedEvidenceRecord(value, active), 'URL_REQUESTED_EVIDENCE_DENIED',
           );
+          // Sem a pausa de privacidade (1.1.54), o portão da auditoria por URL arma sempre: a tentativa
+          // DIRETA é o companheiro durável que a guarda D2 exige para o commit terminal com raster, como no
+          // caminho anexado. Sem ela, todo modelo com captura era recusado (TERMINAL_COMMIT_DENIED) e a
+          // auditoria de outra URL com imagens terminava indisponível.
+          let liveRecord = null;
           const privacyGate = capturePolicy.mode === 'no-pixels' ? null : createPixelPrivacyGateV1({
             pixelState, consentId: null, authorityExpiresAt: correlation.expiresAt,
             commitClock: pixelCommitClock, async afterPixels() {},
+            async onArmedDirect() {
+              const attemptHandle = await pixelAttemptLifecycle.prepareDirect({
+                auditId: args.auditId, expiresAt: correlation.expiresAt,
+              });
+              if (!attemptHandle || typeof attemptHandle !== 'object' ||
+                Reflect.ownKeys(attemptHandle).length !== 0 || !liveRecord) {
+                throw new Error('PIXEL_ATTEMPT_PREPARE_DENIED');
+              }
+              liveRecord.attemptHandle = attemptHandle;
+            },
           });
-          const liveRecord = {
+          liveRecord = {
             active, controller, plan, requestedUrlEvidence: requestedEvidence.evidenceUrl,
             capturePolicy, privacyGate, consentId: null, grant: null, observedTarget: null,
             externallyInvalidated: false, liquidationReason: null, committed: null, completion: null,
@@ -2991,13 +3006,24 @@ export function createAuthorizedAuditStarter(input) {
     if (correlation.sessionCapabilityId !== active.sessionCapabilityId || correlation.windowId !== active.windowId ||
       correlation.capabilityState !== 'claimed' || !['running', 'result'].includes(correlation.sessionState) ||
       correlation.ownershipState !== expectedOwnershipState) throw new Error('AUDIT_RECOVERY_REQUIRED');
-    const attemptSource = freeze({
+    let attemptSource = freeze({
       kind: 'owned-disposable', ownershipId: correlation.ownershipId,
       cleanupMode: expectedCleanupMode, pageId: 'page-1',
     });
     let attempt = exact(await pixelAttemptLifecycle.classify(pixelAttemptRequest(
       active.auditId, null, attemptSource,
     )), ['state', 'handle']);
+    // A auditoria por URL sem consentimento grava a tentativa DIRETA, que tem a correlação anexada.
+    // Só quando a leitura pela alça de posse não serve é que a direta é consultada.
+    if (attempt?.state === 'blocked') {
+      const direct = exact(await pixelAttemptLifecycle.classify(pixelAttemptRequest(
+        active.auditId, null, freeze({ kind: 'attached' }),
+      )), ['state', 'handle']);
+      if (direct && direct.state !== 'blocked') {
+        attemptSource = freeze({ kind: 'attached' });
+        attempt = direct;
+      }
+    }
     if (attempt?.state === 'blocked' && active.commitState === 'confirmed' &&
       await pixelAttemptLifecycle.cleanup(pixelAttemptRequest(
         active.auditId, null, attemptSource, { expected: 'post-finish' },

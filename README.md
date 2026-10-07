@@ -4,6 +4,15 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.55 — revisão humana guiada e quadro de constatações.** O que a extensão não consegue medir
+sozinha vira uma pergunta simples sobre o que se vê na página, sem exigir conhecimento de HTML: **Sim**, **Não**,
+**Não consegui verificar** ou **Não existe nesta página**. Cada cartão descreve o elemento em palavras, destaca-o
+na aba auditada e oferece ajudas opcionais (ampliar a 200%, largura de celular e espaçamento de leitura), desfeitas
+com **Voltar ao normal**. Ao responder **Não**, a pessoa descreve o que constatou, partindo de um rascunho. Respostas
+podem ser revistas sem apagar a anterior. O novo **Quadro de constatações** mostra cada requisito da ABNT NBR
+17225:2025 como não atendido, atendido, não aplicável ou sem conclusão, com frases prontas para citação. Veja as
+[notas da 1.1.55](docs/releases/1.1.55.md).
+
 **Versão 1.1.54 — sem trava de privacidade na auditoria.** Quem audita não usa senha nem dados
 sensíveis: a pausa e a confirmação de captura por conteúdo sensível foram removidas. Páginas com
 campo de senha ou área privada concluem em `result` nos modos com foto, sem diálogo. O mesmo vale

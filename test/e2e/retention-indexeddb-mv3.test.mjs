@@ -177,7 +177,7 @@ test('enforces retention and confirmed deletion through the native Side Panel an
     nativePanelOnly: true,
     explicitTwoPageBatch: true,
     crawlerTrapAvoided: true,
-    consentBeforePixels: true,
+    noPrivacyPause: true,
     defaultRetentionPreserved: true,
     expiryNotExtendedByExport: true,
     retainedFourDownloads: true,
@@ -392,7 +392,7 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
     loopback.baseUrl + '/page-b?auth=' + sensitiveMarker];
   const exports = [];
   let nativePanelOnly = true;
-  let consentBeforePixels = true;
+  let noPrivacyPause = false;
   let narrowLayoutUsable = true;
   let manualDialogKeyboardAndCancel = false;
   let defaultRetentionPreserved = false;
@@ -454,41 +454,23 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
       throw new Error('RETENTION_BATCH_START_UNCONFIRMED:' + JSON.stringify({ optIn, state }), { cause });
     }
 
-    for (const pageNumber of [1, 2]) {
-      const paused = await extension.waitForValue(panel, "(() => { const root=document.querySelector('[data-screen]'); return {" +
-        "screen:root?.dataset.screen,status:root?.dataset.sessionStatus,page:Number(root?.dataset.pageNumber)," +
-        "confirm:Boolean(root?.querySelector('[data-action=\"confirm-pixel-capture\"]'))}; })()",
-      value => value?.screen === 'result' || value?.screen === 'unavailable' ||
-        value?.status === 'privacy-paused' && value.page === pageNumber && value.confirm,
-      { timeoutMs: 90_000, intervalMs: 50 });
-      assert.deepEqual(paused, { screen: 'running', status: 'privacy-paused', page: pageNumber, confirm: true });
-      const privacy = await extension.evaluate(harness, `(async()=>{
-        const session=await chrome.storage.session.get(null);
-        const auditId=session['audita:active-audit-job:v1']?.auditId;
-        const pageId=${JSON.stringify(`page-${pageNumber}`)};
-        const owners=Object.entries(session).filter(([key,value])=>key.startsWith('audita:owned-tab:v2:')&&value?.auditId===auditId+':'+pageId);
-        const store=(await import(chrome.runtime.getURL('src/storage/audit-store.js'))).createAuditStore();
-        const progressStore=(await import(chrome.runtime.getURL('src/background/batch-progress-store.js'))).createBatchProgressStoreV1({indexedDB});
-        const progress=typeof auditId==='string'?await progressStore.readCompleted({auditId}):null;
-        const parent=typeof auditId==='string'?await store.getReportRevision(auditId):null;
-        const child=typeof auditId==='string'?await store.getReportRevision(auditId+':'+pageId):null;
-        return {sanitized:Object.entries(session).every(([key,value])=>
-          !JSON.stringify(value).includes(${JSON.stringify(sensitiveMarker)})||
-          key.startsWith('audita:raw-navigation:v1:')&&value?.version==='RawNavigationUrlV1'&&
-          value.auditId===auditId&&value.purpose==='batch-page'),
-          noSessionRaster:! /data:image\\/(?:png|jpeg|webp);base64,/iu.test(JSON.stringify(session)),
-          ownerPaused:owners.length===1&&owners[0][1].state==='retained-for-consent',
-          noCurrentReport:!parent&&!child,
-          completedPages:(progress?.pages??[]).map(page=>page.pageId)};
-      })()`, { awaitPromise: true });
-      // A imagem SVG presente no próprio HTML da fixture não é um raster capturado.
-      // A página anterior autorizada pode estar no progress store, mas a atual não.
-      assert.deepEqual(privacy, { sanitized: true, noSessionRaster: true, ownerPaused: true,
-        noCurrentReport: true, completedPages: pageNumber === 1 ? [] : ['page-1'] });
-      consentBeforePixels &&= privacy.sanitized && privacy.noSessionRaster && privacy.ownerPaused && privacy.noCurrentReport;
-      assert.equal(await extension.evaluate(panel, 'document.body.innerText.includes(' + JSON.stringify(sensitiveMarker) + ')'), false);
-      await extension.click(panel, '[data-action="confirm-pixel-capture"]');
-    }
+    // 1.1.54 removeu a pausa de privacidade: o lote com marcador sensível na URL segue até o resultado sem
+    // pedir confirmação, e nem a sessão nem o painel expõem o marcador em claro.
+    const unpaused = await extension.waitForValue(panel, "(() => { const root=document.querySelector('[data-screen]'); return {" +
+      "screen:root?.dataset.screen??null,status:root?.dataset.sessionStatus??null," +
+      "confirm:Boolean(document.querySelector('[data-action=\\\"confirm-pixel-capture\\\"]'))}; })()",
+    value => ['result', 'unavailable'].includes(value?.screen) || value?.confirm === true || value?.status === 'privacy-paused',
+    { timeoutMs: 120_000, intervalMs: 50 });
+    assert.equal(unpaused.confirm, false, `o lote não pode pedir confirmação de captura: ${JSON.stringify(unpaused)}`);
+    assert.notEqual(unpaused.status, 'privacy-paused');
+    const sessionSanitized = await extension.evaluate(harness, `(async()=>{
+      const session=await chrome.storage.session.get(null);
+      return Object.entries(session).every(([key,value])=>!JSON.stringify(value).includes(${JSON.stringify(sensitiveMarker)})||
+        key.startsWith('audita:raw-navigation:v1:')&&value?.version==='RawNavigationUrlV1'&&value.purpose==='batch-page');
+    })()`, { awaitPromise: true });
+    assert.equal(sessionSanitized, true);
+    assert.equal(await extension.evaluate(panel, 'document.body.innerText.includes(' + JSON.stringify(sensitiveMarker) + ')'), false);
+    noPrivacyPause = unpaused.confirm === false && sessionSanitized === true;
     const result = await extension.waitForValue(panel, "(() => { const root=document.querySelector('[data-screen]');" +
       " return {screen:root?.dataset.screen,auditId:root?.dataset.auditId??null}; })()",
     value => ['result', 'unavailable'].includes(value?.screen), { timeoutMs: 120_000, intervalMs: 50 });
@@ -598,7 +580,7 @@ async function runPublicBatchRetentionProof({ extension, loopback }) {
   return {
     nativePanelOnly, explicitTwoPageBatch,
     crawlerTrapAvoided: !loopback.requests.some(value => value.startsWith('/crawler-trap')),
-    consentBeforePixels, defaultRetentionPreserved, expiryNotExtendedByExport,
+    noPrivacyPause, defaultRetentionPreserved, expiryNotExtendedByExport,
     retainedFourDownloads: exports[0].length === 4,
     manualDialogKeyboardAndCancel, manualDeletionCompleted: true, reportOptInDefaultOff,
     automaticFourDownloads: exports[1].length === 4, automaticDeletionCompleted: true,

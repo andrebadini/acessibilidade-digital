@@ -77,7 +77,10 @@ test('keeps the public listing concise, accurate and bounded by the Chrome summa
   assert.doesNotMatch(listing, /cópia temporária e inativa/iu);
   assert.match(listing, /2 a 20 URLs[\s\S]*relatório consolidado/iu);
   assert.match(listing, /URLs em lote nos três modos/iu);
-  assert.match(listing, /confirmação individual por página/iu);
+  // 1.1.54 removeu a pausa de privacidade; o texto da loja não pode prometer um diálogo que não existe.
+  assert.doesNotMatch(listing, /pausa de privacidade e confirmação|confirmação individual por página/iu);
+  assert.match(listing, /revisão humana guiada em linguagem simples/iu);
+  assert.match(listing, /quadro de constatações[^.]*requisito da ABNT NBR 17225/iu);
   assert.match(listing, /mapa numerado[^.]*legenda/iu);
   assert.doesNotMatch(listing, /1\.0\.1|aba descartável/iu);
 });
@@ -143,13 +146,37 @@ test('ships beta test instructions for the complete current-page journey and dec
     await read('src/review/index.html'),
   ].map(buffer => buffer.toString('utf8')).join('\n');
   for (const label of [
-    'Evidência completa', 'Somente elementos', 'Sem imagens', 'Continuar e capturar',
+    'Evidência completa', 'Somente elementos', 'Sem imagens',
     'Auditar a página atual', 'Outra URL', 'Lote de páginas', 'Abrir relatório completo',
     'Destacar elemento', 'Mostrar sinais na página', 'Ver e destacar na página',
     'Refazer auditoria', 'Gerar relatório atualizado', 'Imprimir resumo / salvar PDF',
   ]) {
     assert.match(instructions, new RegExp(label, 'iu'), `o roteiro precisa citar ${label}`);
     assert.ok(productUi.includes(label), `o rótulo ${label} citado no roteiro não existe no produto`);
+  }
+  // A pausa de privacidade saiu na 1.1.54: o roteiro do revisor não pode mandar esperar por ela.
+  assert.doesNotMatch(instructions, /Continuar e capturar|pausa antes dos pixels|solicitar sua própria confirmação/iu);
+});
+
+test('o roteiro da loja percorre a revisão guiada e o quadro de constatações com rótulos reais', async () => {
+  const instructions = (await read('store-assets/TEST-INSTRUCTIONS.md')).toString('utf8');
+  const guide = (await read('docs/COMO-USAR.md')).toString('utf8');
+  const productUi = [
+    await read('src/review/index.html'),
+    await read('src/review/review.js'),
+    await read('src/review/report-view.js'),
+    await read('src/core/report/lay-review.js'),
+  ].map(buffer => buffer.toString('utf8')).join('\n');
+  for (const label of [
+    'Nome da pessoa avaliadora', 'Revisão guiada', 'Parte 1 — Requisitos', 'Como verificar', 'Mostrar na página',
+    'Ampliar para 200%', 'Voltar ao normal', 'Não consegui verificar', 'Não existe nesta página', 'Rever resposta',
+    'Quadro de constatações', 'Copiar texto para citação',
+  ]) {
+    assert.match(instructions, new RegExp(label, 'u'), `o roteiro precisa citar ${label}`);
+    assert.ok(productUi.includes(label), `o rótulo ${label} citado no roteiro não existe no produto`);
+  }
+  for (const label of ['Revisão guiada', 'Mostrar na página', 'Ampliar para 200%', 'Rever resposta', 'Quadro de constatações']) {
+    assert.match(guide, new RegExp(label, 'u'), `o guia precisa citar ${label}`);
   }
 });
 

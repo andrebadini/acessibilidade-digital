@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.54
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.55
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
@@ -20,7 +20,6 @@ Principais recursos:
 - auditoria de outra URL informada pelo usuário nos três modos de evidência, sem login e sem servidor externo;
 - auditoria local de 2 a 20 URLs em lote nos três modos, com progresso por página e relatório consolidado, sempre em abas temporárias inativas;
 - três modos de evidência: Evidência completa, Somente elementos e Sem imagens;
-- pausa de privacidade e confirmação explícita antes de capturas potencialmente sensíveis, com confirmação individual por página em lotes;
 - verificações automatizadas e indicação transparente dos itens que exigem julgamento humano;
 - associação de ocorrências aos itens da ABNT e aos critérios WCAG correspondentes;
 - captura da página inteira e de elementos relacionados às ocorrências, conforme o modo escolhido;
@@ -32,7 +31,9 @@ Principais recursos:
 - resumo em linguagem simples com semáforo, cards do que corrigir primeiro e exemplos de texto, para quem não é especialista;
 - percurso guiado pela sequência de Tab, com ou sem áudio: sem áudio é o padrão; com áudio, o anúncio estimado é lido por uma voz instalada no computador, sem vozes on-line;
 - exportação do relatório complementar em HTML, CSV e JSON, além de impressão para salvar PDF;
-- revisão assistida com registro do avaliador, decisão, data e nota;
+- revisão humana guiada em linguagem simples, sem exigir conhecimento de HTML: cada pendência vira uma pergunta sobre o que se vê na página (Sim, Não, Não consegui verificar ou Não existe nesta página), com o elemento descrito em palavras, destaque na página e ajudas opcionais de ampliação a 200%, largura de celular e espaçamento de leitura, desfeitas com um clique;
+- registro da pessoa avaliadora, data e hora locais, nota e histórico das respostas revistas;
+- quadro de constatações com a situação de cada requisito da ABNT NBR 17225:2025 (não atendido, atendido, não aplicável ou sem conclusão) e frases prontas para citação em relatórios, com página, elemento, data e evidência;
 - relatórios locais em HTML, PDF, CSV e JSON-LD/EARL;
 - painel lateral persistente, destaque vivo do elemento e relatório completo em aba própria;
 - progresso real por etapa, com indicador da fase atual e confirmação visual das etapas concluídas;
@@ -75,7 +76,7 @@ Necessária para salvar, mediante ação do usuário, os relatórios HTML, PDF, 
 
 ### scripting
 
-Necessária para executar os coletores e testes dinâmicos incluídos no próprio pacote, dentro da página que o usuário solicitou auditar. Não há código remoto.
+Necessária para executar os coletores e testes dinâmicos incluídos no próprio pacote, dentro da página que o usuário solicitou auditar. Também aplica e remove, somente quando o usuário pede a ajuda “Aplicar espaçamento de leitura” na revisão guiada, uma folha de estilo local que aumenta o espaçamento do texto na própria página auditada. Não há código remoto.
 
 ### storage
 
@@ -83,7 +84,7 @@ Necessária para manter localmente o andamento da auditoria, o modelo de resulta
 
 ### tabs
 
-Necessária para identificar a página ativa escolhida e abrir as páginas locais de relatório e impressão, sem substituir a página auditada.
+Necessária para identificar a página ativa escolhida e abrir as páginas locais de relatório e impressão, sem substituir a página auditada. Também aplica o zoom à aba auditada, somente quando o usuário pede “Ampliar para 200%” ou “Ver como celular (320 px)” na revisão guiada, e restaura o zoom anterior em “Voltar ao normal”.
 
 ### sidePanel
 

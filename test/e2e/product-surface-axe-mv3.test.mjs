@@ -30,7 +30,8 @@ const DOCUMENTO = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"
 const ROTULOS = { 'PAINEL-INICIAL': 'painel, tela inicial', 'PAINEL-RESULTADO': 'painel, tela de resultado', 'RELATORIO-ABA': 'relatório em aba própria' };
 
 async function medir(target, rotulo, t) {
-  await evaluate(target, axeSource);
+  // O script do axe termina numa expressão sem valor; `evaluate` exige um valor serializável de volta.
+  assert.equal(await evaluate(target, `${axeSource}\n;true`), true);
   const resultado = await evaluate(target, `(async () => {
     const r = await window.axe.run(document, {
       resultTypes: ['violations'], runOnly: { type: 'tag', values: ['wcag2a','wcag2aa','wcag21a','wcag21aa','wcag22aa','best-practice'] },

@@ -71,7 +71,12 @@ test('página que revela sinal sensível depois de armar: a auditoria conclui se
     assert.equal(desfecho?.tela, 'result',
       `sinal sensível tardio não barra a auditoria; telas: ${JSON.stringify(telas)}`);
     assert.equal(desfecho.confirma, false);
-    const restantes = await marcadores(extension.harnessPage ?? extension.startPage.page);
+    // A tela de resultado aparece antes da limpeza assíncrona da tentativa terminar; o contrato é que
+    // nenhum marcador SOBRE, então a leitura espera a limpeza (até 30 s) em vez de ler no mesmo instante.
+    const harness = extension.harnessPage ?? extension.startPage.page;
+    const restantes = await waitForValue(harness, `(async () => Object.keys(await chrome.storage.session.get(null))
+      .filter(chave => chave.startsWith('audita:pixel-attempt:v1:')).length)()`, value => value === 0,
+      { timeoutMs: 30_000, intervalMs: 200, awaitPromise: true }).catch(() => marcadores(harness));
     t.diagnostic(`modo=element-only desfecho=result tentativas_restantes=${restantes}`);
     assert.equal(restantes, 0, 'nenhuma tentativa de captura residual');
   } finally {

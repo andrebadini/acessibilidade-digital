@@ -70,15 +70,18 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   })()`);
   assert.deepEqual(entered, { mode: 'full-evidence', value: fixtureUrl });
   await extension.click(panel, '[data-action="start-url-audit"]');
-  await extension.waitForValue(panel,
-    `Boolean(document.querySelector('[data-screen="running"][data-session-status="privacy-paused"] [data-action="confirm-pixel-capture"]'))`, Boolean, {
-    timeoutMs: 60_000, intervalMs: 50,
-  });
-  assert.doesNotMatch(await extension.evaluate(panel, 'document.body.innerText'), new RegExp(privateMarkers.join('|'), 'u'));
-  await extension.click(panel, '[data-action="confirm-pixel-capture"]');
-  await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'result', {
+  // 1.1.54 removeu a pausa de privacidade: a auditoria por URL com imagens conclui sem pedir confirmação.
+  // A espera termina também se o diálogo voltar, e aí o teste falha mostrando a tela.
+  const terminal = await extension.waitForValue(panel, `(() => ({
+    screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+    confirm:Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')),
+    status:document.querySelector('[role="status"]')?.textContent??null,
+  }))()`, value => ['result', 'unavailable'].includes(value?.screen) || value?.confirm === true, {
     timeoutMs: 120_000, intervalMs: 50,
   });
+  assert.equal(terminal.confirm, false, `a auditoria por URL não pode pedir confirmação: ${JSON.stringify(terminal)}`);
+  assert.equal(terminal.screen, 'result', JSON.stringify(terminal));
+  assert.doesNotMatch(await extension.evaluate(panel, 'document.body.innerText'), new RegExp(privateMarkers.join('|'), 'u'));
   const auditId = await extension.evaluate(panel,
     `document.querySelector('[data-screen="result"]')?.dataset.auditId`);
   assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);

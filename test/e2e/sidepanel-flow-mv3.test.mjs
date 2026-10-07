@@ -167,7 +167,10 @@ for (const scenario of [
   const step = async (name, operation) => {
     t.diagnostic(`page-markers-step=${name}:begin`);
     try { const value = await operation(); t.diagnostic(`page-markers-step=${name}:passed`); return value; }
-    catch (cause) { throw new Error(`PAGE_MARKERS_${name}_FAILED`, { cause }); }
+    catch (cause) {
+      t.diagnostic(`page-markers-step=${name}:failed cause=${String(cause?.message ?? cause).slice(0, 1500)}`);
+      throw new Error(`PAGE_MARKERS_${name}_FAILED`, { cause });
+    }
   };
   try {
     extension = await launchUnpackedExtension(t, {
@@ -184,10 +187,7 @@ for (const scenario of [
     await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`,
       value => value === 'initial', { timeoutMs: 30_000 });
     const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
-    await waitForPrivacyPause(extension, panel);
     const auditId = await auditIdPromise;
-    await assertPausedObservedAttempt(extension, auditId, identityBefore);
-    await confirmOnce(extension, panel);
     assert.equal(await waitForResult(extension, panel, auditId).catch(async cause => {
       const attempt = await readPrivateAttempt(extension, auditId).catch(() => null);
       const surface = await extension.evaluate(panel, `(() => ({
@@ -208,8 +208,10 @@ for (const scenario of [
         minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
         diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
       }, fixture.origin);
-      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore,
-        { maxCaptureResizes: captureResizeCeiling(attempt) });
+      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore, {
+        maxCaptureResizes: captureResizeCeiling(attempt),
+        rasterOmissionDeclared: attempt.diagnostics.includes('ELEMENT_CAPTURE_BUDGET_REACHED'),
+      });
       return attempt;
     });
     const fingerprint = await markerRecordFingerprint(extension, auditId);
@@ -845,43 +847,6 @@ async function proveReplacementServiceWorker(extension) {
     `typeof globalThis.__auditaP4dWorkerProof==='undefined'`), true);
 }
 
-function privacyPauseExpression() {
-  return `(() => {
-    const root=document.querySelector('[data-screen="running"][data-session-status="privacy-paused"]');
-    return root?{
-      screen:root.dataset.screen,status:root.dataset.sessionStatus,
-      categories:[...root.querySelectorAll('.privacy-signals li')].map(item=>item.textContent),
-      confirm:root.querySelector('[data-action="confirm-pixel-capture"]')?.textContent??null,
-      cancel:root.querySelector('button[data-intent="CANCEL_AUDIT"]')?.textContent??null
-    }:null;
-  })()`;
-}
-
-async function waitForPrivacyPause(extension, panel) {
-  return extension.waitForValue(panel, privacyPauseExpression(), value =>
-    value?.screen === 'running' && value?.status === 'privacy-paused' &&
-    value?.categories?.includes('Campo de senha') && value?.categories?.includes('Conteúdo marcado como privado') &&
-    /Continuar e capturar/u.test(value?.confirm ?? '') && /Cancelar auditoria/u.test(value?.cancel ?? ''), {
-    timeoutMs: 30_000, intervalMs: 50,
-  });
-}
-
-async function confirmOnce(extension, panel) {
-  await extension.click(panel, '[data-action="confirm-pixel-capture"]');
-  const pending = await extension.waitForValue(panel, `(() => {
-    const button=document.querySelector('[data-action="confirm-pixel-capture"]');
-    return button?{label:button.textContent,disabled:button.getAttribute('aria-disabled'),count:
-      document.querySelectorAll('[data-action="confirm-pixel-capture"]').length}:null;
-  })()`, value => value?.label === 'Confirmação enviada' && value?.disabled === 'true', {
-    timeoutMs: 10_000, intervalMs: 25,
-  });
-  assert.deepEqual(pending, { label: 'Confirmação enviada', disabled: 'true', count: 1 });
-  assert.equal(await extension.evaluate(panel, `(() => {
-    const button=document.querySelector('[data-action="confirm-pixel-capture"]');button?.click();
-    return button?.getAttribute('aria-disabled')??null;
-  })()`, { userGesture: true }), 'true');
-}
-
 async function readPrivateAttempt(extension, requestedAuditId = null) {
   return extension.evaluate(extension.harnessPage, `(async()=>{
     const stored=await chrome.storage.session.get(null);
@@ -992,15 +957,21 @@ async function waitForActiveAuditCleanup(extension, auditId) {
   });
 }
 
+// A pausa de privacidade foi removida na 1.1.54: a fixture tem campo de senha e área privada e, mesmo
+// assim, os modos com foto concluem sem pedir confirmação. Se o diálogo voltar, a espera termina nele e
+// o teste falha com a tela observada.
 async function waitForResult(extension, panel, expectedAuditId = null) {
   const terminal = await extension.waitForValue(panel, `(() => ({
     screen:document.querySelector('[data-screen]')?.dataset.screen??null,
     auditId:document.querySelector('[data-screen="result"]')?.dataset.auditId??null,
-    status:document.querySelector('[role="status"]')?.textContent??null
-  }))()`, value => ['result', 'initial', 'unavailable'].includes(value?.screen) ||
+    status:document.querySelector('[role="status"]')?.textContent??null,
+    paused:Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')||
+      document.querySelector('[data-session-status="privacy-paused"]'))
+  }))()`, value => ['result', 'initial', 'unavailable'].includes(value?.screen) || value?.paused === true ||
     value?.status === 'Não foi possível confirmar a captura. Cancele a auditoria ou aguarde uma nova confirmação.', {
     timeoutMs: 120_000, intervalMs: 50,
   });
+  assert.equal(terminal.paused, false, `a auditoria não pode pausar por privacidade: ${JSON.stringify(terminal)}`);
   if (terminal.screen !== 'result') {
     const attempt = expectedAuditId === null ? null : await readPrivateAttempt(extension, expectedAuditId).catch(() => null);
     const progressProof = await extension.evaluate(panel, `(() => ({
@@ -1129,28 +1100,6 @@ function assertSanitizedModelUrls(values, fixtureOrigin) {
   }
 }
 
-// Pausa por privacidade no percurso passivo: a sessão existe, o trabalho terminou antes de qualquer raster, e
-// NÃO há posse de aba — o documento pausado é o próprio documento do usuário.
-async function assertPausedObservedAttempt(extension, auditId, identityBefore) {
-  const attempt = await readPrivateAttempt(extension, auditId);
-  assert.equal(attempt.activeSame, true);
-  assert.equal(attempt.activeState, 'privacy-paused');
-  assert.deepEqual(attempt.owners, []);
-  assert.equal(attempt.auditPresent, false);
-  assert.equal(attempt.modelPresent, false);
-  assert.equal(attempt.reportPresent, false);
-  assert.equal(attempt.evidenceCount, 0);
-  assert.equal(attempt.exportJournalCount, 0);
-  assert.equal(attempt.executionCheckpointPresent, true);
-  assert.equal(attempt.sessionRasterDataUrls, 0, 'nenhum raster pode existir antes do consentimento');
-  assert.equal(attempt.forbiddenSessionUrlCount, 0);
-  assert.equal(attempt.startJournalPresent, false);
-  assert.equal(attempt.rawNavigationCount, 0);
-  assert.equal(attempt.pixelStateCount >= 1, true);
-  await assertNoCopyCreated(extension, identityBefore);
-  return attempt;
-}
-
 async function assertObservedTerminalAttempt(extension, auditId, identityBefore, expected, fixtureOrigin) {
   await waitForActiveAuditCleanup(extension, auditId);
   const attempt = await readPrivateAttempt(extension, auditId);
@@ -1200,7 +1149,7 @@ async function assertObservedTerminalAttempt(extension, auditId, identityBefore,
 }
 
 async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImages, identityBefore,
-  { maxCaptureResizes = 512 } = {}) {
+  { maxCaptureResizes = 512, rasterOmissionDeclared = false } = {}) {
   const summary = await extension.evaluate(panel, `(() => ({
     coverage:Number(document.querySelector('progress.coverage-progress')?.max??0),
     failures:document.querySelectorAll('[data-result-card][data-classification="failed"]').length,
@@ -1281,12 +1230,18 @@ async function assertPanelSummaryAndDetail(extension, panel, mode, expectedImage
   // caminho alternativo de consulta usado quando não há elemento destacável.
   assert.equal(detail.highlight, true);
   assert.equal(detail.consult, false);
+  // Nos dois modos com imagens o resultado do painel tem orçamento de prévias: quando a ocorrência escolhida
+  // fica fora dele, o painel diz que a captura está no relatório em vez de exibir a miniatura.
   if (mode === 'no-pixels') assert.equal(detail.images, 0);
-  else if (mode === 'full-evidence') {
-    assert.equal(detail.images >= expectedImages ||
+  else {
+    // Com o teto de miniaturas declarado no modelo (ELEMENT_CAPTURE_BUDGET_REACHED, desde a 1.1.53), a ficha
+    // escolhida pode ser de um elemento sem miniatura: o painel lista a evidência do elemento, sem imagem.
+    const declaredWithoutRaster = rasterOmissionDeclared && /Tipo: element/u.test(detail.previewText);
+    assert.equal(detail.images >= expectedImages || declaredWithoutRaster ||
       /Prévia omitida no painel para manter o resultado leve/u.test(detail.previewText), true,
-    'o painel deve exibir a miniatura ou informar que a captura integral está no relatório');
-  } else assert.equal(detail.images >= expectedImages, true);
+    `o painel deve exibir a miniatura ou informar que a captura integral está no relatório: ${JSON.stringify({
+      mode, images: detail.images, previewText: detail.previewText })}`);
+  }
   await assertSourceUntouched(extension, identityBefore,
     { allowCaptureResize: mode !== 'no-pixels', maxCaptureResizes });
 }
@@ -1688,7 +1643,8 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
   const requiredHeaders = ['csv_schema_version', 'audit_id', 'source_rule_id', 'nbr_item_ref',
     'item_wcag_refs', 'source_wcag_refs', 'tested_wcag_refs', 'wcag_refs',
     'section_508_refs', 'consumer_basis_ref',
-    'export_delivery_identity_type', 'export_delivery_audit_id', 'export_delivery_model_hash'];
+    'export_delivery_identity_type', 'export_delivery_audit_id', 'export_delivery_model_hash',
+    'review_answer', 'review_decided_at', 'reviewed_item_outcome', 'review_note'];
   assert.equal(requiredHeaders.every(header => headers.includes(header)), true);
   const record = rows.slice(1).map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]])))
     .find(value => value.nbr_item_ref === knownOccurrence.abnt &&
@@ -1700,7 +1656,7 @@ async function exportFourFormats(extension, report, auditId, downloadDirectory, 
     .map(value => ({ source_rule_id: value.source_rule_id, item_wcag_refs: value.item_wcag_refs,
       source_wcag_refs: value.source_wcag_refs, tested_wcag_refs: value.tested_wcag_refs, wcag_refs: value.wcag_refs,
       outcome: value.outcome, classification: value.classification }))));
-  assert.equal(record.csv_schema_version, 'audita-occurrences-v2');
+  assert.equal(record.csv_schema_version, 'audita-occurrences-v3');
   assert.equal(record.outcome, knownOccurrence.outcome);
   assert.equal(record.source_wcag_refs.split(';').includes(knownOccurrence.wcag), true);
   // N-3 da revisão da 1.1.49: estas quatro asserções existiam antes da migração, continuam verdadeiras no
@@ -1959,9 +1915,7 @@ test('passive current-page declares the capture resize on a page that reacts to 
     // `beginAttachedAttempt` prova a fonte intocada ANTES do arranque (a mutação do handler só pode
     // acontecer depois, na captura) e já arma a observação de abas criadas.
     const { auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
-    await waitForPrivacyPause(extension, panel);
     const auditId = await auditIdPromise;
-    await confirmOnce(extension, panel);
     assert.equal(await waitForResult(extension, panel, auditId), auditId);
     const after = await extension.evaluate(extension.startPage.page, `(() => ({
       href:location.href,scrollY,viewport:[innerWidth,innerHeight],
@@ -2079,35 +2033,6 @@ test('passive current-page audits complete in every mode and keep the observed d
     assert.equal((await extension.runtimeContexts({ contextTypes: ['POPUP'] })).length, 0);
     await extension.captureJourney('panel-current-passive-initial', panel);
 
-    await t.test('full-evidence can be cancelled at the privacy pause without touching the source', async () => {
-      const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'full-evidence');
-      await waitForPrivacyPause(extension, panel);
-      const auditId = await auditIdPromise;
-      assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-      await assertPausedObservedAttempt(extension, auditId, identityBefore);
-      await extension.click(panel, 'button[data-intent="CANCEL_AUDIT"]');
-      await extension.waitForValue(panel,
-        `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial', {
-          timeoutMs: 30_000, intervalMs: 50,
-        });
-      await waitForActiveAuditCleanup(extension, auditId);
-      const cancelled = await readPrivateAttempt(extension, auditId);
-      assert.equal(cancelled.auditPresent, false);
-      assert.equal(cancelled.modelPresent, false);
-      assert.equal(cancelled.reportPresent, false);
-      assert.equal(cancelled.evidenceCount, 0);
-      assert.equal(cancelled.exportJournalCount, 0);
-      assert.equal(cancelled.activeSame, false);
-      assert.equal(cancelled.executionCheckpointPresent, false);
-      assert.equal(cancelled.sessionRasterDataUrls, 0);
-      assert.equal(cancelled.rawNavigationCount, 0);
-      assert.equal(cancelled.pixelStateCount, 0);
-      assert.equal(cancelled.pixelCompanionPresent, false);
-      assert.equal(cancelled.forbiddenSessionUrlCount, 0);
-      assert.deepEqual(cancelled.owners, []);
-      await assertNoCopyCreated(extension, identityBefore);
-    });
-
     await t.test('no-pixels shows progress, completes in the observed document and exposes a live report', async () => {
       const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'no-pixels');
       const auditId = await auditIdPromise;
@@ -2126,21 +2051,20 @@ test('passive current-page audits complete in every mode and keep the observed d
       panel = await deleteAuditAndKeepSource(extension, panel, report, auditId, extension.startPage.tabId);
     });
 
-    await t.test('element-only confirms once and keeps the full-page capture omitted', async () => {
+    await t.test('element-only completes without confirmation and keeps the full-page capture omitted', async () => {
       const { identityBefore, auditIdPromise } = await beginAttachedAttempt(extension, panel, 'element-only');
-      await waitForPrivacyPause(extension, panel);
       const auditId = await auditIdPromise;
       assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-      await assertPausedObservedAttempt(extension, auditId, identityBefore);
-      await confirmOnce(extension, panel);
       assert.equal(await waitForResult(extension, panel, auditId), auditId);
       await assertObservedProgress(extension, panel);
       const attempt = await assertObservedTerminalAttempt(extension, auditId, identityBefore, {
         minimumFullPage: 0, minimumElements: 1, fullPageExact: 0,
         diagnostics: ['FULL_PAGE_CAPTURE_OMITTED'],
       }, fixture.origin);
-      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore,
-        { maxCaptureResizes: captureResizeCeiling(attempt) });
+      await assertPanelSummaryAndDetail(extension, panel, 'element-only', 1, identityBefore, {
+        maxCaptureResizes: captureResizeCeiling(attempt),
+        rasterOmissionDeclared: attempt.diagnostics.includes('ELEMENT_CAPTURE_BUDGET_REACHED'),
+      });
       const report = await openLiveReport(extension, panel, auditId, 1, identityBefore,
         { maxCaptureResizes: captureResizeCeiling(attempt) });
       await extension.captureJourney('report-current-passive-elements', report, { captureBeyondViewport: false });
@@ -2155,27 +2079,14 @@ test('passive current-page audits complete in every mode and keep the observed d
           subtest.diagnostic(`full-evidence-step=${name}:passed`);
           return result;
         } catch (cause) {
-          subtest.diagnostic(`full-evidence-step=${name}:failed`);
+          subtest.diagnostic(`full-evidence-step=${name}:failed cause=${String(cause?.message ?? cause).slice(0, 1500)}`);
           throw new Error(`FULL_EVIDENCE_${name}_FAILED`, { cause });
         }
       };
       const { identityBefore, auditIdPromise } = await step('BEGIN_ATTEMPT', () =>
         beginAttachedAttempt(extension, panel, 'full-evidence'));
-      await step('PRIVACY_PAUSE', () => waitForPrivacyPause(extension, panel));
       const auditId = await step('RESOLVE_AUDIT', () => auditIdPromise);
       assert.match(auditId ?? '', /^[A-Za-z0-9._:-]{1,160}$/u);
-      await step('PAUSED_PROOF', () => assertPausedObservedAttempt(extension, auditId, identityBefore));
-      await step('WORKER_STOP', () => stopServiceWorker(extension));
-      await step('WORKER_REPLACEMENT', () => proveReplacementServiceWorker(extension));
-      await step('REHYDRATED_PAUSE', () => waitForPrivacyPause(extension, panel));
-      await step('REHYDRATED_STORAGE', async () => {
-        const rehydrated = await readPrivateAttempt(extension, auditId);
-        assert.equal(rehydrated.activeState, 'privacy-paused');
-        assert.deepEqual(rehydrated.owners, []);
-        assert.equal(rehydrated.sessionRasterDataUrls, 0);
-      });
-      await step('REHYDRATED_SOURCE', () => assertNoCopyCreated(extension, identityBefore));
-      await step('CONFIRM', () => confirmOnce(extension, panel));
       assert.equal(await step('RESULT', () => waitForResult(extension, panel, auditId)), auditId);
       await step('PROGRESS', () => assertObservedProgress(extension, panel));
       const terminalAttempt = await step('TERMINAL_PROOF', () => assertObservedTerminalAttempt(
@@ -2185,9 +2096,8 @@ test('passive current-page audits complete in every mode and keep the observed d
           { maxCaptureResizes: captureResizeCeiling(terminalAttempt) }));
       await step('PANEL_VISIBLE', () => extension.waitForValue(panel,
         'document.visibilityState', value => value === 'visible', { timeoutMs: 10_000, intervalMs: 50 }));
-      // Chrome 152 may time out rasterizing this native panel after worker restart,
-      // despite visible frames and a verified detail. This QA image is separate from
-      // required audit evidence, source isolation and export proofs.
+      // Chrome 152 may time out rasterizing this native panel, despite visible frames and a verified
+      // detail. This QA image is separate from required audit evidence, source isolation and export proofs.
       try {
         await step('PANEL_CAPTURE', () => extension.captureJourney('panel-current-passive-summary', panel,
           { captureBeyondViewport: false }));
@@ -2206,11 +2116,21 @@ test('passive current-page audits complete in every mode and keep the observed d
         subtest.diagnostic('qa-limitation=REPORT_SCREENSHOT_CDP_TIMEOUT; report-ui-screenshot=not-produced; actual-evidence-and-four-downloads=still-required');
       }
       await step('EXPORT_FOUR', () => exportFourFormats(extension, report, auditId, extension.downloadDirectory));
+      // Sem a pausa, o reinício do worker é provado depois do resultado e das exportações: o painel reidrata
+      // a mesma auditoria, sem cópia da aba, e a exclusão pelo relatório aberto segue com o worker novo.
+      await step('WORKER_STOP', () => stopServiceWorker(extension));
+      await step('WORKER_REPLACEMENT', () => proveReplacementServiceWorker(extension));
+      assert.equal(await step('REHYDRATED_RESULT', () => waitForResult(extension, panel, auditId)), auditId);
+      // O relatório e as exportações já abriram as abas próprias deles; aqui a prova é a do documento
+      // observado, que o reinício do worker não pode tocar.
+      await step('REHYDRATED_SOURCE', () => assertSourceUntouched(extension, identityBefore, {
+        allowCaptureResize: true, maxCaptureResizes: captureResizeCeiling(terminalAttempt),
+      }));
       panel = await step('CLEANUP', () =>
         deleteAuditAndKeepSource(extension, panel, report, auditId, extension.startPage.tabId));
     });
 
-    // A aba do usuário continua a mesma depois de quatro auditorias, uma exclusão e um reinício do worker.
+    // A aba do usuário continua a mesma depois de três auditorias, as exclusões e um reinício do worker.
     const finalSurface = await extension.evaluate(extension.harnessPage, `(async()=>{
       const tabs=await chrome.tabs.query({});
       const stored=await chrome.storage.session.get(null);
