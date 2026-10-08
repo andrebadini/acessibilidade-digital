@@ -51,13 +51,25 @@ function decodeBase64(encoded, maxBytes) {
   return bytes;
 }
 
+// Varredura linear em vez de expressão regular: a regex com grupo repetido estourava a pilha do V8
+// ("Maximum call stack size exceeded") a partir de ~8 MB de base64, ou seja, em toda captura de
+// página inteira de uma página alta (lojas, portais). A auditoria em Evidência completa terminava
+// em "encerrada antes de concluir" no fim, ao validar o modelo.
+function isBase64Character(code) {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) ||
+    code === 43 || code === 47;
+}
+
 export function canonicalBase64DecodedLength(encoded) {
-  if (typeof encoded !== 'string' || !encoded || encoded.length % 4 !== 0 ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) {
+  if (typeof encoded !== 'string' || !encoded || encoded.length % 4 !== 0) {
     throw new TypeError('A captura não contém base64 PNG canônico.');
   }
-  const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0;
-  return encoded.length / 4 * 3 - padding;
+  const length = encoded.length;
+  const padding = encoded.charCodeAt(length - 1) === 61 ? (encoded.charCodeAt(length - 2) === 61 ? 2 : 1) : 0;
+  for (let index = 0; index < length - padding; index += 1) {
+    if (!isBase64Character(encoded.charCodeAt(index))) throw new TypeError('A captura não contém base64 PNG canônico.');
+  }
+  return length / 4 * 3 - padding;
 }
 
 export function pngDataUrlDecodedByteLength(value) {
