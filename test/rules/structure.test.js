@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { runRules } from '../../src/core/rules/run-rules.js';
 import { STRUCTURE_RULES } from '../../src/core/rules/structure.js';
+import { validateCoreRuleTargetInventory } from '../../src/core/report/remediation-policy.js';
 
 function record(nodeId, tagName, overrides = {}) {
   return {
@@ -213,6 +214,11 @@ test('main heading recommendation applies to pages without a native main contain
   ]));
   assert.equal(duplicate.outcome, 'failed');
   assert.equal(duplicate.targets.length, 2);
+  // Página com dois h1 é comum; até a 1.1.55 o motivo não estava no catálogo fechado e a auditoria
+  // inteira era descartada no fim ("encerrada antes de concluir").
+  assert.equal(validateCoreRuleTargetInventory('main-heading', duplicate.outcome,
+    duplicate.targets.map(({ selectorHint, ...target }) => target)), true,
+  'o relatório precisa aceitar os alvos de cabeçalho principal duplicado');
   assert.equal((await evaluate('main-heading', snapshot([
     record('first', 'h1', { role: 'heading', headingLevel: 1 }),
     record('hidden', 'h1', { role: 'heading', headingLevel: 1, hidden: true })

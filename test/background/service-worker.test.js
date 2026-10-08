@@ -697,6 +697,9 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       snapshots.clear();
       return { deleted: deletedAll };
     },
+    // O snapshot desta fixture é falso: o caminho rápido do armazenamento real (decisões aplicadas sobre a
+    // capacidade) fica de fora, e o worker usa o caminho por modelo candidato, que esta fixture simula.
+    commitAuditReviewDecisionsIfRevision: undefined,
     async commitAuditReviewIfRevision(auditId, model, capability) {
       storeCalls.push(['commitAuditReviewIfRevision', auditId]);
       if (reviewConflicts > 0) {

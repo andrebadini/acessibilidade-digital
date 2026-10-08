@@ -253,6 +253,20 @@ export function createReportLaunchAuthority(raw) {
     return serialize(input.sessionArea, auditId, async () => {
       const launch = await getLaunch(auditId);
       const now = readEpoch(input.epochNow);
+      if (launch?.state === 'connected' && launch.auditId === auditId) {
+        if (launch.documentId === sender.documentId) return renewConnected(launch, auditId, context, now, null);
+        // Recarregar a aba do relatório (F5) cria outro documento na mesma aba. Ele assume a abertura
+        // só quando o documento anterior já não existe; as autorizações antigas são revogadas.
+        let previousAlive = true;
+        try {
+          const contexts = await input.chromeApi.runtime.getContexts({ documentIds: [launch.documentId] });
+          previousAlive = !Array.isArray(contexts) || contexts.length !== 0;
+        } catch { previousAlive = true; }
+        if (!previousAlive && typeof sender.documentId === 'string' && sender.documentId) {
+          return renewConnected(launch, auditId, context, now, sender.documentId);
+        }
+        return fail('REPORT_CONNECT_DENIED');
+      }
       if (!liveLaunchAt(launch, auditId, now) || !['allocated', 'awaiting-connection'].includes(launch.state) ||
         context.tabId !== launch.tabId || context.windowId !== launch.windowId || context.documentUrl !== canonicalUrl(input.chromeApi, auditId)) {
         return fail('REPORT_CONNECT_DENIED');
@@ -260,14 +274,16 @@ export function createReportLaunchAuthority(raw) {
       let state = 'view-only';
       let intents = BASE_REPORT_INTENTS;
       if (launch.version === 2) {
-        let source;
+        let source = null;
         try {
           source = await input.sourceSessionAuthority.reauthorizeReportSource({
             sessionCapabilityId: launch.sourceSessionCapabilityId, auditId, state: launch.sourceSessionState,
           });
-        } catch { return fail('REPORT_CONNECT_DENIED'); }
-        if (source?.ok !== true || source.state !== launch.sourceSessionState) return fail('REPORT_CONNECT_DENIED');
-        if (source.state === 'result' && currentAttachedBinding(source.binding)) {
+        } catch { source = null; }
+        // Origem que mudou ou cuja sessão venceu não impede abrir o relatório: ele abre só para consulta,
+        // revisão e exportação (as mesmas permissões de um relatório sem origem viva), sem destaque.
+        if (source?.ok === true && source.state === launch.sourceSessionState &&
+          source.state === 'result' && currentAttachedBinding(source.binding)) {
           state = 'result';
           intents = REPORT_INTENTS;
         }
@@ -287,6 +303,70 @@ export function createReportLaunchAuthority(raw) {
       if (!connected) return fail('REPORT_CONNECT_DENIED');
       return freeze({ ok: true, auditId, sessionCapabilityId, state });
     });
+  }
+
+  // Renovação do relatório já aberto. A revisão guiada leva bem mais que os 30 minutos da autorização:
+  // vencido o prazo, toda resposta, exportação e destaque era recusada ("o relatório perdeu a
+  // autorização"). O mesmo documento do relatório (aba, janela, URL e documentId provados pelo Chrome)
+  // pode renovar o prazo; a capacidade continua a mesma, para não derrubar uma exportação em andamento.
+  // A origem é reprovada a cada renovação: se a página auditada mudou ou a sessão dela venceu, o
+  // relatório continua para consulta, revisão e exportação, sem destaque nem retorno à página.
+  async function renewConnected(launch, auditId, context, now, reboundDocumentId) {
+    if (context.tabId !== launch.tabId || context.windowId !== launch.windowId ||
+      context.documentUrl !== canonicalUrl(input.chromeApi, auditId) || launch.issuedAt > now) {
+      return fail('REPORT_CONNECT_DENIED');
+    }
+    const documentId = reboundDocumentId ?? launch.documentId;
+    const envelope = await input.sessionArea.get(null);
+    const all = Object.entries(envelope ?? {}).flatMap(([key, value]) => {
+      if (!key.startsWith('audita:report-consumer:v1:')) return [];
+      const consumer = consumerRecord(value);
+      return consumer && key === consumerKey(consumer.sessionCapabilityId) && consumer.auditId === auditId &&
+        consumer.state === 'active' ? [consumer] : [];
+    });
+    // Só o próprio documento reaproveita a capacidade; as de um documento recarregado são revogadas.
+    const consumers = all.filter(consumer => reboundDocumentId === null && consumer.documentId === launch.documentId &&
+      consumer.tabId === launch.tabId && consumer.windowId === launch.windowId)
+      .sort((left, right) => right.issuedAt - left.issuedAt);
+    const revokedByReload = reboundDocumentId === null ? [] : all;
+    let state = 'view-only';
+    let intents = BASE_REPORT_INTENTS;
+    if (launch.version === 2) {
+      let source = null;
+      try {
+        source = await input.sourceSessionAuthority.reauthorizeReportSource({
+          sessionCapabilityId: launch.sourceSessionCapabilityId, auditId, state: launch.sourceSessionState,
+        });
+      } catch { source = null; }
+      if (source?.ok === true && source.state === 'result' && launch.sourceSessionState === 'result' &&
+        currentAttachedBinding(source.binding)) {
+        state = 'result';
+        intents = REPORT_INTENTS;
+      }
+    }
+    const expiresAt = now + TTL_MS;
+    const current = consumers[0] ?? null;
+    const sessionCapabilityId = current?.sessionCapabilityId ?? opaqueId(input.randomBytes);
+    const consumer = freeze({
+      version: 1, sessionCapabilityId, auditId, tabId: launch.tabId, windowId: launch.windowId,
+      documentId, intents: [...intents], state: 'active',
+      issuedAt: current?.issuedAt ?? now, expiresAt,
+    });
+    const renewed = freeze({ ...launch, documentId, expiresAt });
+    for (const stale of revokedByReload) {
+      if (!await writeConfirmed(input.sessionArea, consumerKey(stale.sessionCapabilityId), freeze({ ...stale, state: 'revoked' }), consumerRecord)) {
+        return fail('REPORT_CONNECT_DENIED');
+      }
+    }
+    // Uma única escrita para o par: quem autoriza nunca vê prazos diferentes entre consumidor e abertura.
+    await input.sessionArea.set({ [consumerKey(sessionCapabilityId)]: consumer, [launchKey(auditId)]: renewed });
+    const [confirmedConsumer, confirmedLaunch] = await Promise.all([getConsumer(sessionCapabilityId), getLaunch(auditId)]);
+    if (!confirmedConsumer || JSON.stringify(confirmedConsumer) !== JSON.stringify(consumer) ||
+      !confirmedLaunch || JSON.stringify(confirmedLaunch) !== JSON.stringify(renewed)) return fail('REPORT_CONNECT_DENIED');
+    for (const stale of consumers.slice(1)) {
+      await writeConfirmed(input.sessionArea, consumerKey(stale.sessionCapabilityId), freeze({ ...stale, state: 'revoked' }), consumerRecord);
+    }
+    return freeze({ ok: true, auditId, sessionCapabilityId, state });
   }
 
   async function authorizeIntent({ sessionCapabilityId, auditId, intent, sender } = {}) {
@@ -475,8 +555,12 @@ export function createReportLaunchAuthority(raw) {
       await revokeLaunch(current);
       return;
     }
+    // Recarregar o relatório depois de 30 minutos de revisão não pode deixá-lo sem autorização: a mesma
+    // aba, na URL canônica, ganha um prazo novo para a reconexão.
+    const now = readEpoch(input.epochNow);
+    const expiresAt = Math.max(current.expiresAt, now + TTL_MS);
     await writeConfirmed(input.sessionArea, launchKey(launch.auditId),
-      freeze({ ...current, documentId: null, state: 'awaiting-connection' }), launchRecord);
+      freeze({ ...current, documentId: null, state: 'awaiting-connection', expiresAt }), launchRecord);
   }
 
   async function handleTabUpdated(tabId, changeInfo) {

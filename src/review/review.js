@@ -4,7 +4,9 @@ import { buildCompleteReportSummary } from '../panel/panel-summary.js';
 import { createAuditStore } from '../storage/audit-store.js';
 import { createDestructiveDialog } from '../ui/destructive-dialog.js';
 import { parseAuditDeletedEvent } from '../core/audit-deleted-event.js';
-import { createAuthorizedReviewDecisionCommitter, isSafeEvidenceImageUrl, normalizeReviewAuditId } from './review-state.js';
+import {
+  createAuthorizedReviewBatchCommitter, createAuthorizedReviewDecisionCommitter, isSafeEvidenceImageUrl, normalizeReviewAuditId,
+} from './review-state.js';
 import {
   ANSWER_LABELS, CLASSIFICATION_WORDS, GLOSSARY, IMAGE_PURPOSES, LAY_ANSWERS, LAY_GROUPS, PAGE_AID_DESCRIPTIONS, PAGE_AIDS,
   aidLabel, buildLayReviewPlan, draftFinding, formatLocalInstant, imageFindingText, imagePlan, layReviewProgress,
@@ -31,6 +33,7 @@ const deleteAuditDialogStatus = document.querySelector('#delete-audit-dialog-sta
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 const store = createAuditStore();
 const commitDecision = createAuthorizedReviewDecisionCommitter();
+const commitDecisionBatch = createAuthorizedReviewBatchCommitter();
 let auditModel;
 let reportBasis = null;
 let reportModelRevision = 0;
@@ -76,6 +79,93 @@ function sendWorkerRequest(message) {
     }
   });
 }
+
+// A autorização do relatório vale 30 minutos e a revisão guiada costuma levar mais que isso. Vencido o
+// prazo, toda resposta, exportação e destaque era recusada ("o relatório perdeu a autorização"). O
+// relatório renova a própria autorização enquanto está aberto (a cada poucos minutos, ao voltar para a
+// aba e antes de uma ação depois de um intervalo) e, se uma ação for recusada por autorização, renova e
+// repete uma vez. A capacidade é a mesma: exportações em andamento não são afetadas.
+const REPORT_RENEW_INTERVAL_MS = 4 * 60_000;
+const RENEWABLE_DENIALS = new Set([
+  'REPORT_OPERATION_DENIED', 'REPORT_EXPORT_DENIED', 'REPORT_INTENT_DENIED', 'REPORT_RETURN_DENIED',
+  'PAGE_AID_DENIED', 'HIGHLIGHT_NOT_AUTHORIZED', 'HIGHLIGHT_RETURN_FAILED', 'CONTEXT_DENIED',
+]);
+let reportRenewal = null;
+let reportRenewedAt = 0;
+let lastCommitFailureCode = null;
+let reportViewLimitations = [];
+
+function renewableDenial(response) {
+  if (response?.ok === true) return false;
+  return typeof response?.code !== 'string' || RENEWABLE_DENIALS.has(response.code);
+}
+
+function applyReportSessionState(previousState) {
+  if (previousState === reportSessionState) return;
+  if (reportSessionState !== 'result') {
+    // A página auditada mudou ou a sessão dela venceu: o relatório segue para revisão e exportação.
+    activeHighlightOccurrenceId = null;
+    highlightAvailability.clear();
+    reportHighlightPolicy.invalidateKnown();
+    if (reportReconnectTimer !== null) clearTimeout(reportReconnectTimer);
+    reportReconnectTimer = null;
+    try { reportHighlightPort?.disconnect?.(); } catch { /* closed locally */ }
+    reportHighlightPort = null;
+    for (const node of list.querySelectorAll('button.lay-show')) node.hidden = true;
+  } else {
+    for (const node of list.querySelectorAll('button.lay-show')) node.hidden = false;
+    reportReconnectAttempts = 0;
+    connectReportHighlightState();
+  }
+  try {
+    applyReportSourceControls({
+      reportSessionState, limitations: reportViewLimitations,
+      returnControl: returnToPage, explanation: reportSourceExplanation,
+    });
+  } catch { returnToPage.disabled = reportSessionState !== 'result'; }
+}
+
+async function renewReportSession() {
+  const id = auditModel?.auditId ?? safeAuditId();
+  if (!id || !reportSessionCapabilityId) return false;
+  if (reportRenewal) return reportRenewal;
+  reportRenewal = (async () => {
+    const connected = await sendWorkerRequest({ type: 'REPORT_CONNECT', auditId: id });
+    const connection = exactRecord(connected, ['ok', 'auditId', 'sessionCapabilityId', 'state']);
+    if (connection?.ok !== true || connection.auditId !== id ||
+      !/^[A-Za-z0-9_-]{22}$/u.test(connection.sessionCapabilityId ?? '') ||
+      !['result', 'view-only'].includes(connection.state) || (auditModel && auditModel.auditId !== id)) return false;
+    const previousState = reportSessionState;
+    const previousCapability = reportSessionCapabilityId;
+    reportSessionCapabilityId = connection.sessionCapabilityId;
+    reportSessionState = connection.state;
+    reportRenewedAt = Date.now();
+    if (previousCapability !== reportSessionCapabilityId && reportSessionState === 'result') {
+      try { reportHighlightPort?.disconnect?.(); } catch { /* closed locally */ }
+      reportHighlightPort = null;
+      reportReconnectAttempts = 0;
+      connectReportHighlightState();
+    }
+    applyReportSessionState(previousState);
+    return true;
+  })().finally(() => { reportRenewal = null; });
+  return reportRenewal;
+}
+
+// Envia uma ação do relatório com a autorização em dia; uma recusa por autorização renova e repete.
+async function sendAuthorizedRequest(build) {
+  if (!reportSessionCapabilityId) return { ok: false, error: 'Não foi possível concluir a operação local.' };
+  if (Date.now() - reportRenewedAt > REPORT_RENEW_INTERVAL_MS) await renewReportSession();
+  const response = await sendWorkerRequest(build(reportSessionCapabilityId));
+  if (!renewableDenial(response) || !await renewReportSession()) return response;
+  return sendWorkerRequest(build(reportSessionCapabilityId));
+}
+
+setInterval(() => { if (auditModel && reportSessionCapabilityId) void renewReportSession(); }, REPORT_RENEW_INTERVAL_MS);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && auditModel && reportSessionCapabilityId &&
+    Date.now() - reportRenewedAt > 60_000) void renewReportSession();
+});
 
 function renderDeletedAudit() {
   auditModel = null;
@@ -138,10 +228,11 @@ async function handleReportHighlightIntent(intent, { announce = true } = {}) {
     highlightAvailability.set(occurrenceId, { state: 'checking' });
     refreshReportHighlightControl(occurrenceId);
   }
-  const response = await sendWorkerRequest({
-    type, sessionCapabilityId: reportSessionCapabilityId, auditId: auditModel.auditId,
+  const auditId = auditModel.auditId;
+  const response = await sendAuthorizedRequest(sessionCapabilityId => ({
+    type, sessionCapabilityId, auditId,
     ...(occurrenceId === null ? {} : { occurrenceId }),
-  });
+  }));
   if (type === 'GET_HIGHLIGHT_AVAILABILITY') {
     const success = exactRecord(response, ['ok', 'bindingStatus']);
     const available = exactRecord(success?.bindingStatus, ['state']);
@@ -257,10 +348,10 @@ const deleteAuditController = createDestructiveDialog({
   stableFocus: status,
   async onConfirm() {
     if (!auditModel?.auditId) return { ok: false, error: 'Auditoria não encontrada ou já excluída.' };
-    const response = await sendWorkerRequest({
-      type: 'REPORT_DELETE_AUDIT', sessionCapabilityId: reportSessionCapabilityId,
-      auditId: auditModel.auditId,
-    });
+    const auditId = auditModel.auditId;
+    const response = await sendAuthorizedRequest(sessionCapabilityId => ({
+      type: 'REPORT_DELETE_AUDIT', sessionCapabilityId, auditId,
+    }));
     if (response.ok === true) {
       renderDeletedAudit();
       if (response.status === 'pending') deleteAuditController.completeSuccess(
@@ -296,10 +387,10 @@ async function requestExport({ deleteAfterCompleteExport = false } = {}) {
   }, EXPORT_CONFIRMATION_TIMEOUT_MS);
   let response = null;
   try {
-    response = await sendWorkerRequest({
-      type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: reportSessionCapabilityId, auditId: requestedAuditId,
+    response = await sendAuthorizedRequest(sessionCapabilityId => ({
+      type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId, auditId: requestedAuditId,
       deleteAfterCompleteExport: deleteAfterCompleteExport === true,
-    });
+    }));
   } catch { /* the bounded notice above still reports the unconfirmed outcome */ }
   clearTimeout(exportConfirmationTimer);
   exportConfirmationTimer = null;
@@ -311,11 +402,10 @@ async function returnToAuditedPage() {
   if (reportSessionState !== 'result' || !auditModel?.auditId || !reportSessionCapabilityId) return;
   returnToPage.disabled = true;
   status.textContent = 'Retornando à página auditada e ao painel lateral.';
-  const response = await sendWorkerRequest({
-    type: 'REPORT_RETURN_TO_SOURCE',
-    sessionCapabilityId: reportSessionCapabilityId,
-    auditId: auditModel.auditId,
-  });
+  const auditId = auditModel.auditId;
+  const response = await sendAuthorizedRequest(sessionCapabilityId => ({
+    type: 'REPORT_RETURN_TO_SOURCE', sessionCapabilityId, auditId,
+  }));
   const returned = exactRecord(response, ['ok', 'state']);
   if (returned?.ok === true && returned.state === 'source-focused') {
     returnToPage.disabled = false;
@@ -404,6 +494,7 @@ function mountReportView(view) {
   reportRoot.replaceChildren(report);
   evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) =>
     [evidence.evidenceId, `report-evidence-${index + 1}`]));
+  reportViewLimitations = view.executive.limitations;
   applyReportSourceControls({
     reportSessionState, limitations: view.executive.limitations,
     returnControl: returnToPage, explanation: reportSourceExplanation,
@@ -444,14 +535,14 @@ async function saveDecision(occurrence, answer, note, card, trigger, { revise = 
   const committed = await commitDecision({
     auditModel,
     input: decision,
-    requestCommit: authorizedDecision => sendWorkerRequest({
-      type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId: reportSessionCapabilityId,
+    requestCommit: authorizedDecision => sendAuthorizedRequest(sessionCapabilityId => ({
+      type: 'REPORT_COMMIT_REVIEW_DECISION', sessionCapabilityId,
       auditId: authorizedDecision.auditId, itemId: authorizedDecision.itemId,
       occurrenceId: authorizedDecision.occurrenceId, answer: authorizedDecision.answer,
       evaluator: authorizedDecision.evaluator, decidedAt: authorizedDecision.decidedAt,
       mode: authorizedDecision.mode, note: authorizedDecision.note ?? '',
       ...(revise ? { revise: true } : {}),
-    }),
+    })).then(response => { lastCommitFailureCode = response?.ok === true ? null : response?.code ?? null; return response; }),
     loadReportRevision: auditId => store.getReportRevision(auditId),
     controls: card.querySelectorAll('button'),
     retryFocus: trigger,
@@ -490,6 +581,59 @@ function nextUnanswered(card) {
   while (next?.classList.contains('answered')) next = next.nextElementSibling;
   if (next) next.open = true;
   (next?.querySelector('summary') || document.querySelector('a[href="#report-root"]'))?.focus();
+}
+
+// Uma resposta grava todas as ocorrências que ela decide numa só gravação autorizada (antes era uma
+// gravação completa do modelo por ocorrência, em sequência) e atualiza o relatório uma vez.
+async function saveDecisionBatch(entries, card, trigger) {
+  if (!auditModel || !reportSessionCapabilityId || !Array.isArray(entries) || entries.length === 0) return false;
+  const session = reportSessionCapabilityId;
+  const evaluatorName = evaluator.value.trim();
+  if (!evaluatorName) {
+    status.textContent = 'Informe o nome da pessoa avaliadora antes de responder.';
+    evaluator.focus();
+    return false;
+  }
+  const auditId = auditModel.auditId;
+  const decidedAt = new Date().toISOString();
+  const inputs = entries.map(({ occurrence, answer, note }) => ({
+    auditId, itemId: occurrence.itemId, occurrenceId: occurrence.occurrenceId, answer, evaluator: evaluatorName,
+    note, decidedAt, mode: occurrence.mode === 'manual' ? 'manual' : 'assisted',
+  }));
+  const reviseByOccurrence = new Map(entries.map(entry => [entry.occurrence.occurrenceId, entry.revise === true]));
+  const items = [...new Set(entries.map(entry => entry.occurrence.itemId))].join(', ');
+  const committed = await commitDecisionBatch({
+    inputs,
+    requestCommit: decisions => sendAuthorizedRequest(sessionCapabilityId => ({
+      type: 'REPORT_COMMIT_REVIEW_BATCH', sessionCapabilityId, auditId, evaluator: evaluatorName, decidedAt,
+      decisions: JSON.stringify(decisions.map(decision => ({
+        itemId: decision.itemId, occurrenceId: decision.occurrenceId, answer: decision.answer,
+        mode: decision.mode, note: decision.note ?? '', revise: reviseByOccurrence.get(decision.occurrenceId) === true,
+      }))),
+    })).then(response => { lastCommitFailureCode = response?.ok === true ? null : response?.code ?? null; return response; }),
+    loadReportRevision: id => store.getReportRevision(id),
+    controls: card.querySelectorAll('button'),
+    retryFocus: trigger,
+    onPendingChange(pending) {
+      card.toggleAttribute('aria-busy', pending);
+      if (pending) status.textContent = `Salvando a resposta (item ${items}).`;
+    },
+  });
+  if (committed.status === 'duplicate') return false;
+  if (!auditModel || auditModel.auditId !== auditId || reportSessionCapabilityId !== session) return false;
+  card.removeAttribute('aria-busy');
+  if (committed.modelRevision <= reportModelRevision) return true;
+  auditModel = committed.model;
+  reportModelRevision = committed.modelRevision;
+  status.textContent = `Decisão salva para o item ${items}. Atualizando o relatório.`;
+  try {
+    await refreshCommittedReport(committed);
+  } catch {
+    if (auditModel === committed.model && reportSessionCapabilityId === session) {
+      status.textContent = `Decisão salva para o item ${items}, mas não foi possível atualizar a visualização. Reabra o relatório para consultar e imprimir a revisão atualizada.`;
+    }
+  }
+  return true;
 }
 
 
@@ -573,21 +717,38 @@ async function commitAnswers(card, plan, trigger) {
   if (!evaluatorNameOrWarn()) return false;
   const node = layState.cardNodes.get(card.key);
   if (!node) return false;
-  let saved = 0;
+  const entries = [];
   for (const { target, answer, note, itemId } of plan) {
     const text = typeof note === 'string' ? note.trim() : '';
     // Uma ocorrência já decidida só é regravada quando a pessoa pediu "Rever resposta"; uma nova
     // tentativa depois de falha parcial não cria revisão falsa da resposta que já estava salva.
     const revising = layState.revising.has(`${card.key}|${itemId ?? target.entry.itemId}`);
     if (target.decision && (!revising || (target.decision.answer === answer && (target.decision.note ?? '') === text))) continue;
+    if (entries.some(entry => entry.occurrence.occurrenceId === target.occurrence.occurrenceId)) continue;
+    entries.push({ occurrence: target.occurrence, answer, note: text, revise: Boolean(target.decision) });
+  }
+  // Quando esta resposta completa o cartão, a revisão já segue para o próximo enquanto a gravação
+  // termina: em páginas grandes a gravação leva alguns segundos e a pessoa não precisa esperar. O
+  // cartão fica marcado como "salvando" e, se a gravação falhar, volta aberto com o aviso.
+  const decidedNow = new Set(entries.map(entry => entry.occurrence.occurrenceId));
+  const completes = entries.length > 0 && card.questions.every(question => question.entries.every(value =>
+    value.decision || decidedNow.has(value.occurrence.occurrenceId)));
+  if (completes) {
+    node.open = false;
+    node.setAttribute('data-lay-saving', '');
+    layState.openCards.delete(card.key);
+    advanceFrom(card.key);
+  }
+  let saved = 0;
+  // Lotes de até 64 decisões (limite do envelope); na prática uma resposta decide poucas ocorrências.
+  for (let start = 0; start < entries.length; start += 64) {
     try {
-      if (await saveDecision(target.occurrence, answer, text, node, trigger, {
-        revise: Boolean(target.decision), final: false,
-      })) saved += 1;
+      if (await saveDecisionBatch(entries.slice(start, start + 64), node, trigger)) saved += Math.min(64, entries.length - start);
     } catch (error) {
       node.removeAttribute('aria-busy');
       status.textContent = describeSaveFailure(error);
-      refreshLayCard(card.key);
+      const failed = refreshLayCard(card.key);
+      if (completes && failed) { failed.open = true; layState.openCards.add(card.key); }
       return false;
     }
     if (!auditModel) return false;
@@ -597,7 +758,9 @@ async function commitAnswers(card, plan, trigger) {
   status.textContent = saved > 0
     ? 'Resposta salva. O relatório e o quadro de constatações foram atualizados.'
     : 'Nada a salvar: essa resposta já estava registrada.';
-  if (fresh?.classList.contains('answered')) {
+  if (completes) {
+    if (fresh) fresh.open = false;
+  } else if (fresh?.classList.contains('answered')) {
     layState.openCards.delete(card.key);
     fresh.open = false;
     advanceFrom(card.key);
@@ -612,7 +775,12 @@ async function commitAnswers(card, plan, trigger) {
 function describeSaveFailure(error) {
   const message = typeof error?.message === 'string' ? error.message : '';
   if (/mudou repetidamente/u.test(message)) return 'A auditoria mudou durante o salvamento. Tente responder de novo.';
-  if (/não foi autorizada/u.test(message)) return 'A resposta não foi aceita: o relatório perdeu a autorização. Reabra o relatório pelo painel e tente de novo.';
+  if (/não foi autorizada/u.test(message)) {
+    // A autorização é renovada sozinha; esta mensagem só aparece quando nem a renovação foi aceita.
+    if (lastCommitFailureCode === 'REPORT_OPERATION_FAILED') return 'A resposta não foi gravada: o armazenamento local recusou a gravação. Tente de novo em alguns segundos.';
+    if (lastCommitFailureCode === null || lastCommitFailureCode === undefined) return 'A resposta não chegou à extensão. Tente de novo em alguns segundos.';
+    return 'A resposta não foi aceita: não foi possível renovar a autorização deste relatório. Reabra o relatório pelo painel e tente de novo.';
+  }
   return 'Não foi possível salvar a resposta. Confira o nome da pessoa avaliadora e o tamanho da descrição e tente de novo.';
 }
 
@@ -621,9 +789,10 @@ async function requestPageAid(aid) {
     status.textContent = 'As ajudas na página só funcionam enquanto a página auditada continua aberta na aba original.';
     return;
   }
-  const response = await sendWorkerRequest({
-    type: 'REPORT_PAGE_AID', sessionCapabilityId: reportSessionCapabilityId, auditId: auditModel.auditId, aid,
-  });
+  const auditId = auditModel.auditId;
+  const response = await sendAuthorizedRequest(sessionCapabilityId => ({
+    type: 'REPORT_PAGE_AID', sessionCapabilityId, auditId, aid,
+  }));
   if (response?.ok === true) {
     if (aid === 'reset') layState.activeAids.clear(); else layState.activeAids.add(aid);
     updateAidBar();
@@ -676,11 +845,18 @@ async function showOnPage(card, trigger) {
     status.textContent = 'O destaque ao vivo vale para perguntas pendentes ou respondidas com “Não”. Use a captura registrada no cartão.';
     return;
   }
+  if (reportSessionState !== 'result') {
+    status.textContent = 'A página auditada mudou ou foi fechada, então o destaque ao vivo não está mais disponível. Use a captura registrada no cartão.';
+    return;
+  }
   trigger.disabled = true;
   try {
     const available = await handleReportHighlightIntent({ type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId }, { announce: false });
     if (!available || highlightAvailability.get(occurrenceId)?.state !== 'available') {
-      status.textContent = 'Não é possível destacar este elemento agora (a página pode ter mudado). Use a captura registrada no cartão.';
+      const reason = highlightAvailability.get(occurrenceId)?.reason;
+      status.textContent = reason === 'no-binding'
+        ? 'Este elemento não tem localização registrada para destaque nesta auditoria. Use a captura registrada no cartão.'
+        : 'Não é possível destacar este elemento agora (a página auditada pode ter mudado). Use a captura registrada no cartão.';
       return;
     }
     if (await handleReportHighlightIntent({ type: 'HIGHLIGHT_OCCURRENCE', occurrenceId }, { announce: false })) {
@@ -1125,6 +1301,7 @@ async function start() {
     !['result', 'view-only'].includes(connection.state)) { status.textContent = 'Relatório não autorizado.'; return; }
   reportSessionCapabilityId = connected.sessionCapabilityId;
   reportSessionState = connected.state;
+  reportRenewedAt = Date.now();
   const [revision, inventory] = await Promise.all([store.getReportRevision(id), createInstalledCoreRuleInventory()]);
   if (!revision || revision.auditId !== id) { status.textContent = 'Auditoria não encontrada.'; return; }
   const summary = await buildCompleteReportSummary({

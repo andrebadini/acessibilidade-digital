@@ -5,7 +5,7 @@ import {
   PANEL_SURFACE,
   deriveTrustedExtensionContext,
 } from './target-capabilities.js';
-import { parseWorkerMessage } from './worker-protocol.js';
+import { parseReviewBatchEntries, parseWorkerMessage } from './worker-protocol.js';
 
 const LAUNCH_FACTORY_KEYS = Object.freeze([
   'chromeApi', 'authority', 'auditStarter', 'panelCoordinator', 'chromeAdapter',
@@ -175,7 +175,8 @@ export function createSidePanelIntentRouter(raw) {
     typeof input.rawNavigationVault?.putQueue === 'function');
   const coordinator = exact(input?.panelCoordinator, ['attachPanelPort', 'withWindowLock', 'publishHighlightState']);
   const reportOperations = input?.reportOperations
-    ? exact(input.reportOperations, ['commitReviewDecision', 'deleteAudit', 'deleteAllAudits'])
+    ? exact(input.reportOperations, ['commitReviewDecision', 'commitReviewBatch', 'deleteAudit', 'deleteAllAudits']) ??
+      exact(input.reportOperations, ['commitReviewDecision', 'deleteAudit', 'deleteAllAudits'])
     : null;
   if (!input || typeof input.chromeApi?.runtime?.id !== 'string' || typeof input.chromeApi?.runtime?.getContexts !== 'function' ||
     typeof input.chromeApi?.windows?.get !== 'function' || typeof input.chromeApi?.tabs?.query !== 'function' ||
@@ -800,6 +801,13 @@ export function createSidePanelIntentRouter(raw) {
       if (authorization?.ok !== true || authorization.auditId !== envelope.auditId || authorization.intent !== intent) {
         return fail('REPORT_OPERATION_DENIED');
       }
+      if (intent === 'review-commit' && envelope.type === 'REPORT_COMMIT_REVIEW_BATCH') {
+        const entries = parseReviewBatchEntries(envelope.decisions);
+        if (!entries || typeof reportOperations.commitReviewBatch !== 'function') return fail('REPORT_OPERATION_DENIED');
+        return await reportOperations.commitReviewBatch({
+          auditId: envelope.auditId, evaluator: envelope.evaluator, decidedAt: envelope.decidedAt, entries,
+        });
+      }
       if (intent === 'review-commit') return await reportOperations.commitReviewDecision({
         auditId: envelope.auditId, itemId: envelope.itemId, occurrenceId: envelope.occurrenceId,
         answer: envelope.answer, evaluator: envelope.evaluator, decidedAt: envelope.decidedAt,
@@ -996,6 +1004,7 @@ export function createSidePanelIntentRouter(raw) {
       deleteAfterCompleteExport: envelope.deleteAfterCompleteExport === true,
     }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_COMMIT_REVIEW_DECISION') return mutateReport(envelope, request.sender, 'review-commit');
+    if (envelope.type === 'REPORT_COMMIT_REVIEW_BATCH') return mutateReport(envelope, request.sender, 'review-commit');
     if (envelope.type === 'REPORT_PAGE_AID') return input.reportLaunch?.applyPageAid?.({
       sessionCapabilityId: envelope.sessionCapabilityId, auditId: envelope.auditId, sender: request.sender, aid: envelope.aid,
     }) ?? fail('FEATURE_UNAVAILABLE');

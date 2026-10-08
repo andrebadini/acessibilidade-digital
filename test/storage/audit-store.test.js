@@ -11,9 +11,9 @@ import {
   createPixelAttemptDigest,
   createSessionPixelAttemptDigestAuthority,
 } from '../../src/core/privacy/session-url-digest.js';
-import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
+import { applyReviewDecisions, createReviewDecision, reviseReviewDecision } from '../../src/core/review/decisions.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
-import { isAuditIntegrityVerified } from '../../src/core/report/integrity.js';
+import { isAuditIntegrityVerified, verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule-inventory.js';
 import { reportInput } from '../report/helpers.js';
@@ -4347,3 +4347,61 @@ function createFakeIndexedDb(options = {}) {
   };
   return fake;
 }
+
+test('decisions commit seals the same reviewed model as the candidate path, in one revision', async t => {
+  // Revisão guiada (1.1.56): uma resposta grava todas as ocorrências que ela decide numa só revisão, e
+  // o armazenamento aplica as decisões sobre a base validada em vez de revalidar um modelo candidato.
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const { model, checkpoint, latest } = await terminalFixture(`review-batch-${backend.toLowerCase()}`);
+    const decide = (entry, answer) => createReviewDecision({ auditId: model.auditId, itemId: entry.itemId,
+      occurrenceId: entry.occurrenceId, answer, evaluator: 'Pessoa avaliadora',
+      decidedAt: '2026-08-29T12:01:00.000Z', mode: entry.mode });
+    const decisions = model.manualReview.slice(0, 2).map((entry, index) => decide(entry, index ? 'conforme' : 'não se aplica'));
+    assert.equal(decisions.length, 2, 'a fixture precisa de duas perguntas pendentes');
+    const fast = factory();
+    const slow = factory();
+    for (const store of [fast, slow]) {
+      await store.commitAuditWithCheckpointIfAbsent(model.auditId, model, checkpoint, latest,
+        { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+    }
+    const committed = await fast.commitAuditReviewDecisionsIfRevision(model.auditId, decisions,
+      (await fast.getAuditSnapshot(model.auditId)).capability);
+    await slow.commitAuditReviewIfRevision(model.auditId, applyReviewDecisions(model, decisions),
+      (await slow.getAuditSnapshot(model.auditId)).capability);
+    const [fastReport, slowReport] = await Promise.all([fast.getReportRevision(model.auditId), slow.getReportRevision(model.auditId)]);
+    assert.equal(committed.revision, 2);
+    assert.equal(committed.modelHash, fastReport.modelHash);
+    assert.equal(fastReport.modelHash, slowReport.modelHash, 'mesmo modelo selado pelos dois caminhos');
+    assert.deepEqual(fastReport.model, slowReport.model);
+    assert.deepEqual(fastReport.model.reviewDecisions.map(value => value.occurrenceId), decisions.map(value => value.occurrenceId));
+    // Respostas seguidas usam o modelo selado em memória e continuam verificáveis do zero.
+    const next = decide(model.manualReview[2] ?? model.manualReview[0], 'não foi possível determinar');
+    const again = await fast.commitAuditReviewDecisionsIfRevision(model.auditId,
+      [model.manualReview[2] ? next : reviseReviewDecision(fastReport.model.reviewDecisions[0], { ...next, decidedAt: '2026-08-29T12:02:00.000Z' })],
+      (await fast.getAuditSnapshot(model.auditId)).capability);
+    assert.equal(again.revision, 3);
+    assert.equal((await verifyAuditIntegritySnapshot(structuredClone((await fast.getReportRevision(model.auditId)).model)))
+      .integrity.canonicalModelHash, again.modelHash);
+  });
+});
+
+test('decisions commit refuses a stale snapshot, an unknown occurrence and an empty batch', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const { model, checkpoint, latest } = await terminalFixture(`review-batch-denied-${backend.toLowerCase()}`);
+    await store.commitAuditWithCheckpointIfAbsent(model.auditId, model, checkpoint, latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+    const entry = model.manualReview[0];
+    const decision = createReviewDecision({ auditId: model.auditId, itemId: entry.itemId, occurrenceId: entry.occurrenceId,
+      answer: 'conforme', evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-29T12:01:00.000Z', mode: entry.mode });
+    const stale = (await store.getAuditSnapshot(model.auditId)).capability;
+    await store.commitAuditReviewDecisionsIfRevision(model.auditId, [decision], stale);
+    await assert.rejects(store.commitAuditReviewDecisionsIfRevision(model.auditId, [decision], stale),
+      error => error?.code === 'AUDIT_REVISION_CONFLICT' || /inválido/u.test(error?.message ?? ''));
+    const current = (await store.getAuditSnapshot(model.auditId)).capability;
+    await assert.rejects(store.commitAuditReviewDecisionsIfRevision(model.auditId, [], current));
+    await assert.rejects(store.commitAuditReviewDecisionsIfRevision(model.auditId,
+      [{ ...decision, decisionId: 'occ-desconhecida', occurrenceId: 'occ-desconhecida' }], current));
+    assert.equal((await store.getReportRevision(model.auditId)).modelRevision, 2);
+  });
+});

@@ -15,7 +15,7 @@ test('review forwards explicit export choice; a default request never inherits d
   const request = runInNewContext(`${requestSource}; requestExport`, {
     auditModel: { auditId: 'audit-a' }, reportSessionCapabilityId: 'S'.repeat(22),
     regenerate: {}, status: {}, exportConfirmationTimer: null,
-    async sendWorkerRequest(value) { sent.push(value); return { ok: true }; },
+    async sendAuthorizedRequest(build) { sent.push(build('S'.repeat(22))); return { ok: true }; },
     setTimeout: () => 0, clearTimeout: () => {},
   });
   await request({ deleteAfterCompleteExport: true });
@@ -32,7 +32,7 @@ test('an unconfirmed export stops waiting and says so instead of staying queued'
   const regenerate = {};
   const request = runInNewContext(`${requestSource}; requestExport`, {
     auditModel, status, regenerate, reportSessionCapabilityId: 'S'.repeat(22), exportConfirmationTimer: null,
-    async sendWorkerRequest() { return { ok: true }; },
+    async sendAuthorizedRequest() { return { ok: true }; },
     setTimeout(callback, delayMs) { scheduled = { callback, delayMs }; return 7; },
     clearTimeout() { cleared += 1; },
   });

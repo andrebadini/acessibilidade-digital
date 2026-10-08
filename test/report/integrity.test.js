@@ -195,3 +195,25 @@ async function rehashCanonicalModel(model) {
   delete hashInput.integrity.canonicalModelHash;
   model.integrity.canonicalModelHash = await sha256Hex(canonicalStringify(hashInput));
 }
+
+test('a human review is sealed over a verified base only when observation and evidence are untouched', async () => {
+  const { sealReviewedAuditSnapshot } = await import('../../src/core/report/integrity.js');
+  const { applyReviewDecisions, createReviewDecision } = await import('../../src/core/review/decisions.js');
+  const base = await verifyAuditIntegritySnapshot(await verifiedFixture());
+  const entry = base.manualReview[0];
+  const reviewed = createAuditModel(applyReviewDecisions(base, [createReviewDecision({
+    auditId: base.auditId, itemId: entry.itemId, occurrenceId: entry.occurrenceId, answer: 'não conforme',
+    evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-26T16:05:00.000Z', mode: entry.mode,
+  })]));
+  const sealed = await sealReviewedAuditSnapshot(base, reviewed);
+  assert.equal(isAuditIntegrityVerified(sealed), true);
+  // O hash selado é o mesmo que a verificação completa, do zero, recalcula.
+  const recomputed = await verifyAuditIntegritySnapshot(structuredClone(sealed));
+  assert.equal(recomputed.integrity.canonicalModelHash, sealed.integrity.canonicalModelHash);
+  assert.notEqual(sealed.integrity.canonicalModelHash, base.integrity.canonicalModelHash);
+  // Base sem verificação, ou revisão que mexe em evidência ou em regra, não é selada.
+  await assert.rejects(sealReviewedAuditSnapshot(structuredClone(base), reviewed), /Modelo de auditoria inválido/u);
+  const tampered = structuredClone(reviewed);
+  tampered.ruleResults[0].summary = `${tampered.ruleResults[0].summary} `;
+  await assert.rejects(sealReviewedAuditSnapshot(base, tampered), /Modelo de auditoria inválido/u);
+});

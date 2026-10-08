@@ -1,6 +1,11 @@
 const MAX_ENVELOPE_BYTES = 4096;
 const MAX_REVIEW_DECISION_ENVELOPE_BYTES = 24 * 1024;
 const MAX_BATCH_ENVELOPE_BYTES = 164 * 1024;
+// Uma resposta da revisão guiada pode decidir várias ocorrências de uma vez (as de uma pergunta ou as
+// perguntas de uma imagem). Elas vão num só envelope, com a mesma nota repetida no máximo 64 vezes.
+const MAX_REVIEW_BATCH_ENTRIES = 64;
+const MAX_REVIEW_BATCH_ENVELOPE_BYTES = 640 * 1024;
+const REVIEW_BATCH_ENTRY_KEYS = Object.freeze(['itemId', 'occurrenceId', 'answer', 'mode', 'note', 'revise']);
 const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const REVIEW_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
@@ -58,6 +63,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
     'type', 'sessionCapabilityId', 'auditId', 'itemId', 'occurrenceId',
     'answer', 'evaluator', 'decidedAt', 'mode', 'note',
   ],
+  REPORT_COMMIT_REVIEW_BATCH: ['type', 'sessionCapabilityId', 'auditId', 'evaluator', 'decidedAt', 'decisions'],
   REPORT_PAGE_AID: ['type', 'sessionCapabilityId', 'auditId', 'aid'],
   REPORT_DELETE_AUDIT: ['type', 'sessionCapabilityId', 'auditId'],
   REPORT_DELETE_ALL_AUDITS: ['type', 'sessionCapabilityId', 'auditId'],
@@ -87,6 +93,8 @@ export function parseWorkerMessage(message) {
   if (byteLength === null) return failure('INVALID_MESSAGE');
   const maximumBytes = copy.type === 'REPORT_COMMIT_REVIEW_DECISION'
     ? MAX_REVIEW_DECISION_ENVELOPE_BYTES
+    : copy.type === 'REPORT_COMMIT_REVIEW_BATCH'
+      ? MAX_REVIEW_BATCH_ENVELOPE_BYTES
     : copy.type === 'PANEL_START_BATCH_AUDIT'
       ? MAX_BATCH_ENVELOPE_BYTES
       : MAX_ENVELOPE_BYTES;
@@ -201,6 +209,11 @@ function validWorkerEnvelope(value) {
       boundedCanonicalText(value.note, 4_000, true) &&
       (!Object.hasOwn(value, 'revise') || value.revise === true);
   }
+  if (value.type === 'REPORT_COMMIT_REVIEW_BATCH') {
+    return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
+      canonicalInstant(value.decidedAt) && boundedCanonicalText(value.evaluator, 160, false) &&
+      parseReviewBatchEntries(value.decisions) !== null;
+  }
   if (value.type === 'REPORT_PAGE_AID') {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && PAGE_AIDS.has(value.aid);
   }
@@ -314,3 +327,24 @@ export function deepFreeze(value, seen = new WeakSet()) {
 }
 
 function failure(code) { return Object.freeze({ ok: false, code }); }
+
+/** Lê a lista de decisões de um lote de revisão (texto JSON) com chaves e valores exatos. */
+export function parseReviewBatchEntries(text) {
+  if (typeof text !== 'string' || text.length < 2 || text.length > MAX_REVIEW_BATCH_ENVELOPE_BYTES) return null;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return null; }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > MAX_REVIEW_BATCH_ENTRIES) return null;
+  const seen = new Set();
+  const entries = [];
+  for (const value of parsed) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const keys = Object.keys(value);
+    if (keys.length !== REVIEW_BATCH_ENTRY_KEYS.length || REVIEW_BATCH_ENTRY_KEYS.some(key => !Object.hasOwn(value, key))) return null;
+    const { itemId, occurrenceId, answer, mode, note, revise } = value;
+    if (!validReviewId(itemId) || !validReviewId(occurrenceId) || seen.has(occurrenceId) || !REVIEW_ANSWERS.has(answer) ||
+      !REVIEW_MODES.has(mode) || !boundedCanonicalText(note, 4_000, true) || typeof revise !== 'boolean') return null;
+    seen.add(occurrenceId);
+    entries.push(Object.freeze({ itemId, occurrenceId, answer, mode, note, revise }));
+  }
+  return Object.freeze(entries);
+}

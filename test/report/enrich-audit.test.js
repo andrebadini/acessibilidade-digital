@@ -306,3 +306,24 @@ test('rejects mutation of a finalized V2 batch scope before enrichment', async (
 
   await assert.rejects(enrichAuditForReport(input, options), /integridade|hash/iu);
 });
+
+test('um motivo core fora do catálogo de remediação não derruba a auditoria inteira', async () => {
+  // Até a 1.1.55 um único alvo com motivo não registrado invalidava o modelo e a auditoria terminava
+  // em "encerrada antes de concluir". O alvo continua no relatório, só pelo nó; motivos registrados e
+  // os de revisão humana continuam com a remediação canônica.
+  const options = { now: () => '2026-08-26T15:00:00.000Z', manifestVersion: '1.1.56' };
+  for (const [data, expected] of [
+    [{ reason: 'motivo-ainda-nao-registrado' }, { nodeId: 'n-1' }],
+    [{ reason: 'human-judgment-required', itemId: '5.1.4' }, {
+      nodeId: 'n-1', data: { itemId: '5.1.4', reason: 'human-judgment-required' },
+      message: 'Revise manualmente: Ordem de foco previsível.',
+    }],
+  ]) {
+    const input = reportInput();
+    input.ruleResults.find(row => row.ruleId === 'focus-order').targets = [{
+      nodeId: 'n-1', selectorHint: '#continuar', message: 'Texto livre da regra.', data,
+    }];
+    const model = await enrichAuditForReport(input, options);
+    assert.deepEqual(model.ruleResults.find(row => row.ruleId === 'focus-order').targets, [expected]);
+  }
+});

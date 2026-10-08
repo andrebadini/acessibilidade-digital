@@ -547,3 +547,25 @@ test('guided review: "não se aplica", an explicit revise flag and the bounded p
     { type: 'REPORT_PAGE_AID', sessionCapabilityId: 'curto', auditId: 'audit-1', aid: 'reset' },
   ]) assert.equal(parseWorkerMessage(message).ok, false, JSON.stringify(message));
 });
+
+test('a guided review answer travels as one closed batch envelope', async () => {
+  const { parseReviewBatchEntries } = await import('../../src/background/worker-protocol.js');
+  const entry = (occurrenceId, extra = {}) => ({
+    itemId: '5.2.1', occurrenceId, answer: 'não conforme', mode: 'assisted', note: 'Imagem sem alternativa.', revise: false, ...extra,
+  });
+  const envelope = decisions => ({
+    type: 'REPORT_COMMIT_REVIEW_BATCH', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    evaluator: 'Pessoa avaliadora', decidedAt: '2026-10-08T12:00:00.000Z', decisions: JSON.stringify(decisions),
+  });
+  const accepted = parseWorkerMessage(envelope([entry('occ-1'), entry('occ-2', { revise: true })]));
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(parseReviewBatchEntries(accepted.value.decisions).map(value => value.occurrenceId), ['occ-1', 'occ-2']);
+  for (const decisions of [
+    [], [entry('occ-1'), entry('occ-1')], [{ ...entry('occ-1'), extra: true }], [entry('occ-1', { answer: 'talvez' })],
+    [entry('occ-1', { note: ' com espaço ' })], [entry('occ-1', { revise: 'sim' })], [entry('occ-1', { mode: 'automated' })],
+    Array.from({ length: 65 }, (_, index) => entry(`occ-${index}`)),
+  ]) assert.equal(parseWorkerMessage(envelope(decisions)).ok, false, JSON.stringify(decisions).slice(0, 80));
+  assert.equal(parseWorkerMessage({ ...envelope([entry('occ-1')]), decisions: '{"não":"lista"}' }).ok, false);
+  assert.equal(parseWorkerMessage({ ...envelope([entry('occ-1')]), evaluator: '' }).ok, false);
+  assert.equal(parseWorkerMessage({ ...envelope([entry('occ-1')]), extra: 1 }).ok, false);
+});

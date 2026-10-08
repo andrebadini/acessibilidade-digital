@@ -92,6 +92,29 @@ export const V1_MIGRATION_DEFAULTS = Object.freeze({
 
 const CANONICAL_MODELS = new WeakSet();
 
+/**
+ * Troca só o hash canônico de um modelo já canônico (pendente ou SHA-256) por um SHA-256. A validação
+ * do modelo aceita os dois formatos de modo independente (validateIntegrity) e nenhuma outra regra
+ * lê esse valor, então o resultado continua canônico sem revalidar o modelo inteiro. Usado para selar
+ * uma revisão humana.
+ */
+export function withCanonicalModelHash(model, canonicalModelHash) {
+  if (!CANONICAL_MODELS.has(model) || typeof canonicalModelHash !== 'string' || !/^[a-f0-9]{64}$/u.test(canonicalModelHash) ||
+    model.integrity?.algorithm !== 'SHA-256' ||
+    !/^(?:pending|[a-f0-9]{64})$/u.test(model.integrity?.canonicalModelHash ?? '') ||
+    !/^[a-f0-9]{64}$/u.test(model.integrity?.evidenceManifestHash ?? '')) {
+    throw auditModelInputError();
+  }
+  const sealed = Object.freeze({ ...model, integrity: Object.freeze({ ...model.integrity, canonicalModelHash }) });
+  CANONICAL_MODELS.add(sealed);
+  return sealed;
+}
+
+/** Verdadeiro só para modelos produzidos e congelados por createAuditModel (imutáveis). */
+export function isCanonicalAuditModel(value) {
+  return Boolean(value && typeof value === 'object' && CANONICAL_MODELS.has(value));
+}
+
 export function createAuditModel(input) {
   if (CANONICAL_MODELS.has(input)) return input;
   try {
@@ -539,6 +562,10 @@ function projectRuleTarget(target, engine, ruleId) {
   if (engine === V1_MIGRATION_DEFAULTS.sourceEngine && output.data !== undefined) {
     const message = canonicalCoreRemediation(ruleId, output.data);
     if (message !== null) output.message = message;
+    // Motivo sem remediação registrada: o alvo continua no relatório só pelo nó. Antes, um único motivo
+    // fora do catálogo invalidava o modelo inteiro e a auditoria terminava sem resultado. O teste de
+    // cobertura do catálogo (test/report/remediation-coverage.test.js) impede que isso passe despercebido.
+    else delete output.data;
   }
   return output;
 }

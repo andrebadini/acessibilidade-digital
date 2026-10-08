@@ -211,3 +211,79 @@ function rememberReviewRevision(model, committed) {
     REVIEW_COMMIT_REVISIONS.set(model, committed.revision);
   }
 }
+
+function exactBatchReceipt(value, auditId, count) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const keys = Reflect.ownKeys(value);
+    const expected = ['ok', 'auditId', 'count', 'modelRevision', 'modelHash'];
+    if (keys.length !== expected.length || keys.some(key => typeof key !== 'string' || !expected.includes(key))) return null;
+    const receipt = Object.fromEntries(expected.map(key => [key, ownData(value, key)]));
+    return receipt.ok === true && receipt.auditId === auditId && receipt.count === count &&
+      Number.isSafeInteger(receipt.modelRevision) && receipt.modelRevision >= 1 &&
+      typeof receipt.modelHash === 'string' && /^[a-f0-9]{64}$/u.test(receipt.modelHash)
+      ? receipt : null;
+  } catch { return null; }
+}
+
+/**
+ * Uma resposta da revisão guiada pode decidir várias ocorrências (as de uma pergunta ou as perguntas
+ * de uma imagem). Elas vão numa única gravação autorizada, conferida contra o relatório persistido;
+ * antes cada ocorrência era uma gravação completa do modelo, em sequência.
+ */
+export function createAuthorizedReviewBatchCommitter() {
+  const pendingOccurrences = new Set();
+  const auditQueues = new Map();
+  return async function commitBatch({
+    inputs, requestCommit, loadReportRevision, controls = [], retryFocus, onPendingChange,
+  } = {}) {
+    if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 64) throw new TypeError('Lote de decisões inválido.');
+    const decisions = inputs.map(input => createReviewDecision(input));
+    const auditId = decisions[0].auditId;
+    if (decisions.some(decision => decision.auditId !== auditId) ||
+      new Set(decisions.map(decision => decision.occurrenceId)).size !== decisions.length) {
+      throw new TypeError('Lote de decisões inválido.');
+    }
+    const keys = decisions.map(decision => `${auditId}\u0000${decision.occurrenceId}`);
+    if (keys.some(key => pendingOccurrences.has(key))) return { status: 'duplicate' };
+    for (const key of keys) pendingOccurrences.add(key);
+    const cardControls = Array.from(controls).filter(control => control && typeof control === 'object');
+    for (const control of cardControls) control.disabled = true;
+    const queue = auditQueues.get(auditId) || { tail: null };
+    auditQueues.set(auditId, queue);
+    const persist = async () => {
+      if (typeof requestCommit !== 'function' || typeof loadReportRevision !== 'function') {
+        throw new TypeError('Canal autorizado de revisão indisponível.');
+      }
+      const receipt = exactBatchReceipt(await requestCommit(decisions), auditId, decisions.length);
+      if (!receipt) throw new Error('A decisão não foi autorizada pelo relatório.');
+      try {
+        const value = await loadReportRevision(auditId);
+        const model = createAuditModel(ownData(value, 'model'));
+        if (ownData(value, 'auditId') !== auditId || model.auditId !== auditId ||
+          ownData(value, 'modelRevision') !== receipt.modelRevision || ownData(value, 'modelHash') !== receipt.modelHash ||
+          !Array.isArray(model.reviewDecisions) ||
+          !decisions.every(decision => model.reviewDecisions.some(current => sameReviewDecision(current, decision)))) throw new Error();
+        return { model, modelRevision: receipt.modelRevision, modelHash: receipt.modelHash };
+      } catch {
+        throw new Error('A confirmação da decisão não corresponde ao relatório persistido.');
+      }
+    };
+    const operation = queue.tail ? queue.tail.then(persist) : persist();
+    const tail = operation.then(() => undefined, () => undefined);
+    queue.tail = tail;
+    try {
+      try { onPendingChange?.(true); } catch { /* UI notification must not affect authorization. */ }
+      const committed = await operation;
+      return { status: 'committed', ...committed };
+    } catch (error) {
+      for (const control of cardControls) control.disabled = false;
+      try { onPendingChange?.(false); } catch { /* UI notification must not mask the authorization error. */ }
+      try { retryFocus?.focus?.(); } catch { /* Focus recovery is best effort. */ }
+      throw error;
+    } finally {
+      for (const key of keys) pendingOccurrences.delete(key);
+      if (queue.tail === tail) queue.tail = null;
+    }
+  };
+}

@@ -5,6 +5,7 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import {
   commitReviewDecision,
+  createAuthorizedReviewBatchCommitter,
   createAuthorizedReviewDecisionCommitter,
   createReviewDecisionCommitter,
   getPendingReviewEntries,
@@ -432,3 +433,44 @@ test('authorized review gate rejects a forged success receipt or mismatched pers
   }));
   assert.equal(requests, 2);
 });
+
+test('a guided answer commits its decisions as one authorized batch and checks every one in the persisted report', async () => {
+  const inputs = [reviewInput(FIRST_REVIEW.occurrenceId, 'não se aplica'), reviewInput(SECOND_REVIEW.occurrenceId, 'conforme')];
+  const persisted = createAuditModel(applyBoth(reviewModel(), inputs));
+  const commit = createAuthorizedReviewBatchCommitter();
+  const sent = [];
+  const controls = [{ disabled: false }];
+  const result = await commit({
+    inputs, controls,
+    async requestCommit(decisions) {
+      sent.push(decisions.map(value => value.occurrenceId));
+      return { ok: true, auditId: SAMPLE_AUDIT.auditId, count: 2, modelRevision: 2, modelHash: 'b'.repeat(64) };
+    },
+    async loadReportRevision() {
+      return { auditId: SAMPLE_AUDIT.auditId, modelRevision: 2, modelHash: 'b'.repeat(64), model: structuredClone(persisted) };
+    },
+  });
+  assert.equal(result.status, 'committed');
+  assert.equal(result.modelRevision, 2);
+  assert.deepEqual(sent, [[FIRST_REVIEW.occurrenceId, SECOND_REVIEW.occurrenceId]]);
+  assert.equal(controls[0].disabled, true, 'os controles ficam bloqueados até o cartão ser redesenhado');
+
+  // Um recibo de contagem diferente, ou um relatório persistido sem uma das decisões, é recusado.
+  await assert.rejects(commit({ inputs, async requestCommit() {
+    return { ok: true, auditId: SAMPLE_AUDIT.auditId, count: 1, modelRevision: 3, modelHash: 'c'.repeat(64) };
+  }, async loadReportRevision() { throw new Error('must not read'); } }), /não foi autorizada/u);
+  const partial = createAuditModel(applyBoth(reviewModel(), inputs.slice(0, 1)));
+  await assert.rejects(commit({ inputs, async requestCommit() {
+    return { ok: true, auditId: SAMPLE_AUDIT.auditId, count: 2, modelRevision: 3, modelHash: 'c'.repeat(64) };
+  }, async loadReportRevision() {
+    return { auditId: SAMPLE_AUDIT.auditId, modelRevision: 3, modelHash: 'c'.repeat(64), model: structuredClone(partial) };
+  } }), /não corresponde/u);
+  await assert.rejects(commit({ inputs: [inputs[0], inputs[0]], async requestCommit() { throw new Error('must not send'); },
+    async loadReportRevision() { throw new Error('must not read'); } }), /Lote de decisões inválido/u);
+});
+
+function applyBoth(model, inputs) {
+  let current = model;
+  for (const input of inputs) current = recordReviewDecision(current, input);
+  return current;
+}

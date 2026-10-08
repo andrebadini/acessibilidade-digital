@@ -36,6 +36,17 @@ const SCENARIOS = {
   // 1.500 produtos (~18 mil nós) na suíte; AUDITA_HOSTILE_PRODUCTS=4000 reproduz a vitrine extrema medida na 1.1.53.
   'dom-enorme': () => ({ page: html(productGrid(Number(process.env.AUDITA_HOSTILE_PRODUCTS ?? 1500))) }),
 
+  // Padrões de quase toda loja e portal: dois h1 (marca e vitrine), busca com rótulo "só para leitor de
+  // tela" (clip: rect(0 0 0 0), o .sr-only do Bootstrap/Liferay) e rótulo jogado para fora da tela.
+  // Até a 1.1.55 cada um deles invalidava o modelo no fim e a auditoria terminava sem resultado.
+  'padroes-de-loja': () => ({
+    page: html(`<header><h1><a href="/">Loja Exemplo</a></h1><form role="search">` +
+      `<label for="busca" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">Buscar produtos</label>` +
+      `<input id="busca" type="search" placeholder="O que você procura?"><button>Buscar</button></form></header>` +
+      `<main><h1>Ofertas do dia</h1><label for="cep" style="position:absolute;left:-9999px">CEP</label>` +
+      `<input id="cep" inputmode="numeric"></main>${productGrid(40)}`),
+  }),
+
   'muitos-iframes': frameOrigin => {
     const frames = [];
     for (let index = 0; index < 18; index += 1) frames.push(`<iframe title="Anúncio ${index}" width="300" height="250" src="${frameOrigin}/ad?${index}"></iframe>`);
@@ -199,7 +210,7 @@ function startFrameServer(t) {
   }));
 }
 
-const EXPORT_SCENARIOS = new Set(['dom-enorme', 'muitos-iframes', 'shadow-dom', 'conteudo-estranho', 'frameset']);
+const EXPORT_SCENARIOS = new Set(['dom-enorme', 'padroes-de-loja', 'muitos-iframes', 'shadow-dom', 'conteudo-estranho', 'frameset']);
 const only = process.env.AUDITA_HOSTILE_ONLY?.split(',').map(value => value.trim()).filter(Boolean) ?? null;
 const mode = process.env.AUDITA_HOSTILE_MODE ?? 'full-evidence';
 
