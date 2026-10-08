@@ -294,6 +294,11 @@ export function createPanelPrivacyConfirmationController(raw) {
 // `aceita o motivo de auditoria encerrada` falha se as duas divergirem).
 const PANEL_ABORTED_MESSAGE = 'A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se o modo '
   + 'de imagem falhar de novo, use o modo sem pixels.';
+// Idem: a frase literal que `panel-state.js` aceita. O worker só manda o aviso `page-reloaded` ao primeiro
+// painel ocioso da aba cuja auditoria foi interrompida porque a página recarregou ou navegou.
+const PANEL_RELOADED_MESSAGE = 'A página recarregou ou mudou durante a auditoria, e a auditoria foi interrompida. '
+  + 'Alguns sites recarregam sozinhos logo depois que o painel abre. Espere a página terminar de carregar e refaça '
+  + 'a auditoria.';
 // O painel é o único que sabe se a parada foi PEDIDA pelo usuário. Medido (sonda 5 da rodada 93, build
 // instrumentado): quando a auditoria é revogada por conta própria, o bootstrap ocioso chega com o painel em
 // `running` e com `auditId` JÁ CORRELACIONADO — a fronteira não pode ser "nenhuma auditoria chegou a
@@ -923,11 +928,16 @@ function receiveBootstrap(value) {
     // `running` e `auditId` preenchido pelos pacotes de progresso. Sem essa fronteira a mensagem roubava o
     // desfecho de quem pediu para parar — medido no E2E `url-pixel-consent-mv3` (cancelar durante a pausa),
     // em que a tela tem de ser `initial`, não a indisponibilidade.
-    if (state.screen === 'running' && !requestedStop) {
+    const reloaded = value.notice === 'page-reloaded' && ['initial', 'running'].includes(state.screen);
+    if ((state.screen === 'running' || reloaded) && !requestedStop) {
       hasReceivedBootstrap = true;
       highlightStateSynchronizer.invalidate();
       resultBundle = null;
-      transition({ type: 'AUDIT_UNAVAILABLE', auditId: state.auditId, reason: PANEL_ABORTED_MESSAGE });
+      transition({
+        type: 'AUDIT_UNAVAILABLE', auditId: state.auditId,
+        reason: reloaded ? PANEL_RELOADED_MESSAGE : PANEL_ABORTED_MESSAGE,
+      });
+      if (reloaded) synchronizePersonaOnBootstrap();
       return;
     }
     const duplicateIdleBootstrap = hasReceivedBootstrap && state.screen === 'initial';

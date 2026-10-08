@@ -2268,6 +2268,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
     rebindPanelForNavigation: value => typeof panelLauncher?.rebindForNavigation === 'function'
       ? panelLauncher.rebindForNavigation(value)
       : false,
+    notePanelNavigationInterruption: value => typeof panelCoordinator?.noteNavigationInterruption === 'function'
+      ? panelCoordinator.noteNavigationInterruption(value)
+      : false,
   });
   lifecycle.register();
   const contextMenus = registerAuditContextMenus(chromeApi, {

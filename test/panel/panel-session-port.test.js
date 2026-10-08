@@ -277,6 +277,36 @@ test('page-marker correlation resets for initial and running states before callb
   client.stop();
 });
 
+test('an idle bootstrap carries only the closed page-reloaded notice', () => {
+  // O worker avisa o painel recriado de que a auditoria daquela aba foi interrompida porque a página
+  // recarregou. Só `initial` aceita aviso, e só este valor; o resto continua recusado.
+  const idle = {
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  };
+  for (const [packet, accepted] of [
+    [{ ...idle, notice: 'page-reloaded' }, true],
+    [{ ...idle, notice: 'other' }, false],
+    [{ ...idle, notice: null }, false],
+    [{ ...idle, notice: 'page-reloaded', extra: true }, false],
+    [{ ...idle, state: 'running', auditId: 'audit-1', sessionCapabilityId: SESSION_ID, notice: 'page-reloaded' }, false],
+  ]) {
+    const env = fixture();
+    const observed = [];
+    const client = createClient(env, { onBootstrapResult: value => observed.push(value) });
+    client.start();
+    const port = env.ports[0];
+    port.onMessage.emit(packet);
+    if (accepted) {
+      assert.deepEqual(observed, [{ state: 'initial', auditId: null, result: null, notice: 'page-reloaded' }]);
+      assert.equal(port.disconnects, 0);
+    } else {
+      assert.deepEqual(observed, [], JSON.stringify(packet));
+    }
+    client.stop();
+  }
+});
+
 test('uses one admitted Port for bootstrap and every privileged panel intent', async () => {
   const env = fixture();
   const observed = [];

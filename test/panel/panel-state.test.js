@@ -101,6 +101,16 @@ test('aceita o motivo de auditoria encerrada e o projeta como indisponibilidade 
   assert.equal(encerrada.reason, motivo);
 });
 
+test('aceita o motivo de página recarregada durante a auditoria', () => {
+  // A frase é literal em `panel.js` e aqui; o painel recriado depois de a página recarregar a mostra em vez
+  // de voltar ao início em silêncio (1.1.56).
+  const motivo = 'A página recarregou ou mudou durante a auditoria, e a auditoria foi interrompida. Alguns sites '
+    + 'recarregam sozinhos logo depois que o painel abre. Espere a página terminar de carregar e refaça a auditoria.';
+  const recarregada = reducePanelState(createInitialPanelState(), { type: 'AUDIT_UNAVAILABLE', auditId: null, reason: motivo });
+  assert.equal(recarregada.screen, 'unavailable');
+  assert.equal(recarregada.reason, motivo);
+});
+
 test('a tela de indisponibilidade devolve o seletor de modo preservando a preferência (N-1 da 1.1.47)', () => {
   // A re-verificação independente da 1.1.47 mediu (achado N-1) que a tela `unavailable` não oferecia o
   // caminho que a própria mensagem sugere: "Iniciar nova auditoria" repetia o MESMO modo, que acabara de

@@ -61,7 +61,8 @@ function addressTokenFactory() {
 
 export function createAuditLifecycle(raw) {
   const input = exact(raw, ['chromeApi', 'getReadyRuntime']) ??
-    exact(raw, ['chromeApi', 'getReadyRuntime', 'rebindPanelForNavigation']);
+    exact(raw, ['chromeApi', 'getReadyRuntime', 'rebindPanelForNavigation']) ??
+    exact(raw, ['chromeApi', 'getReadyRuntime', 'rebindPanelForNavigation', 'notePanelNavigationInterruption']);
   const updated = input?.chromeApi?.tabs?.onUpdated;
   const removed = input?.chromeApi?.tabs?.onRemoved;
   const detached = input?.chromeApi?.tabs?.onDetached;
@@ -73,6 +74,8 @@ export function createAuditLifecycle(raw) {
     typeof removed?.addListener !== 'function' || typeof removed.removeListener !== 'function' ||
     detachedMalformed ||
     (Object.hasOwn(input, 'rebindPanelForNavigation') && typeof input.rebindPanelForNavigation !== 'function') ||
+    (Object.hasOwn(input, 'notePanelNavigationInterruption') &&
+      typeof input.notePanelNavigationInterruption !== 'function') ||
     typeof windowRemoved?.addListener !== 'function' || typeof windowRemoved.removeListener !== 'function') {
     throw new TypeError('AUDIT_LIFECYCLE_INVALID');
   }
@@ -115,6 +118,12 @@ export function createAuditLifecycle(raw) {
         await bestEffort(() => runtime.reportLaunch?.handleTabUpdated?.(tabId, changeInfo));
         await bestEffort(() => runtime.exportLaunch?.handleTabUpdated?.(tabId, changeInfo));
         if (reasonCode === 'TAB_LOADING' && typeof input.rebindPanelForNavigation === 'function') {
+          // O painel desta aba vai ser recriado; se uma auditoria acabou de ser interrompida pela navegação,
+          // o painel novo precisa dizer isso em vez de voltar ao início em silêncio.
+          if (settlement?.aborted === true && typeof settlement.auditId === 'string' &&
+            typeof input.notePanelNavigationInterruption === 'function') {
+            await bestEffort(() => input.notePanelNavigationInterruption({ tabId, auditId: settlement.auditId }));
+          }
           await bestEffort(() => input.rebindPanelForNavigation({ tabId }));
         }
       } else {

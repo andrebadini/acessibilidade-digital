@@ -528,7 +528,9 @@ function launchAuthorityWithRetirement(retirePort) {
 
 test('exports only lock entry and attaches fresh owner-bound mutation scopes', async () => {
   const { coordinator } = fixture();
-  assert.deepEqual(Object.keys(coordinator), ['attachPanelPort', 'withWindowLock', 'publishHighlightState', 'clearAudit']);
+  assert.deepEqual(Object.keys(coordinator), [
+    'attachPanelPort', 'withWindowLock', 'publishHighlightState', 'clearAudit', 'noteNavigationInterruption',
+  ]);
   assert.equal(Object.isFrozen(coordinator), true);
 
   let retained;
@@ -1603,6 +1605,56 @@ test('panel-first receives initial, rejects a second hello and preserves the inc
   first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
   await tick();
   assert.equal(first.disconnects, 1);
+});
+
+test('a navigation interruption reaches only the next idle hello of that tab, once', async () => {
+  // Uma loja que recarrega a própria página quando o painel abre (1.1.56): a auditoria é liquidada, o painel
+  // é recriado e o painel novo voltava ao início sem explicação. O aviso vai só no primeiro hello ocioso.
+  const { coordinator } = fixture();
+  assert.equal(coordinator.noteNavigationInterruption({ tabId: 17, auditId: 'audit-reloaded' }), true);
+  const first = port();
+  coordinator.attachPanelPort(first);
+  first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.deepEqual(first.messages, [{
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null, notice: 'page-reloaded',
+  }]);
+  first.onDisconnect.emit();
+  await tick();
+  const second = port({ documentId: 'panel-document-2' });
+  coordinator.attachPanelPort(second);
+  second.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.deepEqual(second.messages, [{
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null,
+  }], 'o aviso é consumido pelo primeiro hello e nunca explica uma tela posterior');
+});
+
+test('a navigation notice is bounded in time, scoped to its tab and closed in shape', async () => {
+  let now = EPOCH + 1;
+  const env = fixture({ epochNow: () => now });
+  for (const hostile of [
+    null, {}, { tabId: 17 }, { tabId: -1, auditId: 'a' }, { tabId: 17, auditId: '' },
+    { tabId: 17, auditId: 'a', extra: true }, { tabId: 1.5, auditId: 'a' }, { tabId: 17, auditId: 'x'.repeat(161) },
+  ]) assert.equal(env.coordinator.noteNavigationInterruption(hostile), false);
+  assert.equal(env.coordinator.noteNavigationInterruption({ tabId: 18, auditId: 'other-tab' }), true);
+  const otherTab = port();
+  env.coordinator.attachPanelPort(otherTab);
+  otherTab.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(Object.hasOwn(otherTab.messages[0], 'notice'), false, 'o aviso de outra aba não aparece aqui');
+  otherTab.onDisconnect.emit();
+  await tick();
+
+  assert.equal(env.coordinator.noteNavigationInterruption({ tabId: 17, auditId: 'audit-reloaded' }), true);
+  now += 30_000;
+  const late = port({ documentId: 'panel-document-late' });
+  env.coordinator.attachPanelPort(late);
+  late.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(Object.hasOwn(late.messages[0], 'notice'), false, 'um aviso vencido não é entregue');
 });
 
 test('native SIDE_PANEL port without sender documentId reaches a proved idle bootstrap', async () => {

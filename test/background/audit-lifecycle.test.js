@@ -249,6 +249,42 @@ test('rebinds the existing Side Panel once after loading invalidation completes'
   assert.deepEqual(calls, ['abort', 'highlight', 'authority']);
 });
 
+test('an audit interrupted by loading leaves a notice for the recreated panel before the rebind', async () => {
+  // 1.1.56: uma loja que recarrega a própria página quando o painel abre interrompia a auditoria e o painel
+  // recriado voltava ao início em silêncio. O aviso precisa existir antes de o painel novo nascer.
+  const updated = event(); const removed = event(); const windows = event();
+  const calls = [];
+  let settlement = Object.freeze({ aborted: true, auditId: 'audit-reloaded' });
+  createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: updated, onRemoved: removed }, windows: { onRemoved: windows } },
+    getReadyRuntime: async () => ({
+      auditStarter: { async abortAttachedAuditForTarget() { calls.push('abort'); return settlement; } },
+      authority: { async invalidateForTab() { calls.push('authority'); }, async invalidateForWindow() {} },
+    }),
+    async rebindPanelForNavigation(value) { calls.push(['rebind', value]); return true; },
+    notePanelNavigationInterruption(value) { calls.push(['notice', value]); return true; },
+  }).register();
+
+  updated.emit(17, { status: 'loading' }, {});
+  for (let index = 0; index < 3; index += 1) await tick();
+  assert.deepEqual(calls, [
+    'abort', 'authority', ['notice', { tabId: 17, auditId: 'audit-reloaded' }], ['rebind', { tabId: 17 }],
+  ]);
+
+  calls.length = 0;
+  settlement = Object.freeze({ aborted: false, auditId: null });
+  updated.emit(17, { status: 'loading' }, {});
+  for (let index = 0; index < 3; index += 1) await tick();
+  assert.deepEqual(calls, ['abort', 'authority', ['rebind', { tabId: 17 }]], 'sem auditoria interrompida não há aviso');
+
+  assert.throws(() => createAuditLifecycle({
+    chromeApi: { tabs: { onUpdated: event(), onRemoved: event() }, windows: { onRemoved: event() } },
+    getReadyRuntime: async () => ({}),
+    rebindPanelForNavigation: async () => true,
+    notePanelNavigationInterruption: 'not-a-function',
+  }), /AUDIT_LIFECYCLE_INVALID/u);
+});
+
 test('a handled paused-pixel invalidation never falls through to an independent capability invalidation', async () => {
   const updated = event(); const removed = event(); const windows = event();
   const calls = [];
