@@ -113,7 +113,7 @@ function applyReportSessionState(previousState) {
     reportHighlightPort = null;
     for (const node of list.querySelectorAll('button.lay-show')) node.hidden = true;
   } else {
-    for (const node of list.querySelectorAll('button.lay-show')) node.hidden = false;
+    for (const node of list.querySelectorAll('button.lay-show')) node.hidden = Boolean(node.nextElementSibling?.classList.contains('lay-show-note'));
     reportReconnectAttempts = 0;
     connectReportHighlightState();
   }
@@ -395,7 +395,17 @@ async function requestExport({ deleteAfterCompleteExport = false } = {}) {
   clearTimeout(exportConfirmationTimer);
   exportConfirmationTimer = null;
   regenerate.disabled = false;
-  status.textContent = response?.ok ? 'Relatório atualizado na fila de geração.' : 'Não foi possível gerar o relatório atualizado.';
+  status.textContent = response?.ok ? 'Relatório atualizado na fila de geração.' : describeExportFailure(response?.code);
+}
+
+// Em página grande a exportação leva dezenas de segundos; um segundo pedido nesse intervalo era
+// recusado com uma mensagem genérica, como se a geração tivesse falhado.
+function describeExportFailure(code) {
+  if (code === 'EXPORT_ALREADY_ACTIVE') {
+    return 'Já há uma geração do relatório em andamento para esta auditoria. Aguarde os arquivos terminarem de baixar (a aba de exportação fecha sozinha) e tente de novo.';
+  }
+  if (code === 'EXPORT_LEASE_DENIED') return 'Outra exportação desta auditoria ainda está terminando. Tente de novo em alguns segundos.';
+  return 'Não foi possível gerar o relatório atualizado.';
 }
 
 async function returnToAuditedPage() {
@@ -865,6 +875,23 @@ async function showOnPage(card, trigger) {
   } finally { trigger.disabled = false; }
 }
 
+// Nem todo elemento tem localização registrada para destaque (por exemplo, além do limite de
+// miniaturas). Ao abrir o cartão, a disponibilidade é consultada (é barata) e, sem localização, o botão
+// dá lugar a uma explicação, em vez de oferecer um destaque que só seria recusado depois do clique.
+async function checkShowOnPage(card, node) {
+  const show = node.querySelector('button.lay-show');
+  const occurrenceId = highlightableOccurrence(card);
+  if (!show || show.hidden || !occurrenceId || reportSessionState !== 'result' ||
+    highlightAvailability.get(occurrenceId)?.state === 'available') return;
+  if (!await handleReportHighlightIntent({ type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId }, { announce: false })) return;
+  const availability = highlightAvailability.get(occurrenceId);
+  if (availability?.state !== 'unavailable' || availability.reason !== 'no-binding' || !show.isConnected) return;
+  show.hidden = true;
+  if (!node.querySelector('.lay-show-note')) {
+    show.after(el('p', 'Este elemento não tem localização registrada para destaque nesta auditoria. Use a captura registrada no cartão.', 'lay-show-note'));
+  }
+}
+
 function objectBlock(card) {
   const block = el('div', undefined, 'lay-object');
   const evidence = card.evidence;
@@ -1100,6 +1127,7 @@ function renderCardNode(card) {
   node.open = layState.openCards.has(card.key);
   node.addEventListener('toggle', () => {
     if (node.open) layState.openCards.add(card.key); else layState.openCards.delete(card.key);
+    if (node.open) void checkShowOnPage(card, node);
   });
   const summary = el('summary');
   summary.append(el('span', cardTitle(card), 'lay-card-title'));
