@@ -148,7 +148,9 @@ function formFieldLabel(snapshot) {
       hidden.map(({ field, reason }) => target(field,
         reason === 'clipped-label'
           ? 'O rótulo associado a este campo está recortado na página e não identifica o campo visualmente. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.'
-          : 'O rótulo associado a este campo está deslocado para fora da área de conteúdo observada, à esquerda da origem do documento ou muito abaixo dela — o que também acontece com um rótulo dentro de um contêiner com rolagem própria. Confirme se ele pode ser visto antes de concluir.',
+          // A posição também acontece com rótulo dentro de contêiner com rolagem própria, por isso a
+          // frase pede confirmação. Ela é a mesma do catálogo fechado de remediação (até 200 caracteres).
+          : 'O rótulo associado a este campo está fora da área de conteúdo observada. Confirme se ele pode ser visto; se não puder, ofereça um rótulo visível.',
         { reason })),
       ['A revisão é necessária porque a norma admite propósito visualmente evidente com nome acessível: nem recorte nem posicionamento provam ausência de percepção.',
         'O nome acessível e a associação programática são verificados separadamente neste mesmo relatório.']);

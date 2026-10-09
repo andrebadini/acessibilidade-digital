@@ -221,7 +221,63 @@ test('persists report ownership before navigation and binds only the first exact
   assert.deepEqual((await input.authority.getConsumer(connected.sessionCapabilityId)).intents,
     ['export', 'review-commit', 'delete-audit', 'delete-all']);
   assert.equal((await opening).state, 'connected');
-  assert.deepEqual(await input.authority.connect({ auditId: 'audit-1', sender: input.sender }), { ok: false, code: 'REPORT_CONNECT_DENIED' });
+  // O mesmo documento pode renovar o prazo (revisão longa) e continua com a mesma capacidade.
+  assert.deepEqual(await input.authority.connect({ auditId: 'audit-1', sender: input.sender }),
+    { ok: true, auditId: 'audit-1', sessionCapabilityId: connected.sessionCapabilityId, state: 'view-only' });
+  // Outro documento, com o primeiro ainda vivo, continua recusado.
+  assert.deepEqual(await input.authority.connect({ auditId: 'audit-1', sender: { ...input.sender, documentId: 'report-doc-2' } }),
+    { ok: false, code: 'CONTEXT_DENIED' });
+});
+
+test('a long review renews the same report authorization instead of losing it after 30 minutes', async () => {
+  const input = fixture();
+  const opening = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7 });
+  await new Promise(resolve => setImmediate(resolve));
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  await opening;
+  const authorize = intent => input.authority.authorizeIntent({
+    sessionCapabilityId: connected.sessionCapabilityId, auditId: 'audit-1', intent, sender: input.sender,
+  });
+  // 31 minutos depois da abertura: sem renovação, toda resposta e exportação seria recusada.
+  input.setNow(1000 + 31 * 60_000);
+  assert.deepEqual(await authorize('review-commit'), { ok: false, code: 'REPORT_INTENT_DENIED' });
+  const renewed = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  assert.deepEqual(renewed, { ok: true, auditId: 'audit-1', sessionCapabilityId: connected.sessionCapabilityId, state: 'view-only' });
+  for (const intent of ['review-commit', 'export']) {
+    assert.deepEqual(await authorize(intent), {
+      ok: true, auditId: 'audit-1', windowId: 7, sessionCapabilityId: connected.sessionCapabilityId, intent,
+    });
+  }
+  const launch = await input.authority.getLaunch('audit-1');
+  assert.equal(launch.expiresAt, 1000 + 61 * 60_000);
+  assert.equal((await input.authority.getConsumer(connected.sessionCapabilityId)).expiresAt, launch.expiresAt);
+});
+
+test('renewal re-proves the result source and degrades to review-only when the audited page is gone', async () => {
+  let sourceAlive = true;
+  const sourceSessionAuthority = {
+    async reauthorizeReportSource() {
+      return sourceAlive ? { ok: true, state: 'result', windowId: 7, live: true, binding: {
+        kind: 'attached', tabId: 17, documentId: 'target-document', urlSessionDigest: `hmac-sha256:${'A'.repeat(43)}`,
+      } } : { ok: false, code: 'REPORT_SOURCE_DENIED' };
+    },
+  };
+  const input = fixture({ sourceSessionAuthority });
+  const opening = input.authority.openRegisteredReport({ auditId: 'audit-1', windowId: 7,
+    sourceSessionCapabilityId: 'S'.repeat(22), sourceSessionState: 'result' });
+  await new Promise(resolve => setImmediate(resolve));
+  const connected = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  await opening;
+  assert.equal(connected.state, 'result');
+  assert.equal((await input.authority.connect({ auditId: 'audit-1', sender: input.sender })).state, 'result');
+  sourceAlive = false;
+  input.setNow(1000 + 40 * 60_000);
+  const degraded = await input.authority.connect({ auditId: 'audit-1', sender: input.sender });
+  assert.deepEqual(degraded, { ok: true, auditId: 'audit-1', sessionCapabilityId: connected.sessionCapabilityId, state: 'view-only' });
+  assert.deepEqual((await input.authority.getConsumer(connected.sessionCapabilityId)).intents,
+    ['export', 'review-commit', 'delete-audit', 'delete-all']);
+  assert.deepEqual(await input.authority.authorizeIntent({ sessionCapabilityId: connected.sessionCapabilityId,
+    auditId: 'audit-1', intent: 'highlight', sender: input.sender }), { ok: false, code: 'REPORT_INTENT_DENIED' });
 });
 
 test('keeps V1 report consumers view-only without granting live highlight', async () => {

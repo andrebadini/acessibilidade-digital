@@ -197,3 +197,22 @@ test('contains an asynchronous rejection from the active reader cancellation', a
     process.removeListener('unhandledRejection', onUnhandled);
   }
 });
+
+test('a full-page capture larger than 8 MB of base64 is decoded without exhausting the stack', async () => {
+  // A regex com grupo repetido estourava a pilha do V8 a partir de ~8 MB de base64 e derrubava a
+  // auditoria de páginas altas em Evidência completa (1.1.55). A captura abaixo tem ~10 MB de base64.
+  const { randomFillSync } = await import('node:crypto');
+  const width = 1280;
+  const height = 1500;
+  const raster = new Uint8Array((width * 4 + 1) * height);
+  randomFillSync(raster);
+  for (let row = 0; row < height; row += 1) raster[row * (width * 4 + 1)] = 0;
+  const bytes = buildPng({ width, height, raster });
+  const dataUrl = `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
+  assert.ok(dataUrl.length > 8 * 1024 * 1024, `fixture pequena demais: ${dataUrl.length}`);
+  assert.equal(pngDataUrlDecodedByteLength(dataUrl), bytes.length);
+  const decoded = decodePngDataUrl(dataUrl);
+  assert.equal(decoded.width, width);
+  assert.equal(decoded.height, height);
+  await validatePngRasterData(decoded.bytes);
+});

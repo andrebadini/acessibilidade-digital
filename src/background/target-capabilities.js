@@ -1034,6 +1034,28 @@ export function createTargetCapabilityAuthority({
     return deepFreeze({ ok: true, sessionCapabilityId, auditId: input.auditId, expiresAt: session.expiresAt });
   });
 
+  // Uma sessão com resultado ainda válida ganha mais um período a partir de agora. Usada quando o
+  // relatório reprova, ao vivo, o documento auditado: a revisão humana pode durar bem mais que os
+  // 30 minutos contados desde o início da auditoria. Sessão vencida, revogada ou em execução não muda.
+  const renewResultSession = args => serialize(async () => {
+    const input = readDataRecord(args, ['sessionCapabilityId', 'auditId']);
+    if (!input || !CAPABILITY_ID.test(input.sessionCapabilityId ?? '') || !MODEL_ID.test(input.auditId ?? '')) return unavailable();
+    const key = sessionCapabilityStorageKey(input.sessionCapabilityId);
+    const session = parseSessionRecord(readStoredValue(await sessionArea.get(key), key));
+    const currentTime = readNow(now);
+    if (!session || session.sessionCapabilityId !== input.sessionCapabilityId || session.auditId !== input.auditId ||
+      !['result', 'view-only'].includes(session.state) || session.issuedAt > currentTime ||
+      session.expiresAt <= currentTime) return unavailable();
+    const expiresAt = Math.max(session.expiresAt, currentTime + sessionTtlMs);
+    if (expiresAt === session.expiresAt) return deepFreeze({ ok: true, expiresAt });
+    const renewed = { ...session, expiresAt };
+    try { await sessionArea.set({ [key]: renewed }); } catch { /* a releitura confirma */ }
+    let confirmed;
+    try { confirmed = parseSessionRecord(readStoredValue(await sessionArea.get(key), key)); } catch { return unavailable(); }
+    if (!confirmed || !sameGraph(confirmed, renewed)) return unavailable();
+    return deepFreeze({ ok: true, expiresAt });
+  });
+
   return Object.freeze({
     prepare,
     prepareNavigationForPanel,
@@ -1055,6 +1077,7 @@ export function createTargetCapabilityAuthority({
     clearAudit,
     finalizeAudit,
     rehydrateViewOnly,
+    renewResultSession,
   });
 }
 

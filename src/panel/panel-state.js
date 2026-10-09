@@ -20,6 +20,9 @@ const PANEL_STATE_KEYS = Object.freeze([
 const PERSONA_MODES = new Set(['reader', 'achromatopsia', 'keyboard']);
 const PANEL_ABORTED_MESSAGE = 'A auditoria foi encerrada antes de concluir. Refaça a auditoria e, se '
   + 'o modo de imagem falhar de novo, use o modo sem pixels.';
+const PANEL_RELOADED_MESSAGE = 'A página recarregou ou mudou durante a auditoria, e a auditoria foi interrompida. '
+  + 'Alguns sites recarregam sozinhos logo depois que o painel abre. Espere a página terminar de carregar e refaça '
+  + 'a auditoria.';
 const PANEL_UNAVAILABLE_REASONS = new Set([
   PANEL_UNPREPARED_MESSAGE,
   'O resultado local não pôde ser exibido com segurança.',
@@ -28,6 +31,9 @@ const PANEL_UNAVAILABLE_REASONS = new Set([
   // 1.1.45 mediu: no modo de imagem, sem sinal sensível na página, a sessão é revogada e o painel voltava ao
   // início EM SILÊNCIO). A mensagem é o que a revisão exige: nunca o retorno silencioso ao neutro.
   PANEL_ABORTED_MESSAGE,
+  // A auditoria foi interrompida porque a página da aba recarregou ou navegou; o painel foi recriado e o
+  // worker avisa o painel novo (medido na 1.1.56 numa loja que recarrega ao abrir o painel).
+  PANEL_RELOADED_MESSAGE,
 ]);
 const HIGHLIGHT_BINDING_REASONS = new Set(['no-binding', 'expired', 'live-proof-failed']);
 const READER_SPEECH_AVAILABILITY = new Set(['available', 'unavailable', 'busy', 'error']);

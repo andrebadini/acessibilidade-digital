@@ -44,6 +44,13 @@ export function createHighlightModelAuthority(raw = undefined) {
     getAuditSnapshot = null;
   }
   if (typeof getAuditSnapshot !== 'function') fail();
+  // Leitura canônica (sem cópia nem revalidação a cada consulta), quando o armazenamento oferece.
+  let getCanonicalAuditSnapshot = null;
+  try {
+    const descriptor = Reflect.getOwnPropertyDescriptor(auditStore, 'getCanonicalAuditSnapshot');
+    getCanonicalAuditSnapshot = descriptor?.enumerable && Object.hasOwn(descriptor, 'value') &&
+      typeof descriptor.value === 'function' ? descriptor.value : null;
+  } catch { getCanonicalAuditSnapshot = null; }
 
   async function loadValidated(rawRequest) {
     const request = exactDataRecord(rawRequest, ['auditId']);
@@ -51,10 +58,12 @@ export function createHighlightModelAuthority(raw = undefined) {
       ['__proto__', 'prototype', 'constructor'].includes(request.auditId)) fail();
 
     try {
-      const persisted = exactDataRecord(
-        await Reflect.apply(getAuditSnapshot, auditStore, [request.auditId]),
-        ['model', 'revision', 'capability'],
-      );
+      const persisted = getCanonicalAuditSnapshot
+        ? exactDataRecord(await Reflect.apply(getCanonicalAuditSnapshot, auditStore, [request.auditId]), ['model', 'revision'])
+        : exactDataRecord(
+          await Reflect.apply(getAuditSnapshot, auditStore, [request.auditId]),
+          ['model', 'revision', 'capability'],
+        );
       if (!persisted || !Number.isSafeInteger(persisted.revision) || persisted.revision < 1 ||
         persisted.model === undefined) fail();
 

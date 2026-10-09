@@ -12,10 +12,10 @@ import {
 } from './audit-retention.js';
 import { runPixelAttemptCommitAuthorizationV1 } from '../background/pixel-attempt-correlation.js';
 import { AUDIT_STORAGE_UNAVAILABLE_MESSAGE as STORAGE_UNAVAILABLE_MESSAGE } from '../core/privacy.js';
-import { createAuditModel } from '../core/report/audit-model.js';
+import { createAuditModel, isCanonicalAuditModel } from '../core/report/audit-model.js';
 import { auditModelInputError, captureAuditInput } from '../core/report/audit-input.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
-import { verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
+import { sealReviewedAuditSnapshot, verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { sha256Hex } from '../core/report/hash.js';
 import { applyReviewDecisions } from '../core/review/decisions.js';
 import { validateExecutionCheckpoint } from '../background/execution-checkpoint.js';
@@ -55,6 +55,32 @@ function materializeCanonicalAuditModel(auditId, model, options = {}) {
     const canonical = createAuditModel(model);
     if (canonical.auditId !== auditId) throw new TypeError();
     return canonical;
+  } catch {
+    throw auditModelInputError();
+  }
+}
+
+// Caminho rápido da revisão humana: recebe só as decisões (uma resposta pode gravar várias ocorrências
+// de uma vez) e aplica sobre a base do snapshot, validada e verificada uma vez. O caminho por modelo
+// candidato (abaixo) validava o modelo inteiro de novo várias vezes por resposta: ~11 s por resposta
+// numa loja com 5 mil ocorrências, contra ~4 s aqui, com as mesmas garantias de integridade.
+const MAX_REVIEW_BATCH = 256;
+
+async function reviewDecisionsTransition(id, decisions, snapshotCapability, owner) {
+  try {
+    const auditId = validId(id);
+    if (!Array.isArray(decisions) || decisions.length < 1 || decisions.length > MAX_REVIEW_BATCH) throw new TypeError();
+    const record = capabilityRecord(snapshotCapability, owner, auditId);
+    let base = createAuditModel(record.model);
+    if (base.auditId !== auditId || base.integrity?.algorithm !== 'SHA-256') throw new TypeError();
+    const canonicalPending = base.integrity.canonicalModelHash === 'pending';
+    const completeSha = /^[a-f0-9]{64}$/u.test(base.integrity.canonicalModelHash) &&
+      /^[a-f0-9]{64}$/u.test(base.integrity.evidenceManifestHash);
+    if (!canonicalPending && !completeSha) throw new TypeError();
+    if (completeSha) base = await verifyAuditIntegritySnapshot(base);
+    const expected = createAuditModel(applyReviewDecisions(base, decisions));
+    if (expected.reviewDecisions.length < base.reviewDecisions.length) throw new TypeError();
+    return completeSha ? await sealReviewedAuditSnapshot(base, expected) : expected;
   } catch {
     throw auditModelInputError();
   }
@@ -1042,7 +1068,9 @@ function reviewLatestState(value, auditId, model, revision) {
 function mintAuditSnapshot(owner, auditId, model, revision) {
   const canonicalRevision = storedRevision(revision);
   if (model === undefined) return { model: undefined, revision: canonicalRevision, capability: null };
-  const privateModel = storageClone(model);
+  // Um modelo canônico é congelado em profundidade: a capacidade pode guardá-lo sem cópia, e quem a
+  // usa (a revisão humana) não precisa validá-lo de novo. Qualquer outro valor continua copiado.
+  const privateModel = isCanonicalAuditModel(model) ? model : storageClone(model);
   const capability = Object.freeze(Object.create(null));
   AUDIT_SNAPSHOT_CAPABILITIES.set(capability, Object.freeze({
     owner,
@@ -1613,6 +1641,10 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
     },
     async getAudit(id) { return snapshot(id).model; },
     async getAuditSnapshot(id) { return snapshot(id); },
+    async getCanonicalAuditSnapshot(id) {
+      const key = validId(id);
+      return Object.freeze({ model: currentAudit(key), revision: storedRevision(initial.get(revisionKey(key))) });
+    },
     commitAuditWithCheckpointIfAbsent,
     getReportRevision,
     async setLatest(state) { initial.set(LATEST_KEY, storageClone(state)); },
@@ -1635,6 +1667,11 @@ export function createInMemoryAuditStore(initial = new Map(), storeOptions = {})
         snapshotCapability,
         { review: true },
       );
+    },
+    async commitAuditReviewDecisionsIfRevision(id, decisions, snapshotCapability) {
+      const transition = await reviewDecisionsTransition(id, decisions, snapshotCapability, owner);
+      const committed = await writeAudit(id, transition, undefined, snapshotCapability, { review: true });
+      return Object.freeze({ ...committed, modelHash: transition.integrity.canonicalModelHash });
     },
     async acquireExportLease(id, snapshotCapability, options) {
       return acquireExportLease(id, snapshotCapability, options);
@@ -2164,11 +2201,48 @@ export function createAuditStore(options = {}) {
       });
     });
   };
+  // Modelo canônico (e, depois de uma revisão humana, já verificado) da última revisão lida ou gravada
+  // por esta instância. A mesma impressão digital do cache de validação acima (revisão, esquema e hash
+  // canônico completo): toda gravação de modelo incrementa a revisão. A revisão guiada grava uma
+  // resposta por vez sobre o mesmo modelo; sem isso, cada resposta revalidava e re-hasheava tudo.
+  const canonicalAudits = new Map();
+  const auditFingerprint = (key, value, revision) => {
+    const hash = value && typeof value === 'object' && value.integrity && typeof value.integrity === 'object'
+      ? value.integrity.canonicalModelHash : undefined;
+    return value?.auditId === key && typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash) && Number.isSafeInteger(revision)
+      ? `${revision}:${value.schemaVersion}:${hash}` : null;
+  };
+  const rememberCanonicalAudit = (key, model, revision) => {
+    const fingerprint = auditFingerprint(key, model, revision);
+    if (fingerprint === null || !isCanonicalAuditModel(model)) { canonicalAudits.delete(key); return; }
+    canonicalAudits.set(key, { fingerprint, model });
+    validatedAudits.set(key, fingerprint);
+  };
+  const readCanonicalAudit = async key => {
+    const values = await readKeys([key, revisionKey(key)]);
+    const raw = values.get(key);
+    let revision = null;
+    try { revision = storedRevision(values.get(revisionKey(key))); } catch { revision = null; }
+    const fingerprint = raw === undefined ? null : auditFingerprint(key, raw, revision);
+    const cached = canonicalAudits.get(key);
+    const model = fingerprint !== null && cached?.fingerprint === fingerprint
+      ? cached.model
+      : materializeCanonicalAuditModel(key, raw, { allowMissing: true });
+    if (model === undefined) canonicalAudits.delete(key);
+    else if (cached?.model !== model) rememberCanonicalAudit(key, model, revision);
+    return { model, revisionValue: values.get(revisionKey(key)) };
+  };
   const getAuditSnapshot = async id => {
     const key = validId(id);
-    const values = await readKeys([key, revisionKey(key)]);
-    const model = materializeCanonicalAuditModel(key, values.get(key), { allowMissing: true });
-    return mintAuditSnapshot(owner, key, model, values.get(revisionKey(key)));
+    const { model, revisionValue } = await readCanonicalAudit(key);
+    return mintAuditSnapshot(owner, key, model, revisionValue);
+  };
+  // Leitura só para consulta (destaque ao vivo): devolve o próprio modelo canônico, congelado, sem
+  // cópia e sem capacidade de escrita. Antes cada consulta de destaque copiava e revalidava o modelo.
+  const getCanonicalAuditSnapshot = async id => {
+    const key = validId(id);
+    const { model, revisionValue } = await readCanonicalAudit(key);
+    return Object.freeze({ model, revision: storedRevision(revisionValue) });
   };
   const commitAuditWithCheckpointIfAbsent = async (id, model, checkpoint, latestState, options) => {
     const normalizedOptions = exactTerminalOptions(options);
@@ -2292,9 +2366,11 @@ export function createAuditStore(options = {}) {
         let canonicalCurrentModel;
         try {
           currentRevision = storedRevision(currentRevisionValue);
-          canonicalCurrentModel = materializeCanonicalAuditModel(
-            key, currentModel, { allowMissing: true },
-          );
+          // Na revisão humana, a base já foi validada nesta revisão (snapshot); o cache por impressão
+          // digital evita validar de novo o modelo inteiro dentro da transação.
+          canonicalCurrentModel = options.review === true
+            ? presentCanonicalAudit(key, currentModel, currentRevision)
+            : materializeCanonicalAuditModel(key, currentModel, { allowMissing: true });
         } catch (error) {
           finish(reject, error);
           try { transaction.abort(); } catch {}
@@ -3480,6 +3556,7 @@ export function createAuditStore(options = {}) {
       return materializeCanonicalAuditModel(key, await get(key), { allowMissing: true });
     },
     getAuditSnapshot,
+    getCanonicalAuditSnapshot,
     commitAuditWithCheckpointIfAbsent,
     getReportRevision,
     setLatest(state) { return put(LATEST_KEY, state); },
@@ -3500,6 +3577,12 @@ export function createAuditStore(options = {}) {
         snapshotCapability,
         { review: true },
       );
+    },
+    async commitAuditReviewDecisionsIfRevision(id, decisions, snapshotCapability) {
+      const transition = await reviewDecisionsTransition(id, decisions, snapshotCapability, owner);
+      const committed = await mutateAudit(id, transition, undefined, snapshotCapability, { review: true });
+      rememberCanonicalAudit(validId(id), transition, committed.revision);
+      return Object.freeze({ ...committed, modelHash: transition.integrity.canonicalModelHash });
     },
     acquireExportLease,
     claimExportLease(id, snapshotCapability, options) {

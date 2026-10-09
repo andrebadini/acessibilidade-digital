@@ -410,7 +410,7 @@ test('review and export allow exactly one closed auditId query', async () => {
 
 test('prepares an exact one-use target and atomically persists its running session', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'transitionBatchAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'clearAudit', 'finalizeAudit', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'transitionBatchAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'clearAudit', 'finalizeAudit', 'rehydrateViewOnly', 'renewResultSession']);
   const prepared = await prepareAttached(authority);
   const result = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
   assert.equal(result.ok, true);
@@ -2094,7 +2094,7 @@ test('rehydrates a closed view-only session without resurrecting running intent'
 
 test('rehydrateViewOnly rejects caller-supplied target bindings and keeps the exact authority shape', async () => {
   const { authority, sessionArea } = authorityFixture();
-  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'transitionBatchAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'clearAudit', 'finalizeAudit', 'rehydrateViewOnly']);
+  assert.deepEqual(Object.keys(authority), ['prepare', 'prepareNavigationForPanel', 'exchangeAttachedForNavigationCopy', 'inspectPreparedTarget', 'claimPreparedTarget', 'inspectPreparedAuditTarget', 'claimAndIssueAuditSession', 'claimNavigationAndIssueAuditSession', 'claimExchangedAttachedCopyAndIssueAuditSession', 'claimWorkerEventAndIssueAuditSession', 'authorizeSession', 'transitionAuditSession', 'transitionDisposableAuditSession', 'transitionBatchAuditSession', 'invalidateCapability', 'invalidateForTab', 'invalidateForWindow', 'clearAudit', 'finalizeAudit', 'rehydrateViewOnly', 'renewResultSession']);
   assert.deepEqual(await authority.rehydrateViewOnly({
     auditId: 'audit-view-1', windowId: 9, mode: 'attached', targetBinding: { kind: 'view-only' },
   }), { ok: false, code: 'SESSION_DENIED' });
@@ -2415,4 +2415,31 @@ test('rejects a stored target record with extra keys without broadening it', asy
   await sessionArea.set({ [key]: { ...record, contextType: 'SIDE_PANEL' } });
   assert.deepEqual(await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId)), { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
   assert.equal(Object.hasOwn((await sessionArea.get(key))[key], 'contextType'), true, 'malformed authority data is not normalized into a usable record');
+});
+
+test('a live result session can be renewed for a long review; running, expired and revoked ones cannot', async () => {
+  // A revisão guiada passa dos 30 minutos contados desde o início da auditoria. O relatório renova a
+  // sessão quando reprova, ao vivo, o documento auditado; nada mais muda na sessão.
+  let currentTime = 1_788_000_000_000;
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority, sessionArea } = authorityFixture({ chromeApi, now: () => currentTime });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const renew = () => authority.renewResultSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1' });
+  assert.deepEqual(await renew(), { ok: false, code: 'CAPABILITY_UNAVAILABLE' }, 'uma auditoria em execução não é renovada');
+  await authority.transitionAuditSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', nextState: 'result' });
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const before = (await sessionArea.get(key))[key];
+  currentTime += 25 * 60_000;
+  assert.deepEqual(await renew(), { ok: true, expiresAt: currentTime + 30 * 60_000 });
+  const after = (await sessionArea.get(key))[key];
+  assert.deepEqual({ ...after, expiresAt: before.expiresAt }, before, 'só o prazo muda');
+  currentTime += 29 * 60_000;
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1',
+    consumer: 'panel', intent: 'open-report', sender, claimedWindowId: 9 })).ok, true, 'a sessão continua viva depois de 54 minutos');
+  assert.deepEqual(await authority.renewResultSession({ sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-2' }),
+    { ok: false, code: 'CAPABILITY_UNAVAILABLE' });
+  currentTime += 31 * 60_000;
+  assert.deepEqual(await renew(), { ok: false, code: 'CAPABILITY_UNAVAILABLE' }, 'uma sessão vencida não é ressuscitada');
 });

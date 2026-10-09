@@ -566,3 +566,49 @@ test('rejects invalid factory and public operation inputs before reading storage
   await assert.rejects(store.activateOverlay({ tabId: 7, nonce: 'bad', expectedRevision: 1 }), /HIGHLIGHT_INPUT_INVALID/u);
   assert.equal(reads, 0);
 });
+
+test('a review answer moves the audit bindings to the new model identity and renews their window', async () => {
+  const { store, clock } = clockFixture();
+  await store.put(bindingFixture());
+  await store.put(bindingFixture({ auditId: 'audit-2', modelRevision: 1, modelHash: 'c'.repeat(64) }));
+  clock.value = EPOCH + 20 * 60_000;
+  const next = 'd'.repeat(64);
+  assert.equal(await store.refreshAudit({ auditId: 'audit-1', fromModelHash: HASH, modelRevision: 5, modelHash: next }), 1);
+  const found = await store.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1', expectedModelRevision: 5, expectedModelHash: next });
+  assert.equal(found.binding.modelRevision, 5);
+  assert.equal(found.binding.modelHash, next);
+  assert.equal(found.binding.createdAt, clock.value);
+  assert.equal(found.binding.expiresAt, clock.value + TTL_MS);
+  // Repetir com a identidade já nova é inofensivo; a auditoria vizinha não muda.
+  assert.equal(await store.refreshAudit({ auditId: 'audit-1', fromModelHash: HASH, modelRevision: 5, modelHash: next }), 1);
+  const foreign = await store.findTarget({ auditId: 'audit-2', occurrenceId: 'occ-1' });
+  assert.equal(foreign.binding.modelHash, 'c'.repeat(64));
+  // Depois de 45 minutos do registro original a prova ainda vale, porque foi renovada.
+  clock.value = EPOCH + 45 * 60_000;
+  assert.notEqual(await store.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1' }), null);
+});
+
+test('binding refresh refuses an unexpected model identity, an older target revision and expired proofs', async () => {
+  const { store, clock } = clockFixture();
+  await store.put(bindingFixture());
+  assert.equal(await store.refreshAudit({ auditId: 'audit-1', fromModelHash: 'e'.repeat(64), modelRevision: 5, modelHash: 'd'.repeat(64) }), 0);
+  assert.equal(await store.refreshAudit({ auditId: 'audit-1', fromModelHash: HASH, modelRevision: 3, modelHash: 'd'.repeat(64) }), 0);
+  assert.equal((await store.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1' })).binding.modelHash, HASH);
+  await assert.rejects(store.refreshAudit({ auditId: 'audit-1', fromModelHash: 'pending', modelRevision: 5, modelHash: HASH }),
+    /HIGHLIGHT_INPUT_INVALID/u);
+  clock.value = EPOCH + TTL_MS;
+  assert.equal(await store.refreshAudit({ auditId: 'audit-1', fromModelHash: HASH, modelRevision: 5, modelHash: 'd'.repeat(64) }), 0);
+  assert.equal(await store.refreshAudit({ auditId: 'missing', fromModelHash: HASH, modelRevision: 5, modelHash: 'd'.repeat(64) }), 0);
+});
+
+test('renewing an audit keeps its model identity and only extends live proofs', async () => {
+  const { store, clock } = clockFixture();
+  await store.put(bindingFixture());
+  clock.value = EPOCH + 25 * 60_000;
+  assert.equal(await store.renewAudit('audit-1'), 1);
+  const renewed = await store.findTarget({ auditId: 'audit-1', occurrenceId: 'occ-1', expectedModelRevision: 4, expectedModelHash: HASH });
+  assert.equal(renewed.binding.expiresAt, clock.value + TTL_MS);
+  clock.value = EPOCH + 25 * 60_000 + TTL_MS;
+  assert.equal(await store.renewAudit('audit-1'), 0, 'uma prova vencida não é ressuscitada');
+  assert.equal(await store.renewAudit('missing'), 0);
+});

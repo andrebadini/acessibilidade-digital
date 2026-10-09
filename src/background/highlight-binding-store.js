@@ -546,6 +546,50 @@ export function createHighlightBindingStore(raw = undefined) {
     return changed;
   });
 
+  // Uma resposta da revisão humana muda a revisão e o hash do modelo, mas não muda o que foi observado
+  // na página (ocorrências, evidências, nós). Antes, cada resposta apagava as provas de destaque e
+  // "Mostrar na página" deixava de funcionar depois da primeira. Aqui as provas da auditoria passam à
+  // identidade nova do modelo, só quando todas vêm exatamente da identidade anterior, e o prazo é
+  // renovado a partir de agora (o destaque continua exigindo a prova ao vivo no documento original).
+  const refreshAudit = rawInput => serialize(async () => {
+    const input = exactDataRecord(rawInput, ['auditId', 'fromModelHash', 'modelRevision', 'modelHash']);
+    if (!input || !boundedId(input.auditId) || typeof input.fromModelHash !== 'string' || !SHA256.test(input.fromModelHash) ||
+      !Number.isSafeInteger(input.modelRevision) || input.modelRevision < 1 ||
+      typeof input.modelHash !== 'string' || !SHA256.test(input.modelHash)) inputError();
+    const registry = await loadRegistry();
+    const actionAt = readNow();
+    const entries = Object.entries(registry.bindingsByAuditPage).filter(([, binding]) => binding.auditId === input.auditId);
+    if (entries.length === 0) return 0;
+    if (entries.some(([, binding]) => binding.modelRevision > input.modelRevision ||
+      ![input.fromModelHash, input.modelHash].includes(binding.modelHash) || binding.createdAt > actionAt ||
+      binding.expiresAt <= actionAt)) return 0;
+    const next = copyRegistry(registry);
+    for (const [key, binding] of entries) {
+      next.bindingsByAuditPage[key] = validateHighlightBindingV1({
+        ...binding, modelRevision: input.modelRevision, modelHash: input.modelHash,
+        createdAt: actionAt, expiresAt: actionAt + TTL_MS,
+      });
+    }
+    await persist(next);
+    return entries.length;
+  });
+
+  // Renova o prazo das provas ainda válidas de uma auditoria sem mudar a identidade do modelo. Chamada
+  // quando o relatório reprova, ao vivo, o documento auditado; o destaque segue exigindo a prova ao vivo.
+  const renewAudit = rawAuditId => serialize(async () => {
+    const auditId = readAuditId(rawAuditId);
+    const registry = await loadRegistry();
+    const actionAt = readNow();
+    const entries = Object.entries(registry.bindingsByAuditPage).filter(([, binding]) => binding.auditId === auditId);
+    if (entries.length === 0 || entries.some(([, binding]) => binding.createdAt > actionAt || binding.expiresAt <= actionAt)) return 0;
+    const next = copyRegistry(registry);
+    for (const [key, binding] of entries) {
+      next.bindingsByAuditPage[key] = validateHighlightBindingV1({ ...binding, createdAt: actionAt, expiresAt: actionAt + TTL_MS });
+    }
+    await persist(next);
+    return entries.length;
+  });
+
   const purgeExpired = () => serialize(async () => {
     const actionAt = readNow();
     const registry = await loadRegistry();
@@ -583,6 +627,8 @@ export function createHighlightBindingStore(raw = undefined) {
     listRecoverableOverlays,
     invalidateTab,
     purgeExpired,
+    refreshAudit,
+    renewAudit,
     snapshot,
   });
 }

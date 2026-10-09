@@ -106,6 +106,7 @@ export const SIDE_PANEL_DEFAULT_DENIED = 'SIDE_PANEL_DEFAULT_DENIED';
 export const SIDE_PANEL_BEHAVIOR_DENIED = 'SIDE_PANEL_BEHAVIOR_DENIED';
 export const PERSONA_EXPIRY_ALARM_NAME = 'audita-persona-expiry-v1';
 export const HIGHLIGHT_EXPIRY_ALARM_NAME = 'audita-highlight-expiry-v1';
+const MAX_REVIEW_BATCH_ENTRIES = 64;
 
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const CAPABILITY = /^[A-Za-z0-9_-]{22}$/u;
@@ -1185,75 +1186,111 @@ function createUnavailablePageMarkersController(originCache) {
 
 export function createReportOperations({
   chromeApi, auditStore, sessionArea, modelNow, highlightController, highlightBindingStore,
-  publishHighlightState, requestAuditDeletion,
+  publishHighlightState, requestAuditDeletion, scheduleHighlightExpiry = null,
 }) {
 
-  async function clearHighlightAudit(auditId, reason) {
-    const cleared = await highlightController.clearAudit(auditId, reason);
-    if (cleared?.ok !== true || cleared.state !== 'clear') return false;
-    await highlightBindingStore.deleteAudit(auditId);
-    const snapshot = await highlightBindingStore.snapshot();
-    const confirmed = !Object.values(snapshot.bindingsByAuditPage ?? {}).some(value => value?.auditId === auditId) &&
-      !Object.values(snapshot.activeOverlayByTab ?? {}).some(value => value?.auditId === auditId);
-    if (!confirmed) return false;
+  // Melhor esforço: a resposta já está gravada; se as provas não acompanharem, só o destaque ao vivo
+  // fica indisponível (como antes), nunca a resposta.
+  async function refreshHighlightBindings(auditId, fromModelHash, modelRevision, modelHash) {
+    if (typeof highlightBindingStore?.refreshAudit !== 'function' || typeof fromModelHash !== 'string') return false;
     try {
-      const published = await publishHighlightState({
-        version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId,
-        occurrenceId: null, state: 'clear',
-      });
-      return Number.isSafeInteger(published?.delivered) && published.delivered >= 0;
-    } catch {
-      return false;
-    }
+      const refreshed = await highlightBindingStore.refreshAudit({ auditId, fromModelHash, modelRevision, modelHash });
+      if (refreshed > 0 && typeof scheduleHighlightExpiry === 'function') await scheduleHighlightExpiry();
+      return refreshed > 0;
+    } catch { return false; }
   }
 
-  async function commitReviewDecision(input, { revise = false } = {}) {
+  // Grava uma ou várias decisões da mesma resposta numa só revisão do modelo. A trilha da revisão é
+  // montada aqui, a partir do snapshot autoritativo, nunca pela página.
+  async function commitReviewDecisions(entries) {
+    if (!Array.isArray(entries) || entries.length < 1 || entries.length > MAX_REVIEW_BATCH_ENTRIES) {
+      return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+    }
     let requested;
-    try { requested = createReviewDecision(input); }
-    catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' }); }
+    try {
+      requested = entries.map(({ input, revise }) => ({ input, revise: revise === true, decision: createReviewDecision(input) }));
+    } catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' }); }
+    const auditId = requested[0].decision.auditId;
+    if (requested.some(entry => entry.decision.auditId !== auditId) ||
+      new Set(requested.map(entry => entry.decision.occurrenceId)).size !== requested.length) {
+      return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+    }
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
-        const snapshot = await auditStore.getAuditSnapshot(requested.auditId);
-        if (snapshot?.model?.auditId !== requested.auditId || !snapshot.capability) {
+        const snapshot = await auditStore.getAuditSnapshot(auditId);
+        if (snapshot?.model?.auditId !== auditId || !snapshot.capability) {
           return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
         }
-        // A trilha da revisão é montada aqui, a partir do snapshot autoritativo, nunca pela página.
-        const existing = snapshot.model.reviewDecisions?.find(value => value?.occurrenceId === requested.occurrenceId);
-        let decision = requested;
-        if (revise === true) {
+        const decisions = [];
+        for (const entry of requested) {
+          if (entry.revise !== true) { decisions.push(entry.decision); continue; }
+          const existing = snapshot.model.reviewDecisions?.find(value => value?.occurrenceId === entry.decision.occurrenceId);
           if (!existing) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
-          try { decision = reviseReviewDecision(existing, input); }
+          try { decisions.push(reviseReviewDecision(existing, entry.input)); }
           catch { return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' }); }
         }
-        if (!await clearHighlightAudit(decision.auditId, 'review-commit')) {
+        // A resposta não mexe no destaque: antes ela exigia limpar o destaque ativo e apagava as provas
+        // de destaque da auditoria. Com a revisão guiada isso quebrava "Mostrar na página" depois da
+        // primeira resposta e, se a página auditada tivesse mudado, recusava a própria resposta
+        // ("o relatório perdeu a autorização"). As provas passam à nova identidade do modelo abaixo.
+        const fromModelHash = snapshot.model.integrity?.canonicalModelHash;
+        let modelRevision;
+        let modelHash;
+        if (typeof auditStore.commitAuditReviewDecisionsIfRevision === 'function') {
+          // Caminho rápido: o armazenamento aplica as decisões sobre a base validada e sela o hash; o
+          // modelo selado é o que foi gravado na mesma transação (sem reler e re-verificar tudo).
+          const committed = await auditStore.commitAuditReviewDecisionsIfRevision(auditId, decisions, snapshot.capability);
+          modelRevision = committed?.revision;
+          modelHash = committed?.modelHash;
+        } else {
+          const nextModel = createAuditModel(applyReviewDecisions(snapshot.model, decisions));
+          const committed = await auditStore.commitAuditReviewIfRevision(auditId, nextModel, snapshot.capability);
+          const revision = await auditStore.getReportRevision(auditId);
+          const persisted = decisions.every(decision => same(revision?.model?.reviewDecisions?.find(value =>
+            value?.occurrenceId === decision.occurrenceId), decision));
+          if (revision?.auditId !== auditId || revision.modelRevision !== committed?.revision || !persisted) {
+            return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+          }
+          modelRevision = committed.revision;
+          modelHash = revision.modelHash;
+        }
+        if (!Number.isSafeInteger(modelRevision) || modelRevision < 1 ||
+          typeof modelHash !== 'string' || !/^[a-f0-9]{64}$/u.test(modelHash)) {
           return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
         }
-        const nextModel = createAuditModel(applyReviewDecisions(snapshot.model, [decision]));
-        const committed = await auditStore.commitAuditReviewIfRevision(
-          decision.auditId, nextModel, snapshot.capability,
-        );
-        const revision = await auditStore.getReportRevision(decision.auditId);
-        const persistedDecision = revision?.model?.reviewDecisions?.find(value =>
-          value?.occurrenceId === decision.occurrenceId);
-        if (!Number.isSafeInteger(committed?.revision) || committed.revision < 1 ||
-          revision?.auditId !== decision.auditId || revision.modelRevision !== committed.revision ||
-          typeof revision.modelHash !== 'string' || !/^[a-f0-9]{64}$/u.test(revision.modelHash) ||
-          !same(persistedDecision, decision)) {
-          return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
-        }
+        await refreshHighlightBindings(auditId, fromModelHash, modelRevision, modelHash);
         await sendRuntimeMessage(chromeApi, {
-          type: 'AUDIT_REVIEW_UPDATED', auditId: decision.auditId, exportRevision: committed.revision,
+          type: 'AUDIT_REVIEW_UPDATED', auditId, exportRevision: modelRevision,
         }).catch(() => {});
-        return freeze({
-          ok: true, auditId: decision.auditId, occurrenceId: decision.occurrenceId,
-          modelRevision: committed.revision, modelHash: revision.modelHash,
-        });
+        return freeze({ ok: true, auditId, count: decisions.length, modelRevision, modelHash });
       } catch (error) {
         if (own(error, 'code') === 'AUDIT_REVISION_CONFLICT') continue;
         return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
       }
     }
     return Object.freeze({ ok: false, code: 'REPORT_OPERATION_FAILED' });
+  }
+
+  async function commitReviewDecision(input, { revise = false } = {}) {
+    const result = await commitReviewDecisions([{ input, revise }]);
+    if (result?.ok !== true) return result;
+    return freeze({
+      ok: true, auditId: result.auditId, occurrenceId: input.occurrenceId,
+      modelRevision: result.modelRevision, modelHash: result.modelHash,
+    });
+  }
+
+  // Lote de uma resposta: as ocorrências de uma pergunta (ou as perguntas de uma imagem) numa só
+  // gravação. Pessoa avaliadora e instante são os mesmos para o lote inteiro.
+  async function commitReviewBatch({ auditId, evaluator, decidedAt, entries } = {}) {
+    if (!Array.isArray(entries)) return Object.freeze({ ok: false, code: 'REPORT_OPERATION_DENIED' });
+    return commitReviewDecisions(entries.map(entry => ({
+      input: {
+        auditId, itemId: entry.itemId, occurrenceId: entry.occurrenceId, answer: entry.answer,
+        evaluator, decidedAt, mode: entry.mode, note: entry.note,
+      },
+      revise: entry.revise === true,
+    })));
   }
 
   async function deleteCandidate({ auditId, expectedRevision }, manualAuthorization) {
@@ -1310,7 +1347,7 @@ export function createReportOperations({
   }
 
   return freeze({
-    commitReviewDecision, deleteAudit, deleteAllAudits,
+    commitReviewDecision, commitReviewBatch, deleteAudit, deleteAllAudits,
   });
 }
 
@@ -1523,6 +1560,12 @@ async function buildDefaultRuntime(chromeApi, options) {
     async complete() { return { ok: false, code: 'EXPORT_COMPLETE_DENIED' }; },
     async handleTabUpdated() { return false; }, async handleTabRemoved() { return false; }, async handleWindowRemoved() { return false; },
   });
+  async function renewLiveReportSource({ sessionCapabilityId, auditId }) {
+    try { await authority.renewResultSession({ sessionCapabilityId, auditId }); } catch { /* melhor esforço */ }
+    try {
+      if (await highlightBindingStore.renewAudit(auditId) > 0) await scheduleHighlightExpiry();
+    } catch { /* sem provas para renovar: o destaque só fica indisponível */ }
+  }
   const sourceSessionAuthority = Object.freeze({
     async reauthorizeReportSource({ sessionCapabilityId, auditId, state } = {}) {
       try {
@@ -1541,6 +1584,10 @@ async function buildDefaultRuntime(chromeApi, options) {
               proof.documentId !== attached.documentId || proof.urlSessionDigest !== attached.urlSessionDigest) {
               return Object.freeze({ ok: false, code: 'REPORT_SOURCE_DENIED' });
             }
+            // O documento auditado continua o mesmo: a sessão e as provas de destaque ganham mais um
+            // período. Sem isso, 30 minutos depois do início da auditoria o relatório perdia o destaque,
+            // o retorno à página e as ajudas, mesmo com a página intacta (revisão guiada longa).
+            await renewLiveReportSource({ sessionCapabilityId, auditId });
             return Object.freeze({ ok: true, state, binding: session.targetBinding, windowId: session.windowId, live: true });
           }
           const batch = exact(session.targetBinding, ['kind', 'activePageId', 'activeOwnershipId'], true);
@@ -1965,7 +2012,7 @@ async function buildDefaultRuntime(chromeApi, options) {
   });
   const reportOperations = createReportOperations({
     chromeApi, auditStore, sessionArea, modelNow, highlightController: composedHighlightController, highlightBindingStore,
-    publishHighlightState,
+    publishHighlightState, scheduleHighlightExpiry,
     async requestAuditDeletion(request) {
       try { return await deletionCoordinator.request(request); }
       finally {
@@ -2220,6 +2267,9 @@ export function registerServiceWorker(chromeApi, options = {}) {
     getReadyRuntime,
     rebindPanelForNavigation: value => typeof panelLauncher?.rebindForNavigation === 'function'
       ? panelLauncher.rebindForNavigation(value)
+      : false,
+    notePanelNavigationInterruption: value => typeof panelCoordinator?.noteNavigationInterruption === 'function'
+      ? panelCoordinator.noteNavigationInterruption(value)
       : false,
   });
   lifecycle.register();

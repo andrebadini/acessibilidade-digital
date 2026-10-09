@@ -366,6 +366,25 @@ function packet(state, auditId, sessionCapabilityId, result, captureMode = null)
   return freeze(output);
 }
 
+// Aviso de interrupção por navegação. Quando a aba da auditoria recarrega ou navega, a auditoria é
+// liquidada e o painel daquela aba é recriado com um novo lançamento (`rebindForNavigation`). O painel novo
+// não tem memória da tentativa e voltava ao início em silêncio. Medido na 1.1.56 numa loja que recarrega a
+// própria página quando a largura muda ao abrir o painel: quem clicava logo em "Auditar" via o progresso
+// começar e, um segundo depois, a tela inicial, sem explicação. O aviso não carrega capacidade nem dado da
+// página: só diz ao primeiro painel ocioso daquela aba, por pouco tempo, que a tentativa foi interrompida.
+const NAVIGATION_NOTICE = 'page-reloaded';
+const NAVIGATION_NOTICE_TTL_MS = 30_000;
+const MAX_NAVIGATION_NOTICES = 64;
+
+function initialPacket(notice) {
+  const output = {
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result',
+    state: 'initial', auditId: null, sessionCapabilityId: null, result: null,
+  };
+  if (notice === NAVIGATION_NOTICE) output.notice = NAVIGATION_NOTICE;
+  return freeze(output);
+}
+
 function privacyPausedPacket(suspension, sessionCapabilityId, session) {
   const packet = {
     protocol: 'audita-panel', version: 1, type: 'privacy-paused',
@@ -408,6 +427,7 @@ export function createPanelPortCoordinator(raw) {
   const windowTails = new Map();
   const bindings = new WeakMap();
   const liveByWindow = new Map();
+  const navigationNotices = new Map();
   const scopeStates = new WeakMap();
   const scopeDeniedSentinel = Object.freeze(Object.create(null));
   const activeConflictSentinel = Object.freeze(Object.create(null));
@@ -939,6 +959,28 @@ export function createPanelPortCoordinator(raw) {
     }
   }
 
+  function noteNavigationInterruption(raw) {
+    const args = exact(raw, ['tabId', 'auditId']);
+    if (!args || !safeChromeId(args.tabId) || typeof args.auditId !== 'string' || !AUDIT_ID.test(args.auditId)) return false;
+    let now;
+    try { now = input.epochNow(); } catch { return false; }
+    if (!safeEpoch(now)) return false;
+    navigationNotices.delete(args.tabId);
+    while (navigationNotices.size >= MAX_NAVIGATION_NOTICES) navigationNotices.delete(navigationNotices.keys().next().value);
+    navigationNotices.set(args.tabId, freeze({ auditId: args.auditId, expiresAt: now + NAVIGATION_NOTICE_TTL_MS }));
+    return true;
+  }
+
+  // Consumido pelo primeiro hello provado daquela aba, qualquer que seja o estado: um aviso nunca sobrevive
+  // para explicar uma tela posterior. Só o hello ocioso o entrega.
+  function takeNavigationNotice(tabId, now) {
+    if (!safeChromeId(tabId)) return null;
+    const notice = navigationNotices.get(tabId);
+    if (!notice) return null;
+    navigationNotices.delete(tabId);
+    return notice.expiresAt > now ? NAVIGATION_NOTICE : null;
+  }
+
   async function handleHello(binding) {
     try {
       const admission = await binding.admission;
@@ -955,9 +997,10 @@ export function createPanelPortCoordinator(raw) {
         if (!safeEpoch(currentTime)) throw new Error('PANEL_CLOCK_DENIED');
         bind(binding, admission.windowId, 'proving-hello');
         const bootstrap = await readBootstrap(admission.windowId);
+        const notice = takeNavigationNotice(admission.tabId, currentTime);
         if (!bootstrap) {
           bind(binding, admission.windowId, 'bound-idle');
-          send(binding, packet('initial', null, null, null));
+          send(binding, initialPacket(notice));
           return;
         }
         if (bootstrap.windowId !== admission.windowId || bootstrap.createdAt > currentTime || bootstrap.expiresAt <= currentTime) {
@@ -1620,5 +1663,6 @@ export function createPanelPortCoordinator(raw) {
     publishHighlightState,
     clearAudit,
     ...(closePanelMarkers ? { publishPageMarkersState } : {}),
+    noteNavigationInterruption,
   });
 }

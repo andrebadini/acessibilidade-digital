@@ -4,6 +4,12 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.56 — auditoria em sites reais e revisão longa.** Páginas com dois títulos principais, busca com
+rótulo “só para leitor de tela” ou rótulo deslocado para fora da tela (padrões de quase toda loja e portal)
+voltaram a concluir: antes a auditoria terminava em “encerrada antes de concluir”. A revisão guiada deixou de
+perder a autorização depois de 30 minutos, “Mostrar na página” continua funcionando depois das respostas e cada
+resposta grava bem mais rápido em páginas grandes. Veja as [notas da 1.1.56](docs/releases/1.1.56.md).
+
 **Versão 1.1.55 — revisão humana guiada e quadro de constatações.** O que a extensão não consegue medir
 sozinha vira uma pergunta simples sobre o que se vê na página, sem exigir conhecimento de HTML: **Sim**, **Não**,
 **Não consegui verificar** ou **Não existe nesta página**. Cada cartão descreve o elemento em palavras, destaca-o

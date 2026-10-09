@@ -5,6 +5,14 @@ import { runRules } from '../../src/core/rules/run-rules.js';
 import { FORM_RULES } from '../../src/core/rules/forms.js';
 import { INTERACTIVE_RULES } from '../../src/core/rules/interactive.js';
 import { normalizeSnapshot } from '../../src/core/normalize-snapshot.js';
+import { validateCoreRuleTargetInventory } from '../../src/core/report/remediation-policy.js';
+
+// O relatório só aceita alvos core com remediação registrada; um motivo fora do catálogo fazia a
+// auditoria inteira terminar como "encerrada antes de concluir" (1.1.48 a 1.1.55).
+function acceptedByReport(result) {
+  return validateCoreRuleTargetInventory(result.ruleId, result.outcome,
+    result.targets.map(({ selectorHint, ...target }) => target));
+}
 
 test('a programmatic aria-label is not reported as a missing label association', async () => {
   const page = snapshot([record('search', 'textarea', {
@@ -54,6 +62,7 @@ test('a clipped label becomes a per-field target and never a confirmed failure',
   assert.equal(found.outcome, 'cantTell');
   assert.deepEqual(found.targets.map(value => value.nodeId), ['field']);
   assert.equal(found.targets[0].data.reason, 'clipped-label');
+  assert.equal(acceptedByReport(found), true, 'o rótulo recortado precisa caber no catálogo do relatório');
   assert.doesNotMatch(found.summary, /falha confirmada|infração/iu);
 
   // The same field with a label that is not clipped must not produce a target: the pending
@@ -127,6 +136,7 @@ test('a clipped label becomes a per-field target and never a confirmed failure',
   assert.deepEqual(farLeft.targets.map(entry => entry.nodeId), ['field'], 'a label left of the origin is off screen');
   assert.equal(farLeft.targets[0].data.reason, 'offscreen-label');
   assert.equal(farLeft.outcome, 'cantTell', 'being off screen does not prove absence of perception');
+  assert.equal(acceptedByReport(farLeft), true, 'o rótulo fora da tela precisa caber no catálogo do relatório');
 
   // The vertical case needs real content above it: with only the label in the fixture the label
   // would be the lowest thing drawn and therefore its own reference, which is what the first run of

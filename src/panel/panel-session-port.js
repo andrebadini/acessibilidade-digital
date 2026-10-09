@@ -26,6 +26,10 @@ const BOOTSTRAP_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'state', 'auditId', 'sessionCapabilityId', 'result',
 ]);
 const RUNNING_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'captureMode']);
+// Único aviso aceito num bootstrap ocioso: a auditoria daquela aba foi interrompida porque a página
+// recarregou ou navegou (o painel foi recriado e não tem memória da tentativa).
+const INITIAL_NOTICE_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'notice']);
+const INITIAL_NOTICES = new Set(['page-reloaded']);
 const ATTACHED_PRIVACY_PAUSED_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
   'consentId', 'mode', 'categories', 'message',
@@ -106,9 +110,11 @@ function copyData(value, state = { nodes: 0 }, depth = 0) {
 
 function parseBootstrap(value) {
   const runningPacket = exact(value, RUNNING_BOOTSTRAP_KEYS);
-  const packet = runningPacket ?? exact(value, BOOTSTRAP_KEYS);
+  const noticePacket = runningPacket ? null : exact(value, INITIAL_NOTICE_BOOTSTRAP_KEYS);
+  const packet = runningPacket ?? noticePacket ?? exact(value, BOOTSTRAP_KEYS);
   if (!packet || packet.protocol !== 'audita-panel' || packet.version !== 1 || packet.type !== 'bootstrap-result') return null;
   if (runningPacket && packet.state !== 'running') return null;
+  if (noticePacket && (packet.state !== 'initial' || !INITIAL_NOTICES.has(packet.notice))) return null;
   if (packet.state === 'initial') {
     return packet.auditId === null && packet.sessionCapabilityId === null && packet.result === null ? freeze(packet) : null;
   }
@@ -411,6 +417,7 @@ export function createPanelSessionPortClient(raw) {
       if (bootstrap.state === 'running' && CAPTURE_MODES.has(bootstrap.captureMode)) {
         projection.captureMode = bootstrap.captureMode;
       }
+      if (bootstrap.state === 'initial' && INITIAL_NOTICES.has(bootstrap.notice)) projection.notice = bootstrap.notice;
       notifyBootstrap(freeze(projection));
       synchronizeReviewHeartbeat();
       return;

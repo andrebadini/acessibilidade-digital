@@ -1,6 +1,9 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 
-const MAX_TARGETS_PER_RULE = 10_240;
+// Teto de defesa por regra. O antigo (10.240) era alcançável por uma vitrine grande (milhares de
+// produtos, cada um com botões e links do mesmo tipo) e um único excesso invalidava a auditoria inteira.
+// O novo fica alinhado ao teto de observação do modelo (2 milhões de itens por lista).
+const MAX_TARGETS_PER_RULE = 200_000;
 const MAX_TARGET_TEXT = 200;
 const ID = /^[A-Za-z0-9._:-]{1,200}$/u;
 const TOKEN = /^[A-Za-z0-9._:-]{1,100}$/u;
@@ -78,6 +81,7 @@ const MESSAGE = Object.freeze({
   'invalid-heading-level': 'Informe um nível de cabeçalho entre 1 e 6.',
   'heading-level-skip': 'Corrija a progressão dos níveis de cabeçalho.',
   'missing-main-heading': 'Forneça um cabeçalho que identifique o conteúdo principal.',
+  'multiple-main-headings': 'Identifique a página com um único cabeçalho de nível 1.',
   'missing-section-heading': 'Forneça um cabeçalho que identifique esta seção.',
   'invalid-landmark-semantics': 'Use uma região semântica válida e compatível com o elemento.',
   'duplicate-unique-landmark': 'Mantenha apenas uma região desta função quando ela deve ser única.',
@@ -107,6 +111,10 @@ const MESSAGE = Object.freeze({
   'role-interactivity-mismatch': 'Não use função de widget em conteúdo não interativo.',
   'non-widget-interactive-role': 'Use uma função de widget compatível com o componente interativo.',
   'missing-field-label': 'Forneça um rótulo acessível para este campo.',
+  // Rótulo que existe mas não pode ser visto (padrão "só para leitor de tela" ou fora da tela). As
+  // frases são as mesmas que a regra de 5.9.1 emite: o modelo fechado só aceita remediação registrada.
+  'clipped-label': 'O rótulo associado a este campo está recortado na página e não identifica o campo visualmente. Ofereça um rótulo visível ou torne o propósito do campo visualmente evidente.',
+  'offscreen-label': 'O rótulo associado a este campo está fora da área de conteúdo observada. Confirme se ele pode ser visto; se não puder, ofereça um rótulo visível.',
   'missing-idref': 'Corrija a referência programática que não localiza um alvo único.',
   'ambiguous-idref': 'Use uma referência programática que localize um único alvo.',
   'invalid-label-target': 'Associe este rótulo a um campo rotulável.',
@@ -174,6 +182,7 @@ register(['heading-semantics'], 'invalid-heading-semantics');
 register(['heading-semantics'], 'invalid-heading-level');
 register(['heading-order'], 'heading-level-skip', ['previousLevel', 'level']);
 register(['main-heading'], 'missing-main-heading');
+register(['main-heading'], 'multiple-main-headings');
 register(['section-headings'], 'missing-section-heading');
 register(['landmark-semantics'], 'invalid-landmark-semantics');
 register(['unique-landmarks'], 'duplicate-unique-landmark', ['role']);
@@ -210,6 +219,8 @@ for (const reason of ['missing-idref', 'ambiguous-idref']) {
 }
 
 register(['form-field-label'], 'missing-field-label');
+register(['form-field-label'], 'clipped-label');
+register(['form-field-label'], 'offscreen-label');
 register(['form-label-association'], 'missing-idref', ['attribute'], undefined, data => data.attribute === 'for');
 register(['form-label-association'], 'ambiguous-idref', ['attribute'], undefined, data => data.attribute === 'for');
 register(['form-label-association'], 'invalid-label-target', ['attribute'], undefined, data => data.attribute === 'for');
@@ -348,6 +359,12 @@ function canonicalPolicy(ruleId, data) {
     !exactKeys(data, ['reason', 'itemId']) || !PARAM.itemId(data.itemId)) return null;
   const message = humanPolicy(ruleId, data.reason, data);
   return message ? { parameters: Object.freeze(['itemId']), message } : null;
+}
+
+/** Motivos com remediação registrada para uma regra core (leitura, para testes de cobertura). */
+export function registeredCoreRemediationReasons(ruleId) {
+  const prefix = `${ruleId}\u0000`;
+  return Object.freeze([...POLICY.keys()].filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length)).sort());
 }
 
 export function canonicalCoreRemediation(ruleId, data) {

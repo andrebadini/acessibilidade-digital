@@ -104,6 +104,7 @@ function reviewFixture({ clearOk = true } = {}) {
   };
   const highlightBindingStore = {
     async deleteAudit(auditId) { calls.push(['delete-binding', auditId]); bindings.delete(auditId); return true; },
+    async refreshAudit(value) { calls.push(['refresh-binding', value]); return 1; },
     async snapshot() {
       const bindingsByAuditPage = Object.create(null);
       for (const auditId of bindings) bindingsByAuditPage[`${auditId}\u0000page-1`] = { auditId };
@@ -116,6 +117,7 @@ function reviewFixture({ clearOk = true } = {}) {
     modelNow: () => '2026-08-30T12:00:00.000Z', highlightController, highlightBindingStore,
     async disconnectPanelAudit(auditId) { calls.push(['disconnect-panel', auditId]); return true; },
     async publishHighlightState(value) { calls.push(['publish-highlight', value]); return { delivered: 0 }; },
+    async scheduleHighlightExpiry() { calls.push(['schedule-expiry']); },
   });
   const review = SAMPLE_AUDIT.manualReview[0];
   return {
@@ -246,22 +248,76 @@ test('delete-all clears only inventoried audit highlights and counts unconfirmed
   assert.notEqual(await pending.highlightBindingStore.getActiveOverlay(8), null);
 });
 
-test('review commit confirms overlay and binding invalidation before changing the model identity', async () => {
-  const success = reviewFixture();
-  const result = await success.operations.commitReviewDecision(success.decision);
-  assert.equal(result.ok, true);
-  const names = success.calls.map(([name]) => name);
-  assert.equal(names.indexOf('clear-highlight') < names.indexOf('commit-review'), true);
-  assert.equal(names.indexOf('delete-binding') < names.indexOf('commit-review'), true);
-  assert.deepEqual(success.calls.find(([name]) => name === 'publish-highlight')[1], {
-    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: SAMPLE_AUDIT.auditId,
-    occurrenceId: null, state: 'clear',
-  });
+test('review commit keeps live highlight usable: no overlay cleanup gate, bindings follow the new model identity', async () => {
+  // Revisão guiada (1.1.56): cada resposta apagava as provas de destaque e exigia limpar o destaque
+  // ativo antes de gravar. "Mostrar na página" parava depois da primeira resposta e, se a página
+  // auditada tivesse mudado, a própria resposta era recusada.
+  for (const clearOk of [true, false]) {
+    const env = reviewFixture({ clearOk });
+    const result = await env.operations.commitReviewDecision(env.decision);
+    assert.equal(result.ok, true);
+    const names = env.calls.map(([name]) => name);
+    assert.equal(names.includes('clear-highlight'), false);
+    assert.equal(names.includes('delete-binding'), false);
+    assert.equal(names.includes('publish-highlight'), false);
+    assert.equal(names.indexOf('commit-review') < names.indexOf('refresh-binding'), true);
+    assert.deepEqual(env.calls.find(([name]) => name === 'refresh-binding')[1], {
+      auditId: SAMPLE_AUDIT.auditId, fromModelHash: SAMPLE_AUDIT.integrity.canonicalModelHash,
+      modelRevision: result.modelRevision, modelHash: result.modelHash,
+    });
+    assert.equal(names.at(-1) === 'schedule-expiry' || names.includes('schedule-expiry'), true);
+  }
+});
 
-  const denied = reviewFixture({ clearOk: false });
-  assert.deepEqual(await denied.operations.commitReviewDecision(denied.decision), {
-    ok: false, code: 'REPORT_OPERATION_FAILED',
+test('a guided review answer commits all its decisions in one sealed revision and keeps highlight proofs', async () => {
+  const { enrichAuditForReport } = await import('../../src/core/report/enrich-audit.js');
+  const { createInstalledCoreRuleInventory } = await import('../../src/core/rules/core-rule-inventory.js');
+  const auditId = 'audit-batch';
+  const draft = structuredClone(SAMPLE_AUDIT);
+  draft.auditId = auditId;
+  draft.integrity.canonicalModelHash = 'pending';
+  draft.integrity.evidenceManifestHash = 'pending';
+  const model = await enrichAuditForReport(draft, {
+    now: () => '2026-08-29T12:00:00.000Z', timezone: 'America/Cuiaba',
+    manifestVersion: '1.1.56', rulesVersion: '1.0.0', browserVersion: 'Chrome/152.0.0.0',
   });
-  assert.equal(denied.calls.some(([name]) => name === 'commit-review'), false);
-  assert.equal(denied.calls.some(([name]) => name === 'delete-binding'), false);
+  const inventory = await createInstalledCoreRuleInventory();
+  const checkpoint = { version: 1, auditId, pages: model.pages.map(page => ({
+    pageId: page.pageId, attempted: page.attempted, startedAt: page.attempted ? page.timestamps.startedAt : null,
+    rulesVersion: inventory.rulesVersion, inventoryVersion: inventory.inventoryVersion, inventoryHash: inventory.sha256, outcomes: [],
+  })) };
+  const auditStore = createInMemoryAuditStore();
+  await auditStore.commitAuditWithCheckpointIfAbsent(auditId, model, checkpoint, {
+    version: 1, auditId, status: model.session.status, percent: 100, message: 'Avaliação concluída com limitações.',
+    failureCode: null, modelRevision: 1, updatedAt: '2026-08-29T12:00:00.000Z',
+  }, { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+  const calls = [];
+  const operations = createReportOperations({
+    chromeApi: { runtime: { sendMessage(value, callback) { calls.push(['sent', value.type]); callback?.(); } } }, auditStore,
+    sessionArea: { async get() { return {}; }, async set() {}, async remove() {} }, modelNow: () => '2026-08-29T12:05:00.000Z',
+    highlightController: { async clearAudit() { calls.push(['clear-highlight']); return { ok: true, state: 'clear' }; } },
+    highlightBindingStore: { async refreshAudit(value) { calls.push(['refresh-binding', value]); return 1; } },
+    async publishHighlightState() { calls.push(['publish']); return { delivered: 0 }; },
+  });
+  const entries = model.manualReview.slice(0, 2).map(entry => ({
+    itemId: entry.itemId, occurrenceId: entry.occurrenceId, answer: 'conforme', mode: entry.mode, note: '', revise: false,
+  }));
+  const result = await operations.commitReviewBatch({
+    auditId, evaluator: 'Pessoa avaliadora', decidedAt: '2026-08-29T12:05:00.000Z', entries,
+  });
+  assert.deepEqual(Object.keys(result), ['ok', 'auditId', 'count', 'modelRevision', 'modelHash']);
+  assert.equal(result.ok, true);
+  assert.equal(result.count, entries.length);
+  assert.equal(result.modelRevision, 2, 'uma revisão para a resposta inteira');
+  const report = await auditStore.getReportRevision(auditId);
+  assert.equal(report.modelHash, result.modelHash);
+  assert.deepEqual(report.model.reviewDecisions.map(value => value.occurrenceId), entries.map(value => value.occurrenceId));
+  assert.deepEqual(calls.find(([name]) => name === 'refresh-binding')[1], {
+    auditId, fromModelHash: model.integrity.canonicalModelHash, modelRevision: 2, modelHash: result.modelHash,
+  });
+  assert.equal(calls.some(([name]) => ['clear-highlight', 'publish'].includes(name)), false);
+  // Um lote com ocorrência repetida ou de outra auditoria não grava nada.
+  assert.equal((await operations.commitReviewBatch({ auditId, evaluator: 'Pessoa avaliadora',
+    decidedAt: '2026-08-29T12:06:00.000Z', entries: [entries[0], entries[0]] })).ok, false);
+  assert.equal((await auditStore.getReportRevision(auditId)).modelRevision, 2);
 });

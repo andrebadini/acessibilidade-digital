@@ -13,7 +13,10 @@ test('pending deletion clears the local report and explains remaining cleanup wi
     deleteAuditDialog: {}, deleteAuditCancel: {}, deleteAuditConfirm: {}, status: {}, deleteAuditDialogStatus: {},
     auditModel: { auditId: 'audit-a' }, reportSessionCapabilityId: 'S'.repeat(22),
     createDestructiveDialog(value) { config = value; return { completeSuccess(message) { messages.push(message); } }; },
-    async sendWorkerRequest() { return { ok: true, auditId: 'audit-a', deleted: true, status: 'pending' }; },
+    async sendAuthorizedRequest(build) {
+      assert.equal(build('S'.repeat(22)).type, 'REPORT_DELETE_AUDIT');
+      return { ok: true, auditId: 'audit-a', deleted: true, status: 'pending' };
+    },
     renderDeletedAudit() { cleared++; },
   });
   await config.onConfirm();
