@@ -355,8 +355,12 @@ test('an element taller than the viewport keeps its label inside the visible ban
   runAuditaPageMarkersCommand(singleTarget(idMatch('button', 'continue')), fixture.environment);
   const group = fixture.environment.markerGroups()[0];
   assert.equal(labelOf(group).style.top, '0px');
-  assert.equal(ringOf(group).style.top, '-5px');
-  assert.equal(ringOf(group).style.height, '778px');
+  // Both cut sides stay at the viewport edge and are dashed: the element continues past them.
+  assert.equal(ringOf(group).style.top, '0px');
+  assert.equal(ringOf(group).style.height, '768px');
+  assert.equal(ringOf(group).style.borderTopStyle, 'dashed');
+  assert.equal(ringOf(group).style.borderBottomStyle, 'dashed');
+  assert.equal(ringOf(group).style.borderLeftStyle, 'solid');
 });
 
 test('labels never fully cover each other and slide along the contour before overlapping', () => {
@@ -413,10 +417,11 @@ test('micro elements get a minimum contour and clipped elements hug the visible 
   clipped.main.style.overflow = 'hidden';
   runAuditaPageMarkersCommand(singleTarget(idMatch('button', 'continue')), clipped.environment);
   const clippedRing = ringOf(clipped.environment.markerGroups()[0]);
-  assert.equal(clippedRing.style.left, '35px');
-  assert.equal(clippedRing.style.top, '55px');
-  assert.equal(clippedRing.style.width, '70px');
-  assert.equal(clippedRing.style.height, '30px');
+  assert.equal(clippedRing.style.left, '40px');
+  assert.equal(clippedRing.style.top, '60px');
+  assert.equal(clippedRing.style.width, '60px');
+  assert.equal(clippedRing.style.height, '20px');
+  for (const side of ['Top', 'Bottom', 'Left', 'Right']) assert.equal(clippedRing.style[`border${side}Style`], 'dashed');
 
   const offscreen = createPageMarkersFixture();
   offscreen.first.setRect({ left: -10_000, top: 80, width: 20, height: 20 });
@@ -851,7 +856,9 @@ test('fixed page chrome over an element trims its contour and hides a fully cove
   const group = fixture.environment.markerGroups()[0];
   // The element spans 50..90; the banner covers it from 70 down, so the contour stops at the banner.
   assert.equal(ringOf(group).style.top, '45px');
-  assert.equal(ringOf(group).style.height, '30px');
+  assert.equal(ringOf(group).style.height, '25px');
+  assert.equal(ringOf(group).style.borderBottomStyle, 'dashed');
+  assert.equal(ringOf(group).style.borderTopStyle, 'solid');
   assert.equal(labelOf(group).style.display, 'flex');
 
   covered = { top: 40, bottom: 140 };

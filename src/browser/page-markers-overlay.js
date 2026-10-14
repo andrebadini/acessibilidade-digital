@@ -682,6 +682,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         box.top -= extra;
         box.bottom += extra;
       }
+      const whole = { ...box };
       clipByAncestors(element, cache, box);
       const viewport = viewportRect();
       if (viewport) {
@@ -693,7 +694,11 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       if (!(box.right > box.left) || !(box.bottom > box.top)) return null;
       clipByOccluders(element, box, cache);
       if (!(box.right > box.left) || !(box.bottom > box.top)) return null;
-      return { left: box.left, top: box.top, width: box.right - box.left, height: box.bottom - box.top };
+      // A side cut by the viewport, an inner scroller or fixed page chrome is dashed and not pushed
+      // outwards: a solid border there would read as the edge of the element, which continues.
+      const cut = { top: box.top > whole.top + 0.5, bottom: box.bottom < whole.bottom - 0.5,
+        left: box.left > whole.left + 0.5, right: box.right < whole.right - 0.5 };
+      return { left: box.left, top: box.top, width: box.right - box.left, height: box.bottom - box.top, cut };
     }
 
     // Width from the text itself, never from the box we sized on the previous pass (that fed back
@@ -735,7 +740,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
     // it when there is no room above. When every glued spot would hide another label or another
     // marked element, it moves to the nearest free row above or below and a thin leader joins it to
     // its contour. A label never buries another label.
-    function placeLabel(ring, width, height, placed, obstacles) {
+    function placeLabel(ring, width, height, placed, obstacles, cut = {}) {
       const viewport = viewportRect();
       const bounds = viewport ?? { left: 0, top: 0, right: ring.left + ring.width, bottom: ring.top + ring.height };
       const clampLeft = value => Math.min(Math.max(value, bounds.left), Math.max(bounds.left, bounds.right - width));
@@ -800,6 +805,10 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         // viewport keeps its label pinned to the top of the visible band).
         cost += overlapArea(rect, ringBox) * 40;
         if (candidate.side === 'inside') cost += width * height * 20;
+        // A cut side borders the viewport edge or page chrome (a sticky header): a label there would
+        // sit on that chrome, away from the visible part of the element.
+        if (cut.top && rect.top < ringBox.top + 1) cost += 5000;
+        if (cut.bottom && rect.bottom > ringBox.bottom - 1) cost += 5000;
         if (buried) cost += 1e12;
         if (cost < bestCost) { bestCost = cost; chosen = { ...candidate, rect }; }
       }
@@ -862,9 +871,14 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       const hovered = group.hovered === true && !selected;
       const border = selected ? SELECTED_BORDER : hovered ? HOVER_BORDER : BORDER;
       const rings = boxes.map((box, index) => {
+        const cut = box.cut ?? {};
+        const outset = GAP + border;
+        const left = box.left - (cut.left ? 0 : outset);
+        const top = box.top - (cut.top ? 0 : outset);
         const ring = {
-          left: box.left - GAP - border, top: box.top - GAP - border,
-          width: box.width + (2 * (GAP + border)), height: box.height + (2 * (GAP + border)),
+          left, top,
+          width: (box.left + box.width + (cut.right ? 0 : outset)) - left,
+          height: (box.top + box.height + (cut.bottom ? 0 : outset)) - top,
         };
         const element = ringElement(group, index);
         element.style.left = `${ring.left}px`;
@@ -872,6 +886,10 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         element.style.width = `${ring.width}px`;
         element.style.height = `${ring.height}px`;
         element.style.borderWidth = `${border}px`;
+        element.style.borderTopStyle = cut.top ? 'dashed' : 'solid';
+        element.style.borderBottomStyle = cut.bottom ? 'dashed' : 'solid';
+        element.style.borderLeftStyle = cut.left ? 'dashed' : 'solid';
+        element.style.borderRightStyle = cut.right ? 'dashed' : 'solid';
         element.style.borderRadius = '3px';
         element.style.borderColor = group.color;
         element.style.boxShadow = ringShadow(selected, hovered, group.color);
@@ -883,7 +901,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       for (let index = Math.max(0, rings.length - 1); index < group.extraRings.length; index += 1) {
         group.extraRings[index].style.display = 'none';
       }
-      return { group, selected, rings,
+      return { group, selected, rings, cuts: boxes.map(box => box.cut ?? {}),
         boxes: rings.map(ring => ({ left: ring.left, top: ring.top, right: ring.left + ring.width, bottom: ring.top + ring.height })) };
     }
 
@@ -894,7 +912,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       const width = labelWidth(label, selected);
       const height = selected ? LABEL_HEIGHT_SELECTED : LABEL_HEIGHT;
       const others = obstacles.filter(entry => entry.owner !== group);
-      const spot = placeLabel(rings[0], width, height, placed, others);
+      const spot = placeLabel(rings[0], width, height, placed, others, layout.cuts?.[0] ?? {});
       label.style.width = `${width}px`;
       label.style.height = `${height}px`;
       label.style.left = `${spot.left}px`;

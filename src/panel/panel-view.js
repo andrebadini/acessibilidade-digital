@@ -801,6 +801,22 @@ function renderMarkerLegend(document) {
     list.append(item);
   }
   legend.append(list);
+  // How to read a signal on the page, for someone who never saw one: the contour, the number, the
+  // count in parentheses, the dashed edge and the leader line.
+  const reading = document.createElement('ul');
+  reading.className = 'page-marker-reading';
+  for (const text of [
+    'O contorno colorido envolve o elemento; a etiqueta colada nele traz o número do sinal e o símbolo do resultado.',
+    'O número entre parênteses é a quantidade de ocorrências no mesmo elemento. Exemplo: “3 × (2)” é o sinal 3, com 2 falhas.',
+    'Lado tracejado: o elemento continua além do que está visível (fora da tela, atrás de um cabeçalho fixo ou de uma área com rolagem).',
+    'Quando não há espaço junto ao elemento, a etiqueta fica um pouco afastada e uma linha a liga ao contorno.',
+    'Um elemento oculto no momento (por exemplo, um slide de carrossel) ganha o sinal quando aparecer.',
+  ]) {
+    const item = document.createElement('li');
+    item.append(paragraph(document, text));
+    reading.append(item);
+  }
+  legend.append(reading);
   return legend;
 }
 

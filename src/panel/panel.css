@@ -773,6 +773,13 @@ code {
 
 .page-marker-legend li { display: flex; align-items: center; gap: 5px; min-inline-size: 0; }
 .page-marker-legend li p { font-size: 12px; font-weight: 700; }
+.page-marker-legend ul.page-marker-reading {
+  display: block;
+  padding-inline-start: 1.1rem;
+  list-style: disc;
+}
+.page-marker-legend ul.page-marker-reading li { display: list-item; margin-block: 3px; }
+.page-marker-legend ul.page-marker-reading li p { font-size: 13px; font-weight: 400; line-height: 1.4; }
 .page-marker-symbol {
   display: inline-grid;
   place-items: center;
