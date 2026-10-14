@@ -1343,8 +1343,9 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   assert.equal(failedVisual.getAttribute('aria-label'),
     'Elemento local da evidência ev-control captura do elemento com falha, contornado em vermelho por fora do elemento.');
   assert.equal(failedVisual.querySelector('image').getAttribute('href'), original.dataUrl);
-  // O alvo fica nítido dentro da imagem escurecida e o contorno é desenhado 3 px por fora da borda.
-  assert.equal(failedVisual.querySelector('path.evidence-spotlight').getAttribute('d'), 'M0 0H128V88H0ZM24 12H104V52H24Z');
+  // O alvo e a folga até o contorno ficam nítidos: o furo do escurecimento é o mesmo retângulo do
+  // contorno, desenhado 3 px por fora da borda — não a borda crua, que deixaria a folga escurecida.
+  assert.equal(failedVisual.querySelector('path.evidence-spotlight').getAttribute('d'), 'M0 0H128V88H0ZM21 9H107V55H21Z');
   const failedBox = failedVisual.querySelector('rect[data-evidence-highlight="failed"]');
   assert.deepEqual(['x', 'y', 'width', 'height', 'rx'].map(name => failedBox.getAttribute(name)), ['21', '9', '86', '46', '2']);
   const failedHalo = failedVisual.querySelector('rect.evidence-halo');
@@ -1364,7 +1365,7 @@ test('live report derives occurrence-specific boxes while preserving the pristin
 
   const html = renderHtmlReport(model, { reportView: view });
   assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="failed"[^>]*aria-label="Elemento local da evidência ev-control captura do elemento com falha, contornado em vermelho por fora do elemento\."/u);
-  assert.match(html, /<path class="evidence-spotlight" fill-rule="evenodd" d="M0 0H128V88H0ZM24 12H104V52H24Z" aria-hidden="true"><\/path>/u);
+  assert.match(html, /<path class="evidence-spotlight" fill-rule="evenodd" d="M0 0H128V88H0ZM21 9H107V55H21Z" aria-hidden="true"><\/path>/u);
   assert.match(html, /<rect class="evidence-highlight evidence-highlight--failed" data-evidence-highlight="failed" x="21" y="9" width="86" height="46" rx="2" aria-hidden="true"><\/rect>/u);
   assert.doesNotMatch(html, /data-evidence-treatment="review"/u);
   assert.match(html, /data-report-evidence="ev-control"[^]*?Consultar captura ev-control/u);

@@ -360,8 +360,10 @@ test('presents the capture without marking when there is no reliable frame', () 
 
 test('positions the automatic highlight from capture metadata with an outside outline and a spotlight', () => {
   const html = renderHtmlReport(createAuditModel(withElementFrameMetadata(SAMPLE_AUDIT)));
-  // O alvo fica nítido no meio da imagem escurecida: um furo em `evenodd`, não um retângulo sobre o conteúdo.
-  assert.match(html, /<path class="evidence-spotlight" fill-rule="evenodd" d="M0 0H128V88H0ZM24 24H104V64H24Z" aria-hidden="true"><\/path>/u);
+  // O alvo fica nítido no meio da imagem escurecida: um furo em `evenodd`, não um retângulo sobre o
+  // conteúdo. O furo é o mesmo retângulo do contorno (3 px por fora da borda), e não a borda crua: a
+  // folga até o traço também fica clara, sem a faixa cinza dentro do próprio contorno.
+  assert.match(html, /<path class="evidence-spotlight" fill-rule="evenodd" d="M0 0H128V88H0ZM21 21H107V67H21Z" aria-hidden="true"><\/path>/u);
   // Contorno desenhado 3 px por fora da borda do elemento, com halo branco por baixo do traço colorido.
   assert.match(html, /<rect class="evidence-halo" x="21" y="21" width="86" height="46" rx="2" aria-hidden="true"><\/rect><rect class="evidence-highlight evidence-highlight--failed"[^>]*x="21" y="21" width="86" height="46" rx="2"/u);
   assert.match(html, /Contorno vermelho: elemento com falha\. O restante da imagem aparece escurecido só como contexto\./u);

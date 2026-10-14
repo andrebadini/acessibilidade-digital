@@ -275,7 +275,22 @@ test('uses a bounded deterministic spiral trail before declaring identical marke
 
   assert.equal(plan.counts.unresolvedOverlap, 0);
   assert.equal(new Set(placements.map(marker => `${marker.x}:${marker.y}`)).size, nodes.length);
-  assert.equal(placements.every(marker => marker.targetX === 150 && marker.targetY === 150), true);
+  // A ponta da linha-guia é a borda do contorno mais próxima do marcador — nunca o centro do elemento,
+  // que riscaria o conteúdo — e é o próprio marcador quando ele já encosta no contorno.
+  const rect = { x: 135, y: 135, width: 30, height: 30 };
+  let outside = 0;
+  for (const marker of placements) {
+    const borderX = Math.min(Math.max(marker.x, rect.x), rect.x + rect.width);
+    const borderY = Math.min(Math.max(marker.y, rect.y), rect.y + rect.height);
+    if (Math.hypot(borderX - marker.x, borderY - marker.y) < 6) {
+      assert.deepEqual([marker.leaderX, marker.leaderY], [marker.x, marker.y], 'marcador encostando no contorno');
+      continue;
+    }
+    outside += 1;
+    assert.deepEqual([marker.leaderX, marker.leaderY], [borderX, borderY]);
+    assert.notEqual(`${marker.leaderX}:${marker.leaderY}`, '150:150');
+  }
+  assert.ok(outside > 0, 'nenhum marcador ficou fora do contorno para a linha-guia');
 });
 
 test('places each number next to its own element, preferring the outer top-left corner', () => {
@@ -371,7 +386,7 @@ test('replaces containers by their annotated descendants instead of numbering th
   assert.ok(selected.limitations.includes('container-replaced-by-annotated-descendant'));
 });
 
-test('draws a thin haloed outline around each annotated element besides the leader line', async () => {
+test('draws a thin haloed outline around each annotated element', async () => {
   const strokes = [];
   class Canvas {
     constructor(width, height) { this.width = width; this.height = height; }
@@ -407,6 +422,54 @@ test('draws a thin haloed outline around each annotated element besides the lead
   assert.deepEqual(outlines.map(stroke => stroke.points), [rectangle, rectangle]);
   assert.deepEqual(outlines.map(stroke => stroke.strokeStyle), ['#fff', '#8b1e1e']);
   assert.equal(outlines[0].lineWidth > outlines[1].lineWidth, true, 'o halo branco é mais largo que o traço colorido');
+  // O marcador preferido é o canto superior-esquerdo do próprio elemento: encostado no contorno, ele
+  // dispensa a linha-guia.
+  assert.deepEqual(strokes.filter(stroke => stroke.points.length === 2), []);
+});
+
+test('ends the leader line on the outline and drops it when the badge already touches the outline', async () => {
+  const compose = async rect => {
+    const strokes = [];
+    class Canvas {
+      constructor(width, height) { this.width = width; this.height = height; }
+      getContext() {
+        const context = {
+          fillRect() {}, drawImage() {}, fill() {}, fillText() {},
+          measureText(value) { return { width: [...String(value)].length * 7 }; },
+          strokeStyle: '', lineWidth: 0,
+          points: [],
+          beginPath() { context.points = []; },
+          moveTo(x, y) { context.points.push([x, y]); },
+          lineTo(x, y) { context.points.push([x, y]); },
+          arc() {},
+          stroke() { strokes.push({ strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, points: context.points }); },
+        };
+        return context;
+      }
+      async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+    }
+    const artifact = await composeAnnouncementMap({
+      pageId: 'page-1', fullPageEvidence: await pristineSource(100, 100),
+      snapshot: snapshot([{ nodeId: 'edge', tagName: 'button', accessibleName: 'Ação na borda', axRole: 'button', rect }]),
+      layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+      runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
+    });
+    // Linha-guia = traço de dois pontos; o contorno tem cinco e o círculo do marcador, nenhum.
+    return { artifact, leaders: strokes.filter(stroke => stroke.points.length === 2) };
+  };
+
+  // O elemento não cabe até a margem do marcador: a ponta é a borda do contorno, não o centro.
+  const outside = await compose({ x: 90, y: 20, width: 6, height: 20 });
+  assert.equal(outside.artifact.status, 'complete');
+  assert.deepEqual(outside.leaders.map(stroke => stroke.points), [[[84, 20], [90, 20]]]);
+  assert.equal(outside.artifact.derivation.geometry.annotations[0].marker.leaderX, 90);
+  assert.equal(outside.artifact.derivation.geometry.annotations[0].marker.leaderY, 20);
+
+  // A quatro px do contorno, o marcador já encosta: a linha não é traçada e a ponta guardada é o
+  // próprio marcador.
+  const touching = await compose({ x: 88, y: 20, width: 8, height: 20 });
+  assert.deepEqual(touching.leaders, []);
+  assert.equal(touching.artifact.derivation.geometry.annotations[0].marker.leaderX, 84);
 });
 
 test('wraps raster legend by measured width and exposes bidi controls as visible tokens', () => {

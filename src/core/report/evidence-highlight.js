@@ -171,14 +171,47 @@ export function evidenceOutlineRect(part, width, height) {
   };
 }
 
+function overlaps(left, right) {
+  return left.x < right.x + right.width && right.x < left.x + left.width &&
+    left.y < right.y + right.height && right.y < left.y + left.height;
+}
+
 /**
- * Path do "spotlight": a imagem inteira, com cada parte do alvo como furo (`fill-rule: evenodd`).
- * O que fica fora do alvo é escurecido; o alvo permanece nítido.
+ * Furos do escurecimento: exatamente as caixas expandidas que o contorno desenha, fundidas quando se
+ * sobrepõem. O furo é o do contorno (e não a borda crua do elemento) porque a folga de
+ * `EVIDENCE_HIGHLIGHT_OUTLINE_OFFSET` px entre as duas ficaria escurecida — uma faixa cinza dentro do
+ * próprio contorno, justamente onde a legenda promete área nítida.
+ *
+ * A fusão é necessária pelo `fill-rule: evenodd` do path: dois furos sobrepostos se cancelariam e
+ * reabririam a faixa escura no pedaço em comum — que é o caso comum num inline de várias linhas, em que
+ * os retângulos expandidos de linhas vizinhas se sobrepõem. A caixa da união cobre um pouco mais que os
+ * dois contornos; a sobra sai do contexto escurecido, nunca do alvo.
+ */
+export function evidenceSpotlightHoles(highlight) {
+  const holes = [];
+  for (const part of highlight.parts) {
+    let current = evidenceOutlineRect(part, highlight.width, highlight.height);
+    let index = 0;
+    while (index < holes.length) {
+      if (!overlaps(current, holes[index])) { index += 1; continue; }
+      current = unionOf([current, holes[index]]);
+      holes.splice(index, 1);
+      index = 0;
+    }
+    holes.push(current);
+  }
+  return holes;
+}
+
+/**
+ * Path do "spotlight": a imagem inteira, com cada furo (`evidenceSpotlightHoles`) como buraco
+ * (`fill-rule: evenodd`). O que fica fora do alvo é escurecido; o alvo e a folga até o contorno
+ * permanecem nítidos.
  */
 export function evidenceSpotlightPath(highlight) {
   const number = value => (Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100));
   const rectangle = (x, y, width, height) => `M${number(x)} ${number(y)}H${number(x + width)}V${number(y + height)}H${number(x)}Z`;
-  const holes = highlight.parts.map(part => rectangle(part.x, part.y, part.width, part.height)).join('');
+  const holes = evidenceSpotlightHoles(highlight).map(rect => rectangle(rect.x, rect.y, rect.width, rect.height)).join('');
   return `${rectangle(0, 0, highlight.width, highlight.height)}${holes}`;
 }
 

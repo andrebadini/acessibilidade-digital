@@ -1,13 +1,15 @@
-# Capturas 1.1.57 — medição fresca do alvo, contorno por fora, miniaturas em 2× e mapa sem contornos no vazio
+# Capturas 1.1.57 — medição fresca do alvo, contorno por fora, miniaturas em 2×, mapa sem contornos no vazio e linha-guia na borda
 
 Data: 14/10/2026. Versão em trabalho: **1.1.57** (branch `wip/capturas`, sem commit, sem ZIP reconstruído; o
 `manifest.json` ainda declara **1.1.56** — a subida de versão e o `build:release` são o passo de release, ver
-§7.1). Chrome for Testing 152.0.7977.64, um Chrome por vez.
+§8.1). Chrome for Testing 152.0.7977.64, um Chrome por vez.
 Base do diagnóstico: `docs/qa/diagnostico-marcacao-1.1.57.md`, itens **P3** (precisão das capturas) e **P4**
 (mapa anotado).
 
 Seções **1 a 3**: a rodada P3/P4, já entregue no commit `42b654a`. Seções **4 e 5**: a rodada extra de
-nitidez das miniaturas e de alinhamento do mapa anotado, **não** commitada.
+nitidez das miniaturas e de alinhamento do mapa anotado, entregue no commit `92aac82`. Seção **6**: o
+polimento seguinte do furo do escurecimento e da ponta da linha-guia do mapa, **não** commitado (as seções 7 e 8
+cobrem as provas e as limitações das três rodadas, atualizadas a cada uma).
 
 > **Escopo.** Este documento cobre só o lado **capturas/relatório/mapa** do diagnóstico. Os itens **P0–P2**
 > (sinais numerados na página: cobertura, estabilidade e vínculo visual) são de outra tarefa paralela, que
@@ -55,7 +57,9 @@ relatório HTML (`html.js`) e pela página de revisão (`report-view.js`). O des
 do elemento — que invadia o conteúdo e cobria o vizinho — foi substituído por:
 
 - **spotlight**: a imagem inteira escurecida a 38 % com um furo por parte do alvo (`fill-rule="evenodd"`), de
-  modo que o elemento contornado continua nítido;
+  modo que o elemento contornado continua nítido. Nesta rodada o furo era a **borda crua** do elemento e o
+  contorno é desenhado 3 px por fora, então a folga entre os dois saía escurecida; a seção **6.1** alinha o
+  furo ao retângulo do contorno;
 - **contorno por fora**: cada parte é expandida em 3 px de imagem, com halo branco de 5 px **por baixo** do
   traço colorido de 2,5 px (`non-scaling-stroke`, `rx = 2`). Os halos de todas as partes são pintados antes de
   todos os traços, senão o halo de uma linha de um inline cobriria o traço da linha vizinha;
@@ -90,7 +94,8 @@ Em `src/browser/annotation-map.js`:
    na limitação nova `container-replaced-by-annotated-descendant` (rótulo no relatório e na apresentação para
    leitor de tela).
 3. **Contorno fino do alvo** — além da linha-guia, cada elemento anotado ganha um contorno de 2 px (escalado)
-   com halo branco, na mesma cor do marcador (`#8b1e1e`, ou `#6b4e00` quando o marcador ficou sobreposto).
+   com halo branco, na mesma cor do marcador (`#8b1e1e`, ou `#6b4e00` quando o marcador ficou sobreposto). A
+   ponta da linha-guia só passou a respeitar esse contorno na seção **6.2**.
 4. `ANNOTATION_MAP_VERSION` foi de `1.0.0` para **`1.1.0`** (a geometria desenhada mudou; o artefato derivado
    muda de hash).
 
@@ -169,7 +174,70 @@ anterior havia 2 caixas vazias e marcadores sobre o título e sobre a imagem). O
 linhas visíveis da lista, e a terceira — cujo `<h3>` e cujo botão estão abaixo do corte do rolador — não é
 anotada, embora o contêiner da linha apareça parcialmente.
 
-## 6. Provas executadas
+## 6. Polimento — o furo do escurecimento e a ponta da linha-guia
+
+Dois defeitos de desenho encontrados ao olhar as imagens da rodada anterior. Nenhuma mudança de captura, de
+privacidade ou de esquema de dados: só geometria desenhada e a regra que a valida.
+
+### 6.1 A faixa cinza dentro do próprio contorno
+
+O furo do escurecimento era a **borda crua** do elemento, e o contorno é desenhado 3 px por fora
+(`EVIDENCE_HIGHLIGHT_OUTLINE_OFFSET`). Resultado: a folga entre os dois saía escurecida — uma faixa cinza
+dentro de um contorno que a legenda apresenta como a área nítida.
+
+`evidenceSpotlightHoles` (`src/core/report/evidence-highlight.js`) passa a usar **exatamente o retângulo do
+contorno** (`evidenceOutlineRect`) — o mesmo objeto que o `evidence-halo` e o `evidence-highlight` desenham —
+e o alvo e a folga ficam inteiramente claros. Vale para os dois consumidores de uma vez: `html.js` e
+`report-view.js` já compartilhavam `evidenceHighlightShapes`.
+
+Os furos **se sobrepõem** num inline de várias linhas (as folgas de 3 px de linhas vizinhas se cruzam) e o
+path é `fill-rule: evenodd`: dois furos sobrepostos se cancelam e reabririam justamente o pedaço em comum. Por
+isso as partes sobrepostas são fundidas em caixa de união antes de virar path. O contorno continua com um
+retângulo por fragmento de linha; só o furo é fundido. Um teste percorre quatro geometrias e exige que **todo**
+retângulo de contorno esteja inteiramente contido num furo e que os furos sejam disjuntos entre si.
+
+### 6.2 A linha-guia riscando o conteúdo
+
+A linha ia do marcador ao **centro** do elemento e atravessava o texto na diagonal — o título “Serviços
+digitais para o cidadão” e o banner “Mutirão de vacinação” apareciam riscados. Agora ela termina no **ponto da
+borda do contorno mais próximo do marcador** e não é desenhada quando o marcador já encosta nesse contorno
+(menos de 6 px).
+
+| Peça | O que faz |
+| --- | --- |
+| `annotationLeaderPoint(rect, x, y, mínimo)` | ponto do retângulo mais próximo do marcador; dentro dele ou a menos do mínimo da borda, devolve o próprio marcador (linha de comprimento zero) |
+| `placeMarkers` | guarda a ponta calculada sobre a caixa do elemento em `leaderX/leaderY` (o `targetX/targetY` do centro saiu) |
+| `segmentLeaderPoint` | recalcula a ponta sobre o **contorno recortado do segmento** (`segmentOutlineRect`), em px de imagem, com o mínimo multiplicado pela escala — a linha termina sobre o traço que aparece na imagem |
+| `drawSegment` | só traça quando a ponta difere do marcador; sem contorno (`segmentOutlineRect` nulo) também não traça |
+| `validateAnnotationMapArtifact` | refaz a conta a partir de `sourceRect` e das coordenadas do marcador e **recusa** qualquer outra ponta — a regra antiga (ponta no centro) deixou de passar |
+| `ANNOTATION_MAP_VERSION` | `1.1.0` → **`1.2.0`**: a geometria desenhada mudou e a ponta entra no `geometrySnapshotHash` e no hash derivado |
+
+O marcador preferido é o canto superior-esquerdo do próprio elemento (regra da seção 3.1): nesse caso ele já
+encosta no contorno e o mapa fica **sem** linha-guia — o vínculo passa a ser o contorno com o número colado
+nele. Na fixture real, isso vale para **63 das 65** anotações; as **2** restantes (marcador empurrado pela
+anticolisão ou clampado na margem do segmento) têm linha, a maior delas com 45,5 px de documento, e as duas
+pontas medidas exatamente sobre a borda do retângulo do elemento. Isso muda a leitura das imagens anteriores,
+em que quase todo número tinha um risco diagonal até o centro do alvo.
+
+### 6.3 Leitura das imagens
+
+**Miniaturas (`07-evidencia-*.png`).** Amostragem de pixels na altura do meio da figura do botão de ícone
+(`07-evidencia-2.png`, o mesmo caminho nas duas rodadas): em `qa-out/capturas-v3`, logo por dentro do traço
+vermelho havia **10 px de cinza** (luminância 150) antes de chegar ao elemento — a faixa relatada; em
+`qa-out/capturas-v4` o traço é seguido direto de **9 px claros** (250) e só depois do conteúdo. Nas quatro
+direções, a amostra a 6 px por dentro do contorno dá 255 e a 6 px por fora dá 148–140 (escurecido): o alvo e a
+folga até o contorno ficam claros, o contexto continua escurecido.
+
+**Mapa (`08-mapa.png`).** O título “Serviços digitais para o cidadão”, o banner “Mutirão de vacinação” e a
+lista “Carteira de documentos” aparecem **sem nenhum risco por cima**; cada número fica no canto do seu
+elemento, com o contorno fino correspondente, e os marcadores 11 a 14 continuam presos às duas linhas visíveis
+do rolador — as linhas roladas para fora seguem sem marcação. Dos 65 marcadores, **63** ficaram sem linha-guia
+(o próprio canto do elemento já encosta no contorno) e as **2** com linha (29 e 60, empurrados do canto) têm a
+ponta medida exatamente sobre a borda do retângulo do elemento — `(76; 2023,3)` e `(60; 3530,1)` em px de
+documento, com 45,5 px e 12,6 px de comprimento —, sem entrar no conteúdo. Esses dois ficam nos segmentos 2 e
+4, fora do enquadramento desta captura (a imagem mostra o segmento 1 e o começo da legenda).
+
+## 7. Provas executadas
 
 **Testes de unidade** (todos os diretórios fora de `test/e2e`, em blocos, um bloco por vez):
 
@@ -178,7 +246,9 @@ anotada, embora o contêiner da linha apareça parcialmente.
 | `test/evidence` `test/browser` `test/report` `test/review` `test/core` `test/storage` `test/export` `test/privacy` (rodada extra, um comando) | **1227/1227**, 0 falhas |
 | `test/evidence` `test/browser` `test/report` `test/review` `test/core` `test/storage` `test/export` `test/legal` (rodada P3/P4) | **1185/1185**, 0 falhas |
 | `test/background` `test/highlight` `test/panel` `test/integration` `test/accessibility` `test/axe` `test/detection` | **2626/2627**, 0 falhas (1 pulado) |
-| `test/normative` `test/personas` `test/privacy` `test/reader` `test/rules` `test/ui` e arquivos da raiz | **512/513**, 1 falha esperada (ver §7) |
+| `test/normative` `test/personas` `test/privacy` `test/reader` `test/rules` `test/ui` e arquivos da raiz | **512/513**, 1 falha esperada (ver §8) |
+| `test/report` `test/review` `test/browser` `test/evidence` (§6, um comando) | **651/651**, 0 falhas |
+| `test/core` `test/export` `test/storage` `test/background` `test/integration` (§6, um comando) | **2667** testes, **2666/2666** executados, 0 falhas (1 pulado) |
 
 Arquivos novos: `test/browser/measure-element.test.js` (**9 testes**), `test/report/evidence-highlight.test.js`
 (**9 testes**) e `test/support/png-fixture.js` (gerador de PNG válido compartilhado, para não repetir o
@@ -189,10 +259,17 @@ codificador em cada suíte). Atualizados: `test/browser/annotation-map.test.js` 
 `test/panel/normative-presentation.test.js` (1). Os testes de relatório/revisão passaram a injetar `metadata` de
 quadro onde o objetivo é a marcação — e a afirmar a captura **sem marcação** onde não há quadro.
 
+**Seção 6** — atualizados: `test/report/evidence-highlight.test.js` (11, +2: uma sobre o furo ser o retângulo
+do contorno e outra que percorre quatro geometrias exigindo **todo** contorno contido num furo e furos
+disjuntos), `test/evidence/annotation-map-artifact.test.js` (15, +3: versão do algoritmo, ponta na borda e
+supressão), `test/browser/annotation-map.test.js` (33, +1, com a asserção da linha-guia reescrita) e as duas
+asserções de path do spotlight em `test/report/html.test.js` e `test/review/report-view.test.js`.
+
 **E2E com `AUDITA_E2E_CHROME` = Chrome for Testing 152.0.7977.64**, um Chrome por vez (`--test-concurrency=1`):
 
 | Arquivo | Resultado |
 | --- | --- |
+| `public-axe-map-mv3` + `report-print-layout` (§6, um comando) | 2/2 (mapa: 5 recibos de captura, 7 guias práticos, pacote de 4 downloads; impressão A4, 12 blocos explicativos, 2 páginas) |
 | `capture-visible-element` + `current-page-pixel-consent-mv3` (rodada extra) | 3/3 |
 | `current-page-pixel-consent-mv3` + `current-page-export-mv3` + `public-axe-map-mv3` + `report-print-layout` (rodada extra, um comando) | 5/5 (mapa: 5 recibos de captura, 7 guias práticos, pacote de 4 downloads; impressão A4, 12 blocos, 2 páginas) |
 | `url-audit-mv3` + `lazy-iframe-current-page-mv3` (rodada extra, um comando) | 3/3 — os outros percursos que também passam pelo mapa |
@@ -223,26 +300,37 @@ anotados.”; nenhum marcador cai sobre área sem conteúdo.
 
 **Conferência geométrica do mapa** (script de apoio, fora do repositório): o instantâneo real da fixture foi
 cruzado com os 7 segmentos derivados e cada anotação foi medida em tinta pixel a pixel — **0 de 65 sem tinta**
-(na rodada anterior, 2 caixas vazias: `(29, 574, 34, 23)` e `(443, 628, 28, 28)`).
+(na rodada anterior, 2 caixas vazias: `(29, 574, 34, 23)` e `(443, 628, 28, 28)`). Repetida na rodada de §6
+sobre a geometria 1.2.0: **0 de 65 sem tinta**, 20 anotações com tinta menos espalhada que a caixa (texto curto
+de uma caixa de linha inteira), como antes.
+
+**Seção 6 — QA visual de novo**: `node scripts/visual-qa.mjs --out qa-out/capturas-v4` (fixture local, modo
+evidência completa) — 21 capturas em `qa-out/capturas-v4/127.0.0.1-marcacao.html/`, **6 miniaturas de
+elemento**, 130 figuras de evidência, mapa `partial` com 7 segmentos e **65 de 75** elegíveis anotados
+(10 escondidos por rolagem interna, 0 sem geometria, 0 por limite, 0 sobreposições não resolvidas), os mesmos
+3 sinais de página resolvidos em 1 elemento cada e persistindo após 6 s com rolagem e ponteiro mexido, e
+**zero erros** registrados pelo roteiro. Leitura das imagens pedidas em §6.3.
 
 **Verify do projeto** — `AUDITA_VERIFY_SKIP_TESTS=1 node scripts/verify-project.mjs` (a fase de suíte é a que
 já foi rodada bloco a bloco acima): manifesto/CSP, axe 4.13.0 e seus hashes, identidade neutra, HTML/JSON/PDF
 da amostra, fixtures e varreduras de privacidade — **GREEN**.
 
-## 7. Limitações declaradas e pendências
+## 8. Limitações declaradas e pendências
 
 1. **ZIP de release não reconstruído (única falha da bateria).** `test/release-package.test.js` compara o
    pacote construído a partir desta árvore com o arquivo entregue em `release/`. O fonte mudou nesta branch e
    o ZIP ainda é o da 1.1.56 (`31c0c4…` × `7a7187…`). É o passo de release (subir a versão, rodar
    `npm run build:release` e registrar o digest novo) — deliberadamente **não** feito aqui, e também não faria
-   sentido antes de a tarefa paralela dos sinais fechar.
+   sentido antes de a tarefa paralela dos sinais fechar. Esse arquivo **não** foi reexecutado nas seções 4 e 5
+   nem na 6: o fonte só mudou mais desde então, e a falha continua até o passo de release.
 2. **Teto de 8 partes desenhadas.** Um inline com mais de 8 fragmentos de linha desenha os 8 primeiros; o
    recorte continua cobrindo **todos** os fragmentos medidos, então a caixa nunca corta o elemento.
 3. **Elementos em iframes não recebem miniatura própria** (`cantTell`, `reason: 'frame-context'`): o clip do
    documento de topo recortaria a região errada. O achado permanece com seletor, descrição e captura integral,
    e a limitação é declarada.
-4. **Mapa:** o número pode encostar no primeiro caractere do elemento (é o preço de ficar colado ao alvo).
-   O contorno fino e a linha-guia existem justamente para o vínculo não depender disso.
+4. **Mapa:** o número pode encostar no primeiro caractere do elemento (é o preço de ficar colado ao alvo). O
+   contorno fino existe justamente para o vínculo não depender disso; a linha-guia, depois de §6.2, só aparece
+   quando o marcador não encosta no contorno.
 5. **Capturas antigas sem `metadata` de quadro** aparecem sem marcação, com a legenda própria — antes elas
    ganhavam uma caixa derivada do tamanho do PNG decodificado, que podia estar deslocada em tela com escala de
    dispositivo.
@@ -254,9 +342,22 @@ da amostra, fixtures e varreduras de privacidade — **GREEN**.
    pouco maior que a área visível), e um descendente posicionado que escapa do recorte (`position: fixed`
    dentro de `overflow: hidden`) é tratado como recortado. Os dois desvios erram para o lado de **omitir de
    menos** e de **omitir demais**, respectivamente, e a omissão está sempre declarada na limitação do mapa.
-8. **`ANNOTATION_MAP_VERSION` continua 1.1.0.** A contagem `omittedClipped` e a limitação
-   `ancestor-clipped-elements-omitted` são aditivas e opcionais, como `metadata.pixelScale` e
-   `metadata.highlightParts` — mapas guardados antes delas seguem validando e o relatório mostra zero.
+8. **`ANNOTATION_MAP_VERSION` foi para 1.2.0 (§6.2) e a validação é de igualdade exata.** A regra do projeto
+   é a mesma que levou 1.0.0 → 1.1.0: quando a geometria **desenhada** muda, o artefato derivado muda de
+   `geometrySnapshotHash` e de hash, e a versão sobe junto. Um mapa gerado e guardado pela 1.1.0 **não** passa
+   mais na validação do artefato derivado; auditorias desse tipo precisam ser refeitas (o mapa é derivado da
+   captura integral e a captura continua válida). As adições das rodadas anteriores — `metadata.pixelScale`,
+   `metadata.highlightParts`, `counts.omittedClipped` e a limitação `ancestor-clipped-elements-omitted` —
+   continuam **opcionais** e seguem aceitas quando ausentes, sem mexer na versão.
+9. **A linha-guia desapareceu de quase todo o mapa.** Como o marcador preferido é o canto superior-esquerdo do
+   próprio elemento, ele já encosta no contorno: 63 das 65 anotações ficam sem linha. É o pedido explícito
+   (“se o marcador já encostar no contorno, não desenhe linha”) e não perde vínculo — o número está colado no
+   canto do elemento e o contorno fecha a leitura. Numa dessas, uma linha de até 6 px seria de qualquer forma
+   escondida pelo próprio círculo do marcador (raio de 14 px desenhado por cima).
+10. **Uma falha instável observada uma vez sob carga.** `test/browser/annotation-map.test.js` › “times out a
+   stalled bitmap allocation…” falhou na primeira execução do bloco maior (limite de tempo do `createImageBitmap`
+   com a máquina ocupada) e passou em três execuções isoladas seguidas e nas duas do bloco de §7. É o mesmo
+   teste sensível a tempo de rodadas anteriores; não foi alterado.
 9. **Fora deste escopo:** P0–P2 (cobertura, estabilidade e vínculo visual dos sinais na página) seguem com a
    tarefa paralela; o `ring`/anel do sinal individual ainda mede 0×0 no QA visual desta rodada
    (`ringVisible: false` no `summary.json`), o que é esperado enquanto aquela tarefa não fechar.

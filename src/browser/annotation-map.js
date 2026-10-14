@@ -2,10 +2,12 @@ import { projectElementAccessibility, isEditableAccessibilityNode } from '../cor
 import { buildSnapshotIndexes } from '../core/snapshot-schema.js';
 import {
   ANNOTATION_MAP_ALGORITHM,
+  ANNOTATION_MAP_LEADER_MIN_PX,
   ANNOTATION_MAP_LIMITATIONS,
   ANNOTATION_MAP_LIMITS,
   ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO,
   ANNOTATION_MAP_VERSION,
+  annotationLeaderPoint,
   hashAnnotationMapArtifact,
   hashAnnotationMapGeometry,
 } from '../core/evidence/annotation-map-artifact.js';
@@ -503,9 +505,13 @@ function placeMarkers(entries, width, height) {
     }).sort((left, right) => left.score - right.score || left.index - right.index);
     const selected = scored[0];
     if (selected.collisions > 0) unresolved += 1;
+    // Ponta da linha-guia: a borda do contorno mais próxima do marcador, e não o centro do elemento —
+    // a linha pelo centro riscava o conteúdo do alvo na diagonal. Se o marcador já encosta no contorno,
+    // a ponta é o próprio marcador e o desenho não traça linha nenhuma.
+    const leader = annotationLeaderPoint(entry.bounds, selected.x, selected.y);
     placements.push({
       number: entry.number, x: selected.x, y: selected.y,
-      targetX: entry.bounds.x + entry.bounds.width / 2, targetY: entry.bounds.y + entry.bounds.height / 2,
+      leaderX: leader.x, leaderY: leader.y,
       bounds: entry.bounds, overlapped: selected.collisions > 0,
     });
   }
@@ -782,6 +788,20 @@ function segmentOutlineRect(marker, geometry, dimensions) {
   return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
 }
 
+/**
+ * Ponta da linha-guia no próprio contorno desenhado, em px de imagem do segmento. O contorno aqui é o
+ * retângulo recortado pelo segmento (`segmentOutlineRect`), e não a caixa do elemento no documento: a
+ * linha termina exatamente sobre o traço que aparece na imagem. O mínimo de `annotationLeaderPoint` é
+ * multiplicado pela escala para continuar valendo em px de documento, como na geometria canônica.
+ */
+function segmentLeaderPoint(marker, geometry, dimensions) {
+  const rect = segmentOutlineRect(marker, geometry, dimensions);
+  if (!rect) return null;
+  const scale = Math.min(geometry.scaleX, geometry.scaleY);
+  return annotationLeaderPoint(rect, marker.x * geometry.scaleX, marker.y * geometry.scaleY,
+    ANNOTATION_MAP_LEADER_MIN_PX * scale);
+}
+
 function strokeRectPath(context, rect) {
   context.beginPath();
   context.moveTo(rect.x, rect.y);
@@ -829,11 +849,14 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
     const markerRadius = MARKER_RADIUS * scale;
     const x = marker.x * plan.geometry.scaleX;
     const y = marker.y * plan.geometry.scaleY;
-    const targetX = marker.targetX * plan.geometry.scaleX;
-    const targetY = marker.targetY * plan.geometry.scaleY;
     context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
     context.lineWidth = Math.max(2, Math.round(3 * scale));
-    context.beginPath(); context.moveTo(x, y); context.lineTo(targetX, targetY); context.stroke();
+    // Sem contorno (ou já encostando nele) a linha-guia não é traçada: a ponta devolvida é o próprio
+    // marcador, que só cobriria o alvo.
+    const leader = segmentLeaderPoint(marker, plan.geometry, dimensions);
+    if (leader && (leader.x !== x || leader.y !== y)) {
+      context.beginPath(); context.moveTo(x, y); context.lineTo(leader.x, leader.y); context.stroke();
+    }
     context.fillStyle = '#fff';
     context.beginPath(); context.arc(x, y, markerRadius, 0, Math.PI * 2); context.fill(); context.stroke();
     context.fillStyle = '#14212b';
@@ -940,8 +963,8 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
           x: placed.marker.x,
           y: placed.marker.y + placed.clipY,
           size: MARKER_RADIUS * 2,
-          leaderX: placed.marker.targetX,
-          leaderY: placed.marker.targetY + placed.clipY,
+          leaderX: placed.marker.leaderX,
+          leaderY: placed.marker.leaderY + placed.clipY,
         },
         segmentIndex: placed.segmentIndex,
       };

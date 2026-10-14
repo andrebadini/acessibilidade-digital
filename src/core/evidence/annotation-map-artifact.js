@@ -3,7 +3,22 @@ import { sha256Hex } from '../report/hash.js';
 import { decodePngDataUrl, pngDataUrlDecodedByteLength, validatePngRasterData } from './png.js';
 
 export const ANNOTATION_MAP_ALGORITHM = 'audita.annotation-map';
-export const ANNOTATION_MAP_VERSION = '1.1.0';
+export const ANNOTATION_MAP_VERSION = '1.2.0';
+
+/**
+ * Versões do algoritmo que esta revisão sabe **ler**, além de escrever. A 1.0.0 é a publicada na
+ * 1.1.56 e continua aceita porque há auditorias guardadas nela: recusá-la faria o relatório de quem já
+ * auditou parar de abrir. A 1.1.0 nunca foi publicada, então não tem regra de leitura — mapas novos
+ * saem sempre na versão atual.
+ */
+export const ANNOTATION_MAP_READABLE_VERSIONS = Object.freeze(['1.0.0', ANNOTATION_MAP_VERSION]);
+
+/**
+ * Comprimento mínimo da linha-guia, no mesmo sistema do retângulo recebido por `annotationLeaderPoint`
+ * (px de documento para a geometria canônica, px de imagem do segmento para o desenho). Abaixo disso o
+ * marcador já encosta no contorno: a linha não existiria como traço e só sujaria o alvo.
+ */
+export const ANNOTATION_MAP_LEADER_MIN_PX = 6;
 export const ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO = 1.3;
 export const ANNOTATION_MAP_LIMITS = Object.freeze({
   maxNodes: 200,
@@ -61,6 +76,51 @@ const REQUIRED_LIMITATIONS = Object.freeze([
   'source-capture-may-contain-personal-data',
 ]);
 
+function clampValue(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+/**
+ * Ponto de término da linha-guia, derivado do mesmo retângulo que o contorno desenha: o ponto da borda
+ * mais próximo do marcador. `rect` é o contorno (caixa do elemento, e não a caixa expandida do relatório);
+ * `x`/`y` são o centro do marcador.
+ *
+ * A ponta no centro do elemento riscava o conteúdo na diagonal (o título e o banner do alvo). Terminando
+ * na borda, a linha encosta no contorno. Quando o marcador já está dentro do retângulo ou a menos de
+ * `minimum` da borda, devolve o próprio marcador: linha de comprimento zero, que o desenho não traça — e
+ * é o caso do alvo pequeno, em que o marcador cobre o elemento inteiro e qualquer traço sairia debaixo dele.
+ */
+export function annotationLeaderPoint(rect, x, y, minimum = ANNOTATION_MAP_LEADER_MIN_PX) {
+  const pointX = clampValue(x, rect.x, rect.x + rect.width);
+  const pointY = clampValue(y, rect.y, rect.y + rect.height);
+  return Math.hypot(pointX - x, pointY - y) < minimum ? { x, y } : { x: pointX, y: pointY };
+}
+
+/** Linha-guia da 1.0.0: do marcador até o centro do alvo, como o mapa era desenhado na 1.1.56. */
+function centeredLeaderPoint(sourceRect) {
+  return { x: sourceRect.x + sourceRect.width / 2, y: sourceRect.y + sourceRect.height / 2 };
+}
+
+/**
+ * Regras de leitura por versão do algoritmo. A versão declarada no artefato escolhe o conjunto, e
+ * nenhuma das duas é afrouxada para aceitar a outra: um mapa 1.0.0 com a ponta da linha-guia na borda
+ * é tão inválido quanto um 1.2.0 com a ponta no centro. `omittedClipped` só existe a partir da 1.2.0,
+ * então na 1.0.0 o conjunto de contagens é fechado sem ela — e a contagem vale zero.
+ */
+const READ_RULES = new Map([
+  ['1.0.0', Object.freeze({ leader: (sourceRect) => centeredLeaderPoint(sourceRect), omittedClipped: false })],
+  [ANNOTATION_MAP_VERSION, Object.freeze({
+    leader: (sourceRect, marker) => annotationLeaderPoint(sourceRect, marker.x, marker.y),
+    omittedClipped: true,
+  })],
+]);
+
+function readRules(version) {
+  const rules = typeof version === 'string' ? READ_RULES.get(version) : undefined;
+  if (!rules) throw new TypeError(`Versão do algoritmo do mapa não reconhecida: ${String(version)}.`);
+  return rules;
+}
+
 function nearlyEqual(left, right) {
   return Math.abs(left - right) <= Math.max(1, Math.abs(left), Math.abs(right)) * 1e-9;
 }
@@ -70,8 +130,9 @@ function exactKeys(value, expected) {
     canonicalStringify(Object.keys(value).sort()) === canonicalStringify([...expected].sort());
 }
 
-/** Conjunto fechado com as chaves opcionais que o registro realmente traz. */
-function countKeys(counts) {
+/** Conjunto fechado com as chaves opcionais que o registro realmente traz, conforme a versão. */
+function countKeys(counts, rules) {
+  if (!rules.omittedClipped) return COUNT_KEYS;
   return [...COUNT_KEYS, ...OPTIONAL_COUNT_KEYS.filter(key => counts?.[key] !== undefined)];
 }
 
@@ -107,7 +168,8 @@ function validateSize(value, label, { integer = false } = {}) {
   }
 }
 
-function validateGeometry(geometry, { imageSegmentCount = null } = {}) {
+function validateGeometry(geometry, { imageSegmentCount = null, version = ANNOTATION_MAP_VERSION } = {}) {
+  const rules = readRules(version);
   if (!exactKeys(geometry, GEOMETRY_KEYS) || geometry.coordinateSpace !== 'document-css-px') {
     throw new TypeError('Geometria canônica do mapa inválida.');
   }
@@ -137,22 +199,29 @@ function validateGeometry(geometry, { imageSegmentCount = null } = {}) {
       throw new TypeError(`Marcador geométrico ${number} inválido.`);
     }
     const { sourceRect, marker } = annotation;
+    const leader = rules.leader(sourceRect, marker);
     const within = (value, maximum) => value >= 0 && value <= maximum;
     if (!within(sourceRect.x, geometry.sourceCssSize.width) || !within(sourceRect.y, geometry.sourceCssSize.height) ||
       sourceRect.x + sourceRect.width > geometry.sourceCssSize.width || sourceRect.y + sourceRect.height > geometry.sourceCssSize.height ||
       !within(marker.x, geometry.sourceCssSize.width) || !within(marker.y, geometry.sourceCssSize.height) ||
-      !nearlyEqual(marker.leaderX, sourceRect.x + sourceRect.width / 2) ||
-      !nearlyEqual(marker.leaderY, sourceRect.y + sourceRect.height / 2)) {
+      !nearlyEqual(marker.leaderX, leader.x) || !nearlyEqual(marker.leaderY, leader.y)) {
       throw new TypeError(`Bounds da anotação geométrica ${number} inválidos.`);
     }
   }
   return geometry;
 }
 
-export async function hashAnnotationMapGeometry(geometry) {
-  return sha256Hex(canonicalStringify(validateGeometry(geometry)));
+export async function hashAnnotationMapGeometry(geometry, { version = ANNOTATION_MAP_VERSION } = {}) {
+  return sha256Hex(canonicalStringify(validateGeometry(geometry, { version })));
 }
 
+/**
+ * Valida um mapa guardado pelas regras da versão que ele próprio declara.
+ *
+ * A revisão escreve sempre `ANNOTATION_MAP_VERSION`, mas lê `ANNOTATION_MAP_READABLE_VERSIONS`: o mapa
+ * da 1.1.56 (1.0.0) desenhava a linha-guia até o centro do alvo e não conhecia `counts.omittedClipped`.
+ * Sem isso, abrir uma auditoria salva por aquela versão falharia na validação e o relatório não sairia.
+ */
 export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {}) {
   const pixelsOmitted = artifact?.pixelState === 'omitted-budget';
   if (!exactKeys(artifact, pixelsOmitted ? OMITTED_MAP_KEYS : MAP_KEYS) ||
@@ -167,9 +236,14 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
   if (!exactKeys(artifact.derivation, DERIVATION_KEYS) ||
     artifact.derivation.type !== 'annotated-announcement-map' ||
     artifact.derivation.algorithm !== ANNOTATION_MAP_ALGORITHM ||
-    artifact.derivation.version !== ANNOTATION_MAP_VERSION ||
     artifact.derivation.sourceEvidenceId !== artifact.fullPageEvidenceId ||
     !SHA256.test(artifact.derivation.sourceHash) || !SHA256.test(artifact.derivation.geometrySnapshotHash)) {
+    throw new TypeError('Derivação do mapa inválida.');
+  }
+  let rules;
+  try {
+    rules = readRules(artifact.derivation.version);
+  } catch {
     throw new TypeError('Derivação do mapa inválida.');
   }
   if (sourceArtifact) {
@@ -188,7 +262,7 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
   const imageSegmentCount = artifact.segments.findIndex(segment => segment.role === 'legend-continuation') === -1
     ? artifact.segments.length
     : artifact.segments.findIndex(segment => segment.role === 'legend-continuation');
-  validateGeometry(artifact.derivation.geometry, { imageSegmentCount });
+  validateGeometry(artifact.derivation.geometry, { imageSegmentCount, version: artifact.derivation.version });
   const segmentIds = new Set();
   let declaredDerivedBytes = 0;
   for (const segment of artifact.segments) {
@@ -293,7 +367,7 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
     }
   }
   const omittedClipped = artifact.counts?.omittedClipped ?? 0;
-  const allowedCountKeys = countKeys(artifact.counts);
+  const allowedCountKeys = countKeys(artifact.counts, rules);
   if (!exactKeys(artifact.counts, allowedCountKeys) ||
     !allowedCountKeys.every(key => Number.isSafeInteger(artifact.counts[key]) && artifact.counts[key] >= 0) ||
     artifact.counts.annotated !== artifact.legend.length ||
@@ -360,7 +434,7 @@ export async function hashAnnotationMapArtifact(artifact, { sourceArtifact } = {
       throw new TypeError('PNG, dimensões ou hash da origem pristine do mapa são inválidos.');
     }
   }
-  const geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry);
+  const geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry, { version: artifact.derivation.version });
   if (geometrySnapshotHash !== artifact.derivation.geometrySnapshotHash) throw new TypeError('Hash da geometria do mapa inválido.');
   const segments = [];
   for (const segment of artifact.segments) {

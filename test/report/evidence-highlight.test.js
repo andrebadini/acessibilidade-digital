@@ -16,6 +16,7 @@ import {
   evidenceOutlineRect,
   evidencePixelScale,
   evidenceRasterMatchesCapture,
+  evidenceSpotlightHoles,
   evidenceSpotlightPath,
 } from '../../src/core/report/evidence-highlight.js';
 import { EVIDENCE_TREATMENTS_V1 } from '../../src/core/report/evidence-treatment.js';
@@ -124,14 +125,41 @@ test('expands the outline outside the element and never past the image edges', (
     { x: 0, y: 0, width: 14, height: 14 });
 });
 
-test('darkens everything except the target, leaving one hole per drawn part', () => {
+test('darkens everything except the outline, so no grey band is left inside the frame', () => {
   const highlight = evidenceHighlight(elementEvidence({
     width: 128, height: 88,
     highlightParts: [{ x: 24, y: 12, width: 80, height: 20 }, { x: 24, y: 36, width: 40, height: 20 }],
   }));
-  assert.equal(evidenceSpotlightPath(highlight),
-    'M0 0H128V88H0ZM24 12H104V32H24ZM24 36H64V56H24Z');
+  // Os dois contornos expandidos se sobrepõem (y 33..35): o furo é a união, não dois furos que o
+  // `evenodd` cancelaria no pedaço em comum.
+  assert.equal(evidenceSpotlightPath(highlight), 'M0 0H128V88H0ZM21 9H107V59H21Z');
   assert.equal(EVIDENCE_SPOTLIGHT_OPACITY, 0.38);
+});
+
+test('leaves every drawn outline completely clear, including the gap up to its own edge', () => {
+  const frames = [
+    { width: 128, height: 88, highlightParts: [{ x: 24, y: 12, width: 80, height: 20 }, { x: 24, y: 36, width: 40, height: 20 }] },
+    { width: 128, height: 88, highlightParts: [{ x: 24, y: 12, width: 80, height: 20 }, { x: 24, y: 30, width: 40, height: 20 }] },
+    { width: 128, height: 88, highlightBox: { x: 0, y: 0, width: 128, height: 88 } },
+    { width: 128, height: 88, highlightParts: [{ x: 4, y: 40, width: 20, height: 20 }, { x: 100, y: 4, width: 24, height: 24 }] },
+  ];
+  for (const frame of frames) {
+    const highlight = evidenceHighlight(elementEvidence(frame));
+    const holes = evidenceSpotlightHoles(highlight);
+    for (const part of highlight.parts) {
+      const outline = evidenceOutlineRect(part, highlight.width, highlight.height);
+      const covering = holes.filter(hole => hole.x <= outline.x && hole.y <= outline.y &&
+        hole.x + hole.width >= outline.x + outline.width && hole.y + hole.height >= outline.y + outline.height);
+      assert.equal(covering.length, 1, `contorno ${JSON.stringify(outline)} fora dos furos ${JSON.stringify(holes)}`);
+    }
+    // Furos disjuntos: sobrepostos, o `evenodd` cancelaria o pedaço em comum e a faixa cinza voltaria.
+    for (const [index, hole] of holes.entries()) {
+      for (const other of holes.slice(index + 1)) {
+        assert.ok(hole.x >= other.x + other.width || other.x >= hole.x + hole.width ||
+          hole.y >= other.y + other.height || other.y >= hole.y + hole.height);
+      }
+    }
+  }
 });
 
 test('paints every white halo before any coloured stroke so neighbouring lines do not cover each other', () => {
