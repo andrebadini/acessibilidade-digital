@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.1.57
+# Instruções de teste — Audita Acessibilidade 1.1.58
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.57.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
+1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.58.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
@@ -27,6 +27,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 10. No relatório, use **Imprimir resumo / salvar PDF** e escolha **Salvar como PDF** no diálogo. O resumo é uma edição executiva
     (totais, limitações, matriz ABNT e metodologia) e **não substitui** o relatório completo; confirme que ele identifica a mesma auditoria e revisão.
 11. Na aba do relatório, informe um nome em **Nome da pessoa avaliadora** e abra a seção **Revisão guiada**. Abra um cartão da **Parte 1 — Requisitos**: ele mostra o elemento em palavras, uma pergunta simples e **Como verificar**. Use **Mostrar na página** para destacar o elemento na aba auditada. Num cartão de ampliação, use **Ampliar para 200%** e depois **Voltar ao normal**; confira que o zoom anterior da aba volta. Responda **Sim**, **Não**, **Não consegui verificar** ou **Não existe nesta página**; ao responder **Não**, a descrição da constatação é obrigatória e vem com um rascunho editável. Use **Rever resposta** para trocar uma resposta e confirme que a anterior fica no histórico. Depois selecione **Gerar relatório atualizado**.
+    No cartão do item 5.1.13 (teclado), confira o **mapa do teclado** da página: caixas azuis numeradas nas paradas do Tab e caixas laranja tracejadas nos itens que parecem clicáveis mas o Tab não alcança. Escolha **Sim, falta caixa em algum item**: a descrição passa a ser obrigatória e entra no texto para citação.
 12. Abra o **Quadro de constatações**: ele resume os requisitos da ABNT NBR 17225:2025 como não atendidos, atendidos, não aplicáveis e sem conclusão, com frases para citação. Use **Copiar texto para citação** num item não atendido.
 13. Confirme os quatro downloads: HTML, PDF, CSV e JSON-LD/EARL. O quadro de constatações também aparece no HTML e no PDF.
 14. Confira que as molduras vermelha e âmbar são derivações visuais e que os PNGs originais e hashes permanecem separados.
