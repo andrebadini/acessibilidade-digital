@@ -361,13 +361,6 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
     return { element };
   }
 
-  function resolveTarget(target) {
-    const resolution = resolveElement(target);
-    if (resolution.reason) return resolution;
-    const reason = renderedReason(resolution.element);
-    return reason ? { reason } : { element: resolution.element };
-  }
-
   const visual = Object.freeze({
     failed: Object.freeze({ symbol: '×', phrase: 'falha registrada na auditoria', color: '#8b1e1e' }),
     alert: Object.freeze({ symbol: '!', phrase: 'alerta registrado na auditoria', color: '#8a5a00' }),
@@ -384,6 +377,10 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
   const LABEL_HEIGHT_SELECTED = 24;
   const HOVER_BORDER = 3;
   const MAX_ANCESTORS = 32;
+  const MAX_FRAGMENTS = 8;
+  const LABEL_STEP = 4;
+  // Above this area an obstacle is a container (a section, a card): a label may rest on it.
+  const SMALL_OBSTACLE_AREA = 60000;
   const CHECK_INTERVAL_MS = 100;
   const REPOSITION_INTERVAL_MS = 400;
 
@@ -420,8 +417,16 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
   function installSession(install) {
     const response = { ok: true, locatedMarkerIds: [], unlocated: [] };
     const resolvedRows = [];
+    // An element that exists but is hidden right now (a carousel slide, a closed accordion) still
+    // gets its signal: it stays hidden and appears as soon as the element is rendered. Only an
+    // element that cannot be found, or not found unambiguously, is reported as unlocated.
     for (const target of install.targets) {
-      const resolution = resolveTarget(target);
+      let resolution = resolveElement(target);
+      if (!resolution.reason) {
+        // Hidden is fine; detached or inside another root (shadow tree, other document) is not.
+        const reason = renderedReason(resolution.element);
+        if (reason === 'unsupported-context' || resolution.element.isConnected === false) resolution = { reason };
+      }
       if (resolution.reason) response.unlocated.push({ markerId: target.markerId, reason: resolution.reason });
       else {
         response.locatedMarkerIds.push(target.markerId);
@@ -578,10 +583,35 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       }
     }
 
-    function visibleBox(element, cache) {
-      let box;
+    // An inline element that wraps (a long link in a paragraph) gets one contour per line fragment;
+    // its bounding box would also enclose the neighbouring words of the first and last lines.
+    function rawRects(element) {
+      const rects = [];
+      try {
+        const display = environment.getComputedStyle(element)?.display ?? '';
+        if (display === 'inline' && typeof element.getClientRects === 'function') {
+          const list = element.getClientRects();
+          for (let index = 0; index < (list?.length ?? 0) && rects.length < MAX_FRAGMENTS; index += 1) {
+            const rect = list[index];
+            if (rect && [rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) &&
+              rect.width > 0 && rect.height > 0) rects.push(rect);
+          }
+        }
+      } catch {
+        rects.length = 0;
+      }
+      if (rects.length > 1) return rects;
       try {
         const rect = element.getBoundingClientRect();
+        return rect ? [rect] : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function visibleBox(element, cache, rect) {
+      let box;
+      try {
         if (!rect || ![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)) return null;
         box = { left: rect.left, top: rect.top, right: rect.left + rect.width, bottom: rect.top + rect.height };
       } catch {
@@ -609,124 +639,223 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       return { left: box.left, top: box.top, width: box.right - box.left, height: box.bottom - box.top };
     }
 
-    function labelWidth(button) {
-      try {
-        const measured = Number(button.offsetWidth);
-        if (Number.isFinite(measured) && measured >= 16 && measured <= 320) return measured;
-      } catch {}
+    // Width from the text itself, never from the box we sized on the previous pass (that fed back
+    // and wrapped "1 × (4)" onto two lines). Canvas metrics when available, a safe estimate otherwise.
+    const widthCache = new Map();
+    let measureContext;
+    function labelWidth(button, selected) {
       const text = typeof button.textContent === 'string' ? button.textContent : '';
-      return Math.min(320, Math.max(28, 12 + (text.length * 8)));
+      const font = `700 ${selected ? 14 : 12}px system-ui, sans-serif`;
+      const key = `${font}\u0000${text}`;
+      if (widthCache.has(key)) return widthCache.get(key);
+      let width = null;
+      try {
+        if (measureContext === undefined) {
+          const canvas = environment.document.createElement('canvas');
+          measureContext = typeof canvas?.getContext === 'function' ? canvas.getContext('2d') : null;
+        }
+        if (measureContext && typeof measureContext.measureText === 'function') {
+          measureContext.font = font;
+          const measured = Number(measureContext.measureText(text)?.width);
+          if (Number.isFinite(measured) && measured > 0) width = Math.ceil(measured) + 16;
+        }
+      } catch {
+        measureContext = null;
+      }
+      if (width === null) width = 12 + (text.length * (selected ? 9 : 8));
+      width = Math.min(320, Math.max(28, width));
+      widthCache.set(key, width);
+      return width;
+    }
+
+    function distanceBetween(a, b) {
+      const dx = Math.max(0, a.left - b.right, b.left - a.right);
+      const dy = Math.max(0, a.top - b.bottom, b.top - a.bottom);
+      return Math.hypot(dx, dy);
     }
 
     // The label is a tab glued to the contour: bottom edge on the contour's top edge, flipped under
-    // it when there is no room above, slid along the contour's edges before overlapping another one.
-    function placeLabel(ring, width, height, placed) {
+    // it when there is no room above. When every glued spot would hide another label or another
+    // marked element, it moves to the nearest free row above or below and a thin leader joins it to
+    // its contour. A label never buries another label.
+    function placeLabel(ring, width, height, placed, obstacles) {
       const viewport = viewportRect();
       const bounds = viewport ?? { left: 0, top: 0, right: ring.left + ring.width, bottom: ring.top + ring.height };
       const clampLeft = value => Math.min(Math.max(value, bounds.left), Math.max(bounds.left, bounds.right - width));
+      const ringBox = { left: ring.left, top: ring.top, right: ring.left + ring.width, bottom: ring.top + ring.height };
       const aboveTop = ring.top - height;
       const belowTop = ring.top + ring.height;
-      const fitsAbove = aboveTop >= bounds.top;
-      const startsAboveViewport = ring.top < bounds.top;
-      const fitsBelow = belowTop + height <= bounds.bottom;
+      const startsAboveViewport = ring.top - height < bounds.top;
       const candidates = [];
       const seen = new Set();
       const push = (left, top, side) => {
+        if (top < bounds.top || top + height > bounds.bottom) return;
         const key = `${Math.round(left)}:${Math.round(top)}`;
         if (seen.has(key)) return;
         seen.add(key);
         candidates.push({ left, top, side });
       };
-      if (fitsAbove) {
-        push(clampLeft(ring.left), aboveTop, 'above');
-        push(clampLeft((ring.left + ring.width) - width), aboveTop, 'above');
-      }
+      push(clampLeft(ring.left), aboveTop, 'above');
+      push(clampLeft((ring.left + ring.width) - width), aboveTop, 'above');
       if (startsAboveViewport) {
         push(clampLeft(ring.left), bounds.top, 'above');
         push(clampLeft((ring.left + ring.width) - width), bounds.top, 'above');
-        push(clampLeft(ring.left + ((ring.width - width) / 2)), bounds.top, 'above');
       }
-      if (fitsBelow) {
-        push(clampLeft(ring.left), belowTop, 'below');
-        push(clampLeft((ring.left + ring.width) - width), belowTop, 'below');
-      }
+      push(clampLeft(ring.left), belowTop, 'below');
+      push(clampLeft((ring.left + ring.width) - width), belowTop, 'below');
       for (const ratio of [0.25, 0.5, 0.75]) {
         const centered = clampLeft(ring.left + (ring.width * ratio) - (width / 2));
-        push(centered, Math.max(bounds.top, aboveTop), 'above');
-        if (fitsBelow) push(centered, belowTop, 'below');
+        push(centered, aboveTop, 'above');
+        push(centered, belowTop, 'below');
       }
-      push(clampLeft(ring.left + 3), Math.max(bounds.top, ring.top + 3), 'inside');
+      for (let row = 1; row <= 3; row += 1) {
+        for (const column of [0, 1, -1, 2, -2, 3, -3]) {
+          const left = clampLeft(ring.left + (column * (width + LABEL_STEP)));
+          push(left, aboveTop - (row * (height + LABEL_STEP)), 'detached');
+          push(left, belowTop + (row * (height + LABEL_STEP)), 'detached');
+        }
+      }
+      push(clampLeft(ring.left + 3), Math.min(Math.max(bounds.top, ring.top + 3), bounds.bottom - height), 'inside');
+      if (candidates.length === 0) {
+        candidates.push({ left: clampLeft(ring.left), top: Math.min(Math.max(bounds.top, aboveTop), bounds.bottom - height), side: 'inside' });
+      }
 
       let chosen = null;
-      let bestOverlap = Infinity;
+      let bestCost = Infinity;
       for (const candidate of candidates) {
         const rect = { left: candidate.left, top: candidate.top,
           right: candidate.left + width, bottom: candidate.top + height };
-        let overlap = 0;
+        let cost = distanceBetween(rect, ringBox);
         let buried = false;
         for (const other of placed) {
           const area = overlapArea(rect, other);
           if (area === 0) continue;
-          overlap += area;
+          cost += area * 1000;
           if (covers(other, rect) || covers(rect, other)) buried = true;
         }
-        if (overlap === 0) { chosen = { ...candidate, rect }; break; }
-        if (!buried && overlap < bestOverlap) { bestOverlap = overlap; chosen = { ...candidate, rect }; }
-      }
-      if (!chosen) {
-        const fallback = candidates[0];
-        chosen = { ...fallback, rect: { left: fallback.left, top: fallback.top,
-          right: fallback.left + width, bottom: fallback.top + height } };
+        for (const obstacle of obstacles) {
+          const area = overlapArea(rect, obstacle);
+          if (area === 0) continue;
+          const obstacleArea = (obstacle.right - obstacle.left) * (obstacle.bottom - obstacle.top);
+          cost += area * (obstacleArea <= SMALL_OBSTACLE_AREA ? 40 : 0.05);
+        }
+        // Never sit on the marked element itself unless nothing else fits (a contour taller than the
+        // viewport keeps its label pinned to the top of the visible band).
+        cost += overlapArea(rect, ringBox) * 40;
+        if (candidate.side === 'inside') cost += width * height * 20;
+        if (buried) cost += 1e12;
+        if (cost < bestCost) { bestCost = cost; chosen = { ...candidate, rect }; }
       }
       placed.push(chosen.rect);
       return chosen;
     }
 
+    function leaderBetween(label, ringBox) {
+      const labelCenterX = (label.left + label.right) / 2;
+      const labelCenterY = (label.top + label.bottom) / 2;
+      const toX = Math.min(Math.max(labelCenterX, ringBox.left), ringBox.right);
+      const toY = Math.min(Math.max(labelCenterY, ringBox.top), ringBox.bottom);
+      const fromX = Math.min(Math.max(toX, label.left), label.right);
+      const fromY = Math.min(Math.max(toY, label.top), label.bottom);
+      const length = Math.hypot(toX - fromX, toY - fromY);
+      return length < 2 ? null : { x: fromX, y: fromY, length, angle: Math.atan2(toY - fromY, toX - fromX) };
+    }
+
     function hideGroup(group) {
       group.ring.style.display = 'none';
       group.button.style.display = 'none';
+      group.leader.style.display = 'none';
+      for (const extra of group.extraRings) extra.style.display = 'none';
     }
 
-    function positionGroup(group, cache, placed) {
-      if (group.visible.length === 0) return false;
+    function ringElement(group, index) {
+      if (index === 0) return group.ring;
+      while (group.extraRings.length < index) {
+        const extra = environment.document.createElement('div');
+        extra.setAttribute('class', 'audita-ring');
+        extra.style.all = 'initial';
+        extra.style.position = 'fixed';
+        extra.style.boxSizing = 'border-box';
+        extra.style.pointerEvents = 'none';
+        extra.style.borderStyle = 'solid';
+        extra.style.zIndex = '2147483646';
+        group.container.appendChild(extra);
+        group.extraRings.push(extra);
+      }
+      return group.extraRings[index - 1];
+    }
+
+    // First pass: contours. Returns the contour boxes so the label pass can avoid them.
+    function layoutGroup(group, cache) {
+      if (group.visible.length === 0) return null;
       if (renderedReason(group.element) !== null) {
         hideGroup(group);
-        return false;
+        return null;
       }
-      const box = visibleBox(group.element, cache);
-      if (!box) {
+      const boxes = [];
+      for (const rect of rawRects(group.element)) {
+        const box = visibleBox(group.element, cache, rect);
+        if (box) boxes.push(box);
+      }
+      if (boxes.length === 0) {
         hideGroup(group);
-        return false;
+        return null;
       }
       const selected = isSelected(group);
       const hovered = group.hovered === true && !selected;
       const border = selected ? SELECTED_BORDER : hovered ? HOVER_BORDER : BORDER;
-      const ringLeft = box.left - GAP - border;
-      const ringTop = box.top - GAP - border;
-      const ringWidth = box.width + (2 * (GAP + border));
-      const ringHeight = box.height + (2 * (GAP + border));
-      const ring = group.ring;
-      ring.style.left = `${ringLeft}px`;
-      ring.style.top = `${ringTop}px`;
-      ring.style.width = `${ringWidth}px`;
-      ring.style.height = `${ringHeight}px`;
-      ring.style.borderWidth = `${border}px`;
-      ring.style.borderRadius = '3px';
-      ring.style.borderColor = group.color;
-      ring.style.boxShadow = ringShadow(selected, hovered, group.color);
-      ring.style.display = 'block';
+      const rings = boxes.map((box, index) => {
+        const ring = {
+          left: box.left - GAP - border, top: box.top - GAP - border,
+          width: box.width + (2 * (GAP + border)), height: box.height + (2 * (GAP + border)),
+        };
+        const element = ringElement(group, index);
+        element.style.left = `${ring.left}px`;
+        element.style.top = `${ring.top}px`;
+        element.style.width = `${ring.width}px`;
+        element.style.height = `${ring.height}px`;
+        element.style.borderWidth = `${border}px`;
+        element.style.borderRadius = '3px';
+        element.style.borderColor = group.color;
+        element.style.boxShadow = ringShadow(selected, hovered, group.color);
+        element.style.opacity = group.faded ? '0.6' : '1';
+        element.style.display = 'block';
+        return ring;
+      });
+      // Extra fragments from an earlier pass (the element re-wrapped onto fewer lines) are hidden.
+      for (let index = Math.max(0, rings.length - 1); index < group.extraRings.length; index += 1) {
+        group.extraRings[index].style.display = 'none';
+      }
+      return { group, selected, rings,
+        boxes: rings.map(ring => ({ left: ring.left, top: ring.top, right: ring.left + ring.width, bottom: ring.top + ring.height })) };
+    }
 
+    // Second pass: the label of each contour, glued to the first line fragment when possible.
+    function placeGroupLabel(layout, obstacles, placed) {
+      const { group, selected, rings, boxes } = layout;
       const label = group.button;
-      const width = labelWidth(label);
+      const width = labelWidth(label, selected);
       const height = selected ? LABEL_HEIGHT_SELECTED : LABEL_HEIGHT;
-      const spot = placeLabel({ left: ringLeft, top: ringTop, width: ringWidth, height: ringHeight },
-        width, height, placed);
+      const others = obstacles.filter(entry => entry.owner !== group);
+      const spot = placeLabel(rings[0], width, height, placed, others);
       label.style.width = `${width}px`;
       label.style.height = `${height}px`;
       label.style.left = `${spot.left}px`;
       label.style.top = `${spot.top}px`;
-      label.style.borderRadius = spot.side === 'below' ? '0 0 4px 4px' : '4px 4px 0 0';
+      label.style.borderRadius = spot.side === 'below' ? '0 0 4px 4px' : spot.side === 'above' ? '4px 4px 0 0' : '4px';
       label.style.display = 'flex';
+      const leader = spot.side === 'detached' ? leaderBetween(spot.rect, boxes[0]) : null;
+      if (leader) {
+        group.leader.style.left = `${leader.x}px`;
+        group.leader.style.top = `${leader.y}px`;
+        group.leader.style.width = `${leader.length}px`;
+        group.leader.style.transform = `rotate(${leader.angle}rad)`;
+        group.leader.style.borderTopColor = group.color;
+        group.leader.style.opacity = group.faded ? '0.6' : '1';
+        group.leader.style.display = 'block';
+      } else {
+        group.leader.style.display = 'none';
+      }
       return true;
     }
 
@@ -760,16 +889,20 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       group.classification = classification;
       group.color = treatment.color;
       const selected = isSelected(group);
+      // "3 ×" reads as "signal 3, failure"; the occurrence count goes in parentheses so it is never
+      // read as a multiplication ("3×2").
       group.button.textContent = visible.length > 1
-        ? `${group.number}${treatment.symbol}${visible.length}` : `${group.number}${treatment.symbol}`;
+        ? `${group.number} ${treatment.symbol} (${visible.length})` : `${group.number} ${treatment.symbol}`;
       group.button.style.background = treatment.color;
       group.button.style.borderColor = '#ffffff';
       group.button.style.color = '#ffffff';
       group.button.style.font = `700 ${selected ? 14 : 12}px/1 system-ui, sans-serif`;
       group.button.style.height = `${selected ? LABEL_HEIGHT_SELECTED : LABEL_HEIGHT}px`;
+      // Only the contour steps back when another signal is selected: a faded label would turn the
+      // white-on-colour text into a low-contrast pink.
       const faded = selectedId !== null && !selected;
-      group.button.style.opacity = faded ? '0.45' : '1';
-      group.ring.style.opacity = faded ? '0.45' : '1';
+      group.faded = faded;
+      group.button.style.opacity = '1';
       group.ring.style.borderColor = treatment.color;
       const occurrences = visible.length === 1 ? '1 ocorrência' : `${visible.length} ocorrências`;
       group.button.setAttribute('aria-label',
@@ -785,11 +918,18 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       }
       const cache = new Map();
       const placed = [];
+      const layouts = [];
       for (const group of groups) {
         repairGroup(group);
         updateGroup(group);
-        positionGroup(group, cache, placed);
+        const layout = layoutGroup(group, cache);
+        if (layout) layouts.push(layout);
       }
+      const obstacles = layouts.flatMap(layout => layout.boxes.map(box => ({ ...box, owner: layout.group })));
+      // The selected signal chooses first, then smaller contours (crowded icons) before large ones.
+      layouts.sort((left, right) => (Number(right.selected) - Number(left.selected)) ||
+        ((left.rings[0].width * left.rings[0].height) - (right.rings[0].width * right.rings[0].height)));
+      for (const layout of layouts) placeGroupLabel(layout, obstacles, placed);
       return true;
     }
 
@@ -894,6 +1034,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         '@media (prefers-reduced-motion: reduce){.audita-marker{animation:none !important}}',
         '@media (forced-colors: active){',
         '.audita-ring{border-color:CanvasText !important;box-shadow:none !important}',
+        '.audita-leader{border-top-color:CanvasText !important;box-shadow:none !important}',
         '.audita-marker{background:CanvasText !important;color:Canvas !important;',
         'border-color:Canvas !important;forced-color-adjust:none}',
         '}',
@@ -925,6 +1066,8 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
           button.style.justifyContent = 'center';
           button.style.boxSizing = 'border-box';
           button.style.padding = '0 6px';
+          button.style.whiteSpace = 'nowrap';
+          button.style.overflow = 'hidden';
           button.style.borderWidth = '1px';
           button.style.borderStyle = 'solid';
           button.style.borderColor = '#ffffff';
@@ -933,9 +1076,21 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
           button.style.cursor = 'pointer';
           button.style.pointerEvents = 'auto';
           button.style.zIndex = '2147483647';
+          const leader = environment.document.createElement('div');
+          leader.setAttribute('class', 'audita-leader');
+          leader.style.all = 'initial';
+          leader.style.position = 'fixed';
+          leader.style.height = '0';
+          leader.style.borderTopWidth = '2px';
+          leader.style.borderTopStyle = 'solid';
+          leader.style.boxShadow = '0 0 0 1px #ffffff';
+          leader.style.transformOrigin = '0 0';
+          leader.style.pointerEvents = 'none';
+          leader.style.display = 'none';
+          leader.style.zIndex = '2147483646';
           group = { element: row.element, firstTarget: row.target, number: row.target.number,
-            signals: [], visible: [], classification: 'passed', color: visual.passed.color,
-            hovered: false, container, ring, button, onClick: null, onEnter: null, onLeave: null };
+            signals: [], visible: [], classification: 'passed', color: visual.passed.color, faded: false,
+            hovered: false, container, ring, button, leader, extraRings: [], onClick: null, onEnter: null, onLeave: null };
           group.onClick = event => {
             try { event?.preventDefault?.(); } catch {}
             try { event?.stopPropagation?.(); } catch {}
@@ -943,15 +1098,18 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
             if (firstVisible) safelySend({ type: 'AUDITA_PAGE_MARKER_SELECTED',
               installationId: install.installationId, selectionId: firstVisible.selectionId });
           };
-          group.onEnter = () => { group.hovered = true; };
-          group.onLeave = () => { group.hovered = false; };
+          group.onEnter = () => { group.hovered = true; scheduleFrame(); };
+          group.onLeave = () => { group.hovered = false; scheduleFrame(); };
           button.addEventListener('click', group.onClick);
           button.addEventListener('mouseenter', group.onEnter);
           button.addEventListener('mouseleave', group.onLeave);
           button.addEventListener('focus', group.onEnter);
           button.addEventListener('blur', group.onLeave);
+          // Order is ring, label, then the optional pieces (leader, extra line fragments); z-index,
+          // not document order, keeps the label above them.
           container.appendChild(ring);
           container.appendChild(button);
+          container.appendChild(leader);
           shadow.appendChild(container);
           groupByElement.set(row.element, group);
           groups.push(group);

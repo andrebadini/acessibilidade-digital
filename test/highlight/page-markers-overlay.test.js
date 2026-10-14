@@ -172,7 +172,7 @@ test('the ceiling of 500 accepts a full payload and refuses one item more', () =
   const result = runAuditaPageMarkersCommand(install({ targets: targets(500) }), full.environment);
   assert.equal(result.ok, true);
   assert.equal(result.locatedMarkerIds.length, 500);
-  assert.equal(buttonForNumber(full, 1).textContent, '1×500');
+  assert.equal(buttonForNumber(full, 1).textContent, '1 × (500)');
   assert.deepEqual(runAuditaPageMarkersCommand(filter(Array.from({ length: 500 }, (_, index) => `s${index + 1}`)),
     full.environment), { ok: true });
   assert.deepEqual(runAuditaPageMarkersCommand(filter(Array.from({ length: 501 }, (_, index) => `s${index + 1}`)),
@@ -319,14 +319,14 @@ test('every located element keeps its own contour outside the element with a whi
   assert.equal(label.style.color, '#ffffff');
   assert.equal(label.style.borderColor, '#ffffff');
   assert.match(label.style.font, /700 12px/u);
-  assert.equal(label.textContent, '1×');
+  assert.equal(label.textContent, '1 ×');
 });
 
 test('the occurrence count only appears above one and the classification drives colour and symbol', () => {
   const fixture = createPageMarkersFixture();
   runAuditaPageMarkersCommand(install(), fixture.environment);
-  assert.equal(buttonForNumber(fixture, 1).textContent, '1×2');
-  assert.equal(buttonForNumber(fixture, 2).textContent, '2✓');
+  assert.equal(buttonForNumber(fixture, 1).textContent, '1 × (2)');
+  assert.equal(buttonForNumber(fixture, 2).textContent, '2 ✓');
   assert.equal(buttonForNumber(fixture, 1).style.background, '#8b1e1e');
   assert.equal(buttonForNumber(fixture, 2).style.background, '#1f6f43');
   assert.match(buttonForNumber(fixture, 1).getAttribute('aria-label'),
@@ -383,7 +383,7 @@ test('labels never fully cover each other and slide along the contour before ove
   }
 });
 
-test('a selection enlarges the contour and its label while the other signals fade', () => {
+test('a selection enlarges the contour and its label while the other contours step back', () => {
   const fixture = createPageMarkersFixture();
   runAuditaPageMarkersCommand(install(), fixture.environment);
   assert.deepEqual(runAuditaPageMarkersCommand(select('s1', false), fixture.environment), { ok: true });
@@ -392,8 +392,9 @@ test('a selection enlarges the contour and its label while the other signals fad
   assert.match(ringOf(group).style.boxShadow, /0 0 0 4px rgba\(139, 30, 30, 0\.35\)/u);
   assert.equal(labelOf(group).style.height, '24px');
   assert.match(labelOf(group).style.font, /700 14px/u);
-  assert.equal(ringOf(other).style.opacity, '0.45');
-  assert.equal(labelOf(other).style.opacity, '0.45');
+  // Only the contour steps back; the label keeps its solid colour so its text keeps its contrast.
+  assert.equal(ringOf(other).style.opacity, '0.6');
+  assert.equal(labelOf(other).style.opacity, '1');
   assert.equal(ringOf(group).style.opacity, '1');
 });
 
@@ -443,7 +444,7 @@ test('installs multiple isolated markers, groups duplicate DOM targets, and leav
   assert.equal(fixture.environment.hosts().length, 1);
   assert.equal(fixture.environment.markerButtons().length, 2);
   assert.match(buttonForNumber(fixture, 1).getAttribute('aria-label'), /Sinal 1: falha registrada na auditoria, 3 ocorrências\. Abrir no painel\./u);
-  assert.equal(buttonForNumber(fixture, 1).textContent, '1×3');
+  assert.equal(buttonForNumber(fixture, 1).textContent, '1 × (3)');
   assert.equal(fixture.document.activeElement, fixture.priorFocus);
   assert.strictEqual(fixture.document.getSelection(), beforeSelection);
   assert.deepEqual(fixture.first.attributes, beforeAttributes);
@@ -495,7 +496,7 @@ test('filter recomputes visible priority, count, label and click destination wit
 
   assert.deepEqual(runAuditaPageMarkersCommand(filter(['s3', 's2']), fixture.environment), { ok: true });
   const marker = buttonForNumber(fixture, 4);
-  assert.equal(marker.textContent, '4!2');
+  assert.equal(marker.textContent, '4 ! (2)');
   assert.equal(marker.style.background, '#8a5a00');
   assert.match(marker.getAttribute('aria-label'), /alerta registrado na auditoria, 2 ocorrências/u);
   marker.click();
@@ -512,7 +513,7 @@ test('filter recomputes visible priority, count, label and click destination wit
   });
   assert.equal(ringOf(fixture.environment.markerGroups()[0]).style.display, 'none');
   assert.deepEqual(runAuditaPageMarkersCommand(filter(['s1']), fixture.environment), { ok: true });
-  assert.equal(marker.textContent, '4×');
+  assert.equal(marker.textContent, '4 ×');
   assert.equal(ringOf(fixture.environment.markerGroups()[0]).style.display, 'block');
 });
 
@@ -533,7 +534,7 @@ test('selection ring stays on a visible target, and only explicit scroll moves i
   assert.deepEqual(fixture.environment.messages, []);
 });
 
-test('isolates missing, ambiguous, non-rendered and unsupported targets while keeping offscreen targets', () => {
+test('isolates missing, ambiguous, detached and unsupported targets while keeping hidden and offscreen targets', () => {
   const fixture = createPageMarkersFixture();
   const duplicate = new FixtureElement('button', { id: 'duplicate' }, fixture.document);
   const duplicate2 = new FixtureElement('button', { id: 'duplicate' }, fixture.document);
@@ -558,15 +559,25 @@ test('isolates missing, ambiguous, non-rendered and unsupported targets while ke
     { markerId: 'm6', number: 6, match: idMatch('section', 'offscreen'), signals: [{ selectionId: 's6', classification: 'passed' }] },
   ] }), fixture.environment);
 
-  assert.deepEqual(result, { ok: true, locatedMarkerIds: ['m6'], unlocated: [
+  // A hidden element (carousel slide, closed accordion) keeps a signal that waits hidden until the
+  // element is rendered; detached and foreign-root elements are still refused.
+  assert.deepEqual(result, { ok: true, locatedMarkerIds: ['m3', 'm6'], unlocated: [
     { markerId: 'm1', reason: 'not-found' },
     { markerId: 'm2', reason: 'ambiguous' },
-    { markerId: 'm3', reason: 'not-rendered' },
     { markerId: 'm4', reason: 'not-rendered' },
     { markerId: 'm5', reason: 'unsupported-context' },
   ] });
-  assert.equal(fixture.environment.markerButtons().length, 1);
-  assert.equal(ringOf(fixture.environment.markerGroups()[0]).style.display, 'none');
+  assert.equal(fixture.environment.markerButtons().length, 2);
+  for (const group of fixture.environment.markerGroups()) assert.equal(ringOf(group).style.display, 'none');
+  hidden.style.visibility = 'visible';
+  hidden.setRect({ left: 40, top: 300, width: 80, height: 30 });
+  fixture.environment.triggerMutations([{ target: hidden, type: 'attributes' }]);
+  fixture.environment.settle?.();
+  fixture.environment.flushFrames?.();
+  const revealed = fixture.environment.markerGroups()
+    .find(group => labelOf(group).getAttribute('aria-label').startsWith('Sinal 3:'));
+  assert.equal(ringOf(revealed).style.display, 'block');
+  assert.equal(labelOf(revealed).style.display, 'flex');
 });
 
 test('rejects malformed matches, unsafe tokens and mixed shapes before any DOM query', () => {

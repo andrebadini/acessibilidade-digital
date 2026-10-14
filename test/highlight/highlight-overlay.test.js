@@ -467,7 +467,7 @@ test('creates the required failure treatment without mutating or focusing the ta
   assert.equal(root.tabIndex, -1);
   assert.equal(root.children.length, 2);
   assert.deepEqual(root.children.map(child => child.tagName), ['SPAN', 'SPAN']);
-  assert.match(root.textContent, /^17×Falha confirmada$/u);
+  assert.match(root.textContent, /^×Falha confirmada$/u);
   assert.deepEqual(fixture.target.scrollCalls, [{ block: 'center', inline: 'nearest' }]);
   assert.equal(fixture.target.focusCalls, 0);
   assert.deepEqual(authorSnapshot(fixture.target), before);
@@ -492,7 +492,7 @@ test('creates the distinct manual-review treatment with only fixed local text', 
   assert.equal(root.style.borderWidth, '3px');
   assert.equal(root.style.borderStyle, 'dashed');
   assert.equal(root.style.borderColor, 'rgb(107, 78, 0)');
-  assert.match(root.textContent, /^5000\?Revisão humana necessária$/u);
+  assert.match(root.textContent, /^\?Revisão humana necessária$/u);
   assert.doesNotMatch(root.textContent, /action|primary|doc-main/iu);
 });
 
@@ -703,7 +703,7 @@ test('the tab rides the contour top-left, flips under it at the viewport edge an
   assert.deepEqual({ left: aboveMarker.style.left, top: aboveMarker.style.top },
     { left: '-3px', top: '-27px' });
   assert.deepEqual({ left: aboveLabel.style.left, top: aboveLabel.style.top },
-    { left: '32px', top: '-27px' });
+    { left: '24px', top: '-27px' });
   assert.equal(aboveMarker.style.borderRadius, '4px 0 0 0');
   assert.equal(aboveLabel.style.borderRadius, '0 4px 0 0');
   assert.equal(aboveMarker.style.height, '24px');
@@ -711,7 +711,7 @@ test('the tab rides the contour top-left, flips under it at the viewport edge an
   assert.equal(aboveMarker.style.border, '1px solid #ffffff');
   assert.equal(aboveMarker.style.background, 'rgb(139, 30, 30)');
   assert.equal(aboveMarker.style.color, '#ffffff');
-  assert.equal(aboveMarker.textContent, '17×');
+  assert.equal(aboveMarker.textContent, '×');
   assert.equal(aboveLabel.textContent, 'Falha confirmada');
 
   // Less than 22px of room above: the tab hangs below the contour with the corners flipped.
@@ -736,7 +736,7 @@ test('the tab rides the contour top-left, flips under it at the viewport edge an
   const [rightMarker] = rightRoot.children;
   assert.equal(rightRoot.style.left, '3994px');
   assert.equal(Number.parseFloat(rightRoot.style.left) + 3 + Number.parseFloat(rightMarker.style.left),
-    1024 - (36 + 140 - 1));
+    1024 - (28 + 140 - 1));
   assert.equal(rightMarker.style.top, '-27px');
 
   // Taller than the viewport and starting above the screen: the tab pins to the viewport top.

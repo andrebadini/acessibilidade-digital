@@ -296,9 +296,15 @@ for (const scenario of [
         });
         const button=groups.length===1?groups[0].querySelector('.audita-marker'):null;
         if(!button)return {reason:'IDLESS_MARKER_NOT_CORRELATED',matches:groups.length,
-          total:root.shadowRoot.querySelectorAll('.audita-group').length};
+          total:root.shadowRoot.querySelectorAll('.audita-group').length,
+          target:[rect.left,rect.top,rect.width,rect.height].map(Math.round),
+          rings:[...root.shadowRoot.querySelectorAll('.audita-group')].map(group=>{const ring=group.querySelector('.audita-ring');
+            return [ring.style.display,ring.style.left,ring.style.top,ring.style.width,ring.style.height,
+              group.querySelector('.audita-marker').textContent].join(' ');})};
         return Number(button.getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]);
-      })()`, value => typeof value === 'number' || Boolean(value?.reason),
+      })()`, value => typeof value === 'number',
+      // The overlay follows the scroll on the next animation frame; under load the first read can
+      // still see the pre-scroll contour, so keep polling instead of failing on the first miss.
       { timeoutMs: 10_000, intervalMs: 50 });
       assert.equal(typeof number, 'number', JSON.stringify(number));
       await extension.evaluate(extension.startPage.page, `(() => {
@@ -505,7 +511,7 @@ for (const scenario of [
       assert.ok(Object.keys(expected.counts).length > 0);
       await extension.click(panel, `[data-result-filter="${expected.classification}"]`);
       const symbol = expected.classification === 'passed' ? '✓' : '×';
-      const expectedLabels = Object.entries(expected.counts).map(([number, count]) => `${number}${symbol}${count}`).sort();
+      const expectedLabels = Object.entries(expected.counts).map(([number, count]) => (count > 1 ? `${number} ${symbol} (${count})` : `${number} ${symbol}`)).sort();
       await extension.waitForValue(extension.startPage.page, markerSurface, value => value.roots === 1 &&
         JSON.stringify(value.buttons.filter(button=>!button.hidden).map(button=>button.text).sort()) === JSON.stringify(expectedLabels));
       assert.deepEqual(await extension.evaluate(panel, `[...document.querySelectorAll('[data-result-filter]')].map(node=>node.textContent)`), totals);

@@ -332,7 +332,7 @@ function pageMarkersEvent(value) {
     typeof record.sessionCapabilityId !== 'string' || !CAPABILITY.test(record.sessionCapabilityId) ||
     !Number.isSafeInteger(record.modelRevision) || record.modelRevision < 1 ||
     !['active', 'clear'].includes(record.state) ||
-    (record.selectedOrdinal !== null && (!Number.isSafeInteger(record.selectedOrdinal) || record.selectedOrdinal < 0 || record.selectedOrdinal >= 64)) ||
+    (record.selectedOrdinal !== null && (!Number.isSafeInteger(record.selectedOrdinal) || record.selectedOrdinal < 0 || record.selectedOrdinal >= 500)) ||
     (record.state === 'clear' && record.selectedOrdinal !== null)) return null;
   return record;
 }

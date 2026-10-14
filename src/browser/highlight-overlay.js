@@ -502,7 +502,9 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
       element.style.font = `700 14px/${lineHeight} system-ui, sans-serif`;
       element.style.whiteSpace = 'nowrap';
     };
-    marker.textContent = `${install.markerNumber}${install.kind === 'failed' ? '×' : '?'}`;
+    // Only the symbol: the occurrence ordinal used here is not the number of the page signal for
+    // the same element, and two different numbers on one element read as two different findings.
+    marker.textContent = install.kind === 'failed' ? '×' : '?';
     chip(marker, '0 8px', '1');
     label.textContent = install.kind === 'failed' ? 'Falha confirmada' : 'Revisão humana necessária';
     chip(label, '0 10px', '1.25');

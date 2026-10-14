@@ -243,10 +243,13 @@ const OVERLAY_STATE = `(() => {
     const buttonBox = { x: Math.round(rect.left), y: Math.round(rect.top),
       width: Math.round(rect.width), height: Math.round(rect.height) };
     const located = ringBox.x !== null;
-    const matching = located ? pageElements.filter(element => {
+    // O contorno fica POR FORA do elemento: folga de 3 px mais a espessura da borda em cada lado.
+    const inset = (number(ring.style.borderWidth) ?? 0) + 3;
+    const matching = located && ring.style.display !== 'none' ? pageElements.filter(element => {
       const box = element.getBoundingClientRect();
-      return Math.abs(box.left - ringBox.x) <= 1 && Math.abs(box.top - ringBox.y) <= 1 &&
-        Math.abs(box.width - ringBox.width) <= 1 && Math.abs(box.height - ringBox.height) <= 1;
+      return Math.abs(box.left - (ringBox.x + inset)) <= 1.5 && Math.abs(box.top - (ringBox.y + inset)) <= 1.5 &&
+        Math.abs(box.width - (ringBox.width - (2 * inset))) <= 1.5 &&
+        Math.abs(box.height - (ringBox.height - (2 * inset))) <= 1.5;
     }) : [];
     const painted = (x, y) => (x >= 0 && y >= 0 && x < innerWidth && y < innerHeight)
       ? document.elementsFromPoint(x, y)
@@ -280,6 +283,15 @@ const OVERLAY_STATE = `(() => {
       paintedUnderButton: painted(buttonBox.x + buttonBox.width / 2, buttonBox.y + buttonBox.height / 2),
     };
   });
+  // Colisões: etiqueta sobre outra etiqueta, ou etiqueta sobre o contorno de outro elemento marcado.
+  const intersects = (a, b) => Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x) > 1 &&
+    Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y) > 1;
+  for (const group of groups) {
+    group.labelOverLabel = group.visible ? groups.filter(other => other !== group && other.visible &&
+      intersects(group.button, other.button)).map(other => other.number) : [];
+    group.labelOverOtherRing = group.visible ? groups.filter(other => other !== group && other.ringVisible &&
+      other.ring.width * other.ring.height <= 60000 && intersects(group.button, other.ring)).map(other => other.number) : [];
+  }
   return { present: true, groups, viewport: { width: innerWidth, height: innerHeight },
     scroll: { x: Math.round(scrollX), y: Math.round(scrollY) } };
 })()`;
@@ -842,8 +854,10 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
     await sleep(700);
     const after = await attempt('ler-sinais-depois', () => evaluate(page, OVERLAY_STATE));
     const afterPanel = await attempt('ler-painel-depois', () => evaluate(panel, PANEL_MARKERS));
-    const numbersBefore = (before.value?.groups ?? []).filter(group => group.visible).map(group => group.number).sort();
-    const numbersAfter = (after.value?.groups ?? []).filter(group => group.visible).map(group => group.number).sort();
+    // Sinais fora da tela ou de slide oculto ficam escondidos de propósito: persistência é o overlay
+    // continuar instalado com os mesmos grupos, não o mesmo conjunto visível.
+    const numbersBefore = (before.value?.groups ?? []).map(group => group.number).sort((a, b) => a - b);
+    const numbersAfter = (after.value?.groups ?? []).map(group => group.number).sort((a, b) => a - b);
     summary.persistence = {
       waitedMs: PERSISTENCE_WAIT_MS,
       movedPointer: true,
@@ -1052,8 +1066,13 @@ function printPageSummary(summary) {
     // propósito, então zero anéis aqui não é falha — a captura 04-*.png é que mede o anel.
     lines.push(`  sinais desenhados: ${summary.signals.drawn ?? 0} de ${summary.signals.groups.length} grupo(s) ` +
       `(números ${(summary.signals.numbers ?? []).join(', ') || '—'}; ${summary.signals.onScreen ?? 0} no quadro visível)`);
-    const precisos = (summary.signals.groups ?? []).filter(group => group.targetCandidateCount === 1).length;
-    lines.push(`  precisão: ${precisos} de ${summary.signals.groups.length} grupo(s) com exatamente 1 elemento no retângulo medido`);
+    const visiveis = (summary.signals.groups ?? []).filter(group => group.ringVisible);
+    const precisos = visiveis.filter(group => group.targetCandidateCount >= 1).length;
+    lines.push(`  precisão: ${precisos} de ${visiveis.length} contorno(s) visível(is) colados ao elemento (folga 3 px + borda)`);
+    const colisoes = (summary.signals.groups ?? []).filter(group => group.labelOverLabel?.length);
+    const sobreOutros = (summary.signals.groups ?? []).filter(group => group.labelOverOtherRing?.length);
+    lines.push(`  etiquetas sobrepostas: ${colisoes.length}; etiquetas sobre outro elemento marcado: ${sobreOutros.length}` +
+      (colisoes.length ? ` (${colisoes.map(group => `${group.number}↔${group.labelOverLabel.join('/')}`).join(', ')})` : ''));
   }
   if (summary.unlocated?.length) {
     lines.push(`  não localizados: ${summary.unlocated.length}` +
