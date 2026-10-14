@@ -1400,3 +1400,20 @@ test('a tela de indisponibilidade oferece repetir e escolher outro modo (N-1 da 
   choose.click();
   assert.deepEqual(emitted, [{ type: 'RETRY' }, { type: 'NEW_AUDIT' }]);
 });
+
+test('without the strict live proof, the detail still offers the page signals path to see the element', () => {
+  const input = fixture();
+  input.state.highlight = {
+    state: 'idle', occurrenceId: null, bindingStatus: { state: 'unavailable', reason: 'live-proof-failed' },
+    message: null,
+  };
+  const intents = [];
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+  const show = root.querySelector('[data-action="page-highlight"]');
+  assert.ok(show, 'the page-signal path is offered next to the recorded evidence');
+  assert.ok(root.querySelector('[data-action="consult-evidence"]'));
+  show.click();
+  assert.deepEqual(intents, [{ type: 'HIGHLIGHT_PAGE_OCCURRENCE', occurrenceId: 'occ-1' }]);
+});

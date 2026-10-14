@@ -838,3 +838,32 @@ test('remains synchronous and executable after Chrome-style function serializati
   assert.deepEqual(invoke(clear()), { ok: true });
   assertClean(fixture);
 });
+
+test('fixed page chrome over an element trims its contour and hides a fully covered one', () => {
+  const fixture = createPageMarkersFixture();
+  const banner = new FixtureElement('div', { id: 'cookie-banner' }, fixture.document);
+  banner.style.position = 'fixed';
+  banner.setRect({ left: 0, top: 70, width: 1024, height: 120 });
+  fixture.main.append(banner);
+  let covered = { top: 70, bottom: 190 };
+  fixture.document.elementFromPoint = (x, y) => (y >= covered.top && y < covered.bottom ? banner : fixture.first);
+  runAuditaPageMarkersCommand(singleTarget(idMatch('button', 'continue')), fixture.environment);
+  const group = fixture.environment.markerGroups()[0];
+  // The element spans 50..90; the banner covers it from 70 down, so the contour stops at the banner.
+  assert.equal(ringOf(group).style.top, '45px');
+  assert.equal(ringOf(group).style.height, '30px');
+  assert.equal(labelOf(group).style.display, 'flex');
+
+  covered = { top: 40, bottom: 140 };
+  banner.setRect({ left: 0, top: 40, width: 1024, height: 100 });
+  fixture.environment.triggerMutations([{ target: banner, type: 'attributes' }]);
+  fixture.environment.settle();
+  assert.equal(ringOf(group).style.display, 'none', 'an element entirely under the banner is not outlined over it');
+
+  // A full-screen scrim (modal backdrop) is not page chrome: the signals stay usable under it.
+  covered = { top: 0, bottom: 768 };
+  banner.setRect({ left: 0, top: 0, width: 1024, height: 768 });
+  fixture.environment.triggerMutations([{ target: banner, type: 'attributes' }]);
+  fixture.environment.settle();
+  assert.equal(ringOf(group).style.display, 'block');
+});

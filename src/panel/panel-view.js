@@ -1130,6 +1130,16 @@ function renderDetail(document, detail, expanded, highlight, markers, emit, onEv
     button.textContent = action.label;
     actions.append(button);
   } else {
+    // The live proof of the single highlight is stricter than the page signals. When it is not
+    // available and the signals are not on the page yet, the signals are still the way to see the
+    // element: the same path as the card's "Destacar elemento na página".
+    if (markerNumber === null && !['active', 'showing', 'hiding'].includes(markers.status) &&
+      ['top-document', 'mixed'].includes(detail.heading?.context)) {
+      const show = actionButton(document, 'Destacar elemento na página', 'HIGHLIGHT_PAGE_OCCURRENCE',
+        'detail-page-highlight', emit, 'primary-action', { occurrenceId: detail.occurrenceId });
+      show.dataset.action = 'page-highlight';
+      actions.append(show);
+    }
     const button = actionButton(document, action.label, 'CONSULT_EVIDENCE', 'consult-evidence', emit, 'secondary-action', {
       occurrenceId: detail.occurrenceId,
       reason: action.reason,

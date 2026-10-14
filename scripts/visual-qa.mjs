@@ -716,6 +716,17 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
         return evaluate(panel, PANEL_DETAIL);
       });
       summary.unlocatedReason = detail.value?.limitation ?? null;
+      // O bloco técnico do detalhe traz o seletor registrado: é o que explica por que não houve sinal.
+      for (const entry of summary.unlocated.slice(0, 12)) {
+        const technical = await attempt('tecnico-nao-localizado', async () => {
+          await clickByFocusId(panel, entry.focusId);
+          await sleep(250);
+          return evaluate(panel, `(document.querySelector('[data-detail-block="technical"]')?.textContent ?? '').replace(/\\s+/gu, ' ').trim().slice(0, 600)`);
+        });
+        entry.tecnico = technical.value ?? null;
+      }
+      summary.unlocatedPanelReasons = (await attempt('motivos-painel', () => evaluate(panel,
+        `[...document.querySelectorAll('[data-page-marker-review] li')].map(node => node.textContent.trim()).slice(0, 20)`))).value ?? null;
     }
 
     await attempt('painel-sinais-visivel', () => evaluate(panel, `(() => {

@@ -237,3 +237,21 @@ test('the unavailable notice does not promise a recovery that cannot work', asyn
   assert.match(state.message, /relatório/u);
   assert.match(state.message, /sinais/u);
 });
+
+test('picking an occurrence without a signal on the page explains it instead of reporting a failure', async () => {
+  const f = fixture();
+  await shown(f);
+  const pending = f.session.select('three'); await tick();
+  f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_SELECTION_UNAVAILABLE' });
+  assert.equal(await pending, false);
+  const state = f.session.read();
+  assert.equal(state.status, 'active');
+  assert.equal(state.selectedOccurrenceId, null);
+  assert.match(state.message, /não tem sinal na página neste momento/u);
+  assert.doesNotMatch(state.message, /Não foi possível/u);
+
+  const failing = f.session.select('two'); await tick();
+  f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.equal(await failing, false);
+  assert.match(f.session.read().message, /Não foi possível atualizar este sinal/u);
+});

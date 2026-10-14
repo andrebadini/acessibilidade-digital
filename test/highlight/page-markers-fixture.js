@@ -257,6 +257,7 @@ export function createPageMarkersFixture() {
         visibility: element.style.visibility ?? 'visible',
         overflowX: element.style.overflowX ?? element.style.overflow ?? 'visible',
         overflowY: element.style.overflowY ?? element.style.overflow ?? 'visible',
+        position: element.style.position ?? 'static',
       };
     },
     requestAnimationFrame(callback) { const id = nextFrame++; frames.set(id, callback); return id; },

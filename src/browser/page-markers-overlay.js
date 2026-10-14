@@ -609,6 +609,61 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       }
     }
 
+    function positionedAncestor(node, element, cache) {
+      if (!cache.positions) cache.positions = new Map();
+      let current = node;
+      for (let depth = 0; current && depth < 12; depth += 1) {
+        if (current === element) return null;
+        let position = cache.positions.get(current);
+        if (position === undefined) {
+          try { position = environment.getComputedStyle(current)?.position ?? ''; } catch { position = ''; }
+          cache.positions.set(current, position);
+        }
+        if (position === 'fixed' || position === 'sticky') return current;
+        current = current.parentElement;
+      }
+      return null;
+    }
+
+    // Fixed or sticky page chrome painted over the element (a sticky header, a cookie banner) trims
+    // the contour, and an element entirely under it gets no contour: a contour drawn on top of the
+    // banner would point at the banner. Full-screen backdrops (modal scrims) are ignored, so the
+    // signals stay usable while a dialog dims the page.
+    function clipByOccluders(element, box, cache) {
+      const document = environment.document;
+      if (typeof document?.elementFromPoint !== 'function') return;
+      const viewport = viewportRect();
+      const viewportArea = viewport ? (viewport.right - viewport.left) * (viewport.bottom - viewport.top) : Infinity;
+      const seen = new Set();
+      for (const y of [box.top + 1, (box.top + box.bottom) / 2, box.bottom - 1]) {
+        for (const x of [box.left + 1, (box.left + box.right) / 2, box.right - 1]) {
+          if (!(box.right > box.left) || !(box.bottom > box.top)) return;
+          let top = null;
+          try { top = document.elementFromPoint(x, y); } catch {}
+          if (!top || top === host || top === element) continue;
+          try {
+            if (element.contains?.(top) || top.contains?.(element)) continue;
+          } catch { continue; }
+          const occluder = positionedAncestor(top, element, cache);
+          if (!occluder || seen.has(occluder)) continue;
+          seen.add(occluder);
+          try { if (occluder.contains?.(element)) continue; } catch { continue; }
+          let rect = null;
+          try { rect = occluder.getBoundingClientRect(); } catch {}
+          if (!rect || ![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) ||
+            rect.width * rect.height >= viewportArea * 0.5) continue;
+          const cover = { left: rect.left, top: rect.top, right: rect.left + rect.width, bottom: rect.top + rect.height };
+          if (cover.left <= box.left + 1 && cover.right >= box.right - 1) {
+            if (cover.top <= box.top + 1 && cover.bottom > box.top) box.top = Math.max(box.top, cover.bottom);
+            else if (cover.bottom >= box.bottom - 1 && cover.top < box.bottom) box.bottom = Math.min(box.bottom, cover.top);
+          } else if (cover.top <= box.top + 1 && cover.bottom >= box.bottom - 1) {
+            if (cover.left <= box.left + 1 && cover.right > box.left) box.left = Math.max(box.left, cover.right);
+            else if (cover.right >= box.right - 1 && cover.left < box.right) box.right = Math.min(box.right, cover.left);
+          }
+        }
+      }
+    }
+
     function visibleBox(element, cache, rect) {
       let box;
       try {
@@ -635,6 +690,8 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         box.right = Math.min(box.right, viewport.right);
         box.bottom = Math.min(box.bottom, viewport.bottom);
       }
+      if (!(box.right > box.left) || !(box.bottom > box.top)) return null;
+      clipByOccluders(element, box, cache);
       if (!(box.right > box.left) || !(box.bottom > box.top)) return null;
       return { left: box.left, top: box.top, width: box.right - box.left, height: box.bottom - box.top };
     }

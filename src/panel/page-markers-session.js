@@ -3,6 +3,9 @@
 // cannot deliver and points at what still works: the recorded evidence in the report.
 const UNAVAILABLE = 'Não foi possível mostrar os sinais nesta página. Esta página não tem mais um canal ativo da extensão, então repetir a auditoria não resolve; consulte as evidências e as capturas no relatório.';
 const REMOVE_FAILED = 'Não foi possível confirmar a remoção dos sinais. Tente remover novamente.';
+// Picking an occurrence whose element has no signal on the page right now (not found, inside an
+// iframe, or no longer in the page) is an expected answer, not a failure of the signals.
+const SELECTION_UNAVAILABLE = 'Esta ocorrência não tem sinal na página neste momento. Consulte a evidência registrada ou o relatório.';
 // Matches the ceiling the worker, the controller, the projection and the page overlay share, so a
 // full inventory of 500 findings is never truncated by the panel.
 export const MAX_PAGE_MARKER_SIGNALS = 500;
@@ -154,6 +157,11 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
       if (context !== captured || generation !== version) return false;
       const next = responseState(response, captured);
       if (!next) {
+        const code = exact(response, ['ok', 'code'])?.code;
+        if (selectionRequest && (code === 'PAGE_MARKERS_SELECTION_UNAVAILABLE' || code === 'PAGE_MARKERS_INVALID')) {
+          publish({ ...state, selectedOccurrenceId: null, message: SELECTION_UNAVAILABLE });
+          return false;
+        }
         publish({ ...state, message: 'Não foi possível atualizar este sinal. Consulte a evidência ou tente novamente.' });
         return false;
       }
