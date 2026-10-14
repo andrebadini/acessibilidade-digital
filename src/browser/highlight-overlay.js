@@ -10,6 +10,17 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
   const MAX_HIGHLIGHT_SEGMENTS = 64;
   const MAX_HIGHLIGHT_COMPLEXITY = 320;
   const MAX_HIGHLIGHT_ANCESTRY = 64;
+  // Vocabulário do seletor, copiado do caminho dos sinais: o destaque individual aceita os mesmos
+  // `tag[atributo-semântico="valor"]` que `buildStableSelector` produz e que `parseHighlightSelectorV1`
+  // valida no worker. A validação aqui é independente de propósito — nada do worker é autoridade.
+  const SIGNAL_ATTRIBUTES = Object.freeze(['name', 'alt', 'title', 'aria-label', 'data-testid', 'role']);
+  const MAX_ATTRIBUTE_VALUE = 256;
+  const ATTRIBUTE_SEGMENT_PATTERN = new RegExp(
+    '^([a-z][a-z0-9-]{0,62})'
+    + '(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?'
+    + '((?:\\.-?[_A-Za-z][_A-Za-z0-9-]*){0,2})'
+    + '(?:\\[([a-z][a-z0-9-]{0,31})="((?:[^"\\\\]|\\\\.)*)"\\])?'
+    + '(?::nth-of-type\\(([1-9][0-9]*)\\))?$', 'u');
 
   function rgba(color, alpha) {
     const match = /^rgb\((\d{1,3}), (\d{1,3}), (\d{1,3})\)$/u.exec(String(color));
@@ -83,7 +94,6 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
 
       const segments = selector.value.split(' > ');
       if (segments.length < 1 || segments.length > MAX_HIGHLIGHT_SEGMENTS) return null;
-      const segmentPattern = /^([a-z][a-z0-9-]{0,62})(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?((?:\.-?[_A-Za-z][_A-Za-z0-9-]*){0,2})(?:\[(role|type)="([a-z]+)"\])?(?::nth-of-type\(([1-9][0-9]*)\))?$/u;
       const classPattern = /\.(-?[_A-Za-z][_A-Za-z0-9-]*)/gu;
       const allowedRoles = new Set([
         'alert', 'button', 'checkbox', 'dialog', 'heading', 'img', 'link', 'list', 'listitem',
@@ -96,15 +106,48 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
       ]);
       const safeToken = token => typeof token === 'string' && token.length >= 1 && token.length <= 23 &&
         /^-?[_A-Za-z][_A-Za-z0-9-]*$/u.test(token) && !sensitiveToken(token);
+      // Mesmo teste de valor que os sinais fazem dentro da página e que `isSafeSignalAttributeValue`
+      // repete no worker: texto não vazio, sem caractere de controle e sem cara de credencial.
+      const controlCharacter = /[\u0000-\u001f\u007f]/u;
+      const safeAttributeValue = value => typeof value === 'string' && value.length >= 1 &&
+        value.length <= MAX_ATTRIBUTE_VALUE && !controlCharacter.test(value) && !sensitiveToken(value);
+      // `escapeCssString` dos sinais escapa o valor dentro do seletor; a leitura de volta tem de ser
+      // a mesma nos dois lados, senão o valor comparado aqui não é o valor que o worker validou.
+      const unescapeCss = value => {
+        let output = '';
+        for (let index = 0; index < value.length; index += 1) {
+          if (value[index] !== '\\') { output += value[index]; continue; }
+          index += 1;
+          if (index >= value.length) break;
+          const hex = /^[0-9a-fA-F]{1,6}/u.exec(value.slice(index));
+          if (hex) {
+            const code = Number.parseInt(hex[0], 16);
+            if (code > 0 && code <= 0x10ffff) output += String.fromCodePoint(code);
+            index += hex[0].length - 1;
+            if (value[index + 1] === ' ') index += 1;
+            continue;
+          }
+          output += value[index];
+        }
+        return output;
+      };
       let complexity = Math.max(0, segments.length - 1);
       for (const segment of segments) {
-        const match = segmentPattern.exec(segment);
+        const match = ATTRIBUTE_SEGMENT_PATTERN.exec(segment);
         if (!match) return null;
-        const [, , id, rawClasses = '', attributeName, attributeValue, rawNth] = match;
+        const [, , id, rawClasses = '', attributeName, rawAttributeValue, rawNth] = match;
         if (id !== undefined && !safeToken(id)) return null;
         const classes = [...rawClasses.matchAll(classPattern)].map(entry => entry[1]);
         if (classes.some(className => !safeToken(className))) return null;
-        if (attributeName !== undefined && !(attributeName === 'role' ? allowedRoles : allowedTypes).has(attributeValue)) return null;
+        if (attributeName !== undefined) {
+          // Duas leituras do mesmo campo, como no worker: as enumerações de role/type exportadas no
+          // modelo e o atributo semântico do próprio elemento (`tag[atributo="valor"]`), que é a
+          // forma que `buildStableSelector` dá a um controle sem classe.
+          const attributeValue = unescapeCss(rawAttributeValue);
+          const enumerated = (attributeName === 'role' ? allowedRoles : allowedTypes).has(attributeValue);
+          const semantic = SIGNAL_ATTRIBUTES.includes(attributeName) && safeAttributeValue(attributeValue);
+          if (!enumerated && !semantic) return null;
+        }
         if (rawNth !== undefined && (!Number.isSafeInteger(Number(rawNth)) || Number(rawNth) < 1)) return null;
         complexity += 1 + (id === undefined ? 0 : 1) + classes.length +
           (attributeName === undefined ? 0 : 2) + (rawNth === undefined ? 0 : 3);

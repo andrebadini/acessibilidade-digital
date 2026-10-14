@@ -351,7 +351,10 @@ async function collectHighlightStructuralProofs(rawCandidates, expectedElement =
     const seen = new Set();
     let current = element;
     while (true) {
-      if (!current || seen.has(current) || ancestry.length >= 16) throw new TypeError();
+      // Mesmo teto do caminho dos sinais e do anel do destaque (`MAX_HIGHLIGHT_ANCESTRY`,
+      // `MAX_SIGNATURE_ANCESTRY`): uma página real aninha controles bem abaixo de 16 níveis e o
+      // limite antigo derrubava a prova do quadro inteiro, não só do candidato profundo.
+      if (!current || seen.has(current) || ancestry.length >= 64) throw new TypeError();
       seen.add(current);
       const attributes = [];
       for (const [name, maximum] of [['role', 512], ['type', 128]]) {
@@ -398,7 +401,18 @@ async function collectHighlightStructuralProofs(rawCandidates, expectedElement =
         if (expectedElement !== null) return failure('shadow-root');
         continue;
       }
-      entries.push({ occurrenceId: candidate.occurrenceId, structuralInput: await structuralInput(selected) });
+      // Um elemento que não pode ser provado é apenas descartado — nunca derruba o quadro inteiro.
+      // Antes, um único candidato profundo demais (ou com ancestral fora da gramática) fazia o
+      // `catch` externo transformar TODOS os candidatos da página em `inaccessible`, e a pessoa
+      // ficava sem destaque nenhum. A garantia continua a mesma: sem prova, sem alvo.
+      let structuralInputValue;
+      try {
+        structuralInputValue = await structuralInput(selected);
+      } catch {
+        if (expectedElement !== null) return failure('inaccessible');
+        continue;
+      }
+      entries.push({ occurrenceId: candidate.occurrenceId, structuralInput: structuralInputValue });
     }
     return { version: 1, entries, reason: null };
   } catch {
@@ -408,7 +422,7 @@ async function collectHighlightStructuralProofs(rawCandidates, expectedElement =
 
 function structuralInputRecord(value) {
   const record = exactHighlightRecord(value, ['version', 'tag', 'computedRole', 'ancestry']);
-  const ancestry = record && denseHighlightArray(record.ancestry, 16);
+  const ancestry = record && denseHighlightArray(record.ancestry, 64);
   if (!record || record.version !== 'StructuralSignatureInputV1' ||
     typeof record.tag !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/u.test(record.tag) ||
     (record.computedRole !== null && (typeof record.computedRole !== 'string' || record.computedRole.length > 32)) ||

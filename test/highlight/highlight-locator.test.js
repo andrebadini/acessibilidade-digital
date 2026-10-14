@@ -8,6 +8,7 @@ import {
   createStructuralSignatureV1,
   parseCssSelectorV1,
   parseHighlightSelectorV1,
+  parseSignalSelectorV1,
   roleForStructuralSignature,
   selectorMatchesOne,
   structuralSignatureMatches,
@@ -311,6 +312,42 @@ test('eases only the highlight vocabulary while the strict export grammar keeps 
   // Outside the vocabulary both stay closed: no combinators, wildcards, negation or pseudo-classes.
   for (const value of ['button > *', 'button:hover', 'div + button', 'button:not(.x)', 'button >']) {
     assert.throws(() => parseHighlightSelectorV1(value), TypeError, value);
+  }
+});
+
+test('accepts the semantic attribute selectors the page signals produce, unescaping the value', () => {
+  // Exatamente as formas que `buildStableSelector` emite para um controle sem id único. Sem elas o
+  // elemento ganhava sinal na página e não ganhava destaque individual.
+  for (const [value, expected] of [
+    ['input[name="q"]', { name: 'name', value: 'q' }],
+    ['img[alt="Mapa do site"]', { name: 'alt', value: 'Mapa do site' }],
+    ['a[title="Ver mais"]', { name: 'title', value: 'Ver mais' }],
+    ['input[aria-label="Buscar"]', { name: 'aria-label', value: 'Buscar' }],
+    // `escapeCssString` escreve as aspas do valor como `\22 `: a leitura de volta tem de ser a
+    // mesma nos dois lados, senão o valor validado aqui não é o valor que a página corrobora.
+    ['button[data-testid="save \\22 draft\\22 "]', { name: 'data-testid', value: 'save "draft"' }],
+    ['button[role="presentation"]', { name: 'role', value: 'presentation' }],
+  ]) {
+    const parsed = parseHighlightSelectorV1(value);
+    assert.equal(parsed.value, value);
+    assert.equal(parsed.complexity, 3);
+    assert.deepEqual(parsed.segments.at(-1).enumAttribute, expected);
+  }
+  assert.equal(parseHighlightSelectorV1('main > input[name="q"]').complexity, 5);
+
+  // O campo continua fechado: só os atributos semânticos dos sinais, nunca um seletor de atributo
+  // arbitrário e nunca um valor com cara de credencial ou com caractere de controle.
+  for (const value of [
+    'div[data-test="x"]',
+    'a[href="/sair"]',
+    'input[type="date"]',
+    'input[name="access_token"]',
+    'input[name="Cliente 550e8400-e29b-41d4-a716-446655440000"]',
+    'input[name="a\u0007b"]',
+    `input[name="${'x'.repeat(257)}"]`,
+  ]) {
+    assert.throws(() => parseHighlightSelectorV1(value), TypeError, value);
+    assert.throws(() => parseSignalSelectorV1(value), TypeError, value);
   }
 });
 

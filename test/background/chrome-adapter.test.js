@@ -2121,6 +2121,118 @@ test('serialized structural proof preserves the locator role map for unknown inp
   assert.equal(browserProof.entries[0].structuralInput.computedRole, 'textbox');
 });
 
+test('proves a deep ancestry up to the shared 64 cap and drops only the candidate that exceeds it', async () => {
+  // Uma página real aninha controles bem abaixo de 16 níveis. Antes, o primeiro candidato que
+  // estourasse o teto fazia o `catch` externo devolver `inaccessible` para o quadro inteiro, e a
+  // pessoa ficava sem destaque nenhum naquela página.
+  const deepDepth = 40;
+  const tooDeepDepth = 70;
+  const fake = chromeFake();
+  const url = 'https://example.test/deep';
+
+  const build = depth => {
+    const document = {
+      children: [],
+      querySelectorAll(selector) { return selectorMap.get(selector) ?? []; },
+    };
+    const element = (tag, attributes = {}) => ({
+      tagName: tag.toUpperCase(),
+      children: [],
+      parentElement: null,
+      parentNode: null,
+      ownerDocument: document,
+      getAttribute(name) { return Object.hasOwn(attributes, name) ? attributes[name] : null; },
+      getRootNode() { return document; },
+    });
+    const html = element('html');
+    const body = element('body');
+    document.children = [html];
+    html.parentNode = document;
+    html.children = [body];
+    body.parentElement = html;
+    body.parentNode = html;
+    let parent = body;
+    for (let level = 0; level < depth; level += 1) {
+      const wrapper = element('div');
+      parent.children.push(wrapper);
+      wrapper.parentElement = parent;
+      wrapper.parentNode = parent;
+      parent = wrapper;
+    }
+    const target = element('input', { id: 'field', type: 'text' });
+    parent.children.push(target);
+    target.parentElement = parent;
+    target.parentNode = parent;
+    return { document, target };
+  };
+
+  const deep = build(deepDepth);
+  const tooDeep = build(tooDeepDepth);
+  const shallow = build(0);
+  const selectorMap = new Map([
+    ['input#deep', [deep.target]],
+    ['input#toodeep', [tooDeep.target]],
+    ['input#shallow', [shallow.target]],
+  ]);
+  const scope = { ...deep.document, querySelectorAll: selector => selectorMap.get(selector) ?? [] };
+  const scoped = element => ({
+    ...element,
+    ownerDocument: scope,
+    getRootNode() { return scope; },
+  });
+  for (const entry of selectorMap.values()) entry.forEach(item => Object.assign(item, scoped(item)));
+
+  let browserProof;
+  fake.chromeApi.tabs.get = async id => ({ id, windowId: 3, status: 'complete', discarded: false, url });
+  fake.chromeApi.scripting.executeScript = async options => {
+    if (options.target.allFrames === true) {
+      const original = globalThis.document;
+      try {
+        globalThis.document = scope;
+        browserProof = await options.func(...options.args);
+      } finally {
+        if (original === undefined) delete globalThis.document;
+        else globalThis.document = original;
+      }
+      return [{ frameId: 0, documentId: 'doc-top', result: browserProof }];
+    }
+    return [{ frameId: 0, documentId: 'doc-top', result: url }];
+  };
+  fake.chromeApi.debugger.sendCommand = async (_target, method, params) => {
+    if (method === 'DOM.resolveNode') return { object: { objectId: `remote-${params.backendNodeId}` } };
+    if (method === 'Runtime.callFunctionOn') {
+      const occurrenceId = params.arguments[0].value.occurrenceId;
+      return {
+        result: {
+          value: {
+            version: 1,
+            entries: browserProof.entries.filter(entry => entry.occurrenceId === occurrenceId),
+            reason: null,
+          },
+        },
+      };
+    }
+    return {};
+  };
+  const selector = value => ({ syntax: 'CSSSelectorV1', value, byteLength: value.length, complexity: 2 });
+  const candidates = [
+    { occurrenceId: 'occ-deep', evidenceId: 'ev-deep', backendNodeId: 91, selector: selector('input#deep') },
+    { occurrenceId: 'occ-toodeep', evidenceId: 'ev-toodeep', backendNodeId: 92, selector: selector('input#toodeep') },
+    { occurrenceId: 'occ-shallow', evidenceId: 'ev-shallow', backendNodeId: 93, selector: selector('input#shallow') },
+  ];
+
+  const proofs = await createChromeAdapter(fake.chromeApi).proveHighlightTargets({
+    tabId: 7,
+    windowId: 3,
+    topDocumentId: 'doc-top',
+    candidates,
+  });
+
+  assert.deepEqual(proofs.map(proof => proof.occurrenceId), ['occ-deep', 'occ-shallow']);
+  const provenDepths = browserProof.entries.map(entry => [entry.occurrenceId, entry.structuralInput.ancestry.length]);
+  assert.deepEqual(provenDepths, [['occ-deep', deepDepth + 3], ['occ-shallow', 3]]);
+});
+
 test('rejects ambiguous or backend-divergent live targets instead of falling back to a selector', async () => {
   for (const mutation of [
     fake => { fake.state.proofResult.entries = []; fake.state.proofResult.reason = 'ambiguous'; },
