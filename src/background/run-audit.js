@@ -26,6 +26,7 @@ import { canonicalInternalReviewUrl } from '../core/report/report-policy.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import { axeEquivalenceForAuditaRule } from '../core/normative/axe-nbr-crosswalk.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
+import { applyHoverOnlyProbe } from '../browser/hover-only-probe.js';
 import { section508ReferencesForWcag } from '../core/normative/section508.js';
 import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
 import { projectAuditResourceOrigin } from '../core/privacy.js';
@@ -58,7 +59,7 @@ import {
 } from './pixel-privacy-gate.js';
 
 const SCHEMA_VERSION = 1;
-const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
+const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 131, itemCount: 146 });
 const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
   'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE',
@@ -974,6 +975,17 @@ async function runLegacyAudit({
       if (passive) appendDiagnosticOnce('DYNAMIC_PROBES_OMITTED_PASSIVE', DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE, true);
       if (probesTimedOut(rawProbes, normalizedProbes)) recoverable('DYNAMIC_PROBES_INCOMPLETE', 'As verificações dinâmicas atingiram o tempo limite.');
       state.snapshot = mergeProbesIntoSnapshot(state.snapshot, normalizedProbes);
+      throwIfAborted(signal);
+    } catch (error) {
+      rethrowAbort(error, signal);
+      recoverable('DYNAMIC_PROBES_FAILED', 'As verificações dinâmicas não puderam ser concluídas.');
+    }
+
+    // Conteúdo interativo revelado apenas por hover (5.1.13 / WCAG 2.1.1). Roda em modo descartável e
+    // também na página atual: `CSS.forcePseudoState` não dispara eventos nem executa JS do site, e o
+    // estado forçado é sempre desfeito antes da auditoria seguir — a página permanece como estava.
+    try {
+      state.snapshot = await awaitStep(() => applyHoverOnlyProbe(state.snapshot, cdp, { signal }));
       throwIfAborted(signal);
     } catch (error) {
       rethrowAbort(error, signal);

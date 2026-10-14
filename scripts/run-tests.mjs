@@ -30,6 +30,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/graphic-visibility-observation.test.mjs',
   'test/e2e/highlight-marking-mv3.test.mjs',
   'test/e2e/hostile-pages-mv3.test.mjs',
+  'test/e2e/hover-only-content-mv3.test.mjs',
   'test/e2e/identifier-credential-mv3.test.mjs',
   'test/e2e/link-role-observation.test.mjs',
   'test/e2e/mandatory-journey-mv3.test.mjs',

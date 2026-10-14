@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Serviços com conteúdo escondido</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; }
+  h1 { font-size: 24px; }
+  .service-list { display: flex; flex-wrap: wrap; gap: 16px; padding: 0; list-style: none; }
+  .service { border: 1px solid #767676; border-radius: 8px; padding: 12px; width: 220px; background: #fff; }
+  .card__title { display: block; font-weight: 700; margin-bottom: 8px; }
+  .service ul { display: none; margin: 8px 0 0; padding-left: 20px; }
+  .service a, .service button { font-size: 16px; }
+
+  /* Cartão 1: só o mouse revela a lista, e a revelação é animada — como nas páginas reais, onde ler o
+     estilo no mesmo instante em que o hover é forçado ainda mostra a lista escondida. O bloco não tem
+     nada focável: TAB nunca chega aos links. */
+  .service--hover ul { display: block; visibility: hidden; opacity: 0;
+    transition: opacity 0.2s, visibility 0.2s; }
+  .service--hover:hover { transition: 0.3s !important; }
+  .service--hover:hover ul { visibility: visible; opacity: 1; }
+
+  /* Cartão 2: o teclado também revela, porque o bloco tem um link visível e regra de :focus-within. */
+  .service--focus:hover ul,
+  .service--focus:focus-within ul { display: block; }
+
+  /* Cartão 3: existe um botão focável, mas o foco não revela a lista. Fica como dúvida para revisão. */
+  .service--button:hover ul { display: block; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Serviços</h1>
+  <div class="service-list">
+    <div class="service service--hover" id="so-mouse">
+      <span class="card__title">Certidões</span>
+      <ul>
+        <li><a href="#certidao-emitir">Emitir certidão</a></li>
+        <li><a href="#certidao-consultar">Consultar certidão</a></li>
+      </ul>
+    </div>
+    <div class="service service--focus" id="com-foco">
+      <span class="card__title">Protocolos</span>
+      <a class="card__trigger" href="#protocolos">Abrir protocolos</a>
+      <ul>
+        <li><a href="#protocolo-consultar">Consultar protocolo</a></li>
+      </ul>
+    </div>
+    <div class="service service--button" id="com-botao">
+      <span class="card__title">Agendamentos</span>
+      <button class="card__button" type="button">Ver agenda</button>
+      <ul>
+        <li><a href="#agenda-marcar">Marcar atendimento</a></li>
+      </ul>
+    </div>
+  </div>
+  <p><a href="#ajuda">Ajuda</a></p>
+</main>
+</body>
+</html>

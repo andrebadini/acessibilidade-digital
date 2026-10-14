@@ -25,16 +25,16 @@ function snapshot() {
   };
 }
 
-test('authoritative core runs exactly 130 rules into all 146 JSON-safe items', async () => {
-  assert.equal(CORE_RULES.length, 130);
+test('authoritative core runs exactly 131 rules into all 146 JSON-safe items', async () => {
+  assert.equal(CORE_RULES.length, 131);
   assert.deepEqual(validateCoreRuleComposition(), []);
 
   const audit = await runCoreAudit(snapshot());
   assert.equal(audit.schemaVersion, 1);
-  assert.equal(audit.ruleResults.length, 130);
+  assert.equal(audit.ruleResults.length, 131);
   assert.equal(audit.itemResults.length, 146);
   assert.deepEqual(audit.composition, {
-    ruleCount: 130,
+    ruleCount: 131,
     itemCount: 146,
     valid: true
   });
@@ -72,9 +72,9 @@ test('merges supplemental axe failures conservatively without treating passes as
   }));
 
   assert.deepEqual(core, original);
-  assert.equal(merged.ruleResults.length, 131);
+  assert.equal(merged.ruleResults.length, 132);
   assert.equal(merged.itemResults.find(item => item.id === '5.13.2').outcome, 'failed');
-  assert.equal(merged.composition.coreRuleCount, 130);
+  assert.equal(merged.composition.coreRuleCount, 131);
   assert.equal(merged.composition.supplementalRuleCount, 1);
   assert.equal(merged.ruleResults.some(rule => rule.outcome === 'passed' && rule.source?.engine === 'axe-core'), false);
 });

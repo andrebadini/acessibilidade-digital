@@ -2,6 +2,7 @@ import { NBR17225_ITEMS } from './normative/nbr17225.js';
 import { validateNormativeData } from './normative/validate-normative-data.js';
 import { aggregateItems } from './rules/aggregate-items.js';
 import { FORM_RULES } from './rules/forms.js';
+import { HOVER_ONLY_RULES } from './rules/hover-only.js';
 import { INTERACTIVE_RULES } from './rules/interactive.js';
 import { MANUAL_REVIEW_RULES } from './rules/manual-review.js';
 import { MEDIA_RULES } from './rules/media.js';
@@ -18,6 +19,7 @@ const RULE_FAMILIES = Object.freeze([
   FORM_RULES,
   VISUAL_RULES,
   MEDIA_RULES,
+  HOVER_ONLY_RULES,
   MANUAL_REVIEW_RULES
 ]);
 
