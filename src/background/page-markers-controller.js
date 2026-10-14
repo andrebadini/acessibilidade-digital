@@ -12,6 +12,9 @@ const DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 const TYPES = new Set(['PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS',
   'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS']);
+// Every 64-fold ceiling in this path — targets, signals, ordinals — moved to the same bound so a
+// page with more than 64 findings stops losing its signals past the 64th.
+const MAX_PAGE_MARKER_TARGETS = 500;
 
 function ownData(object, key) {
   try {
@@ -61,11 +64,11 @@ function freezeGraph(value) {
 }
 function clearMarkers(modelRevision) {
   return freezeGraph({ ok: true, markers: { state: 'clear', modelRevision, groups: [],
-    counts: { markers: 0, located: 0, unlocated: 0, general: 0, omitted: 0 }, selectedOrdinal: null } });
+    counts: { markers: 0, located: 0, unlocated: 0, general: 0, omitted: 0 }, selectedOrdinal: null, reasons: [] } });
 }
 function parseVisibleOrdinals(value) {
   if (value === '') return [];
-  if (typeof value !== 'string' || !/^(?:0|[1-9]|[1-5][0-9]|6[0-3])(?:,(?:0|[1-9]|[1-5][0-9]|6[0-3]))*$/u.test(value)) return null;
+  if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]?|[1-4][0-9]{2})(?:,(?:0|[1-9][0-9]?|[1-4][0-9]{2}))*$/u.test(value)) return null;
   const parts = value.split(',');
   const values = parts.map(Number);
   for (let index = 0; index < values.length; index += 1) {
@@ -83,7 +86,7 @@ function parseEnvelope(value) {
     !Number.isSafeInteger(record.windowId) || record.windowId < 0 ||
     !Number.isSafeInteger(record.modelRevision) || record.modelRevision < 1) return null;
   if (type === 'PANEL_SELECT_PAGE_MARKER' && (!Number.isSafeInteger(record.ordinal) || record.ordinal < 0 ||
-    record.ordinal > 63 || typeof record.scroll !== 'boolean')) return null;
+    record.ordinal >= MAX_PAGE_MARKER_TARGETS || typeof record.scroll !== 'boolean')) return null;
   if (type === 'PANEL_FILTER_PAGE_MARKERS') {
     record.ordinals = parseVisibleOrdinals(record.visibleOrdinals);
     if (!record.ordinals) return null;
@@ -284,16 +287,19 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
   }
   function parseInstallResult(value, targets) {
     const result = exactData(value, ['ok', 'locatedMarkerIds', 'unlocated']);
-    const located = result && denseArray(result.locatedMarkerIds, 64); const unlocated = result && denseArray(result.unlocated, 64);
+    const located = result && denseArray(result.locatedMarkerIds, MAX_PAGE_MARKER_TARGETS);
+    const unlocated = result && denseArray(result.unlocated, MAX_PAGE_MARKER_TARGETS);
     if (!result || result.ok !== true || !located || !unlocated || located.some(id => typeof id !== 'string') ||
       new Set(located).size !== located.length) return null;
-    const unlocatedIds = [];
+    const unlocatedReasons = new Map();
     for (const value of unlocated) { const row = exactData(value, ['markerId', 'reason']);
-      if (!row || typeof row.markerId !== 'string' || typeof row.reason !== 'string') return null; unlocatedIds.push(row.markerId); }
-    const expected = targets.map(target => target.markerId).sort(); const partition = [...located, ...unlocatedIds].sort();
+      if (!row || typeof row.markerId !== 'string' || typeof row.reason !== 'string' ||
+        unlocatedReasons.has(row.markerId)) return null; unlocatedReasons.set(row.markerId, row.reason); }
+    const expected = targets.map(target => target.markerId).sort();
+    const partition = [...located, ...unlocatedReasons.keys()].sort();
     if (partition.length !== expected.length || partition.some((id, index) => id !== expected[index]) ||
       new Set(partition).size !== partition.length) return null;
-    return { located: new Set(located), unlocated: new Set(unlocatedIds) };
+    return { located: new Set(located), unlocated: unlocatedReasons };
   }
   function captureBundle(bundle, snapshot) {
     const root = exactData(bundle, ['version', 'auditId', 'modelRevision', 'modelHash', 'summary', 'details']);
@@ -301,10 +307,25 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
     if (!root || root.version !== 1 || root.auditId !== snapshot.model.auditId || root.modelRevision !== snapshot.modelRevision ||
       root.modelHash !== snapshot.modelHash || !details) return null;
     const occurrenceIds = [];
-    for (const value of details.slice(0, 64)) { const occurrenceId = ownData(value, 'occurrenceId');
+    for (const value of details.slice(0, MAX_PAGE_MARKER_TARGETS)) { const occurrenceId = ownData(value, 'occurrenceId');
       if (typeof occurrenceId !== 'string' || !occurrenceId || occurrenceIds.includes(occurrenceId)) return null;
       occurrenceIds.push(occurrenceId); }
     return { occurrenceIds, totalDetails: details.length };
+  }
+  // The three match shapes the projection emits, copied field by field so nothing extra reaches
+  // the page and the page's own exact-key validation keeps working.
+  // Chrome serializes injected arguments as JSON and drops null values, so the structural shape
+  // travels without the fields the page did not record.
+  function wireMatch(match) {
+    if (Object.hasOwn(match, 'attribute')) {
+      return { tag: match.tag, attribute: { name: match.attribute.name, value: match.attribute.value } };
+    }
+    if (!Object.hasOwn(match, 'path')) return { tag: match.tag, id: match.id };
+    const wired = { tag: match.tag, classes: [...match.classes], path: match.path };
+    for (const field of ['id', 'role', 'type']) {
+      if (match[field] !== null) wired[field] = match[field];
+    }
+    return wired;
   }
   function buildPlan(snapshot, bundle) {
     if (snapshot.model.requestedScope?.mode !== 'single' ||
@@ -315,7 +336,10 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
     bundle.occurrenceIds.forEach((occurrenceId, ordinal) => { const signal = signalByOccurrence.get(occurrenceId);
       if (signal) { selectionToOrdinal.set(signal.selectionId, ordinal); ordinalToSelection.set(ordinal, signal.selectionId); } });
     const generalSelections = new Set(projection.public.general.map(row => row.selectionId).filter(id => selectionToOrdinal.has(id)));
-    const explicitlyUnlocated = new Set(projection.public.unlocated.map(row => row.selectionId).filter(id => selectionToOrdinal.has(id)));
+    const unlocatedReasons = new Map();
+    for (const row of projection.public.unlocated) {
+      if (selectionToOrdinal.has(row.selectionId)) unlocatedReasons.set(row.selectionId, row.reason);
+    }
     const markerNumbers = new Map(projection.public.markers.map(marker => [marker.markerId, marker.number]));
     const grouped = new Map();
     for (const candidate of projection.private.candidates) {
@@ -329,19 +353,40 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
     }
     const targets = [...grouped.values()]; const markerSelections = new Set(targets.flatMap(t => t.signals.map(s => s.selectionId)));
     for (const selectionId of ordinalToSelection.values())
-      if (!generalSelections.has(selectionId) && !markerSelections.has(selectionId)) explicitlyUnlocated.add(selectionId);
+      if (!generalSelections.has(selectionId) && !markerSelections.has(selectionId) && !unlocatedReasons.has(selectionId)) {
+        unlocatedReasons.set(selectionId, 'unresolved');
+      }
+    const explicitlyUnlocated = new Set(unlocatedReasons.keys());
     const decisions = new Map(snapshot.model.reviewDecisions.map(row => [row.occurrenceId, row]));
     const rules = new Map(snapshot.model.ruleResults.map(row => [JSON.stringify([row.source.engine, row.source.ruleId]), row]));
     // "Não se aplica" encerra a pergunta sem achado: não conta como ocorrência omitida dos sinais.
     const findings = snapshot.model.occurrences.filter(row => decisions.get(row.occurrenceId)?.answer !== 'não se aplica' &&
       findingKind(row, rules.get(JSON.stringify([row.source.engine, row.source.ruleId])), decisions.get(row.occurrenceId)) !== 'checklist');
-    return { page, targets, ordinalToSelection, selectionToOrdinal, generalSelections, explicitlyUnlocated, markerSelections,
+    return { page, targets, ordinalToSelection, selectionToOrdinal, generalSelections, explicitlyUnlocated,
+      unlocatedReasons, markerSelections,
       offered: ordinalToSelection.size, omitted: findings.filter(row => !bundle.occurrenceIds.includes(row.occurrenceId)).length };
   }
   function activeResult(record) {
     return freezeGraph({ ok: true, markers: { state: 'active', modelRevision: record.modelRevision,
       groups: record.groups.map(group => ({ number: group.number, ordinals: [...group.ordinals] })),
-      counts: { ...record.counts }, selectedOrdinal: record.selectedOrdinal } });
+      counts: { ...record.counts }, selectedOrdinal: record.selectedOrdinal,
+      reasons: record.reasons.map(row => ({ ...row })) } });
+  }
+  // Plain-language reason for a signal that did not appear, in the vocabulary the panel shows.
+  function reasonGroups(plan, installed) {
+    const counts = new Map();
+    const add = (selectionId, reason) => {
+      if (!plan.selectionToOrdinal.has(selectionId)) return;
+      counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    };
+    for (const [selectionId, reason] of plan.unlocatedReasons) add(selectionId, reason);
+    for (const row of plan.targets) {
+      const reason = installed.unlocated.get(row.markerId);
+      if (!reason) continue;
+      for (const signal of row.signals) add(signal.selectionId, reason);
+    }
+    return [...counts.entries()].map(([reason, count]) => ({ reason, count }))
+      .sort((left, right) => left.reason.localeCompare(right.reason));
   }
 
   async function show(request, sender, panelWindowId, isCurrent, originBefore, captured) {
@@ -417,7 +462,7 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
           windowId: origin.windowId, tabId: origin.tabId, documentId: origin.documentId,
           urlSessionDigest: origin.urlSessionDigest, modelRevision: snapshot.modelRevision, expiresAt,
           state: 'installing', cancelled: false, isCurrent, helloResolve: null, helloTimer: null,
-          expiryTimer: null, portBinding: null, selectedOrdinal: null, groups: [], counts: null,
+          expiryTimer: null, portBinding: null, selectedOrdinal: null, groups: [], counts: null, reasons: [],
           ordinalToSelection: plan.ordinalToSelection, selectionToOrdinal: plan.selectionToOrdinal,
           markerSelections: plan.markerSelections, publishedActive: false, publishedClear: false };
         records.set(targetKey(record), record);
@@ -431,8 +476,7 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
         });
         const installCommand = freezeGraph({ version: 1, op: 'install', installationId, ttlMs,
           targets: plan.targets.map(row => ({ markerId: row.markerId, number: row.number,
-            match: row.match.id === null ? { tag: row.match.tag, classes: [...row.match.classes], path: row.match.path } : { ...row.match },
-            signals: row.signals.map(signal => ({ ...signal })) })) });
+            match: wireMatch(row.match), signals: row.signals.map(signal => ({ ...signal })) })) });
         let installed;
         try { installed = parseInstallResult(await executeInDocument(record, runAuditaPageMarkersCommand, installCommand), plan.targets); }
         catch { installed = null; }
@@ -474,6 +518,7 @@ export function createPageMarkersController({ originCache, modelAuthority, loadP
         record.counts = { markers: groups.length, located,
           unlocated: plan.offered - plan.generalSelections.size - located,
           general: plan.generalSelections.size, omitted: plan.omitted };
+        record.reasons = reasonGroups(plan, installed);
         record.state = 'active';
         record.expiryTimer = setTimer(() => scheduleCleanup(record), Math.max(1, expiresAt - readNow()));
         record.publishedActive = true;

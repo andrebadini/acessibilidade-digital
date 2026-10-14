@@ -816,6 +816,17 @@ code {
 .page-marker-limit { flex: 1 0 100%; color: var(--review); font-weight: 650; }
 .marker-go-action { flex: 1 1 13rem; }
 
+.page-marker-reasons { display: grid; gap: 4px; }
+.page-marker-reasons-lead { font-size: 14px; line-height: 1.4; }
+.page-marker-reasons-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 20px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .visually-hidden {
   position: fixed !important;
   inline-size: 1px !important;

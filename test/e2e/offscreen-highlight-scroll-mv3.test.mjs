@@ -98,8 +98,10 @@ test('showing an off-screen occurrence brings it into view and marks it, without
   assert.ok(after.top > 0 && after.bottom < after.innerHeight,
     `the element must land inside the viewport, not against an edge: ${JSON.stringify(after)}`);
   assert.match(after.overlayText, /Falha confirmada/u, `the marking must name what it marks: ${JSON.stringify(after)}`);
-  assert.ok(Math.abs(after.overlayTop - after.top) <= 2,
-    `the marking must sit on the element it names: overlay ${after.overlayTop} vs element ${after.top}`);
+  // The contour is drawn OUTSIDE the element — 3px of gap plus its own 3px border — so the marking
+  // hugs the element without ever covering its content.
+  assert.ok(Math.abs(after.overlayTop - (after.top - 6)) <= 2,
+    `the marking must hug the element it names: overlay ${after.overlayTop} vs element ${after.top}`);
   // Asking to see an element is not a reason to move the reader's focus into the page.
   assert.equal(after.focus, before.focus, `showing the element must not move focus: ${before.focus} -> ${after.focus}`);
 

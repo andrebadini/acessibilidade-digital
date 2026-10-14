@@ -1,6 +1,6 @@
 import { isAuditIntegrityVerified } from '../core/report/integrity.js';
 import { sanitizeHtmlSnippetSource } from '../core/evidence/snippet.js';
-import { classifySelectorToken, parseCssSelectorV1 } from './highlight-locator.js';
+import { classifySignalToken, parseSignalSelectorV1, MAX_SIGNAL_CLASSES } from './highlight-locator.js';
 import { classifyPanelResultV1, deriveResultContextV1 } from '../panel/panel-result-contract.js';
 
 const MAX_ROWS = 5_000;
@@ -69,42 +69,56 @@ function rootIdentity(snippet) {
       values[match[1]] = match[2];
     }
   }
-  return { tag: opening[1], id: values.id ?? null,
-    classes: [...new Set((values.class ?? '').split(/[\t\n\f\r ]+/u).filter(classifySelectorToken))].sort(),
-    role: values.role ?? null, type: values.type ?? null };
+  return { tag: opening[1], id: values.id || null,
+    classes: [...new Set((values.class ?? '').split(/[\t\n\f\r ]+/u).filter(classifySignalToken))]
+      .sort().slice(0, MAX_SIGNAL_CLASSES),
+    role: values.role || null, type: values.type || null };
 }
 
+function selectorFor(parsed) {
+  return { syntax: parsed.syntax, value: parsed.value, byteLength: parsed.byteLength, complexity: parsed.complexity };
+}
+
+// Three shapes leave here, and the overlay revalidates each of them inside the page:
+//   {tag, id}                                  — unique id recorded by buildStableSelector;
+//   {tag, attribute:{name,value}}              — semantic selector (name/alt/title/aria-label/data-testid/role);
+//   {tag, classes, path, id, role, type}       — structural path plus every independent corroboration.
 function locatorFor(evidence) {
   if ((evidence.selector?.framePath?.length ?? 0) > 0 || evidence.selector?.css?.includes(' >>> ')) {
     return { reason: 'unsupported-context' };
   }
-  const identity = rootIdentity(evidence.snippet);
   const css = evidence.selector?.css;
+  // Without a readable snippet there is nothing to corroborate, and saying so is more useful than
+  // blaming the selector.
+  const identity = rootIdentity(evidence.snippet);
+  if (!identity) return { reason: 'insufficient-correspondence' };
   let parsed;
   try {
-    parsed = parseCssSelectorV1(typeof css === 'string' && css.startsWith('#') && identity
+    parsed = parseSignalSelectorV1(typeof css === 'string' && css.startsWith('#')
       ? `${identity.tag}${css}` : css);
   } catch {
-    return { reason: typeof css === 'string' && css.startsWith('#') && !identity
-      ? 'insufficient-correspondence' : 'unsupported-selector' };
+    return { reason: 'unsupported-selector' };
   }
   const last = parsed.segments.at(-1);
-  if (!identity || last.tag !== identity.tag || last.id !== identity.id) {
-    return { reason: 'insufficient-correspondence' };
+  if (last.tag !== identity.tag) return { reason: 'insufficient-correspondence' };
+
+  if (last.attribute !== null) {
+    return { selector: selectorFor(parsed),
+      match: { tag: last.tag, attribute: { name: last.attribute.name, value: last.attribute.value } } };
   }
-  let match = { tag: last.tag, id: last.id };
-  if (last.id === null) {
-    if (!identity.classes.length || parsed.segments.some(segment =>
-      segment.id !== null || segment.classes.length || segment.enumAttribute !== null)) {
-      return { reason: 'insufficient-correspondence' };
-    }
-    // Sanitized snippets normalize whitespace. Require the recorded structural path
-    // and the independent class conjunction to resolve to the same unique live element.
-    match = { tag: last.tag, id: null, classes: identity.classes.slice(0, 2), path: parsed.value };
+
+  if (last.id !== null) {
+    if (identity.id !== last.id) return { reason: 'insufficient-correspondence' };
+    return { selector: selectorFor(parsed), match: { tag: last.tag, id: last.id } };
   }
+
+  // Structural path. Classes are corroboration, never an identity requirement: an element with no
+  // usable class must still be located. The live element must match the path, the tag, the
+  // recorded id (when the snippet had one) and role/type, and must carry every recorded class.
   return {
-    selector: { syntax: parsed.syntax, value: parsed.value, byteLength: parsed.byteLength, complexity: parsed.complexity },
-    match,
+    selector: selectorFor(parsed),
+    match: { tag: last.tag, classes: identity.classes, path: parsed.value,
+      id: identity.id, role: identity.role, type: identity.type },
   };
 }
 

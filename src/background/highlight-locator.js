@@ -22,6 +22,137 @@ const RAW_SELECTOR_TOKEN_PATTERN = /[#.]([^#.\[\]:()>\t\n\f\r ,\\*]+)/gu;
 const SEGMENT_PATTERN = /^([a-z][a-z0-9-]{0,62})(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?((?:\.-?[_A-Za-z][_A-Za-z0-9-]*){0,2})(?:\[(role|type)="([a-z]+)"\])?(?::nth-of-type\(([1-9][0-9]*)\))?$/u;
 const CLASS_PATTERN = /\.(-?[_A-Za-z][_A-Za-z0-9-]*)/gu;
 
+// ---------------------------------------------------------------------------------------------
+// Gramática dos SINAIS na página (page markers)
+// ---------------------------------------------------------------------------------------------
+//
+// O seletor dos sinais é produzido por `buildStableSelector` e só pode assumir três formas:
+//   `tag#id`, `tag[atributo-semântico="valor"]` e o caminho estrutural `tag > tag:nth-of-type(n)`.
+// Ele é revalidado dentro da própria página, então o vocabulário continua FECHADO — o que muda
+// em relação a `parseCssSelectorV1` é o que hoje impede marcação legítima:
+//
+//   · o caminho estrutural pode ter até 64 segmentos (antes 16), com complexidade proporcional;
+//   · ids/classes com 4 dígitos ou 8 hexadecimais são aceitos (o dado já está no DOM da própria
+//     página e não sai dela), mantendo a recusa de nomes com cara de credencial;
+//   · atributos semânticos além de role/type (name, alt, title, aria-label, data-testid) são
+//     aceitos com valor até 256 caracteres.
+//
+// Nenhum destes afrouxamentos vale para o relatório/exportação: `parseCssSelectorV1` continua
+// sendo a gramática estrita usada pelo modelo, pela captura e pelo destaque individual.
+// The individual highlight walks the same ancestry the page walks. It is deeper than the strict
+// 16-segment export grammar because a page that nests controls 20 levels down still deserves a
+// highlight, and the ancestry depth never leaves the page: it only feeds the SHA-256 structural
+// signature that the page and the worker compute independently.
+export const MAX_SIGNATURE_ANCESTRY = 64;
+export const SIGNAL_SEMANTIC_ATTRIBUTES = Object.freeze([
+  'name', 'alt', 'title', 'aria-label', 'data-testid', 'role',
+]);
+export const MAX_SIGNAL_SEGMENTS = 64;
+export const MAX_SIGNAL_COMPLEXITY = 320;
+export const MAX_SIGNAL_ATTRIBUTE_VALUE = 256;
+export const MAX_SIGNAL_CLASSES = 24;
+
+// Um segmento dos sinais nunca carrega classes: as classes registradas viajam ao lado do caminho,
+// como corroboração, e não dentro do seletor.
+const SIGNAL_SEGMENT_PATTERN = new RegExp(
+  '^([a-z][a-z0-9-]{0,62})'
+  + '(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?'
+  + '(?:\\[([a-z][a-z0-9-]{0,31})="((?:[^"\\\\]|\\\\.)*)"\\])?'
+  + '(?::nth-of-type\\(([1-9][0-9]*)\\))?$', 'u');
+
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
+
+/** Same closed token shape as `classifySelectorToken`, minus the date/hash heuristics. */
+export function classifySignalToken(value) {
+  return typeof value === 'string' &&
+    value.length >= 1 &&
+    value.length <= MAX_TOKEN_LENGTH &&
+    SAFE_TOKEN_PATTERN.test(value) &&
+    !isSignalSensitiveToken(value);
+}
+
+/** Credential-shaped names stay refused even inside the page. */
+export function isSignalSensitiveToken(value) {
+  return SENSITIVE_TOKEN_PATTERN.test(value) || URL_LIKE_PATTERN.test(value) || UUID_PATTERN.test(value);
+}
+
+export function isSafeSignalAttributeValue(value) {
+  return typeof value === 'string' && value.length >= 1 && value.length <= MAX_SIGNAL_ATTRIBUTE_VALUE &&
+    !CONTROL_CHARACTER_PATTERN.test(value) && !isSignalSensitiveToken(value);
+}
+
+/** Undoes the CSS string escaping produced by `escapeCssString` in core/evidence/selector.js. */
+export function unescapeCssString(value) {
+  let output = '';
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '\\') { output += value[index]; continue; }
+    index += 1;
+    if (index >= value.length) break;
+    const hex = /^[0-9a-fA-F]{1,6}/u.exec(value.slice(index));
+    if (hex) {
+      const code = Number.parseInt(hex[0], 16);
+      if (code > 0 && code <= 0x10ffff) output += String.fromCodePoint(code);
+      index += hex[0].length - 1;
+      if (value[index + 1] === ' ') index += 1;
+      continue;
+    }
+    output += value[index];
+  }
+  return output;
+}
+
+export function parseSignalSelectorV1(value) {
+  if (typeof value !== 'string') throw invalidSelector('O seletor deve ser texto primitivo.');
+  if (value.length > MAX_SELECTOR_BYTES) throw invalidSelector('CSSSelectorV1 excede 2.048 bytes.');
+  const byteLength = utf8(value).byteLength;
+  if (byteLength > MAX_SELECTOR_BYTES) throw invalidSelector('CSSSelectorV1 excede 2.048 bytes.');
+
+  RAW_SELECTOR_TOKEN_PATTERN.lastIndex = 0;
+  for (const match of value.matchAll(RAW_SELECTOR_TOKEN_PATTERN)) {
+    if (isSignalSensitiveToken(match[1])) throw invalidSelector('Token sensível proibido em CSSSelectorV1.');
+  }
+
+  const rawSegments = value.split(' > ');
+  if (rawSegments.length < 1 || rawSegments.length > MAX_SIGNAL_SEGMENTS) {
+    throw invalidSelector('CSSSelectorV1 excede o limite de segmentos.');
+  }
+
+  const segments = [];
+  let complexity = Math.max(0, rawSegments.length - 1);
+  for (const rawSegment of rawSegments) {
+    const match = SIGNAL_SEGMENT_PATTERN.exec(rawSegment);
+    if (!match) throw invalidSelector('CSSSelectorV1 não pertence à gramática fechada.');
+    const [, tag, id = null, attributeName, rawAttributeValue, rawNth] = match;
+    if (id !== null && !classifySignalToken(id)) throw invalidSelector('Token inválido em CSSSelectorV1.');
+
+    let attribute = null;
+    if (attributeName !== undefined) {
+      const attributeValue = unescapeCssString(rawAttributeValue);
+      if (!SIGNAL_SEMANTIC_ATTRIBUTES.includes(attributeName) || !isSafeSignalAttributeValue(attributeValue)) {
+        throw invalidSelector('Atributo semântico não permitido em CSSSelectorV1.');
+      }
+      attribute = { name: attributeName, value: attributeValue };
+    }
+
+    let nthOfType = null;
+    if (rawNth !== undefined) {
+      nthOfType = Number(rawNth);
+      if (!Number.isSafeInteger(nthOfType) || nthOfType < 1) throw invalidSelector('Ordinal inválido em CSSSelectorV1.');
+    }
+
+    complexity += 1 + (id === null ? 0 : 1) + (attribute === null ? 0 : 2) + (nthOfType === null ? 0 : 3);
+    if (complexity > MAX_SIGNAL_COMPLEXITY) throw invalidSelector('CSSSelectorV1 excede a complexidade permitida.');
+    segments.push({ tag, id, attribute, nthOfType });
+  }
+
+  // Um id ou um atributo descrevem o próprio elemento: nunca aparecem no meio de um caminho.
+  if (segments.length > 1 && segments.some(segment => segment.id !== null || segment.attribute !== null)) {
+    throw invalidSelector('CSSSelectorV1 não pertence à gramática fechada.');
+  }
+
+  return deepFreezePlain({ syntax: 'CSSSelectorV1', value, byteLength, complexity, segments });
+}
+
 const ALLOWED_ROLES = Object.freeze(new Set([
   'alert', 'button', 'checkbox', 'dialog', 'heading', 'img', 'link', 'list', 'listitem',
   'main', 'menu', 'menuitem', 'navigation', 'option', 'radio', 'region', 'search', 'slider',
@@ -37,26 +168,40 @@ const BUTTON_INPUT_TYPES = new Set(['button', 'file', 'image', 'reset', 'submit'
 const TEXTBOX_INPUT_TYPES = new Set(['email', 'password', 'search', 'tel', 'text', 'url']);
 const NO_ROLE_INPUT_TYPES = new Set(['color', 'date', 'datetime-local', 'hidden', 'month', 'time', 'week']);
 
-export function classifySelectorToken(value) {
+function tokenShapeOk(value) {
   return typeof value === 'string' &&
     value.length >= 1 &&
     value.length <= MAX_TOKEN_LENGTH &&
-    SAFE_TOKEN_PATTERN.test(value) &&
-    !isSensitiveSelectorToken(value);
+    SAFE_TOKEN_PATTERN.test(value);
 }
 
-export function parseCssSelectorV1(value) {
+export function classifySelectorToken(value) {
+  return tokenShapeOk(value) && !isSensitiveSelectorToken(value);
+}
+
+// One closed grammar, two vocabularies. The strict one (`parseCssSelectorV1`) still governs the
+// model, the export and the report; the eased one (`parseHighlightSelectorV1`) governs the live
+// individual highlight, which is re-proved inside the page by the structural signature and must not
+// refuse an element merely because its id or class carries four digits or eight hex characters.
+// Credential-shaped names stay refused in both.
+function parseSelectorV1(value, { maxSegments, maxComplexity, sensitive }) {
   if (typeof value !== 'string') throw invalidSelector('O seletor deve ser texto primitivo.');
   if (value.length > MAX_SELECTOR_BYTES) throw invalidSelector('CSSSelectorV1 excede 2.048 bytes.');
   const byteLength = utf8(value).byteLength;
   if (byteLength > MAX_SELECTOR_BYTES) throw invalidSelector('CSSSelectorV1 excede 2.048 bytes.');
 
-  scanCompleteRawTokens(value);
+  RAW_SELECTOR_TOKEN_PATTERN.lastIndex = 0;
+  for (const match of value.matchAll(RAW_SELECTOR_TOKEN_PATTERN)) {
+    if (sensitive(match[1])) throw invalidSelector('Token sensível proibido em CSSSelectorV1.');
+  }
   const rawSegments = value.split(' > ');
-  if (rawSegments.length < 1 || rawSegments.length > MAX_SELECTOR_SEGMENTS) {
+  if (rawSegments.length < 1 || rawSegments.length > maxSegments) {
     throw invalidSelector('CSSSelectorV1 excede o limite de segmentos.');
   }
 
+  const assertSafeToken = token => {
+    if (sensitive(token) || !tokenShapeOk(token)) throw invalidSelector('Token sensível proibido em CSSSelectorV1.');
+  };
   const segments = [];
   let complexity = Math.max(0, rawSegments.length - 1);
   for (const rawSegment of rawSegments) {
@@ -64,8 +209,8 @@ export function parseCssSelectorV1(value) {
     if (!match) throw invalidSelector('CSSSelectorV1 não pertence à gramática fechada.');
     const [, tag, id = null, rawClasses = '', attributeName, attributeValue, rawNth] = match;
     const classes = [...rawClasses.matchAll(CLASS_PATTERN)].map(entry => entry[1]);
-    if (id !== null) assertSafeSelectorToken(id);
-    for (const className of classes) assertSafeSelectorToken(className);
+    if (id !== null) assertSafeToken(id);
+    for (const className of classes) assertSafeToken(className);
 
     let enumAttribute = null;
     if (attributeName !== undefined) {
@@ -83,11 +228,27 @@ export function parseCssSelectorV1(value) {
     }
 
     complexity += 1 + (id === null ? 0 : 1) + classes.length + (enumAttribute === null ? 0 : 2) + (nthOfType === null ? 0 : 3);
-    if (complexity > MAX_SELECTOR_COMPLEXITY) throw invalidSelector('CSSSelectorV1 excede a complexidade permitida.');
+    if (complexity > maxComplexity) throw invalidSelector('CSSSelectorV1 excede a complexidade permitida.');
     segments.push({ tag, id, classes, enumAttribute, nthOfType });
   }
 
   return deepFreezePlain({ syntax: 'CSSSelectorV1', value, byteLength, complexity, segments });
+}
+
+export function parseCssSelectorV1(value) {
+  return parseSelectorV1(value, {
+    maxSegments: MAX_SELECTOR_SEGMENTS,
+    maxComplexity: MAX_SELECTOR_COMPLEXITY,
+    sensitive: isSensitiveSelectorToken,
+  });
+}
+
+export function parseHighlightSelectorV1(value) {
+  return parseSelectorV1(value, {
+    maxSegments: MAX_SIGNAL_SEGMENTS,
+    maxComplexity: MAX_SIGNAL_COMPLEXITY,
+    sensitive: isSignalSensitiveToken,
+  });
 }
 
 export function canonicalPath(element, { scopeRoot, maxSegments } = {}) {
@@ -182,13 +343,6 @@ function utf8(value) {
 function isSensitiveSelectorToken(value) {
   return SENSITIVE_TOKEN_PATTERN.test(value) || URL_LIKE_PATTERN.test(value) ||
     FOUR_DECIMALS_PATTERN.test(value) || EIGHT_HEX_PATTERN.test(value) || UUID_PATTERN.test(value);
-}
-
-function scanCompleteRawTokens(value) {
-  RAW_SELECTOR_TOKEN_PATTERN.lastIndex = 0;
-  for (const match of value.matchAll(RAW_SELECTOR_TOKEN_PATTERN)) {
-    if (isSensitiveSelectorToken(match[1])) throw invalidSelector('Token sensível proibido em CSSSelectorV1.');
-  }
 }
 
 function assertSafeSelectorToken(value) {
@@ -298,7 +452,7 @@ function exactQuery(scopeRoot, value) {
 }
 
 async function canonicalSignatureInput({ documentId, frameId, element, scopeRoot, subtle }) {
-  assertScopeReachable(element, scopeRoot, MAX_SELECTOR_SEGMENTS, 'StructuralSignatureV1');
+  assertScopeReachable(element, scopeRoot, MAX_SIGNATURE_ANCESTRY, 'StructuralSignatureV1');
   const ancestry = [];
   const seen = new Set();
   let current = element;
@@ -318,7 +472,7 @@ async function canonicalSignatureInput({ documentId, frameId, element, scopeRoot
     }
     ancestry.push({ tag: tagToken(current), nthOfType: ordinal, attributes });
     if (isScopeRoot(current, scopeRoot)) break;
-    if (ancestry.length >= MAX_SELECTOR_SEGMENTS) throw new TypeError('Escopo não alcançado em StructuralSignatureV1.');
+    if (ancestry.length >= MAX_SIGNATURE_ANCESTRY) throw new TypeError('Escopo não alcançado em StructuralSignatureV1.');
     current = parentWithinScope(current, scopeRoot);
   }
 

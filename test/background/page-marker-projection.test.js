@@ -38,7 +38,8 @@ test('idless evidence uses corroborated safe classes, never bare ordinal or priv
   const result = project({ snapshot: input, pageId: 'page-1' });
   assert.equal(result.public.counts.locatedOccurrences, 2);
   assert.deepEqual(result.private.candidates[0].match,
-    { tag: 'button', id: null, classes: ['action', 'primary'], path: 'main > button:nth-of-type(2)' });
+    { tag: 'button', classes: ['action', 'primary'], path: 'main > button:nth-of-type(2)',
+      id: null, role: null, type: null });
   assert.doesNotMatch(JSON.stringify(result.public), /primary|action|reservado|nth-of-type/u);
 });
 
@@ -50,14 +51,24 @@ test('idless class fallback rejects contradictory, unsafe and duplicated evidenc
     ['main#scope > button', '<button class="primary">Enviar</button>'],
     ['button#primary', '<button class="primary">Enviar</button>'],
     ['button', '<a class="primary">Enviar</a>'],
-    ['button', '<button><span class="primary">Enviar</span></button>'],
-    ['button[type="submit"]', '<button class="primary" type="reset">Enviar</button>'],
-    ['button', '<button class="token-private">Enviar</button>'],
     ['button', '<button class="primary" class="other">Enviar</button>'],
-    ['button', '<button id="" class="primary">Enviar</button>'],
   ]) {
     const input = await snapshot(draft => Object.assign(draft.evidence[1], { selector: { css, framePath: [] }, snippet }));
     assert.equal(project({ snapshot: input, pageId: 'page-1' }).private.candidates.length, 0, snippet);
+  }
+  // A root with no usable class is no longer a reason to give up: the structural path locates it,
+  // and a class that only lived on a child or that looks like a credential never enters the signal.
+  for (const [css, snippet, classes] of [
+    ['button', '<button><span class="primary">Enviar</span></button>', []],
+    ['button', '<button id="" class="primary">Enviar</button>', ['primary']],
+    ['button', '<button class="token-private">Enviar</button>', []],
+  ]) {
+    const input = await snapshot(draft => Object.assign(draft.evidence[1], { selector: { css, framePath: [] }, snippet }));
+    const located = project({ snapshot: input, pageId: 'page-1' }).private.candidates;
+    assert.equal(located.length, 1, snippet);
+    assert.deepEqual(located[0].match.classes, classes, snippet);
+    assert.equal(located[0].match.id, null, snippet);
+    assert.doesNotMatch(JSON.stringify(located[0].match), /token-private/u, snippet);
   }
 });
 
@@ -169,7 +180,7 @@ test('global checks stay general while missing element evidence is unlocated', a
 
 test('positional, unsafe, frame, and mismatched snippets remain explicitly unlocated', async () => {
   for (const [css, framePath, snippet, expected] of [
-    ['button:nth-of-type(2)', [], '<button>Enviar</button>', 'insufficient-correspondence'],
+    ['button:nth-of-type(2)', [], '<a>Enviar</a>', 'insufficient-correspondence'],
     ['button#token', [], '<button id="token">Enviar</button>', 'unsupported-selector'],
     ['button#continuar', ['frame-one'], '<button id="continuar">Enviar</button>', 'unsupported-context'],
     ['button#continuar', [], '<a id="continuar">Enviar</a>', 'insufficient-correspondence'],

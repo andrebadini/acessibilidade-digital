@@ -7,6 +7,7 @@ import {
   classifySelectorToken,
   createStructuralSignatureV1,
   parseCssSelectorV1,
+  parseHighlightSelectorV1,
   roleForStructuralSignature,
   selectorMatchesOne,
   structuralSignatureMatches,
@@ -258,6 +259,59 @@ test('enforces segment, complexity and UTF-8 budgets at their exact boundaries',
   assert.equal(parseCssSelectorV1(sixteenSegments).segments.length, 16);
   assert.throws(() => parseCssSelectorV1(`${sixteenSegments} > main`), /segmentos/iu);
   assert.throws(() => parseCssSelectorV1('a'.repeat(2_049)), /2\.048 bytes/iu);
+});
+
+test('eases only the highlight vocabulary while the strict export grammar keeps refusing date and hash tokens', () => {
+  // Anything both grammars accept must parse to the exact same record.
+  const shared = 'main > button.primary[type="button"]:nth-of-type(2)';
+  assert.deepEqual(parseHighlightSelectorV1(shared), parseCssSelectorV1(shared));
+
+  for (const [value, complexity] of [
+    ['button#post-1234', 2],
+    ['button.card-2024', 2],
+    ['button.hex-9f8e7d6c', 2],
+    ['main > button.primary.card-2024', 5],
+  ]) {
+    assert.throws(() => parseCssSelectorV1(value), /token sensível/iu, value);
+    const parsed = parseHighlightSelectorV1(value);
+    assert.equal(parsed.value, value);
+    assert.equal(parsed.complexity, complexity);
+    assert.equal(parsed.syntax, 'CSSSelectorV1');
+    assert.equal(Object.isFrozen(parsed), true);
+    assert.equal(Object.isFrozen(parsed.segments), true);
+  }
+
+  // Credential-shaped names, URLs and UUIDs stay refused on both paths.
+  for (const value of [
+    'button#password',
+    'button.token-value',
+    'button.session-id',
+    'button.csrf-token',
+    'button#api-key',
+    'button.cliente-550e8400-e29b-41d4-a716-446655440000',
+    'div.user@example.com',
+  ]) {
+    assert.throws(() => parseHighlightSelectorV1(value), /token sensível/iu, value);
+    assert.throws(() => parseCssSelectorV1(value), /token sensível/iu, value);
+  }
+
+  // The 16-segment / cost-64 export ceilings become 64 segments / cost 320 for the highlight.
+  const deepest = Array.from({ length: 64 }, () => 'main').join(' > ');
+  assert.equal(parseHighlightSelectorV1(deepest).segments.length, 64);
+  assert.equal(parseHighlightSelectorV1(deepest).complexity, 127);
+  assert.throws(() => parseHighlightSelectorV1(`${deepest} > main`), /segmentos/iu);
+  assert.throws(() => parseCssSelectorV1(deepest), /segmentos/iu);
+
+  const strongest = 'button#safe.primary.secondary[type="button"]:nth-of-type(1)';
+  const atCostLimit = [...Array(24).fill(strongest), ...Array(27).fill('button.primary')].join(' > ');
+  assert.equal(parseHighlightSelectorV1(atCostLimit).complexity, 320);
+  assert.throws(() => parseHighlightSelectorV1(`${atCostLimit} > main`), /complexidade/iu);
+  assert.throws(() => parseCssSelectorV1(atCostLimit), /segmentos/iu);
+
+  // Outside the vocabulary both stay closed: no combinators, wildcards, negation or pseudo-classes.
+  for (const value of ['button > *', 'button:hover', 'div + button', 'button:not(.x)', 'button >']) {
+    assert.throws(() => parseHighlightSelectorV1(value), TypeError, value);
+  }
 });
 
 test('rejects an oversized code-unit input before constructing or invoking TextEncoder', () => {
@@ -671,9 +725,12 @@ test('structural signatures reject caller-supplied structure, malformed expected
     /assinatura/iu,
   );
 
-  const deep = linearTree(17);
+  // The ancestry ceiling is 64, the same the page walks for the signals and the individual highlight.
+  const deepest = linearTree(64);
+  await createStructuralSignatureV1({ documentId: 'doc-1', frameId: 0, element: deepest.target, scopeRoot: deepest.document, subtle: webcrypto.subtle });
+  const tooDeep = linearTree(65);
   await assert.rejects(
-    () => createStructuralSignatureV1({ documentId: 'doc-1', frameId: 0, element: deep.target, scopeRoot: deep.document, subtle: webcrypto.subtle }),
+    () => createStructuralSignatureV1({ documentId: 'doc-1', frameId: 0, element: tooDeep.target, scopeRoot: tooDeep.document, subtle: webcrypto.subtle }),
     /escopo não alcançado/iu,
   );
 });

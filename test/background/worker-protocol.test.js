@@ -37,15 +37,19 @@ test('page-marker revision, ordinal and filter boundaries are closed and canonic
   for (const revision of [0, -1, 1.5, '1', Number.MAX_SAFE_INTEGER + 1]) {
     assert.equal(parse(markerEnvelope('PANEL_SHOW_PAGE_MARKERS', { modelRevision: revision })), false);
   }
-  for (const ordinal of [-1, 64, 0.5, '0', null]) {
+  for (const ordinal of [-1, 500, 0.5, '0', null]) {
     assert.equal(parse(markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal, scroll: false })), false);
   }
   assert.equal(parse(markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 0, scroll: true })), true);
+  assert.equal(parse(markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 499, scroll: true })), true);
   assert.equal(parse(markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 0, scroll: 1 })), false);
-  for (const visibleOrdinals of ['', '0', '0,9,10,63', Array.from({ length: 64 }, (_, i) => i).join(',')]) {
+  for (const visibleOrdinals of ['', '0', '0,9,10,63', Array.from({ length: 500 }, (_, i) => i).join(',')]) {
     assert.equal(parse(markerEnvelope('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals })), true);
   }
-  for (const visibleOrdinals of ['00', '1,0', '0,0', '64', '-1', '0,', ' 0', '0, 1', [0]]) {
+  assert.equal(parse(markerEnvelope('PANEL_FILTER_PAGE_MARKERS', {
+    visibleOrdinals: Array.from({ length: 500 }, (_, i) => i + 1).join(','),
+  })), false, 'an ordinal at the ceiling is still out of range');
+  for (const visibleOrdinals of ['00', '1,0', '0,0', '500', '-1', '0,', ' 0', '0, 1', [0]]) {
     assert.equal(parse(markerEnvelope('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals })), false);
   }
 });
