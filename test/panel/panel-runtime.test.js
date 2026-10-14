@@ -160,7 +160,8 @@ test('page markers wire controls, ABNT selection, filters and explicit navigatio
   let markerModelRevision = 1;
   const markerResponse = (selectedOrdinal = null) => ({ ok: true, markers: { state: 'active', modelRevision: markerModelRevision,
     groups: [{ number: 9, ordinals: [0, 1] }],
-    counts: { markers: 1, located: 2, unlocated: 0, general: Math.min(64, result.details.length) - 2, omitted: 0 }, selectedOrdinal } });
+    counts: { markers: 1, located: 2, unlocated: 0, general: Math.min(500, result.details.length) - 2, omitted: 0 },
+    selectedOrdinal, reasons: [] } });
   const finishPending = async () => {
     for (let turn = 0; turn < 8; turn++) {
       await tick();

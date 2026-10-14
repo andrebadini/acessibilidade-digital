@@ -5,7 +5,7 @@ import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-c
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { sanitizeEvidenceUrlV1 } from '../core/privacy.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
-import { parseCssSelectorV1 } from './highlight-locator.js';
+import { parseHighlightSelectorV1 } from './highlight-locator.js';
 import { runAuditaHighlightCommand } from '../browser/highlight-overlay.js';
 import { probeSensitiveContextInTab } from '../browser/sensitive-context-probe.js';
 
@@ -99,7 +99,7 @@ function highlightSelectorRecord(value) {
   const record = exactHighlightRecord(value, ['syntax', 'value', 'byteLength', 'complexity']);
   if (!record || record.syntax !== 'CSSSelectorV1') return null;
   try {
-    const parsed = parseCssSelectorV1(record.value);
+    const parsed = parseHighlightSelectorV1(record.value);
     if (parsed.byteLength !== record.byteLength || parsed.complexity !== record.complexity) return null;
     return Object.freeze({
       syntax: 'CSSSelectorV1',

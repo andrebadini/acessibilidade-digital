@@ -227,9 +227,9 @@ function validWorkerEnvelope(value) {
 }
 
 function validOpaqueId(value) { return typeof value === 'string' && OPAQUE_ID.test(value); }
-function validMarkerOrdinal(value) { return Number.isSafeInteger(value) && value >= 0 && value < 64; }
+function validMarkerOrdinal(value) { return Number.isSafeInteger(value) && value >= 0 && value < 500; }
 function validMarkerFilter(value) {
-  if (typeof value !== 'string' || value.length > 181) return false;
+  if (typeof value !== 'string' || value.length > 2048) return false;
   if (value === '') return true;
   const parts = value.split(',');
   return parts.every((part, index) => {

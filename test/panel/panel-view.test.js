@@ -154,6 +154,7 @@ function markerSnapshot(overrides = {}) {
     status: 'active',
     groups: [{ number: 7, occurrenceIds: ['occ-1', 'occ-2'] }],
     counts: { markers: 1, located: 2, unlocated: 0, general: 0, omitted: 0 },
+    reasons: [],
     selectedOccurrenceId: 'occ-1',
     message: 'Sinais visíveis na página atual.',
     ...overrides,
@@ -204,11 +205,40 @@ test('marker projection copies only public fields and derives visible occurrence
   assert.equal(view.result.summary.counts.errors.occurrences, 1, 'filters and markers preserve canonical totals');
 });
 
+test('the signals block explains in plain language why some findings got no signal', () => {
+  const input = fixture();
+  const markers = markerSnapshot({ reasons: [
+    { reason: 'unsupported-context', count: 3 }, { reason: 'not-rendered', count: 2 },
+    { reason: 'unresolved', count: 1 }, { reason: 'not-found', count: 1 },
+  ] });
+  const root = renderPanelView({ view: buildPanelView({ ...input, markers }),
+    document: new TestDocument(), onIntent: () => {} });
+  const block = root.querySelector('[data-marker-reasons]');
+  assert.ok(block, 'the block is visible whenever signals are on the page');
+  const rows = block.querySelectorAll('[data-marker-reason]');
+  assert.deepEqual(rows.map(row => row.textContent), [
+    '3 estão dentro de um quadro incorporado (iframe)',
+    '2 estavam ocultos no momento',
+    '1 a página mudou e o elemento não foi reencontrado',
+    '1 não foi reencontrado na página',
+  ]);
+  assert.deepEqual(rows.map(row => row.dataset.markerReason),
+    ['unsupported-context', 'not-rendered', 'other', 'not-found']);
+  assert.doesNotMatch(root.querySelector('[data-page-marker-review]').textContent, /unsupported-context|not-rendered|unresolved/u);
+  // A hidden or idle block never speculates about categories it was not given.
+  for (const hidden of [markerSnapshot({ status: 'idle', groups: [], counts: null }),
+    markerSnapshot({ reasons: [] })]) {
+    const quiet = renderPanelView({ view: buildPanelView({ ...input, markers: hidden }),
+      document: new TestDocument(), onIntent: () => {} });
+    assert.equal(quiet.querySelector('[data-marker-reasons]'), null);
+  }
+});
+
 test('result defaults to an idle marker snapshot without changing non-result contracts', () => {
   const input = fixture();
   const view = buildPanelView(input);
   assert.deepEqual(view.markers, {
-    status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, message: null,
+    status: 'idle', groups: [], counts: null, reasons: [], selectedOccurrenceId: null, message: null,
   });
   assert.deepEqual(view.result.visibleOccurrenceIds, ['occ-1', 'occ-2']);
 });

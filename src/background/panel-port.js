@@ -756,7 +756,7 @@ export function createPanelPortCoordinator(raw) {
         invalidateMarkerReceipt(binding);
         nextReceipt = result ? Object.freeze({ windowId: binding.windowId, auditId: value.auditId,
           sessionCapabilityId: value.sessionCapabilityId, modelRevision: result.modelRevision,
-          detailCount: Math.min(64, result.details.length) }) : null;
+          detailCount: Math.min(500, result.details.length) }) : null;
       }
     }
     binding.port.postMessage(value);

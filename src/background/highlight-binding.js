@@ -1,6 +1,6 @@
 import { sanitizeResourceUrl } from '../core/normalize-snapshot.js';
 import { isAuditIntegrityVerified } from '../core/report/integrity.js';
-import { parseCssSelectorV1 } from './highlight-locator.js';
+import { parseHighlightSelectorV1 } from './highlight-locator.js';
 
 const BINDING_KEYS = Object.freeze([
   'version', 'auditId', 'pageId', 'modelRevision', 'modelHash', 'tabId', 'windowId',
@@ -125,7 +125,7 @@ function selectorRecord(value) {
   if (!record || record.syntax !== 'CSSSelectorV1') return null;
   let parsed;
   try {
-    parsed = parseCssSelectorV1(record.value);
+    parsed = parseHighlightSelectorV1(record.value);
   } catch {
     return null;
   }
@@ -258,7 +258,7 @@ function selectorFromEvidence(evidence) {
   try {
     const selector = evidence?.selector?.css;
     if (typeof selector !== 'string') return null;
-    const parsed = parseCssSelectorV1(selector);
+    const parsed = parseHighlightSelectorV1(selector);
     return {
       syntax: 'CSSSelectorV1', value: parsed.value,
       byteLength: parsed.byteLength, complexity: parsed.complexity,

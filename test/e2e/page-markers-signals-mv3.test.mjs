@@ -20,9 +20,10 @@ const DOCUMENT = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <button id="missing-name">Botão sem nome</button><input id="missing-label" type="text"></main></body></html>`;
 
 // The overlay lives in a closed shadow root attached to documentElement, so every read goes
-// through the host element and its shadowRoot, never through body's children. A ring is drawn
-// only for the signal the report currently has selected; the other signals stay as numbered
-// buttons, which is what keeps the page readable while marking it.
+// through the host element and its shadowRoot, never through body's children. Every located signal
+// draws its own outer contour (C.12) — a number floating alone would not say where the problem is.
+// Selection does not add or remove contours: it emphasizes one of them (C.16), which is read here
+// as the enlarged label, so the emphasized ring can be told apart from the hover highlight.
 const markerSurface = `(() => {
   const host = document.querySelector('[data-audita-page-markers-root="v1"]');
   if (!host) return { roots: 0, buttons: [], ring: null };
@@ -33,20 +34,21 @@ const markerSurface = `(() => {
     label: group.querySelector('.audita-marker').getAttribute('aria-label'),
     text: group.querySelector('.audita-marker').textContent,
     marked: group.querySelector('.audita-ring').style.display !== 'none',
+    selected: group.querySelector('.audita-marker').style.height === '24px',
     box: buttonBox(group),
   }));
-  const markedGroup = [...shadow.querySelectorAll('.audita-group')]
-    .find(group => group.querySelector('.audita-ring').style.display !== 'none') ?? null;
+  const selectedGroup = [...shadow.querySelectorAll('.audita-group')]
+    .find(group => group.querySelector('.audita-marker').style.height === '24px') ?? null;
   return { roots: document.querySelectorAll('[data-audita-page-markers-root="v1"]').length,
     buttons: groups,
-    ring: markedGroup ? (() => {
-      const box = markedGroup.querySelector('.audita-ring').getBoundingClientRect();
+    ring: selectedGroup ? (() => {
+      const box = selectedGroup.querySelector('.audita-ring').getBoundingClientRect();
       const covered = [...document.querySelectorAll('main *')].filter(element => {
         const other = element.getBoundingClientRect();
         return other.width > 0 && other.height > 0 && other.x < box.x + box.width && box.x < other.x + other.width &&
           other.y < box.y + box.height && box.y < other.y + other.height;
       }).map(element => element.id || element.tagName.toLowerCase());
-      return { label: markedGroup.querySelector('.audita-marker').getAttribute('aria-label'),
+      return { label: selectedGroup.querySelector('.audita-marker').getAttribute('aria-label'),
         box: [Math.round(box.x), Math.round(box.y), Math.round(box.width), Math.round(box.height)],
         covered: covered.filter((tag, index, all) => all.indexOf(tag) === index) };
     })() : null };
@@ -125,13 +127,15 @@ test('the panel draws numbered signals over the audited page', { timeout: 300_00
     assert.ok(button.box[2] > 0 && button.box[3] > 0,
       `every signal must be drawn where the reader can see it: ${JSON.stringify(button)}`);
   }
-  // A ring is drawn only for the signal the report has selected, so the page stays readable
-  // while marked. The report opens on its first occurrence, so exactly one ring is expected and
-  // it must be the ring of the signal the panel also reports as selected.
-  assert.ok(surface.ring, `the selected occurrence must be ringed on the page: ${JSON.stringify(surface)}`);
+  // Every located element keeps its own contour, and the report's current occurrence is the one
+  // emphasized on the page. The report opens on its first occurrence, so exactly one signal must
+  // carry the emphasis and it must be the signal the panel also reports as selected.
+  assert.ok(surface.ring, `the selected occurrence must be emphasized on the page: ${JSON.stringify(surface)}`);
   const number = Number(surface.ring.label.match(/^Sinal ([0-9]+)/u)[1]);
-  assert.equal(surface.buttons.filter(button => button.marked).length, 1,
-    `only the selected signal may draw a ring: ${JSON.stringify(surface.buttons)}`);
+  assert.equal(surface.buttons.filter(button => button.marked).length, surface.buttons.length,
+    `every located signal draws its own contour: ${JSON.stringify(surface.buttons)}`);
+  assert.equal(surface.buttons.filter(button => button.selected).length, 1,
+    `only the selected signal may carry the emphasis: ${JSON.stringify(surface.buttons)}`);
 
   // The numbered signal has to sit on a real element of the audited page, otherwise the number
   // tells the reader nothing about where the problem is.

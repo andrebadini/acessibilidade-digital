@@ -194,7 +194,7 @@ function parseHighlightState(value) {
   return null;
 }
 
-function validMarkerOrdinal(value, maximum = 64) {
+function validMarkerOrdinal(value, maximum = 500) {
   return Number.isSafeInteger(value) && value >= 0 && value < maximum;
 }
 
@@ -217,7 +217,7 @@ function copyPageMarkersIntent(intent, maximum) {
   if (copy.type === 'PANEL_SELECT_PAGE_MARKER' &&
     (!validMarkerOrdinal(copy.ordinal, maximum) || typeof copy.scroll !== 'boolean')) return null;
   if (copy.type === 'PANEL_FILTER_PAGE_MARKERS') {
-    if (typeof copy.visibleOrdinals !== 'string' || copy.visibleOrdinals.length > 181) return null;
+    if (typeof copy.visibleOrdinals !== 'string' || copy.visibleOrdinals.length > 2048) return null;
     if (copy.visibleOrdinals !== '') {
       const parts = copy.visibleOrdinals.split(',');
       if (!parts.every((part, index) => validMarkerOrdinal(Number(part), maximum) &&
@@ -405,7 +405,7 @@ export function createPanelSessionPortClient(raw) {
       sessionId = bootstrap.sessionCapabilityId;
       sessionState = bootstrap.state;
       markerRevision = bootstrap.result?.modelRevision ?? null;
-      markerDetailCount = Math.min(64, bootstrap.result?.details.length ?? 0);
+      markerDetailCount = Math.min(500, bootstrap.result?.details.length ?? 0);
       if (['result', 'view-only'].includes(bootstrap.state)) {
         if (reviewBudgetAuditId !== bootstrap.auditId) {
           reviewBudgetAuditId = bootstrap.auditId;
