@@ -50,7 +50,7 @@ function chromeFixture() {
   const events = {
     message: event(), connect: event(), installed: event(), context: event(),
     updated: event(), tabRemoved: event(), tabDetached: event(), windowRemoved: event(),
-    action: event(), alarm: event(), startup: event(),
+    action: event(), alarm: event(), startup: event(), debuggerEvent: event(),
   };
   const alarmValues = new Map();
   return {
@@ -642,6 +642,7 @@ function defaultGraphFixture(initialSessionValues = null, fixtureOptions = {}) {
       async attach() {},
       async sendCommand() { return {}; },
       async detach() {},
+      onEvent: events.debuggerEvent,
     };
   }
   chromeApi.tabs.query = fixtureOptions.tabsQuery ?? (async () => []);

@@ -36,6 +36,15 @@ export const ELEMENT_MEASUREMENT_FALLBACK_MESSAGE =
 export const ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE =
   'Elementos dentro de iframes não recebem miniatura própria: a posição medida no quadro não pode ser aplicada ao documento de topo. O achado continua no relatório com seletor, descrição e captura integral da página.';
 
+// Congelamento de navegação (1.1.58). A página tentou trocar de documento durante a auditoria (recarga por
+// `<meta http-equiv="refresh">`, `location.reload()` por temporizador, redirecionamento por script) e a
+// navegação foi segurada com o depurador anexado até o fim — é o que faz o resultado corresponder à página
+// analisada. Não é uma degradação: nada foi perdido, e por isso a mensagem não força `partial`. A contagem de
+// tentativas existe no runtime, mas o catálogo é fechado e compara mensagem exata; o número não entra no
+// texto para não transformar uma mensagem factual em texto livre.
+export const PAGE_NAVIGATION_HELD_MESSAGE =
+  'A página tentou recarregar ou navegar sozinha durante a auditoria; a navegação foi segurada até o fim para que o resultado corresponda à página analisada.';
+
 export const EXPORT_ISSUE_MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
   REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
@@ -229,6 +238,14 @@ export const SYSTEM_DIAGNOSTIC_POLICY = Object.freeze([
     statuses: ALL_TERMINAL_STATUSES,
     recoverable: true,
     fact: 'attached-copy-reloaded',
+    causePartial: false,
+  }),
+  page({
+    code: 'PAGE_NAVIGATION_HELD',
+    message: PAGE_NAVIGATION_HELD_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES,
+    recoverable: true,
+    fact: 'page-navigation-held',
     causePartial: false,
   }),
   page({

@@ -6,6 +6,7 @@ import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { sanitizeEvidenceUrlV1 } from '../core/privacy.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
 import { parseHighlightSelectorV1 } from './highlight-locator.js';
+import { createNavigationFreeze } from './navigation-freeze.js';
 import { runAuditaHighlightCommand } from '../browser/highlight-overlay.js';
 import { probeSensitiveContextInTab } from '../browser/sensitive-context-probe.js';
 
@@ -838,16 +839,23 @@ function captureChromeDebugger(value) {
   const sendCommand = ownChromeApiValue(value, 'sendCommand');
   const detach = ownChromeApiValue(value, 'detach');
   const attach = ownChromeApiValue(value, 'attach');
+  // `onEvent` é a única porta de entrada de eventos CDP do projeto (1.1.58). Sem ela não há como reagir a
+  // `Fetch.requestPaused` e o congelamento de navegação não existe; por isso ela é capturada com o mesmo
+  // rigor das demais — leitura dupla, estabilidade verificada e objeto congelado.
+  const onEvent = ownChromeApiValue(value, 'onEvent');
   const confirmedSendCommand = ownChromeApiValue(value, 'sendCommand');
   const confirmedDetach = ownChromeApiValue(value, 'detach');
   const confirmedAttach = ownChromeApiValue(value, 'attach');
-  if (sendCommand !== confirmedSendCommand || detach !== confirmedDetach || attach !== confirmedAttach) {
+  const confirmedOnEvent = ownChromeApiValue(value, 'onEvent');
+  if (sendCommand !== confirmedSendCommand || detach !== confirmedDetach || attach !== confirmedAttach ||
+    onEvent !== confirmedOnEvent) {
     throw chromeApiDenied();
   }
   if (typeof attach !== 'function' || typeof sendCommand !== 'function' || typeof detach !== 'function') {
     throw chromeApiDenied();
   }
   const captured = ObjectCreate(null);
+  defineDataProperty(captured, 'onEvent', captureChromeEvent(onEvent), true, false, false);
   defineDataProperty(captured, 'attach', ReflectApply(FunctionPrototypeBind, attach, [captured]), true, false, false);
   defineDataProperty(
     captured,
@@ -1727,6 +1735,13 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       const cdp = createCdpClient(transport);
       await cdp.connect(tabId);
       return cdp;
+    },
+    // Congelamento de navegação (1.1.58): ver src/background/navigation-freeze.js. Recebe a sessão já
+    // anexada porque o congelamento vive e morre junto com ela.
+    async beginNavigationFreeze(cdp, tabId) {
+      const freeze = createNavigationFreeze({ chromeApi, cdp, tabId });
+      await freeze.start();
+      return freeze;
     },
     collectPage(cdp, tabId) { return collectPage(cdp, tabId, { executeScript }); },
     captureFullPage,

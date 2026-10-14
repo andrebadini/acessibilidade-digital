@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import {
   ATTACHED_COPY_RELOADED_MESSAGE,
+  PAGE_NAVIGATION_HELD_MESSAGE,
+  SYSTEM_DIAGNOSTIC_MESSAGES,
   diagnosticPolicyEntry,
 } from '../../src/core/report/diagnostic-policy.js';
 import { deriveSystemLimitations, listedLimitations } from '../../src/core/report/text-policy.js';
@@ -49,6 +51,37 @@ test('attached-copy reload is a non-partial page limitation with one canonical m
     pages: [{ finalUrlObserved: false, viewport: {}, diagnostics: [diagnostic] }],
     axe: { limitations: [] },
   }).filter(value => value === ATTACHED_COPY_RELOADED_MESSAGE), [ATTACHED_COPY_RELOADED_MESSAGE]);
+});
+
+test('congelamento de navegação é diagnóstico informativo, não limitação nem causa de parcial', () => {
+  assert.equal(
+    PAGE_NAVIGATION_HELD_MESSAGE,
+    'A página tentou recarregar ou navegar sozinha durante a auditoria; a navegação foi segurada até o fim para que o resultado corresponda à página analisada.',
+  );
+  const diagnostic = { code: 'PAGE_NAVIGATION_HELD', message: PAGE_NAVIGATION_HELD_MESSAGE, recoverable: true };
+  for (const status of ['complete', 'partial', 'failed', 'cancelled']) {
+    const policy = diagnosticPolicyEntry(diagnostic, {
+      role: 'page', mode: 'single', status, attempted: true, finalUrlObserved: true,
+    });
+    assert.equal(policy?.fact, 'page-navigation-held', `o diagnóstico precisa valer em ${status}`);
+    assert.equal(policy?.causePartial, false, 'segurar uma navegação não degrada a auditoria');
+  }
+  // Também vale no lote: o mesmo congelamento protege a página de um lote.
+  assert.equal(diagnosticPolicyEntry(diagnostic, {
+    role: 'page', mode: 'batch', status: 'complete', attempted: true, finalUrlObserved: true,
+  })?.fact, 'page-navigation-held');
+  // O catálogo é fechado na mensagem: uma frase livre com o mesmo código NÃO é aceita.
+  assert.equal(diagnosticPolicyEntry({ ...diagnostic, message: `${PAGE_NAVIGATION_HELD_MESSAGE} (3 vezes)` }, {
+    role: 'page', mode: 'single', status: 'complete', attempted: true, finalUrlObserved: true,
+  }), null);
+  assert.equal(SYSTEM_DIAGNOSTIC_MESSAGES.includes(PAGE_NAVIGATION_HELD_MESSAGE), true);
+  // Não vira "limitação": nada foi perdido, a navegação foi segurada e o resultado corresponde à página.
+  assert.deepEqual(deriveSystemLimitations({
+    requestedScope: { mode: 'single' },
+    session: { status: 'complete', diagnostics: [diagnostic] },
+    pages: [{ finalUrlObserved: false, viewport: {}, diagnostics: [diagnostic] }],
+    axe: { limitations: [] },
+  }).filter(value => value === PAGE_NAVIGATION_HELD_MESSAGE), []);
 });
 
 test('lista de limitações nunca some em silêncio quando a entrada não é lista', () => {

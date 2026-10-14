@@ -35,6 +35,7 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/mandatory-journey-mv3.test.mjs',
   'test/e2e/mhtml-state-characterization.test.mjs',
   'test/e2e/native-disabled-collector.test.mjs',
+  'test/e2e/navigation-freeze-mv3.test.mjs',
   'test/e2e/offscreen-highlight-scroll-mv3.test.mjs',
   'test/e2e/page-markers-signals-mv3.test.mjs',
   'test/e2e/passive-target-size.test.mjs',

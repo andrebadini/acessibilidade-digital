@@ -49,6 +49,7 @@ function chromeFake() {
   const calls = [];
   const updated = {};
   const removed = {};
+  const events = {};
   const chromeApi = {
     runtime: { getURL: path => `chrome-extension://test/${path}`, sendMessage: async message => calls.push(['message', message]) },
     tabs: {
@@ -66,13 +67,18 @@ function chromeFake() {
         calls.push(['cdp', method]);
         if (method === 'Browser.getVersion') return { product: 'Chrome/140.0' };
         if (method === 'Runtime.evaluate') return { result: { value: { width: 1280, height: 720, deviceScaleFactor: 2 } } };
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'FRAME-TOP' } } };
         return {};
       },
       detach: async target => calls.push(['detach', target]),
+      onEvent: {
+        addListener(listener) { events.listener = listener; },
+        removeListener() { events.removed = true; },
+      },
     },
     storage: { session: { async get() { return {}; }, async set() {}, async remove() {} } },
   };
-  return { chromeApi, calls, updated, removed };
+  return { chromeApi, calls, updated, removed, events };
 }
 
 function createChromeAdapter(chromeApi, rawOptions) {
