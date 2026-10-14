@@ -10,6 +10,15 @@ import { REPORT_CSS, REPORT_CSS_CSP_HASH } from './report.css.js';
 import { REPORT_SCRIPT, REPORT_SCRIPT_CSP_HASH } from './report.js.js';
 import { REPORT_VIEW_SCRIPT, REPORT_VIEW_SCRIPT_CSP_HASH } from './report-view-script.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from './evidence-treatment.js';
+import {
+  EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
+  EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND,
+  evidenceCaptureSize,
+  evidenceHighlight,
+  evidenceHighlightLegend,
+  evidenceHighlightShapes,
+  evidenceRasterMatchesCapture,
+} from './evidence-highlight.js';
 import { decodePngDataUrl } from '../evidence/png.js';
 import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO } from '../evidence/annotation-map-artifact.js';
 import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
@@ -49,10 +58,12 @@ const ANNOTATION_MAP_LIMITATION_LABELS = Object.freeze({
   'source-capture-may-contain-personal-data': 'a captura original pode conter dados pessoais visíveis',
   'frame-content-omitted': 'conteúdo de frames foi omitido',
   'closed-shadow-root-omitted': 'conteúdo de Shadow DOM fechado foi omitido',
+  'container-replaced-by-annotated-descendant': 'contêineres com elementos internos anotados foram substituídos por esses elementos',
   'node-limit-reached': 'o limite de elementos anotados foi atingido',
   'legend-limit-reached': 'o limite de legenda ou segmentos foi atingido',
   'unresolved-marker-overlap': 'uma ou mais sobreposições de marcadores permaneceram',
   'non-uniform-pixel-scale': 'as escalas horizontal e vertical da captura não são uniformes',
+  'ancestor-clipped-elements-omitted': 'elementos escondidos por uma área com rolagem própria foram omitidos',
 });
 
 const OUTCOME_PRIORITY = Object.freeze({ failed: 0, cantTell: 1, passed: 2, untested: 3, inapplicable: 4 });
@@ -209,14 +220,12 @@ function renderReportViewDocument(model, view, options = {}) {
         const figureAttributes = `id="${anchor}" data-report-preview-evidence="${escapeHtml(item.evidenceId)}" data-evidence-kind="${escapeHtml(item.kind)}"`;
         const accessibleLabel = `${label(item.kind, evidenceKindLabels, 'Evidência registrada')} local da evidência ${item.evidenceId}`;
         const treatment = item.kind === 'element' && tone ? EVIDENCE_TREATMENTS_V1[tone] : null;
-        const png = treatment ? pngMetadata(item.dataUrl) : null;
-        if (!treatment || !png) {
+        const highlight = treatment ? evidenceHighlight(item) : null;
+        if (!treatment || !highlight) {
           return `<figure ${figureAttributes}><img class="evidence-media" src="${escapeHtml(item.dataUrl)}" alt="${escapeHtml(accessibleLabel)}"><figcaption>${escapeHtml(accessibleLabel)}.</figcaption></figure>`;
         }
-        const width = finitePositive(item.metadata?.width) || png.width;
-        const height = finitePositive(item.metadata?.height) || png.height;
-        const box = highlightBox(item, width, height);
-        return `<figure ${figureAttributes}><svg class="evidence-media evidence-media--marked" data-evidence-treatment="${treatment.tone}" role="img" aria-label="${escapeHtml(`${accessibleLabel} ${treatment.aria}`)}" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet" focusable="false"><image href="${escapeHtml(item.dataUrl)}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet"></image><rect class="evidence-highlight evidence-highlight--${treatment.tone}" data-evidence-highlight="${treatment.tone}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" aria-hidden="true"></rect></svg><figcaption>${escapeHtml(`${treatment.legend} ${accessibleLabel}.`)}</figcaption></figure>`;
+        const aria = `${accessibleLabel} ${treatment.aria}${highlight.clipped ? ` ${EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND}` : ''}`;
+        return `<figure ${figureAttributes}><svg class="evidence-media evidence-media--marked" data-evidence-treatment="${treatment.tone}" role="img" aria-label="${escapeHtml(aria)}" viewBox="0 0 ${highlight.width} ${highlight.height}" width="${highlight.width}" height="${highlight.height}" preserveAspectRatio="xMidYMid meet" focusable="false"><image href="${escapeHtml(item.dataUrl)}" width="${highlight.width}" height="${highlight.height}" preserveAspectRatio="xMidYMid meet"></image>${evidenceShapesMarkup(evidenceHighlightShapes(highlight, treatment.tone))}</svg><figcaption>${escapeHtml(`${evidenceHighlightLegend(treatment, highlight)} ${accessibleLabel}.`)}</figcaption></figure>`;
       }).join('');
     return `<section data-report-evidence-preview><h4>Capturas registradas</h4>${previews}</section>`;
   };
@@ -595,16 +604,15 @@ function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome
   if (!artifact) return '<section><h4>Evidência visual</h4><p>Captura marcada indisponível; consulte as limitações e os demais registros da ocorrência.</p></section>';
   const image = imageByEvidenceId.get(artifact.evidenceId);
   const tone = outcome === 'failed' ? 'failed' : outcome === 'passed' ? 'passed' : 'review';
-  const legend = tone === 'failed'
-    ? 'Símbolo ✕ e moldura sólida: não atendimento técnico observado.'
-    : tone === 'passed'
-      ? 'Símbolo ✓ e moldura dupla: atendimento confirmado na revisão.'
-      : 'Símbolo ? e moldura tracejada: evidência pendente de revisão humana.';
   const annex = `#evidencia-${evidenceIndex(artifactById, artifact.evidenceId) + 1}`;
   if (artifact.kind === 'full-page') {
-    return `<section aria-labelledby="evidencia-ocorrencia-${occurrenceIndex + 1}"><h4 id="evidencia-ocorrencia-${occurrenceIndex + 1}">Evidência visual</h4><p class="evidence-scope-banner"><strong>Alvo elementar não localizado; evidência registrada no nível da página.</strong> A captura fornece contexto e não indica que cada pixel represente a desconformidade.</p><figure class="occurrence-evidence page-level-evidence page-level-evidence--${tone}">${renderEvidenceImage(image, `Captura integral usada como contexto da ocorrência. ${legend}`)}<figcaption>${escapeHtml(legend)} <a href="${annex}">Consultar o arquivo original no anexo</a>.</figcaption></figure></section>`;
+    const pageLegend = 'Captura integral usada como contexto; o alvo do elemento não foi localizado nesta ocorrência.';
+    return `<section aria-labelledby="evidencia-ocorrencia-${occurrenceIndex + 1}"><h4 id="evidencia-ocorrencia-${occurrenceIndex + 1}">Evidência visual</h4><p class="evidence-scope-banner"><strong>Alvo elementar não localizado; evidência registrada no nível da página.</strong> A captura fornece contexto e não indica que cada pixel represente a desconformidade.</p><figure class="occurrence-evidence page-level-evidence page-level-evidence--${tone}">${renderEvidenceImage(image, pageLegend)}<figcaption>${escapeHtml(pageLegend)} <a href="${annex}">Consultar o arquivo original no anexo</a>.</figcaption></figure></section>`;
   }
-  return `<section aria-labelledby="evidencia-ocorrencia-${occurrenceIndex + 1}"><h4 id="evidencia-ocorrencia-${occurrenceIndex + 1}">Evidência visual</h4><figure class="occurrence-evidence">${renderMarkedEvidenceImage(image, artifact, `Captura do elemento ${artifact.nodeId || 'auditado'}. ${legend}`, tone)}<figcaption>${escapeHtml(legend)} A marcação é derivada para localização; <a href="${annex}">o PNG original e seu hash estão no anexo</a>.</figcaption></figure></section>`;
+  const highlight = evidenceHighlight(artifact);
+  const treatment = EVIDENCE_TREATMENTS_V1[tone];
+  const caption = treatment && highlight ? evidenceHighlightLegend(treatment, highlight) : EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND;
+  return `<section aria-labelledby="evidencia-ocorrencia-${occurrenceIndex + 1}"><h4 id="evidencia-ocorrencia-${occurrenceIndex + 1}">Evidência visual</h4><figure class="occurrence-evidence">${renderMarkedEvidenceImage(image, artifact, `Captura do elemento ${artifact.nodeId || 'auditado'}.`, tone)}<figcaption>${escapeHtml(caption)} A marcação é derivada para localização; <a href="${annex}">o PNG original e seu hash estão no anexo</a>.</figcaption></figure></section>`;
 }
 
 function announcementMaps(model, imageByEvidenceId) {
@@ -613,7 +621,7 @@ function announcementMaps(model, imageByEvidenceId) {
 <p class="section-intro">Evidência derivada para relacionar marcadores aos elementos e às prévias calculadas. Ordem observada DOM/AX não é ordem de foco, e a prévia não é transcrição literal de tecnologia assistiva.</p><div class="map-list">${model.pages.map((page, index) => {
     const artifact = maps.find(value => value.pageId === page.pageId);
     if (!artifact) return `<article id="mapa-${index + 1}" class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}" data-map-status="absent"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><div class="map-unavailable"><p><strong>Mapa indisponível nesta auditoria.</strong></p><p>Nenhum artefato derivado validado foi registrado; a captura original permanece separada no anexo quando disponível.</p></div></article>`;
-    const coverage = `${artifact.counts.annotated} de ${artifact.counts.eligible} elementos elegíveis anotados; ${artifact.counts.omittedFrame} contextos de frame, ${artifact.counts.omittedNoRect} elementos sem geometria, ${artifact.counts.omittedLimit} por limite e ${artifact.counts.unresolvedOverlap} sobreposições não resolvidas.`;
+    const coverage = `${artifact.counts.annotated} de ${artifact.counts.eligible} elementos elegíveis anotados; ${artifact.counts.omittedFrame} contextos de frame, ${artifact.counts.omittedNoRect} elementos sem geometria, ${artifact.counts.omittedClipped ?? 0} escondidos por rolagem interna, ${artifact.counts.omittedLimit} por limite e ${artifact.counts.unresolvedOverlap} sobreposições não resolvidas.`;
     const printableAspectRatio = String(ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO).replace('.', ',');
     const limits = `${groupedInteger(artifact.limits.maxNodes)} nós; ${groupedInteger(artifact.limits.maxSourcePixels)} pixels de origem; dimensão ${groupedInteger(artifact.limits.maxDimension)}; ${groupedInteger(artifact.limits.maxCanvasPixels)} pixels por segmento; ${groupedInteger(artifact.limits.maxSegments)} segmentos; ${groupedInteger(artifact.limits.maxDerivedBytes)} bytes derivados; ${groupedInteger(artifact.limits.maxLegendCodePoints)} pontos de código de legenda; proporção raster imprimível até ${printableAspectRatio}:1 (regra do algoritmo).`;
     const limitations = artifact.limitations.length
@@ -847,20 +855,28 @@ function createImageRegistry(artifacts) {
   const definitions = [];
   const byEvidenceId = new Map();
   const byDataUrl = new Map();
-  const register = (key, dataUrl) => {
-    const metadata = pngMetadata(dataUrl);
-    if (!metadata) return;
+  const register = (key, dataUrl, artifact) => {
+    const raster = pngMetadata(dataUrl);
+    if (!raster) return;
     let image = byDataUrl.get(dataUrl);
     if (!image) {
-      image = Object.freeze({ id: `evidence-image-${definitions.length}`, dataUrl, width: metadata.width, height: metadata.height });
+      // O quadro declarado manda quando o raster é o esperado (`width/height × pixelScale`): a captura
+      // de elemento em 2× ocupa a mesma caixa de antes e o pixel a mais vira nitidez, não tamanho.
+      // Sem essa conferência vale o tamanho do próprio PNG — auditorias anteriores à 1.1.57 e os
+      // segmentos do mapa, que não declaram quadro.
+      const declared = evidenceRasterMatchesCapture(artifact, raster) ? evidenceCaptureSize(artifact) : null;
+      image = Object.freeze({
+        id: `evidence-image-${definitions.length}`, dataUrl,
+        width: declared?.width ?? raster.width, height: declared?.height ?? raster.height,
+      });
       definitions.push(image);
       byDataUrl.set(dataUrl, image);
     }
     byEvidenceId.set(key, image);
   };
   for (const artifact of artifacts) {
-    register(artifact.evidenceId, artifact.dataUrl);
-    for (const segment of artifact.kind === 'announcement-map' ? artifact.segments : []) register(segment.segmentId, segment.dataUrl);
+    register(artifact.evidenceId, artifact.dataUrl, artifact);
+    for (const segment of artifact.kind === 'announcement-map' ? artifact.segments : []) register(segment.segmentId, segment.dataUrl, segment);
   }
   return { definitions, byEvidenceId };
 }
@@ -875,28 +891,22 @@ function renderEvidenceImage(image, accessibleName) {
 }
 
 function renderMarkedEvidenceImage(image, artifact, accessibleName, tone) {
-  const captureWidth = finitePositive(artifact.metadata?.width) || image.width;
-  const captureHeight = finitePositive(artifact.metadata?.height) || image.height;
-  const box = highlightBox(artifact, captureWidth, captureHeight);
-  return `<svg class="evidence-media" role="img" aria-label="${escapeHtml(accessibleName)}" viewBox="0 0 ${captureWidth} ${captureHeight}" width="${captureWidth}" height="${captureHeight}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}" width="${captureWidth}" height="${captureHeight}"></use><rect class="evidence-highlight evidence-highlight--${tone}" x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" aria-hidden="true"></rect></svg>`;
+  const highlight = evidenceHighlight(artifact);
+  // Sem quadro confiável (nem `metadata.width/height`, nem `metadata.clip`) não há como posicionar a
+  // caixa sem misturar sistemas de escala: a captura é apresentada sem marcação, e não com uma caixa
+  // possivelmente errada.
+  if (!highlight) return renderEvidenceImage(image, accessibleName);
+  const treatment = EVIDENCE_TREATMENTS_V1[tone];
+  const aria = `${accessibleName}${treatment ? ` ${treatment.aria}` : ''}${highlight.clipped ? ` ${EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND}` : ''}`;
+  return `<svg class="evidence-media evidence-media--marked" role="img" aria-label="${escapeHtml(aria)}" viewBox="0 0 ${highlight.width} ${highlight.height}" width="${highlight.width}" height="${highlight.height}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}" width="${highlight.width}" height="${highlight.height}"></use>${evidenceShapesMarkup(evidenceHighlightShapes(highlight, tone))}</svg>`;
 }
 
-function highlightBox(artifact, width, height) {
-  const box = artifact.metadata?.highlightBox;
-  if (!box || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(box[key]))) return { x: 0, y: 0, width, height };
-  const x = clamp(box.x, 0, width);
-  const y = clamp(box.y, 0, height);
-  const right = clamp(box.x + Math.max(0, box.width), x, width);
-  const bottom = clamp(box.y + Math.max(0, box.height), y, height);
-  return { x, y, width: right - x, height: bottom - y };
-}
-
-function finitePositive(value) {
-  return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function clamp(value, minimum, maximum) {
-  return Math.min(maximum, Math.max(minimum, value));
+function evidenceShapesMarkup(shapes) {
+  return shapes.map(shape => {
+    const attributes = Object.entries(shape.attributes)
+      .map(([name, value]) => ` ${name}="${escapeHtml(value)}"`).join('');
+    return `<${shape.kind}${attributes}></${shape.kind}>`;
+  }).join('');
 }
 
 function unique(values) {

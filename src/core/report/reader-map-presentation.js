@@ -10,9 +10,11 @@ const LIMITATIONS = Object.freeze({
   'source-capture-may-contain-personal-data': 'A captura original pode conter dados pessoais visíveis.',
   'frame-content-omitted': 'O conteúdo interno de frames não foi anotado.',
   'closed-shadow-root-omitted': 'O conteúdo de Shadow DOM fechado não foi anotado.',
+  'container-replaced-by-annotated-descendant': 'Contêineres com elementos internos anotados aparecem representados por esses elementos internos.',
   'node-limit-reached': 'O limite de elementos anotados foi atingido.',
   'legend-limit-reached': 'O limite de legenda ou segmentos foi atingido.',
   'unresolved-marker-overlap': 'Alguns marcadores permaneceram sobrepostos.',
+  'ancestor-clipped-elements-omitted': 'Elementos escondidos por uma área com rolagem própria não foram anotados.',
   'non-uniform-pixel-scale': 'As escalas horizontal e vertical da captura não são uniformes.',
 });
 
@@ -45,7 +47,7 @@ export function readerMapPresentation(pages, maps) {
         ? 'Nenhum elemento elegível foi encontrado. Isso não significa conformidade da página.'
         : map.status === 'partial' ? 'Mapa gerado com cobertura parcial. Consulte as omissões registradas.'
           : 'Mapa gerado. Localize o número na imagem e leia o anúncio correspondente na legenda.',
-      coverage: `${counts.annotated} de ${counts.eligible} elementos elegíveis anotados; ${counts.omittedFrame} contextos de frame omitidos; ${counts.omittedNoRect} elementos sem geometria; ${counts.omittedLimit} omitidos por limite; ${counts.unresolvedOverlap} sobreposições não resolvidas.`,
+      coverage: `${counts.annotated} de ${counts.eligible} elementos elegíveis anotados; ${counts.omittedFrame} contextos de frame omitidos; ${counts.omittedNoRect} elementos sem geometria; ${counts.omittedClipped ?? 0} escondidos por rolagem interna; ${counts.omittedLimit} omitidos por limite; ${counts.unresolvedOverlap} sobreposições não resolvidas.`,
       limitations: map.limitations.map(code => LIMITATIONS[code] ?? code),
       segments: map.segments.map(segment => {
         const markers = map.legend.filter(entry => entry.segmentIndex === segment.index).map(entry => entry.number);

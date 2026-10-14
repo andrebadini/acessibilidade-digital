@@ -24,7 +24,9 @@ test('saved enhanced contrast displays AAA as an advisory without claiming AA or
   const inventory = await createInstalledCoreRuleInventory();
   const artifact = input.evidence.artifacts.find(row => row.evidenceId === 'ev-1');
   artifact.dataUrl = input.evidence.artifacts[0].dataUrl;
-  artifact.metadata = { width: 1, height: 1 };
+  // O quadro vem da captura; a amostra é um PNG 1×1, então o alvo é o quadro inteiro. Sem quadro
+  // declarado a captura é apresentada sem marcação e não haveria tom a verificar.
+  artifact.metadata = { width: 1, height: 1, highlightBox: { x: 0, y: 0, width: 1, height: 1, coordinateSpace: 'capture-css-px' } };
   const model = await enrichAuditForReport(createAuditModel(input), {
     now: () => '2026-09-08T12:00:00.000Z', timezone: 'America/Cuiaba',
     manifestVersion: '1.1.9', rulesVersion: inventory.rulesVersion, browserVersion: 'Chrome/152.0.0.0',
@@ -50,7 +52,7 @@ test('saved enhanced contrast displays AAA as an advisory without claiming AA or
     const cardHtml = html.match(/<article class="occurrence-card"[^]*?<\/article>/u)?.[0] ?? '';
     assert.match(cardHtml, /data-result="alerts"/u);
     assert.doesNotMatch(cardHtml, /data-result="failed"|data-classification="failed"|Falha confirmada/u);
-    assert.match(cardHtml, /Recomendação não atendida/u);
+    assert.match(cardHtml, /Contorno âmbar sólido: recomendação não atendida/u);
     assert.match(cardHtml, /data-evidence-treatment="advisory"/u);
   }
   assert.equal(JSON.stringify(model), before);

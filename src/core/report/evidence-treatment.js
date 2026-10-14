@@ -1,21 +1,29 @@
 const NORMATIVE_CLASSIFICATIONS = new Set(['requirement', 'recommendation']);
 const TONE_ORDER = Object.freeze(['failed', 'advisory', 'review']);
 
+// A legenda começa pela cor do contorno: quem não distingue os tons lê a mesma informação no texto, e
+// quem lê a imagem antes do texto sabe o que procurar. O contorno é desenhado **por fora** do
+// elemento (`evidence-highlight.js`), então nenhuma frase promete uma moldura sobre o conteúdo.
 export const EVIDENCE_TREATMENTS_V1 = Object.freeze({
   failed: Object.freeze({
     tone: 'failed',
-    aria: 'com falha confirmada destacada por moldura vermelha sólida.',
-    legend: '✕ Falha confirmada — moldura vermelha sólida sobre o elemento.',
+    aria: 'captura do elemento com falha, contornado em vermelho por fora do elemento.',
+    legend: 'Contorno vermelho: elemento com falha.',
   }),
   review: Object.freeze({
     tone: 'review',
-    aria: 'com revisão humana necessária destacada por moldura âmbar tracejada.',
-    legend: '? Revisão humana necessária — moldura âmbar tracejada sobre o elemento.',
+    aria: 'captura do elemento pendente de revisão humana, contornado em âmbar tracejado por fora do elemento.',
+    legend: 'Contorno âmbar tracejado: elemento que precisa de revisão humana.',
   }),
   advisory: Object.freeze({
     tone: 'advisory',
-    aria: 'com recomendação não atendida destacada por moldura âmbar sólida.',
-    legend: '! Recomendação não atendida — moldura âmbar sólida; não é falha de requisito obrigatório.',
+    aria: 'captura do elemento com recomendação não atendida, contornado em âmbar sólido por fora do elemento.',
+    legend: 'Contorno âmbar sólido: recomendação não atendida; não é falha de requisito obrigatório.',
+  }),
+  passed: Object.freeze({
+    tone: 'passed',
+    aria: 'captura do elemento com atendimento confirmado na revisão, contornado em azul por fora do elemento.',
+    legend: 'Contorno azul: atendimento confirmado na revisão.',
   }),
 });
 

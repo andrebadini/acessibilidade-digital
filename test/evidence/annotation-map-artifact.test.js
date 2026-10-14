@@ -4,6 +4,7 @@ import { deflateSync } from 'node:zlib';
 
 import {
   ANNOTATION_MAP_ALGORITHM,
+  ANNOTATION_MAP_LEADER_MIN_PX,
   ANNOTATION_MAP_LIMITS,
   ANNOTATION_MAP_VERSION,
   hashAnnotationMapArtifact,
@@ -184,6 +185,102 @@ test('enforces the aggregate legend budget and couples omission counts to their 
     const incoherent = await completeArtifact();
     mutate(incoherent);
   assert.throws(() => validateAnnotationMapArtifact(incoherent), /limitaç|contagens?|parcial|omiss/iu);
+  }
+});
+
+/** Geometria mínima válida só para exercitar a regra da linha-guia. */
+function geometryWithLeader(marker, sourceRect = { x: 10, y: 10, width: 100, height: 50 }) {
+  return {
+    coordinateSpace: 'document-css-px',
+    sourceCssSize: { width: 300, height: 200 },
+    sourcePixelSize: { width: 300, height: 200 },
+    scaleX: 1,
+    scaleY: 1,
+    deviceScaleFactor: null,
+    annotations: [{ number: 1, nodeId: 'n-1', sourceRect, marker: { size: 28, ...marker }, segmentIndex: 1 }],
+  };
+}
+
+test('declares the algorithm version that matches the drawn geometry', () => {
+  // 1.0.0 → 1.1.0: contorno do alvo. 1.1.0 → 1.2.0: a linha-guia terminava no centro do elemento e
+  // riscava o conteúdo; agora termina na borda do contorno. O mapa guardado é versionado: um artefato
+  // com a versão anterior deixa de ser aceito, e o bump é a marca disso.
+  assert.equal(ANNOTATION_MAP_ALGORITHM, 'audita.annotation-map');
+  assert.equal(ANNOTATION_MAP_VERSION, '1.2.0');
+  assert.equal(ANNOTATION_MAP_LEADER_MIN_PX, 6);
+});
+
+test('ends the leader line on the nearest point of the element rect, never on its centre', async () => {
+  // À direita do contorno: a ponta é a borda direita, na mesma altura do marcador.
+  await hashAnnotationMapGeometry(geometryWithLeader({ x: 150, y: 35, leaderX: 110, leaderY: 35 }));
+  // Abaixo: a ponta é a borda inferior, na mesma coluna.
+  await hashAnnotationMapGeometry(geometryWithLeader({ x: 60, y: 100, leaderX: 60, leaderY: 60 }));
+  // Na diagonal: a ponta é o canto mais próximo.
+  await hashAnnotationMapGeometry(geometryWithLeader({ x: 150, y: 100, leaderX: 110, leaderY: 60 }));
+  // A regra antiga — ponta no centro do elemento — não passa mais.
+  await assert.rejects(hashAnnotationMapGeometry(geometryWithLeader({ x: 150, y: 35, leaderX: 60, leaderY: 35 })),
+    /Bounds da anotação geométrica 1/u);
+  // Nem uma ponta torta que não seja a projeção exata.
+  await assert.rejects(hashAnnotationMapGeometry(geometryWithLeader({ x: 150, y: 35, leaderX: 110, leaderY: 40 })),
+    /Bounds da anotação geométrica 1/u);
+});
+
+test('suppresses the leader line when the marker already touches the outline', async () => {
+  // Exatamente no mínimo (6 px) a linha existe — no eixo e na diagonal (3, 4, 5 não serve: 5 fica abaixo).
+  await hashAnnotationMapGeometry(geometryWithLeader({ x: 116, y: 35, leaderX: 110, leaderY: 35 }));
+  await hashAnnotationMapGeometry(geometryWithLeader({ x: 116, y: 34, leaderX: 110, leaderY: 34 }));
+  // Abaixo do mínimo — a 5,9 px, sobre a própria borda e dentro do contorno — a ponta é o próprio
+  // marcador: linha de comprimento zero, que o desenho não traça. Guardar a borda deixaria um fio
+  // atravessando a folga que o escurecimento agora mantém clara.
+  for (const [x, y] of [[115.9, 35], [110, 35], [60, 35]]) {
+    await hashAnnotationMapGeometry(geometryWithLeader({ x, y, leaderX: x, leaderY: y }));
+    await assert.rejects(hashAnnotationMapGeometry(geometryWithLeader({ x, y, leaderX: 10, leaderY: 10 })),
+      /Bounds da anotação geométrica 1/u);
+  }
+});
+
+test('accepts the optional count of elements hidden by an inner scrollport and keeps older maps valid', async () => {
+  // Mapas guardados antes desse campo seguem válidos: a chave é opcional e ausente vale zero.
+  const stored = await completeArtifact();
+  assert.equal('omittedClipped' in stored.counts, false);
+  assert.equal(validateAnnotationMapArtifact(stored), stored);
+
+  const clipped = await completeArtifact();
+  clipped.status = 'partial';
+  clipped.counts = { ...clipped.counts, eligible: 3, omittedClipped: 2 };
+  clipped.limitations = [...clipped.limitations, 'ancestor-clipped-elements-omitted'];
+  clipped.hash = await hashAnnotationMapArtifact(clipped);
+
+  assert.equal(validateAnnotationMapArtifact(clipped), clipped);
+  assert.equal(await hashAnnotationMapArtifact(clipped), clipped.hash, 'a contagem entra no hash derivado');
+});
+
+test('rejects a clipped-omission count that contradicts its limitation or the eligible total', async () => {
+  const clipped = value => {
+    value.status = 'partial';
+    value.counts = { ...value.counts, eligible: 3, omittedClipped: 2 };
+    value.limitations = [...value.limitations, 'ancestor-clipped-elements-omitted'];
+  };
+  for (const mutate of [
+    // Contagem sem a limitação que a explica.
+    value => { value.status = 'partial'; value.counts = { ...value.counts, eligible: 3, omittedClipped: 2 }; },
+    // Limitação sem contagem alguma.
+    value => { value.limitations = [...value.limitations, 'ancestor-clipped-elements-omitted']; },
+    // Total de elegíveis que ignora o que ficou escondido.
+    value => {
+      clipped(value);
+      value.counts = { ...value.counts, eligible: 1 };
+    },
+    // O conjunto de contagens continua fechado: chave nova não passa.
+    value => { value.counts = { ...value.counts, omittedHidden: 1 }; },
+    // Estado completo não pode carregar omissão material.
+    value => { clipped(value); value.status = 'complete'; },
+    // Contagem negativa ou fracionária.
+    value => { clipped(value); value.counts = { ...value.counts, omittedClipped: -1 }; },
+  ]) {
+    const artifact = await completeArtifact();
+    mutate(artifact);
+    assert.throws(() => validateAnnotationMapArtifact(artifact), TypeError);
   }
 });
 

@@ -7,6 +7,7 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { labelComparisonFixture } from './label-comparison-fixture.js';
 import { hashAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from './annotation-map-fixture.js';
+import { pngDataUrl } from '../support/png-fixture.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderHtmlReport, REPORT_OCCURRENCE_DETAIL_LIMIT, REPORT_REVIEW_DETAIL_LIMIT } from '../../src/core/report/html.js';
 import {
@@ -298,9 +299,38 @@ test('renders item context separately from source and tested WCAG plus the froze
   assert.match(html, /https:\/\/www\.section508\.gov\/develop\/applicability-conformance\//u);
 });
 
+function withElementFrameMetadata(audit) {
+  const input = structuredClone(audit);
+  input.evidence[1].metadata = {
+    width: 128, height: 88,
+    highlightBox: { x: 24, y: 24, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
+  };
+  return input;
+}
+
+test('keeps the reported box in CSS px when the thumbnail was captured at 2x', () => {
+  // A miniatura em 2× existe para o contorno não chegar serrilhado. O quadro declarado continua sendo o
+  // sistema do `viewBox`: se o relatório usasse o tamanho do PNG, o mesmo elemento apareceria com o
+  // dobro do tamanho — e a caixa da marcação, calculada em CSS px, sairia fora do lugar.
+  const audit = withElementFrameMetadata(SAMPLE_AUDIT);
+  const doubled = pngDataUrl(256, 176);
+  audit.evidence[1].dataUrl = doubled;
+  audit.evidence[1].metadata.pixelScale = 2;
+  audit.evidence[1].metadata.clip = { x: 0, y: 0, width: 128, height: 88, scale: 2 };
+  const html = renderHtmlReport(audit);
+
+  const at = html.indexOf(`href="${doubled}"`);
+  assert.ok(at > 0, 'a imagem de 256×176 precisa estar embutida');
+  const definition = html.slice(html.lastIndexOf('<image', at), html.indexOf('>', at));
+  assert.match(definition, /width="128" height="88"/u);
+  const id = definition.match(/id="([^"]+)"/u)[1];
+  assert.match(html, new RegExp(`<use href="#${id}" width="128" height="88"`, 'u'));
+  assert.doesNotMatch(html, /width="256"|height="176"/u);
+});
+
 test('embeds occurrence-specific marked screenshots and raw evidence with useful alt and self-contained A4 CSS', () => {
-  const html = renderHtmlReport(SAMPLE_AUDIT);
-  const images = [...html.matchAll(/<svg\b[^>]*class="evidence-media"[^>]*>[\s\S]*?<\/svg>/gu)].map(match => match[0]);
+  const html = renderHtmlReport(withElementFrameMetadata(SAMPLE_AUDIT));
+  const images = [...html.matchAll(/<svg\b[^>]*class="evidence-media[^"]*"[^>]*>[\s\S]*?<\/svg>/gu)].map(match => match[0]);
   assert.equal(images.length, 5);
   for (const image of images) {
     assert.match(image, /role="img"/u);
@@ -311,9 +341,9 @@ test('embeds occurrence-specific marked screenshots and raw evidence with useful
   assert.equal((html.match(/data:image\/png;base64,/gu) || []).length, 1);
   assert.equal((html.match(/<image\b[^>]*href="data:image\/png;base64,[A-Za-z0-9+/=]+"/gu) || []).length, 1);
   assert.match(html, /class="evidence-highlight evidence-highlight--failed"/u);
-  assert.match(html, /Símbolo ✕ e moldura sólida[^<]*não atendimento técnico/iu);
+  assert.match(html, /Contorno vermelho: elemento com falha\. O restante da imagem aparece escurecido só como contexto\./u);
   assert.match(html, /class="evidence-highlight evidence-highlight--review"/u);
-  assert.match(html, /Símbolo \? e moldura tracejada[^<]*revisão humana/iu);
+  assert.match(html, /Contorno âmbar tracejado: elemento que precisa de revisão humana\./u);
   assert.match(html, /marcação é derivada[^.]*PNG original[^.]*hash/iu);
   assert.match(html, /<style>[^]*@page\s*\{[^}]*size:\s*A4/iu);
   assert.match(html, /thead\s*\{[^}]*display:\s*table-header-group/iu);
@@ -321,22 +351,27 @@ test('embeds occurrence-specific marked screenshots and raw evidence with useful
   assert.doesNotMatch(html, /<script[^>]+src=|<link\b|@import|url\(\s*["']?https?:|<(?:img|source)[^>]+src=["']https?:/iu);
 });
 
-test('positions the automatic highlight from capture metadata without using color alone', () => {
-  const input = structuredClone(SAMPLE_AUDIT);
-  input.evidence[1].metadata = {
-    width: 128, height: 88,
-    highlightBox: { x: 24, y: 24, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
-  };
+test('presents the capture without marking when there is no reliable frame', () => {
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  assert.doesNotMatch(html, /class="evidence-highlight/u);
+  assert.doesNotMatch(html, /class="evidence-spotlight/u);
+  assert.match(html, /Captura sem marcação: o quadro do elemento não pôde ser posicionado com segurança\./u);
+});
 
-  const html = renderHtmlReport(createAuditModel(input));
-  assert.match(html, /<rect class="evidence-highlight evidence-highlight--(?:failed|review)" x="24" y="24" width="80" height="40" aria-hidden="true"><\/rect>/u);
-  assert.match(html, /aria-hidden="true"/u);
-  assert.match(html, /Símbolo ✕ e moldura sólida[^<]*não atendimento técnico/iu);
-  assert.match(html, /Símbolo \? e moldura tracejada[^<]*revisão humana/iu);
+test('positions the automatic highlight from capture metadata with an outside outline and a spotlight', () => {
+  const html = renderHtmlReport(createAuditModel(withElementFrameMetadata(SAMPLE_AUDIT)));
+  // O alvo fica nítido no meio da imagem escurecida: um furo em `evenodd`, não um retângulo sobre o
+  // conteúdo. O furo é o mesmo retângulo do contorno (3 px por fora da borda), e não a borda crua: a
+  // folga até o traço também fica clara, sem a faixa cinza dentro do próprio contorno.
+  assert.match(html, /<path class="evidence-spotlight" fill-rule="evenodd" d="M0 0H128V88H0ZM21 21H107V67H21Z" aria-hidden="true"><\/path>/u);
+  // Contorno desenhado 3 px por fora da borda do elemento, com halo branco por baixo do traço colorido.
+  assert.match(html, /<rect class="evidence-halo" x="21" y="21" width="86" height="46" rx="2" aria-hidden="true"><\/rect><rect class="evidence-highlight evidence-highlight--failed"[^>]*x="21" y="21" width="86" height="46" rx="2"/u);
+  assert.match(html, /Contorno vermelho: elemento com falha\. O restante da imagem aparece escurecido só como contexto\./u);
+  assert.match(html, /Contorno âmbar tracejado: elemento que precisa de revisão humana\./u);
 });
 
 test('changes occurrence evidence from review to red after a nonconformity decision', () => {
-  const reviewed = applyReviewDecisions(SAMPLE_AUDIT, [
+  const reviewed = applyReviewDecisions(withElementFrameMetadata(SAMPLE_AUDIT), [
     reviewDecision('occ-focus-review', '5.1.4', 'não conforme', 'assisted'),
   ]);
   const html = renderHtmlReport(reviewed);
@@ -345,7 +380,7 @@ test('changes occurrence evidence from review to red after a nonconformity decis
   assert.match(card, /data-outcome="cantTell"[^>]*data-display-outcome="failed"/u);
   assert.match(card, /status--failed[\s\S]*Não atendido neste teste/u);
   assert.match(card, /evidence-highlight--failed/u);
-  assert.match(card, /Símbolo ✕ e moldura sólida[^<]*não atendimento técnico/iu);
+  assert.match(card, /Contorno vermelho: elemento com falha\./u);
   assert.match(card, /class="legal-analysis"/u);
   assert.match(card, /Inconformidade ao item 5\.1\.4 da ABNT NBR 17225:2025/u);
   assert.doesNotMatch(card, /evidence-highlight--review/u);
@@ -363,18 +398,20 @@ test('changes occurrence evidence from review to green after a conformity decisi
   const card = occurrenceCard(renderHtmlReport(reviewed), 'occ-cross-page');
   assert.match(card, /status--passed[\s\S]*Atendido no escopo observado/u);
   assert.match(card, /page-level-evidence--passed/u);
-  assert.match(card, /Símbolo ✓ e moldura dupla[^<]*atendimento confirmado/iu);
+  // Sem alvo elementar localizado, a captura integral é só contexto: nenhum contorno é prometido.
+  assert.match(card, /Captura integral usada como contexto; o alvo do elemento não foi localizado nesta ocorrência\./u);
+  assert.doesNotMatch(card, /Contorno /u);
   assert.doesNotMatch(card, /page-level-evidence--review/u);
 });
 
 test('keeps occurrence evidence amber after an inconclusive review decision', () => {
-  const reviewed = applyReviewDecisions(SAMPLE_AUDIT, [
+  const reviewed = applyReviewDecisions(withElementFrameMetadata(SAMPLE_AUDIT), [
     reviewDecision('occ-focus-review', '5.1.4', 'não foi possível determinar', 'assisted'),
   ]);
   const card = occurrenceCard(renderHtmlReport(reviewed), 'occ-focus-review');
   assert.match(card, /status--cantTell[\s\S]*Requer revisão humana/u);
   assert.match(card, /evidence-highlight--review/u);
-  assert.match(card, /Símbolo \? e moldura tracejada[^<]*revisão humana/iu);
+  assert.match(card, /Contorno âmbar tracejado: elemento que precisa de revisão humana\./u);
 });
 
 test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
@@ -729,6 +766,26 @@ test('renders absent, empty, partial, complete and legend-continuation map state
   assert.match(complete, /\.map-card,\.announcement-map-segment,\.announcement-map-legend\{min-width:0\}/u);
   assert.match(complete, /\.map-meta code,\.announcement-map-segment figcaption code,\.legend-selector code\{word-break:break-all\}/u);
   assert.doesNotMatch(complete.match(/<section id="mapas"[^]*?<\/section>/u)?.[0] ?? '', /data-impact=|data-wcag=/u);
+
+  // Auditoria guardada antes da contagem de rolagem interna: a cobertura diz zero, sem quebrar.
+  assert.match(complete, /0 escondidos por rolagem interna/u);
+  const clipped = structuredClone(SAMPLE_AUDIT);
+  clipped.evidence[0] = createPristineMapSource();
+  const clippedMap = await createAnnotationMapFixture({ status: 'partial' });
+  clippedMap.counts = { ...clippedMap.counts, eligible: 3, omittedClipped: 2 };
+  clippedMap.limitations = [...clippedMap.limitations, 'ancestor-clipped-elements-omitted'];
+  clippedMap.hash = await hashAnnotationMapArtifact(clippedMap);
+  clipped.evidence.push(clippedMap);
+  const clippedDiagnostic = {
+    code: 'ANNOTATION_MAP_PARTIAL',
+    message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.',
+    at: '2026-08-26T14:00:31.000Z', recoverable: true,
+  };
+  clipped.pages[0].diagnostics.push(structuredClone(clippedDiagnostic));
+  clipped.session.diagnostics.push(clippedDiagnostic);
+  const clippedHtml = renderHtmlReport(clipped);
+  assert.match(clippedHtml, /2 escondidos por rolagem interna/u);
+  assert.match(clippedHtml, /ancestor-clipped-elements-omitted — elementos escondidos por uma área com rolagem própria foram omitidos/u);
 
   const continued = structuredClone(SAMPLE_AUDIT);
   continued.evidence[0] = createPristineMapSource();

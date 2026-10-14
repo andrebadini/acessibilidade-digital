@@ -265,7 +265,7 @@ test('summary print is explicit, restores presentation on error and never trigge
 });
 
 test('reused report captures have one marked preview and an annex link instead of another image', async () => {
-  const { model, summary } = await fixture();
+  const { model, summary } = await fixture({ mutateDraft: withElementFrame });
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
   const html = renderHtmlReport(model, { reportView: view });
   const previewFigures = [...html.matchAll(/<figure[^>]+data-report-preview-evidence="([^"]+)"[\s\S]*?<\/figure>/g)];
@@ -475,6 +475,20 @@ function matches(node, selector) {
     if (value === null || (match[2] !== undefined && value !== match[2])) return false;
   }
   return true;
+}
+
+// O quadro do elemento vem da captura (`metadata`), nunca do tamanho do PNG decodificado. A amostra
+// antiga não traz esse quadro, então os testes que verificam a marcação o injetam explicitamente; os
+// que verificam a ausência de quadro usam a amostra como está.
+const ELEMENT_FRAME_METADATA = Object.freeze({
+  width: 128,
+  height: 88,
+  highlightBox: { x: 24, y: 12, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
+});
+
+function withElementFrame(draft) {
+  draft.evidence.find(evidence => evidence.kind === 'element').metadata = structuredClone(ELEMENT_FRAME_METADATA);
+  return draft;
 }
 
 async function fixture({ mutateDraft } = {}) {
@@ -1197,7 +1211,7 @@ test('missing ABNT association is explicit in the live report and HTML/PDF sourc
 });
 
 test('live report renders decision-first cards, evidence previews and honest evidence-only navigation', async () => {
-  const { model, summary } = await fixture();
+  const { model, summary } = await fixture({ mutateDraft: withElementFrame });
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
   const root = renderReportView({ view, document: new Document(), onExport() {} });
   const firstIssue = root.querySelector('[data-report-issue][data-result="failed"]');
@@ -1326,11 +1340,20 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   const failedFigure = failed.querySelector('[data-evidence-kind="element"]');
   const failedVisual = failedFigure.querySelector('svg[data-evidence-treatment="failed"]');
   assert.ok(failedVisual);
-  assert.equal(failedVisual.getAttribute('aria-label'), 'Elemento local da evidência ev-control com falha confirmada destacada por moldura vermelha sólida.');
+  assert.equal(failedVisual.getAttribute('aria-label'),
+    'Elemento local da evidência ev-control captura do elemento com falha, contornado em vermelho por fora do elemento.');
   assert.equal(failedVisual.querySelector('image').getAttribute('href'), original.dataUrl);
+  // O alvo e a folga até o contorno ficam nítidos: o furo do escurecimento é o mesmo retângulo do
+  // contorno, desenhado 3 px por fora da borda — não a borda crua, que deixaria a folga escurecida.
+  assert.equal(failedVisual.querySelector('path.evidence-spotlight').getAttribute('d'), 'M0 0H128V88H0ZM21 9H107V55H21Z');
   const failedBox = failedVisual.querySelector('rect[data-evidence-highlight="failed"]');
-  assert.deepEqual(['x', 'y', 'width', 'height'].map(name => failedBox.getAttribute(name)), ['24', '12', '80', '40']);
-  assert.match(failedFigure.querySelector('figcaption').textContent, /✕ Falha confirmada.*moldura vermelha sólida/iu);
+  assert.deepEqual(['x', 'y', 'width', 'height', 'rx'].map(name => failedBox.getAttribute(name)), ['21', '9', '86', '46', '2']);
+  const failedHalo = failedVisual.querySelector('rect.evidence-halo');
+  assert.deepEqual(['x', 'y', 'width', 'height'].map(name => failedHalo.getAttribute(name)), ['21', '9', '86', '46']);
+  const failedCaption = failedFigure.querySelector('figcaption').textContent;
+  assert.match(failedCaption, /Contorno vermelho: elemento com falha\./u);
+  assert.match(failedCaption, /escurecido só como contexto/u);
+  assert.doesNotMatch(failedCaption, /moldura vermelha sólida/iu);
 
   assert.equal(root.querySelector('[data-report-issue][data-result="humanReview"]'), null);
   assert.ok(root.querySelector('[data-report-checklist]'));
@@ -1341,8 +1364,9 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   assert.deepEqual(model.evidence.find(evidence => evidence.kind === 'element'), originalSnapshot);
 
   const html = renderHtmlReport(model, { reportView: view });
-  assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="failed"[^>]*aria-label="Elemento local da evidência ev-control com falha confirmada destacada por moldura vermelha sólida\."/u);
-  assert.match(html, /<rect class="evidence-highlight evidence-highlight--failed" data-evidence-highlight="failed" x="24" y="12" width="80" height="40" aria-hidden="true"><\/rect>/u);
+  assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="failed"[^>]*aria-label="Elemento local da evidência ev-control captura do elemento com falha, contornado em vermelho por fora do elemento\."/u);
+  assert.match(html, /<path class="evidence-spotlight" fill-rule="evenodd" d="M0 0H128V88H0ZM21 9H107V55H21Z" aria-hidden="true"><\/path>/u);
+  assert.match(html, /<rect class="evidence-highlight evidence-highlight--failed" data-evidence-highlight="failed" x="21" y="9" width="86" height="46" rx="2" aria-hidden="true"><\/rect>/u);
   assert.doesNotMatch(html, /data-evidence-treatment="review"/u);
   assert.match(html, /data-report-evidence="ev-control"[^]*?Consultar captura ev-control/u);
   assert.ok(html.includes(original.dataUrl), 'the original raster remains embedded under the derived SVG frame');
@@ -1353,6 +1377,7 @@ test('one consolidated issue marks every correlated element and keeps one full-p
   const { model, summary } = await fixture({
     mutateDraft(draft) {
       const originalEvidence = draft.evidence.find(evidence => evidence.evidenceId === 'ev-control');
+      originalEvidence.metadata = structuredClone(ELEMENT_FRAME_METADATA);
       draft.evidence.push({
         ...structuredClone(originalEvidence),
         evidenceId: 'ev-control-2', nodeId: 'n-2', backendNodeId: 42,
@@ -1431,6 +1456,7 @@ test('human-confirmed failures leave unanswered checks separate without inventin
   const { model, summary } = await fixture({
     mutateDraft(draft) {
       const originalEvidence = draft.evidence.find(evidence => evidence.evidenceId === 'ev-control');
+      originalEvidence.metadata = structuredClone(ELEMENT_FRAME_METADATA);
       draft.evidence.push({
         ...structuredClone(originalEvidence),
         evidenceId: 'ev-control-2', nodeId: 'n-2', backendNodeId: 42,

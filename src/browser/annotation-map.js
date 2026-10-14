@@ -2,10 +2,12 @@ import { projectElementAccessibility, isEditableAccessibilityNode } from '../cor
 import { buildSnapshotIndexes } from '../core/snapshot-schema.js';
 import {
   ANNOTATION_MAP_ALGORITHM,
+  ANNOTATION_MAP_LEADER_MIN_PX,
   ANNOTATION_MAP_LIMITATIONS,
   ANNOTATION_MAP_LIMITS,
   ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO,
   ANNOTATION_MAP_VERSION,
+  annotationLeaderPoint,
   hashAnnotationMapArtifact,
   hashAnnotationMapGeometry,
 } from '../core/evidence/annotation-map-artifact.js';
@@ -27,6 +29,12 @@ const SIGNIFICANT_ROLES = new Set([
   'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'region', 'slider', 'spinbutton',
   'switch', 'tab', 'table', 'textbox', 'treeitem',
 ]);
+/**
+ * Contêineres: quando já existe descendente anotado, uma anotação do contêiner englobaria vários
+ * elementos e o número deixaria de apontar para um alvo único.
+ */
+const CONTAINER_TAGS = new Set(['details', 'li', 'table']);
+const CONTAINER_ROLES = new Set(['list', 'listitem', 'region', 'table']);
 const PRIVATE_ATTRIBUTE = /(?:^(?:data-(?:audita-)?private|data-nosnippet)$|pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const BASE_LIMITATIONS = Object.freeze([
   'observed-dom-ax-order-not-literal-assistive-technology',
@@ -37,6 +45,10 @@ const BASE_LIMITATIONS = Object.freeze([
 ]);
 const MARKER_RADIUS = 14;
 const MARKER_CLEARANCE = MARKER_RADIUS * 2 + 4;
+const MARKER_STROKE = '#8b1e1e';
+const MARKER_OVERLAP_STROKE = '#6b4e00';
+/** Peso de uma colisão no custo do marcador: proximidade nunca vale mais que uma sobreposição. */
+const MARKER_COLLISION_COST = 1e6;
 const LEGEND_LINE_HEIGHT = 22;
 const LEGEND_PADDING = 16;
 const LEGEND_HEADING_HEIGHT = 34;
@@ -84,6 +96,17 @@ function ancestorState(node, indexes, predicate) {
   return false;
 }
 
+/** Registra todos os ancestrais de um nó anotável, para saber quais contêineres já têm descendente. */
+function markAncestorsOf(node, indexes, target) {
+  const visited = new Set();
+  let current = node?.parentId === null || node?.parentId === undefined ? null : indexes.byNodeId.get(String(node.parentId));
+  while (current && !visited.has(String(current.nodeId))) {
+    visited.add(String(current.nodeId));
+    target.add(String(current.nodeId));
+    current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
+  }
+}
+
 function closedShadow(node, indexes) {
   const rootId = typeof node?.shadowRootId === 'string' ? node.shadowRootId : null;
   const root = rootId ? indexes.byNodeId.get(rootId) : null;
@@ -92,6 +115,67 @@ function closedShadow(node, indexes) {
 
 function usefulRect(rect) {
   return rect && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0;
+}
+
+const CLIPPING_OVERFLOW = new Set(['auto', 'clip', 'hidden', 'scroll']);
+/** Raízes de rolagem da página: a captura integral cobre o documento todo, então elas não escondem nada. */
+const DOCUMENT_ROOT_TAGS = new Set(['body', 'html']);
+/** Faixa mínima visível para valer uma anotação: menos que isto é o vinco do recorte, não o elemento. */
+const CLIPPED_VISIBLE_MIN_PX = 1;
+
+function styleValue(node, name) {
+  const styles = node?.styles;
+  if (!styles || typeof styles !== 'object') return '';
+  const camel = name.replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
+  return text(styles[name] ?? styles[camel]).toLowerCase();
+}
+
+/**
+ * Ancestrais que recortam o próprio conteúdo — `overflow` diferente de `visible`.
+ *
+ * O instantâneo já traz o `overflow` computado de cada nó, então o recorte é deduzido do que foi
+ * coletado: nenhuma ida extra ao navegador e nenhuma mudança na geometria declarada. A caixa usada é a
+ * de borda, um pouco maior que a área realmente visível; erra para o lado de anotar demais, nunca para
+ * o de esconder um elemento que aparece na imagem.
+ *
+ * Limitação conhecida: um descendente posicionado que escapa do recorte (por exemplo `position: fixed`
+ * dentro de um contêiner com `overflow: hidden`) é tratado como recortado. O resultado é uma omissão a
+ * mais, registrada na limitação do mapa, nunca uma marcação sobre o vazio.
+ */
+function clippingAncestorRects(node, indexes) {
+  const rects = [];
+  const visited = new Set();
+  let current = node?.parentId === null || node?.parentId === undefined ? null : indexes.byNodeId.get(String(node.parentId));
+  while (current && !visited.has(String(current.nodeId))) {
+    visited.add(String(current.nodeId));
+    if (!DOCUMENT_ROOT_TAGS.has(safeTag(current)) && usefulRect(current.rect) &&
+      (CLIPPING_OVERFLOW.has(styleValue(current, 'overflow-x')) || CLIPPING_OVERFLOW.has(styleValue(current, 'overflow-y')))) {
+      rects.push(current.rect);
+    }
+    current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
+  }
+  return rects;
+}
+
+/**
+ * Recorta o retângulo pelos ancestrais com rolagem. Retorna `null` quando nada de útil sobra: um
+ * elemento guardado dentro do rolador aparece na captura integral, e marcar o lugar onde ele estaria
+ * poria o número sobre outro conteúdo.
+ */
+function visibleRect(node, indexes) {
+  let left = node.rect.x;
+  let top = node.rect.y;
+  let right = left + node.rect.width;
+  let bottom = top + node.rect.height;
+  for (const clip of clippingAncestorRects(node, indexes)) {
+    left = Math.max(left, clip.x);
+    top = Math.max(top, clip.y);
+    right = Math.min(right, clip.x + clip.width);
+    bottom = Math.min(bottom, clip.y + clip.height);
+  }
+  return right - left >= CLIPPED_VISIBLE_MIN_PX && bottom - top >= CLIPPED_VISIBLE_MIN_PX
+    ? { x: left, y: top, width: right - left, height: bottom - top }
+    : null;
 }
 
 function significant(node, projection) {
@@ -244,10 +328,12 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     ? Math.min(options.maxNodes, ANNOTATION_MAP_LIMITS.maxNodes)
     : ANNOTATION_MAP_LIMITS.maxNodes;
   const entries = [];
-  const counts = { eligible: 0, annotated: 0, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0 };
+  const counts = { eligible: 0, annotated: 0, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0, omittedClipped: 0 };
   const limitations = new Set(['observed-dom-ax-order-not-literal-assistive-technology', 'top-document-open-shadow-only']);
   const dedupe = new Set();
   const omittedFrames = new Set();
+  const candidates = [];
+  const annotatedAncestorIds = new Set();
   let legendCodePoints = 0;
   let closedShadowOmitted = false;
   for (const node of snapshot.nodes) {
@@ -269,15 +355,32 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     const key = String(node.nodeId);
     if (dedupe.has(key)) continue;
     dedupe.add(key);
-    counts.eligible += 1;
     if (!usefulRect(node.rect)) {
       counts.omittedNoRect += 1;
       continue;
     }
-    const preview = text(projection.announcementPreview);
-    const selectorSummary = structuralSelector(node, indexes);
-    const nameSource = text(projection.nameSource) || 'none';
-    const previewLength = [...`${selectorSummary}\n${preview}\n${nameSource}`].length;
+    if (!visibleRect(node, indexes)) {
+      counts.omittedClipped += 1;
+      limitations.add('ancestor-clipped-elements-omitted');
+      continue;
+    }
+    candidates.push({
+      nodeId: key,
+      selectorSummary: structuralSelector(node, indexes),
+      announcementPreview: text(projection.announcementPreview),
+      nameSource: text(projection.nameSource) || 'none',
+      bounds: { x: node.rect.x, y: node.rect.y, width: node.rect.width, height: node.rect.height },
+      container: CONTAINER_TAGS.has(safeTag(node)) || CONTAINER_ROLES.has(projection.role),
+    });
+    markAncestorsOf(node, indexes, annotatedAncestorIds);
+  }
+  // Contêineres com descendentes anotados saem antes de qualquer numeração: a caixa de um `<li>`,
+  // `<table>`, `<details>` ou `role="region"` que já tem filhos anotados englobaria vários elementos
+  // e o número deixaria de dizer qual deles está marcado.
+  const kept = candidates.filter(candidate => !(candidate.container && annotatedAncestorIds.has(candidate.nodeId)));
+  if (kept.length !== candidates.length) limitations.add('container-replaced-by-annotated-descendant');
+  for (const candidate of kept) {
+    const previewLength = [...`${candidate.selectorSummary}\n${candidate.announcementPreview}\n${candidate.nameSource}`].length;
     if (entries.length >= maxNodes || previewLength > MAX_PREVIEW_CODE_POINTS ||
       legendCodePoints + previewLength > ANNOTATION_MAP_LIMITS.maxLegendCodePoints) {
       counts.omittedLimit += 1;
@@ -289,17 +392,18 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     legendCodePoints += previewLength;
     entries.push({
       number: entries.length + 1,
-      nodeId: key,
-      selectorSummary,
-      announcementPreview: preview,
-      nameSource,
-      bounds: { x: node.rect.x, y: node.rect.y, width: node.rect.width, height: node.rect.height },
+      nodeId: candidate.nodeId,
+      selectorSummary: candidate.selectorSummary,
+      announcementPreview: candidate.announcementPreview,
+      nameSource: candidate.nameSource,
+      bounds: candidate.bounds,
     });
   }
   counts.omittedFrame = omittedFrameContextCount(snapshot, omittedFrames);
   if (counts.omittedFrame > 0) limitations.add('frame-content-omitted');
   if (closedShadowOmitted) limitations.add('closed-shadow-root-omitted');
   counts.annotated = entries.length;
+  counts.eligible = kept.length + counts.omittedNoRect + counts.omittedClipped;
   return { entries, legend: entries.map(({ bounds, ...entry }) => entry), counts, limitations: canonicalLimitations(limitations) };
 }
 
@@ -388,14 +492,28 @@ function placeMarkers(entries, width, height) {
   const placements = [];
   let unresolved = 0;
   for (const entry of entries) {
+    // Custo = colisões (peso dominante, para a anticolisão continuar mandando) + distância até o canto
+    // superior-esquerdo exterior do próprio elemento, que é a primeira candidata de `markerCandidates`.
+    const anchor = { x: entry.bounds.x, y: entry.bounds.y };
     const candidates = markerCandidates(entry.bounds, MARKER_RADIUS, width, height);
-    const scored = candidates.map((candidate, index) => ({
-      ...candidate, index,
-      score: placements.reduce((total, placed) => total + (distanceSquared(candidate, placed) < MARKER_CLEARANCE ** 2 ? 1 : 0), 0),
-    })).sort((left, right) => left.score - right.score || left.index - right.index);
+    const scored = candidates.map((candidate, index) => {
+      const collisions = placements.reduce((total, placed) => total + (distanceSquared(candidate, placed) < MARKER_CLEARANCE ** 2 ? 1 : 0), 0);
+      return {
+        ...candidate, index, collisions,
+        score: collisions * MARKER_COLLISION_COST + Math.sqrt(distanceSquared(candidate, anchor)),
+      };
+    }).sort((left, right) => left.score - right.score || left.index - right.index);
     const selected = scored[0];
-    if (selected.score > 0) unresolved += 1;
-    placements.push({ number: entry.number, x: selected.x, y: selected.y, targetX: entry.bounds.x + entry.bounds.width / 2, targetY: entry.bounds.y + entry.bounds.height / 2, overlapped: selected.score > 0 });
+    if (selected.collisions > 0) unresolved += 1;
+    // Ponta da linha-guia: a borda do contorno mais próxima do marcador, e não o centro do elemento —
+    // a linha pelo centro riscava o conteúdo do alvo na diagonal. Se o marcador já encosta no contorno,
+    // a ponta é o próprio marcador e o desenho não traça linha nenhuma.
+    const leader = annotationLeaderPoint(entry.bounds, selected.x, selected.y);
+    placements.push({
+      number: entry.number, x: selected.x, y: selected.y,
+      leaderX: leader.x, leaderY: leader.y,
+      bounds: entry.bounds, overlapped: selected.collisions > 0,
+    });
   }
   return { placements, unresolved };
 }
@@ -559,7 +677,7 @@ export function buildAnnotationMapPlan({
     entries.push({ ...entry, number: entries.length + 1, bounds });
   }
   const counts = { ...selected.counts, annotated: entries.length, omittedNoRect: selected.counts.omittedNoRect + outside };
-  counts.eligible = counts.annotated + counts.omittedNoRect + counts.omittedLimit;
+  counts.eligible = counts.annotated + counts.omittedNoRect + counts.omittedLimit + counts.omittedClipped;
   if (measureLegendText !== undefined && typeof measureLegendText !== 'function') {
     throw new TypeError('A função de medição da legenda é inválida.');
   }
@@ -659,6 +777,62 @@ function canvasHeightFor(segment, geometry, sourceWidth) {
   return { imageHeight, legendHeight, height: imageHeight + legendHeight, width: sourceWidth };
 }
 
+function segmentOutlineRect(marker, geometry, dimensions) {
+  const bounds = marker.bounds;
+  if (!usefulRect(bounds)) return null;
+  const imageHeight = Math.max(0, dimensions.imageHeight);
+  const x = clamp(bounds.x * geometry.scaleX, 0, dimensions.width);
+  const y = clamp(bounds.y * geometry.scaleY, 0, imageHeight);
+  const right = clamp((bounds.x + bounds.width) * geometry.scaleX, x, dimensions.width);
+  const bottom = clamp((bounds.y + bounds.height) * geometry.scaleY, y, imageHeight);
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
+/**
+ * Ponta da linha-guia no próprio contorno desenhado, em px de imagem do segmento. O contorno aqui é o
+ * retângulo recortado pelo segmento (`segmentOutlineRect`), e não a caixa do elemento no documento: a
+ * linha termina exatamente sobre o traço que aparece na imagem. O mínimo de `annotationLeaderPoint` é
+ * multiplicado pela escala para continuar valendo em px de documento, como na geometria canônica.
+ */
+function segmentLeaderPoint(marker, geometry, dimensions) {
+  const rect = segmentOutlineRect(marker, geometry, dimensions);
+  if (!rect) return null;
+  const scale = Math.min(geometry.scaleX, geometry.scaleY);
+  return annotationLeaderPoint(rect, marker.x * geometry.scaleX, marker.y * geometry.scaleY,
+    ANNOTATION_MAP_LEADER_MIN_PX * scale);
+}
+
+function strokeRectPath(context, rect) {
+  context.beginPath();
+  context.moveTo(rect.x, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y + rect.height);
+  context.lineTo(rect.x, rect.y + rect.height);
+  context.lineTo(rect.x, rect.y);
+  context.stroke();
+}
+
+/**
+ * Contorno fino do elemento anotado, na mesma cor do marcador e com halo branco: liga visualmente o
+ * número ao alvo sem depender só da linha-guia. Como no relatório, os halos de todos os contornos
+ * saem antes dos traços coloridos, para um contorno colorido vizinho nunca ficar coberto.
+ */
+function drawElementOutlines(context, segment, plan, dimensions) {
+  const outlines = segment.placements
+    .map(marker => ({ marker, rect: segmentOutlineRect(marker, plan.geometry, dimensions) }))
+    .filter(entry => entry.rect);
+  if (!outlines.length) return;
+  const strokeWidth = Math.max(2, Math.round(2 * Math.min(plan.geometry.scaleX, plan.geometry.scaleY)));
+  context.strokeStyle = '#fff';
+  context.lineWidth = strokeWidth + 4;
+  for (const { rect } of outlines) strokeRectPath(context, rect);
+  context.lineWidth = strokeWidth;
+  for (const { marker, rect } of outlines) {
+    context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
+    strokeRectPath(context, rect);
+  }
+}
+
 function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.fillStyle = '#fff';
   context.fillRect(0, 0, dimensions.width, dimensions.height);
@@ -669,15 +843,20 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.font = '700 16px system-ui';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
+  const scale = Math.min(plan.geometry.scaleX, plan.geometry.scaleY);
+  drawElementOutlines(context, segment, plan, dimensions);
   for (const marker of segment.placements) {
-    const markerRadius = MARKER_RADIUS * Math.min(plan.geometry.scaleX, plan.geometry.scaleY);
+    const markerRadius = MARKER_RADIUS * scale;
     const x = marker.x * plan.geometry.scaleX;
     const y = marker.y * plan.geometry.scaleY;
-    const targetX = marker.targetX * plan.geometry.scaleX;
-    const targetY = marker.targetY * plan.geometry.scaleY;
-    context.strokeStyle = marker.overlapped ? '#6b4e00' : '#8b1e1e';
-    context.lineWidth = Math.max(2, Math.round(3 * Math.min(plan.geometry.scaleX, plan.geometry.scaleY)));
-    context.beginPath(); context.moveTo(x, y); context.lineTo(targetX, targetY); context.stroke();
+    context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
+    context.lineWidth = Math.max(2, Math.round(3 * scale));
+    // Sem contorno (ou já encostando nele) a linha-guia não é traçada: a ponta devolvida é o próprio
+    // marcador, que só cobriria o alvo.
+    const leader = segmentLeaderPoint(marker, plan.geometry, dimensions);
+    if (leader && (leader.x !== x || leader.y !== y)) {
+      context.beginPath(); context.moveTo(x, y); context.lineTo(leader.x, leader.y); context.stroke();
+    }
     context.fillStyle = '#fff';
     context.beginPath(); context.arc(x, y, markerRadius, 0, Math.PI * 2); context.fill(); context.stroke();
     context.fillStyle = '#14212b';
@@ -784,8 +963,8 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
           x: placed.marker.x,
           y: placed.marker.y + placed.clipY,
           size: MARKER_RADIUS * 2,
-          leaderX: placed.marker.targetX,
-          leaderY: placed.marker.targetY + placed.clipY,
+          leaderX: placed.marker.leaderX,
+          leaderY: placed.marker.leaderY + placed.clipY,
         },
         segmentIndex: placed.segmentIndex,
       };
@@ -799,7 +978,7 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
     sourceEvidenceId: fullPageEvidence.evidenceId, sourceHash, geometrySnapshotHash, geometry,
   };
   if (!plan.entries.length) {
-    const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 ||
+    const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 || plan.counts.omittedClipped > 0 ||
       plan.counts.omittedLimit > 0 || plan.counts.unresolvedOverlap > 0 || plan.limitations.includes('closed-shadow-root-omitted');
     const empty = {
       evidenceId, pageId, kind: 'announcement-map', state: 'derived', fullPageEvidenceId: fullPageEvidence.evidenceId,
@@ -866,7 +1045,7 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
   const segments = rendered.map((segment, offset) => ({
     segmentId: `${evidenceId}-segment-${offset + 1}`, index: offset + 1, count: rendered.length, ...segment,
   }));
-  const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 ||
+  const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 || plan.counts.omittedClipped > 0 ||
     plan.counts.omittedLimit > 0 || plan.counts.unresolvedOverlap > 0 || plan.limitations.includes('closed-shadow-root-omitted');
   const artifact = {
     evidenceId, pageId, kind: 'announcement-map', state: 'derived', fullPageEvidenceId: fullPageEvidence.evidenceId,
