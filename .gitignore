@@ -9,3 +9,6 @@ node_modules
 
 # Material local de entrega (pacotes antigos, testes do Google) — não versionado.
 /entregas/
+
+# Capturas do roteiro de QA visual (scripts/visual-qa.mjs) — material de revisão local.
+qa-out/

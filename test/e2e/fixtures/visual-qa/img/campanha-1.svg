@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" role="img" aria-label="Mutirão de vacinação">
+<rect width="320" height="200" fill="#0b4ea2"/>
+<rect x="24" y="40" width="200" height="12" rx="6" fill="rgba(255,255,255,0.55)"/><rect x="24" y="64" width="150" height="12" rx="6" fill="rgba(255,255,255,0.55)"/><circle cx="258" cy="70" r="34" fill="rgba(255,255,255,0.35)"/>
+<text x="16" y="184" font-family="system-ui, sans-serif" font-size="16" fill="#ffffff">Mutirão de vacinação</text>
+</svg>

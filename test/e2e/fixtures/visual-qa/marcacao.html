@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portal de Serviços do Cidadão — página de marcação para QA visual</title>
+<link rel="stylesheet" href="/marcacao.css">
+</head>
+<body>
+
+<!-- CASO 6a — elemento com problema colado no topo da página (position:absolute; top:0).
+     A barra de aviso ocupa exatamente y=0 na viewport, então a caixa que o produto desenhar
+     para ela precisa começar em y=0 e não pode ser empurrada para baixo nem sumir atrás do
+     cabeçalho fixo. O texto tem contraste baixo de propósito (#4a6ea8 sobre #0b2f6b). -->
+<div class="aviso-topo">
+  <span>Aviso de manutenção programada para o próximo domingo</span>
+  <a href="#manutencao">mais detalhes</a>
+</div>
+
+<!-- CASO 11 — cabeçalho fixo (position:sticky) com botão sem nome acessível.
+     O botão só tem o desenho do ícone, sem aria-label, sem texto e sem title. As caixas
+     desenhadas sobre ele precisam acompanhar o cabeçalho quando a página rola. -->
+<header class="site-header">
+  <div class="site-header__inner">
+    <span class="marca">Portal de Serviços</span>
+    <nav class="menu" aria-label="Principal">
+      <a href="#servicos">Serviços</a>
+      <a href="#carteira">Carteira</a>
+      <a href="#ajuda">Ajuda</a>
+    </nav>
+    <button class="site-header__acao">
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="conteudo">
+
+  <section class="hero" id="servicos">
+    <h1>Serviços digitais para o cidadão</h1>
+    <p class="hero__linha">Emita documentos, acompanhe pedidos e consulte benefícios em um só lugar.</p>
+
+    <!-- CASO 6b — elemento com problema colado na borda direita da viewport (right:0).
+         O botão flutuante encosta no limite direito; uma caixa desenhada com largura extra
+         apareceria cortada ou fora da tela. Botão só de ícone, sem nome acessível. -->
+    <button class="botao-borda">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+    </button>
+
+    <div class="hero__acoes">
+      <a class="botao botao--primario" href="#servicos">Começar agora</a>
+      <a class="botao" href="#ajuda">Ver ajuda</a>
+    </div>
+  </section>
+
+  <!-- CASO 8 — container com overflow:auto contendo itens problemáticos.
+       A gaveta tem 132 px de altura e conteúdo de ~420 px: os itens do fim ficam
+       geometricamente fora da área visível do container. O produto precisa decidir
+       entre desenhar na posição recortada, rolar o container ou recusar o alvo. -->
+  <section class="bloco">
+    <h2>Carteira de documentos</h2>
+    <p>Role a lista lateral para ver todos os documentos vinculados à sua conta.</p>
+    <div class="gaveta">
+      <article class="doc"><h3>RG digital</h3><p>Emitido em 12/03/2024</p><button class="acao-icone"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="doc"><h3>CPF</h3><p>Regular</p><button class="acao-icone"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="doc"><h3>CNH</h3><p>Vence em 09/2027</p><button class="acao-icone"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="doc"><h3>Título de eleitor</h3><p>Seção 0214</p><button class="acao-icone"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="doc"><h3>Cartão SUS</h3><p>Ativo</p><button class="acao-icone"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="doc"><h3>Certificado militar</h3><p>Dispensado</p><button class="acao-icone"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="doc"><h3>Passaporte</h3><p>Válido até 2031</p><button class="acao-icone"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 12h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+    </div>
+  </section>
+
+  <!-- CASO 10 — carrossel que troca a classe "is-active" de slide a cada 2 s (marcacao.js).
+       Só o slide ativo é exibido; os outros têm área zero. Isso testa de uma vez se os sinais
+       somem quando o DOM muda sozinho e se um alvo que ficou invisível é reportado como
+       não localizado em vez de desenhado no lugar errado. -->
+  <section class="bloco" id="carteira">
+    <h2>Campanhas em destaque</h2>
+    <div class="carrossel" data-carrossel>
+      <div class="slide is-active">
+        <div class="generico"><img src="/img/campanha-1.svg" width="640" height="180"></div>
+        <button class="acao-icone acao-icone--grande"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <p>Mutirão de vacinação nos postos de saúde.</p>
+      </div>
+      <div class="slide">
+        <div class="generico"><img src="/img/campanha-2.svg" width="640" height="180"></div>
+        <button class="acao-icone acao-icone--grande"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <p>Matrícula escolar aberta para o próximo semestre.</p>
+      </div>
+      <div class="slide">
+        <div class="generico"><img src="/img/campanha-3.svg" width="640" height="180"></div>
+        <button class="acao-icone acao-icone--grande"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <p>Atualize o cadastro do CadÚnico até sexta-feira.</p>
+      </div>
+      <div class="carrossel__controles">
+        <button class="ponto is-active" data-ir="0" aria-label="Ir para o slide 1"></button>
+        <button class="ponto" data-ir="1" aria-label="Ir para o slide 2"></button>
+        <button class="ponto" data-ir="2" aria-label="Ir para o slide 3"></button>
+      </div>
+    </div>
+  </section>
+
+  <!-- CASO 1 — imagens sem alt, SEM id e SEM classe, aninhadas em divs genéricas.
+       A única forma de chegar nelas é por posição na árvore. Uma resolução que dependa de
+       id ou de classe não encontra alvo nenhum e precisa dizer isso com honestidade. -->
+  <section class="bloco">
+    <h2>Como funciona</h2>
+    <div>
+      <div>
+        <img src="/img/passo-1.svg" width="220" height="120">
+      </div>
+      <div>
+        <div>
+          <img src="/img/passo-2.svg" width="220" height="120">
+        </div>
+      </div>
+    </div>
+    <p>O atendimento começa pelo cadastro, segue para a conferência de dados e termina com a emissão do documento.</p>
+  </section>
+
+  <!-- CASO 4 — link inline longo com contraste baixo que quebra em três linhas dentro do
+       parágrafo. A caixa precisa cobrir as três linhas (não só a primeira) e o contraste
+       precisa ser reprovado. -->
+  <section class="bloco">
+    <h2>Termos de uso atualizados</h2>
+    <p class="termos">Antes de continuar, leia com atenção a
+      <a class="link-baixo-contraste" href="#termos">política de privacidade e o termo de adesão ao serviço digital do cidadão com as regras de uso, guarda de dados e cancelamento a qualquer momento</a>
+      e confirme o recebimento das informações.</p>
+  </section>
+
+  <!-- CASO 5 — botões-ícone minúsculos (16x16) lado a lado com 4 px de espaço.
+       O alvo fica abaixo do mínimo de 24x24 e os vizinhos quase se tocam: uma caixa com
+       folga de alguns pixels já invade o botão seguinte. -->
+  <section class="bloco">
+    <h2>Favoritos</h2>
+    <div class="tira-icones">
+      <button class="icone-mini"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+      <button class="icone-mini"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8h10" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+      <button class="icone-mini"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+      <button class="icone-mini"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="5" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+    </div>
+    <p>Use os atalhos para guardar um serviço na sua lista.</p>
+  </section>
+
+  <!-- CASO 2 — grade de 6 cards que compartilham as MESMAS classes (.card, .card__img).
+       Todas as imagens estão sem alt e todos os botões só têm ícone, sem nome acessível.
+       Seis ocorrências idênticas em estrutura: o alvo precisa ser distinguido por posição,
+       e a numeração dos sinais precisa continuar apontando para o card certo. -->
+  <section class="bloco">
+    <h2>Serviços mais usados</h2>
+    <div class="grade">
+      <article class="card"><div class="card__midia"><img class="card__img" src="/img/servico-1.svg" width="160" height="110"></div><h3 class="card__titulo">Certidão de nascimento</h3><button class="card__acao"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="card"><div class="card__midia"><img class="card__img" src="/img/servico-2.svg" width="160" height="110"></div><h3 class="card__titulo">Licença de obra</h3><button class="card__acao"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="card"><div class="card__midia"><img class="card__img" src="/img/servico-3.svg" width="160" height="110"></div><h3 class="card__titulo">IPTU em cota única</h3><button class="card__acao"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="card"><div class="card__midia"><img class="card__img" src="/img/servico-4.svg" width="160" height="110"></div><h3 class="card__titulo">Transporte escolar</h3><button class="card__acao"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="card"><div class="card__midia"><img class="card__img" src="/img/servico-5.svg" width="160" height="110"></div><h3 class="card__titulo">Auxílio emergencial</h3><button class="card__acao"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+      <article class="card"><div class="card__midia"><img class="card__img" src="/img/servico-6.svg" width="160" height="110"></div><h3 class="card__titulo">Segunda via de conta</h3><button class="card__acao"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 5v14" stroke="currentColor" stroke-width="2" fill="none"/></svg></button></article>
+    </div>
+  </section>
+
+  <!-- CASO 3 — classes no estilo CSS-modules/hash (Button_root__x8f3a9c2 css-1q2w3e4).
+       O nome não diz nada sobre o elemento e muda a cada build. O produto não pode
+       depender de classe legível para descrever nem para localizar o alvo. -->
+  <section class="bloco">
+    <h2>Ações da conta</h2>
+    <div class="AccountActions_wrap__9d2c1b css-9x8y7z">
+      <button class="Button_root__x8f3a9c2 css-1q2w3e4">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+      </button>
+      <button class="Button_root__x8f3a9c2 css-1q2w3e4 Button_root--ghost__44bca1">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 4v16" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+      </button>
+      <div class="AccountActions_meta__7ab31f">Última entrada em 02/10/2026 às 08h14</div>
+    </div>
+  </section>
+
+  <!-- CASO 7 — seção de fundo escuro com elemento problemático.
+       Texto escuro sobre fundo escuro (#3a3a3a sobre #161616) e um botão só de ícone.
+       A amostragem de pixel e a mediação de contraste precisam enxergar o fundo real. -->
+  <section class="bloco bloco--escuro">
+    <h2>Central de ajuda</h2>
+    <p class="texto-escuro">Atendimento por chat das 8h às 20h em dias úteis.</p>
+    <button class="acao-escura">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 20l4-1 9-9-3-3-9 9-1 4z" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+    </button>
+  </section>
+
+  <!-- CASO 9 — formulário com campos sem rótulo: um sem id e sem label, outro com id mas
+       sem label associado, um select e uma área de texto. Todos com name, porque é o que
+       uma página real tem. -->
+  <section class="bloco" id="ajuda">
+    <h2>Solicitar atendimento</h2>
+    <form class="formulario" action="#ajuda" method="get">
+      <div class="campo"><input type="text" name="nome-completo" placeholder="Nome completo"></div>
+      <div class="campo"><input type="text" id="campo-cpf" name="cpf" placeholder="CPF"></div>
+      <div class="campo"><select name="assunto"><option>Dúvida</option><option>Reclamação</option></select></div>
+      <div class="campo"><textarea name="descricao" rows="3" placeholder="Descreva o que aconteceu"></textarea></div>
+      <button class="botao botao--primario" type="submit">Enviar solicitação</button>
+    </form>
+  </section>
+
+  <!-- CASO 12 — uma seção grande inteira (div com texto) com contraste baixo, contendo
+       vários filhos. O contraste é do container, não de um filho isolado: a marcação precisa
+       escolher entre marcar o bloco todo ou cada filho, e a caixa escolhida tem de fazer
+       sentido para quem lê. -->
+  <section class="bloco">
+    <div class="secao-baixo-contraste" id="manutencao">
+      <h2>Perguntas frequentes</h2>
+      <p>O prazo de análise varia conforme o tipo de solicitação e a quantidade de documentos anexados.</p>
+      <ul>
+        <li>Emissões simples ficam prontas em até 2 dias úteis.</li>
+        <li>Análises com vistoria podem levar até 15 dias úteis.</li>
+        <li>Recursos administrativos têm prazo próprio informado no protocolo.</li>
+      </ul>
+      <p>Se o prazo passar sem resposta, procure a ouvidoria com o número do protocolo em mãos.</p>
+    </div>
+  </section>
+
+  <!-- Texto de enchimento para a página passar de três telas de altura, de modo que a
+       rolagem, o cabeçalho fixo e o recorte do container de overflow sejam de fato exercidos. -->
+  <section class="bloco">
+    <h2>Documentos e prazos</h2>
+    <p>O acompanhamento de um pedido pode ser feito pelo número de protocolo gerado no fim da solicitação. Guarde esse número: ele é a chave de consulta em todos os canais de atendimento, inclusive presencial.</p>
+    <p>Quando o pedido depende de vistoria, a equipe responsável entra em contato pelo telefone cadastrado para agendar a visita. Não há custo para o agendamento, mas a visita pode ser remarcada uma vez sem prejuízo da posição na fila.</p>
+    <p>Documentos digitalizados precisam estar legíveis e completos. Arquivos cortados, escuros ou com páginas faltantes são devolvidos para correção e o prazo passa a contar da nova entrega.</p>
+    <p>Em caso de divergência de dados cadastrais, o ajuste é feito no posto de atendimento mais próximo, com documento oficial de identificação. A correção é registrada no histórico do pedido e fica visível para quem consulta o protocolo.</p>
+    <h3>Onde acompanhar</h3>
+    <p>A consulta fica disponível na área logada, na seção de pedidos, e também por telefone na central de atendimento. O histórico mostra cada mudança de situação com data e hora.</p>
+    <p>O prazo começa a contar do dia seguinte ao registro do pedido e é contado em dias úteis. Feriados locais e nacionais não entram na contagem, o que pode alongar o prazo em semanas com muitos feriados.</p>
+  </section>
+
+  <section class="bloco">
+    <h2>Orientações gerais</h2>
+    <p>Antes de abrir um novo pedido, verifique se já existe um em andamento para o mesmo assunto. Pedidos repetidos são agrupados e podem atrasar a análise por causa da conferência duplicada de documentos.</p>
+    <p>O atendimento presencial funciona de segunda a sexta, das 9h às 17h, com distribuição de senhas até as 16h. Em dias de grande movimento a espera pode passar de uma hora, então prefira o canal digital sempre que possível.</p>
+    <p>Para pedidos que exigem reconhecimento de firma, o cartório pode ser escolhido livremente, desde que o documento resultante seja entregue dentro do prazo informado no protocolo.</p>
+    <p>Dúvidas sobre cobrança devem ser tratadas pelo canal de atendimento do próprio serviço. A ouvidoria atua depois que o canal comum tiver dado resposta, e o número do protocolo anterior deve ser informado.</p>
+    <h3>Privacidade</h3>
+    <p>Os dados informados são usados apenas para a prestação do serviço solicitado e ficam guardados pelo prazo legal aplicável. O titular pode pedir correção, portabilidade ou eliminação nos termos da lei de proteção de dados.</p>
+    <p>O acesso à área logada é pessoal e intransferível. Em caso de perda do acesso, a recuperação é feita com conferência de dados cadastrais e pode exigir comparecimento presencial.</p>
+  </section>
+
+</main>
+
+<footer class="rodape">
+  <p>Portal de Serviços do Cidadão — atendimento de segunda a sexta, das 9h às 17h.</p>
+  <a href="#conteudo">Voltar ao topo</a>
+</footer>
+
+<script src="/marcacao.js"></script>
+</body>
+</html>

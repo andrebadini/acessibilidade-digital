@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" role="img" aria-label="Matrícula escolar">
+<rect width="320" height="200" fill="#146b4a"/>
+<rect x="24" y="48" width="170" height="12" rx="6" fill="rgba(255,255,255,0.55)"/><rect x="24" y="72" width="120" height="12" rx="6" fill="rgba(255,255,255,0.55)"/><rect x="228" y="34" width="68" height="68" rx="8" fill="rgba(255,255,255,0.35)"/>
+<text x="16" y="184" font-family="system-ui, sans-serif" font-size="16" fill="#ffffff">Matrícula escolar</text>
+</svg>

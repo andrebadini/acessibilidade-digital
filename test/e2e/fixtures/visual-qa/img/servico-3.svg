@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" role="img" aria-label="IPTU em cota única">
+<rect width="320" height="200" fill="#f6ecdf"/>
+<rect x="24" y="52" width="150" height="12" rx="6" fill="rgba(255,255,255,0.55)"/>
+<text x="16" y="184" font-family="system-ui, sans-serif" font-size="16" fill="#7a3b0b">IPTU em cota única</text>
+</svg>
