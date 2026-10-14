@@ -3,7 +3,7 @@ import { sha256Hex } from '../report/hash.js';
 import { decodePngDataUrl, pngDataUrlDecodedByteLength, validatePngRasterData } from './png.js';
 
 export const ANNOTATION_MAP_ALGORITHM = 'audita.annotation-map';
-export const ANNOTATION_MAP_VERSION = '1.0.0';
+export const ANNOTATION_MAP_VERSION = '1.1.0';
 export const ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO = 1.3;
 export const ANNOTATION_MAP_LIMITS = Object.freeze({
   maxNodes: 200,
@@ -23,6 +23,7 @@ export const ANNOTATION_MAP_LIMITATIONS = Object.freeze([
   'source-capture-may-contain-personal-data',
   'frame-content-omitted',
   'closed-shadow-root-omitted',
+  'container-replaced-by-annotated-descendant',
   'node-limit-reached',
   'legend-limit-reached',
   'unresolved-marker-overlap',

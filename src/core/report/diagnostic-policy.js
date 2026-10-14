@@ -23,6 +23,19 @@ export const FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE =
 export const ELEMENT_CAPTURE_BUDGET_MESSAGE =
   'O limite de evidências por página foi atingido; as demais ocorrências continuam no relatório com seletor e descrição, sem miniatura própria e, em páginas muito grandes, sem trecho de código.';
 
+// A miniatura de elemento é recortada pela posição do alvo. Quando essa posição não pôde ser remedida
+// no instante da captura (`DOM.getContentQuads`/`DOM.getBoxModel` recusaram o nó), a miniatura usa a
+// medida do snapshot — que pode estar desatualizada se a página mudou de layout desde a coleta. A
+// limitação é declarada em vez de escondida; nada disso impede a auditoria de concluir.
+export const ELEMENT_MEASUREMENT_FALLBACK_MESSAGE =
+  'A posição de um ou mais elementos não pôde ser remedida no instante da miniatura; nesses casos a imagem usa a medida do snapshot e pode estar deslocada se a página mudou de layout.';
+
+// (P3/16 do diagnóstico 1.1.57.) Nó de subframe tem o `rect` no sistema de coordenadas do próprio
+// documento; aplicar esse clip ao documento de topo recortaria uma região arbitrária. Enquanto não
+// houver captura dentro do quadro, o comportamento é declarar em vez de desenhar no lugar errado.
+export const ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE =
+  'Elementos dentro de iframes não recebem miniatura própria: a posição medida no quadro não pode ser aplicada ao documento de topo. O achado continua no relatório com seletor, descrição e captura integral da página.';
+
 export const EXPORT_ISSUE_MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
   REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
@@ -102,6 +115,14 @@ const technicalPageDiagnostics = [
   page({ code: 'AXE_EXECUTION_FAILED', message: 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.', fact: 'axe-partial', group: 'axe' }),
   page({ code: 'FULL_PAGE_CAPTURE_TRUNCATED', message: FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE, fact: 'full-page-truncated' }),
   page({ code: 'ELEMENT_CAPTURE_BUDGET_REACHED', message: ELEMENT_CAPTURE_BUDGET_MESSAGE, fact: 'element-capture-budget' }),
+  page({
+    code: 'ELEMENT_MEASUREMENT_FALLBACK', message: ELEMENT_MEASUREMENT_FALLBACK_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES, fact: 'element-measurement-fallback', causePartial: false,
+  }),
+  page({
+    code: 'ELEMENT_CAPTURE_FRAME_CONTEXT', message: ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES, fact: 'element-frame-context', causePartial: false,
+  }),
   page({ code: 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', message: 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.', fact: 'element-capture-skipped' }),
   page({ code: 'ANNOTATION_MAP_PARTIAL', message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.', fact: 'annotation-partial', group: 'annotation' }),
   page({ code: 'CDP_DISCONNECT_FAILED', message: 'A sessão de depuração não pôde ser encerrada automaticamente.', fact: 'cleanup-cdp', timestampScope: 'root' }),

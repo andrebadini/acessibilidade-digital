@@ -10,6 +10,7 @@ const LIMITATIONS = Object.freeze({
   'source-capture-may-contain-personal-data': 'A captura original pode conter dados pessoais visíveis.',
   'frame-content-omitted': 'O conteúdo interno de frames não foi anotado.',
   'closed-shadow-root-omitted': 'O conteúdo de Shadow DOM fechado não foi anotado.',
+  'container-replaced-by-annotated-descendant': 'Contêineres com elementos internos anotados aparecem representados por esses elementos internos.',
   'node-limit-reached': 'O limite de elementos anotados foi atingido.',
   'legend-limit-reached': 'O limite de legenda ou segmentos foi atingido.',
   'unresolved-marker-overlap': 'Alguns marcadores permaneceram sobrepostos.',

@@ -1,6 +1,17 @@
 import { sha256Hex } from '../core/report/hash.js';
+import { MAX_MEASURED_PARTS, rectExceedsBounds, unionOfRects } from './measure-element.js';
 
-const ELEMENT_CONTEXT_MARGIN = 24;
+// Contexto ao redor do elemento, adaptativo. Um valor fixo de 24 px dominava a imagem de um botão de
+// ícone de 16 px e ficava invisível ao redor de um bloco de 600 px — a pessoa não distinguia a moldura
+// do conteúdo. A moldura acompanha o lado maior do alvo, entre 40 px e 160 px.
+const MIN_ELEMENT_CONTEXT_MARGIN = 40;
+const MAX_ELEMENT_CONTEXT_MARGIN = 160;
+
+/** Margem de contexto, em CSS px, para um alvo do tamanho informado. */
+export function elementContextMargin(width, height) {
+  const longest = Math.max(Number.isFinite(width) ? width : 0, Number.isFinite(height) ? height : 0);
+  return Math.max(MIN_ELEMENT_CONTEXT_MARGIN, Math.min(MAX_ELEMENT_CONTEXT_MARGIN, Math.round(0.35 * longest)));
+}
 
 function dimensions(metrics = {}) {
   const size = metrics.cssContentSize || metrics.contentSize || {};
@@ -95,31 +106,58 @@ export async function captureFullPage(cdp, metrics = {}) {
   }, 'full-page', size);
 }
 
-function normalizedClip(rect, metrics, margin = ELEMENT_CONTEXT_MARGIN) {
-  if (!rect || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) || rect.width <= 0 || rect.height <= 0) return null;
+function validRects(values) {
+  if (!Array.isArray(values)) return null;
+  const rects = values
+    .filter(rect => rect && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0)
+    .map(rect => ({ x: rect.x, y: rect.y, width: rect.width, height: rect.height }));
+  return rects.length > 0 ? rects : null;
+}
+
+/** Retângulo do documento recortado no espaço do clip (`capture-css-px`). */
+function clipRelative(documentRect, clip) {
+  const x = Math.max(0, documentRect.x - clip.x);
+  const y = Math.max(0, documentRect.y - clip.y);
+  const right = Math.min(clip.width, documentRect.x + documentRect.width - clip.x);
+  const bottom = Math.min(clip.height, documentRect.y + documentRect.height - clip.y);
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
+function normalizedClip(rect, metrics) {
+  const measured = validRects(metrics.measuredRects);
+  const fallback = validRects([rect]);
+  const source = measured ?? fallback;
+  if (!source) return null;
   const size = dimensions(metrics);
-  const viewportRelative = rect.coordinateSpace === 'viewport';
+  const viewportRelative = measured === null && rect.coordinateSpace === 'viewport';
   if (viewportRelative && (!Number.isFinite(metrics.scrollX) || !Number.isFinite(metrics.scrollY))) return null;
-  const documentX = rect.x + (viewportRelative ? metrics.scrollX : 0);
-  const documentY = rect.y + (viewportRelative ? metrics.scrollY : 0);
-  const targetLeft = Math.max(0, documentX);
-  const targetTop = Math.max(0, documentY);
-  const targetRight = size.width === null ? documentX + rect.width : Math.min(size.width, documentX + rect.width);
-  const targetBottom = size.height === null ? documentY + rect.height : Math.min(size.height, documentY + rect.height);
+  const rects = viewportRelative
+    ? source.map(item => ({ ...item, x: item.x + metrics.scrollX, y: item.y + metrics.scrollY }))
+    : source;
+  const box = unionOfRects(rects);
+  // Contexto proporcional ao alvo: um valor fixo dominava um botão de 16 px e sumia ao redor de um
+  // bloco grande. Sem medição fresca, a união é o rect do snapshot e o resultado é o mesmo de antes.
+  const margin = elementContextMargin(box.width, box.height);
+  const targetLeft = Math.max(0, box.x);
+  const targetTop = Math.max(0, box.y);
+  const targetRight = size.width === null ? box.x + box.width : Math.min(size.width, box.x + box.width);
+  const targetBottom = size.height === null ? box.y + box.height : Math.min(size.height, box.y + box.height);
   if (targetRight <= targetLeft || targetBottom <= targetTop) return null;
   const clipLeft = Math.max(0, targetLeft - margin);
   const clipTop = Math.max(0, targetTop - margin);
   const clipRight = size.width === null ? targetRight + margin : Math.min(size.width, targetRight + margin);
   const clipBottom = size.height === null ? targetBottom + margin : Math.min(size.height, targetBottom + margin);
+  const clip = { x: clipLeft, y: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop, scale: 1 };
+  const parts = rects.map(item => clipRelative(item, clip)).filter(Boolean);
+  if (parts.length === 0) return null;
   return {
-    clip: { x: clipLeft, y: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop, scale: 1 },
-    highlightBox: {
-      x: targetLeft - clipLeft,
-      y: targetTop - clipTop,
-      width: targetRight - targetLeft,
-      height: targetBottom - targetTop,
-      coordinateSpace: 'capture-css-px',
-    },
+    clip,
+    margin,
+    // O desenho usa as partes (fragmentos de linha de um inline); `highlightBox` continua sendo a
+    // união, para quem lê auditorias geradas antes desta versão.
+    highlightBox: { ...unionOfRects(parts), coordinateSpace: 'capture-css-px' },
+    highlightParts: parts.slice(0, MAX_MEASURED_PARTS).map(part => ({ ...part })),
+    highlightClipped: rectExceedsBounds(box, size),
   };
 }
 
@@ -135,12 +173,26 @@ function clipInsideViewports(clip, metrics) {
   });
 }
 
+function cantTell(reason, metrics) {
+  return { status: 'cantTell', reason, evidenceId: null, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
+}
+
+/**
+ * Captura a miniatura do elemento.
+ *
+ * `rect` é o retângulo do snapshot, em CSS px do documento. Quando `metrics.measuredRects` traz a
+ * remedição fresca por `DOM.getContentQuads` (um retângulo por fragmento de linha), ela manda: o
+ * `rect` fica só como reserva. Nós de iframe não são capturados com coordenadas do documento de topo
+ * — o clip seria aplicado ao documento errado — e devolvem `cantTell` com `reason: 'frame-context'`.
+ */
 export async function captureElement(cdp, rect, metrics = {}) {
+  if (Array.isArray(metrics.framePath) && metrics.framePath.length > 0) return cantTell('frame-context', metrics);
   const geometry = normalizedClip(rect, metrics);
-  if (!geometry) return { status: 'cantTell', reason: 'invalid-or-outside-rect', evidenceId: null, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
-  const { clip, highlightBox } = geometry;
+  if (!geometry) return cantTell('invalid-or-outside-rect', metrics);
+  const { clip, margin, highlightBox, highlightParts, highlightClipped } = geometry;
   const result = await capture(cdp, { format: 'png', captureBeyondViewport: !clipInsideViewports(clip, metrics), fromSurface: true, clip }, 'thumbnail', {
-    width: clip.width, height: clip.height, clip, highlightBox, annotationMargin: ELEMENT_CONTEXT_MARGIN,
+    width: clip.width, height: clip.height, clip, highlightBox, highlightParts, annotationMargin: margin,
+    ...(highlightClipped ? { highlightClipped: true } : {}),
   });
   return { ...result, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
 }

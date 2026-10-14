@@ -1,4 +1,5 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
+import { measureElementTarget } from '../browser/measure-element.js';
 import { collectPage } from '../browser/collect-page.js';
 import { AXE_PROVENANCE, runAxeInTab } from '../browser/axe-adapter.js';
 import { dedupeFindingsForPresentation } from '../core/axe/dedupe-findings.js';
@@ -40,6 +41,7 @@ import { createAuditModel } from '../core/report/audit-model.js';
 import { testedWcagRefsForCoreRule } from '../core/report/tested-criteria.js';
 import {
   ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE, ELEMENT_CAPTURE_BUDGET_MESSAGE,
+  ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE, ELEMENT_MEASUREMENT_FALLBACK_MESSAGE,
   FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE,
 } from '../core/report/diagnostic-policy.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
@@ -1065,11 +1067,35 @@ async function runLegacyAudit({
         if (canCaptureElements && !furtherPixelCaptureSuppressed && !thumbnailBudget.reached) {
           thumbnailBudget.attempted += 1;
           try {
+            // Remedição do alvo no instante da captura. O rect do snapshot é medido muito antes desta
+            // fase; entre uma coisa e outra a página rola e troca de layout, e o inline multilinha vem
+            // como caixa envolvente. `DOM.getContentQuads` devolve um quadrilátero por fragmento de
+            // linha, em coordenadas da viewport, convertidas para o documento com as métricas tomadas
+            // no mesmo momento. Falhou? O rect do snapshot continua valendo, e a limitação é declarada.
+            let measurement = null;
+            if (!evidenceBudgetSpent) {
+              try {
+                measurement = await awaitStep(() => measureElementTarget(cdp, node));
+              } catch (error) {
+                rethrowAbort(error, signal);
+                measurement = null;
+              }
+            }
+            if (measurement === null) {
+              appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
+            } else if (measurement.status === 'frame-context') {
+              appendDiagnosticOnce('ELEMENT_CAPTURE_FRAME_CONTEXT', ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE, true);
+            } else if (measurement.status !== 'measured') {
+              appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
+            }
             thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
               ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
+              ...(measurement?.status === 'measured' ? measurement.metrics : {}),
+              ...(measurement?.status === 'measured' ? { measuredRects: measurement.rects } : {}),
+              ...(Array.isArray(node.framePath) && node.framePath.length > 0 ? { framePath: node.framePath } : {}),
               ...(state.fullPage ? { fullPageEvidenceId: state.fullPage.evidenceId } : {}),
             }));
-            if (thumbnail.status !== 'captured') {
+            if (thumbnail.status !== 'captured' && thumbnail.reason !== 'frame-context') {
               recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
             }
           } catch (error) {

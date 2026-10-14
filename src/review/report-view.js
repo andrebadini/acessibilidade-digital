@@ -1,11 +1,16 @@
 import { createAuditModel } from '../core/report/audit-model.js';
 import { resultsOverviewElement } from '../core/report/results-overview.js';
 import { checklistElement } from '../core/report/checklist-presentation.js';
-import { decodePngDataUrl } from '../core/evidence/png.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
+import {
+  EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
+  evidenceHighlight,
+  evidenceHighlightLegend,
+  evidenceHighlightShapes,
+} from '../core/report/evidence-highlight.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { listedLimitations, viewportSummary } from '../core/report/text-policy.js';
@@ -534,33 +539,10 @@ function sectionNavigation(document) {
 
 function isSafePngDataUrl(value) { return typeof value === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/]+=*$/u.test(value); }
 
-function finitePositive(value) { return Number.isFinite(value) && value > 0 ? value : null; }
-
-function clamp(value, minimum, maximum) { return Math.min(maximum, Math.max(minimum, value)); }
-
 function evidenceFrame(artifact) {
   const cached = EVIDENCE_FRAME_BY_ARTIFACT.get(artifact);
-  if (cached) return cached;
-  let width = finitePositive(artifact.metadata?.width);
-  let height = finitePositive(artifact.metadata?.height);
-  if (width === null || height === null) {
-    try {
-      const metadata = decodePngDataUrl(artifact.dataUrl);
-      width ??= metadata.width;
-      height ??= metadata.height;
-    } catch { return null; }
-  }
-  const candidate = artifact.metadata?.highlightBox;
-  const box = !candidate || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(candidate[key]))
-    ? { x: 0, y: 0, width, height }
-    : (() => {
-      const x = clamp(candidate.x, 0, width);
-      const y = clamp(candidate.y, 0, height);
-      const right = clamp(candidate.x + Math.max(0, candidate.width), x, width);
-      const bottom = clamp(candidate.y + Math.max(0, candidate.height), y, height);
-      return { x, y, width: right - x, height: bottom - y };
-    })();
-  const frame = Object.freeze({ width, height, box: Object.freeze(box) });
+  if (cached !== undefined) return cached;
+  const frame = evidenceHighlight(artifact);
   EVIDENCE_FRAME_BY_ARTIFACT.set(artifact, frame);
   return frame;
 }
@@ -581,7 +563,7 @@ function appendEvidenceMedia(document, figure, artifact, tone) {
   svg.setAttribute('class', 'evidence-media evidence-media--marked');
   svg.setAttribute('data-evidence-treatment', treatment.tone);
   svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', `${label} ${treatment.aria}`);
+  svg.setAttribute('aria-label', `${label} ${treatment.aria}${frame.clipped ? ` ${EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND}` : ''}`);
   svg.setAttribute('viewBox', `0 0 ${frame.width} ${frame.height}`);
   svg.setAttribute('width', frame.width);
   svg.setAttribute('height', frame.height);
@@ -592,17 +574,14 @@ function appendEvidenceMedia(document, figure, artifact, tone) {
   image.setAttribute('width', frame.width);
   image.setAttribute('height', frame.height);
   image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-  const box = document.createElementNS(SVG_NAMESPACE, 'rect');
-  box.setAttribute('class', `evidence-highlight evidence-highlight--${treatment.tone}`);
-  box.setAttribute('data-evidence-highlight', treatment.tone);
-  box.setAttribute('x', frame.box.x);
-  box.setAttribute('y', frame.box.y);
-  box.setAttribute('width', frame.box.width);
-  box.setAttribute('height', frame.box.height);
-  box.setAttribute('aria-hidden', 'true');
-  svg.append(image, box);
+  svg.append(image);
+  for (const shape of evidenceHighlightShapes(frame, treatment.tone)) {
+    const node = document.createElementNS(SVG_NAMESPACE, shape.kind);
+    for (const [name, value] of Object.entries(shape.attributes)) node.setAttribute(name, value);
+    svg.append(node);
+  }
   figure.append(svg);
-  return `${treatment.legend} ${label}.`;
+  return `${evidenceHighlightLegend(treatment, frame)} ${label}.`;
 }
 
 function plainBlock(document, name, title) {

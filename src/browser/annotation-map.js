@@ -27,6 +27,12 @@ const SIGNIFICANT_ROLES = new Set([
   'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'region', 'slider', 'spinbutton',
   'switch', 'tab', 'table', 'textbox', 'treeitem',
 ]);
+/**
+ * Contêineres: quando já existe descendente anotado, uma anotação do contêiner englobaria vários
+ * elementos e o número deixaria de apontar para um alvo único.
+ */
+const CONTAINER_TAGS = new Set(['details', 'li', 'table']);
+const CONTAINER_ROLES = new Set(['list', 'listitem', 'region', 'table']);
 const PRIVATE_ATTRIBUTE = /(?:^(?:data-(?:audita-)?private|data-nosnippet)$|pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const BASE_LIMITATIONS = Object.freeze([
   'observed-dom-ax-order-not-literal-assistive-technology',
@@ -37,6 +43,10 @@ const BASE_LIMITATIONS = Object.freeze([
 ]);
 const MARKER_RADIUS = 14;
 const MARKER_CLEARANCE = MARKER_RADIUS * 2 + 4;
+const MARKER_STROKE = '#8b1e1e';
+const MARKER_OVERLAP_STROKE = '#6b4e00';
+/** Peso de uma colisão no custo do marcador: proximidade nunca vale mais que uma sobreposição. */
+const MARKER_COLLISION_COST = 1e6;
 const LEGEND_LINE_HEIGHT = 22;
 const LEGEND_PADDING = 16;
 const LEGEND_HEADING_HEIGHT = 34;
@@ -82,6 +92,17 @@ function ancestorState(node, indexes, predicate) {
     current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
   }
   return false;
+}
+
+/** Registra todos os ancestrais de um nó anotável, para saber quais contêineres já têm descendente. */
+function markAncestorsOf(node, indexes, target) {
+  const visited = new Set();
+  let current = node?.parentId === null || node?.parentId === undefined ? null : indexes.byNodeId.get(String(node.parentId));
+  while (current && !visited.has(String(current.nodeId))) {
+    visited.add(String(current.nodeId));
+    target.add(String(current.nodeId));
+    current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
+  }
 }
 
 function closedShadow(node, indexes) {
@@ -248,6 +269,8 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
   const limitations = new Set(['observed-dom-ax-order-not-literal-assistive-technology', 'top-document-open-shadow-only']);
   const dedupe = new Set();
   const omittedFrames = new Set();
+  const candidates = [];
+  const annotatedAncestorIds = new Set();
   let legendCodePoints = 0;
   let closedShadowOmitted = false;
   for (const node of snapshot.nodes) {
@@ -269,15 +292,27 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     const key = String(node.nodeId);
     if (dedupe.has(key)) continue;
     dedupe.add(key);
-    counts.eligible += 1;
     if (!usefulRect(node.rect)) {
       counts.omittedNoRect += 1;
       continue;
     }
-    const preview = text(projection.announcementPreview);
-    const selectorSummary = structuralSelector(node, indexes);
-    const nameSource = text(projection.nameSource) || 'none';
-    const previewLength = [...`${selectorSummary}\n${preview}\n${nameSource}`].length;
+    candidates.push({
+      nodeId: key,
+      selectorSummary: structuralSelector(node, indexes),
+      announcementPreview: text(projection.announcementPreview),
+      nameSource: text(projection.nameSource) || 'none',
+      bounds: { x: node.rect.x, y: node.rect.y, width: node.rect.width, height: node.rect.height },
+      container: CONTAINER_TAGS.has(safeTag(node)) || CONTAINER_ROLES.has(projection.role),
+    });
+    markAncestorsOf(node, indexes, annotatedAncestorIds);
+  }
+  // Contêineres com descendentes anotados saem antes de qualquer numeração: a caixa de um `<li>`,
+  // `<table>`, `<details>` ou `role="region"` que já tem filhos anotados englobaria vários elementos
+  // e o número deixaria de dizer qual deles está marcado.
+  const kept = candidates.filter(candidate => !(candidate.container && annotatedAncestorIds.has(candidate.nodeId)));
+  if (kept.length !== candidates.length) limitations.add('container-replaced-by-annotated-descendant');
+  for (const candidate of kept) {
+    const previewLength = [...`${candidate.selectorSummary}\n${candidate.announcementPreview}\n${candidate.nameSource}`].length;
     if (entries.length >= maxNodes || previewLength > MAX_PREVIEW_CODE_POINTS ||
       legendCodePoints + previewLength > ANNOTATION_MAP_LIMITS.maxLegendCodePoints) {
       counts.omittedLimit += 1;
@@ -289,17 +324,18 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     legendCodePoints += previewLength;
     entries.push({
       number: entries.length + 1,
-      nodeId: key,
-      selectorSummary,
-      announcementPreview: preview,
-      nameSource,
-      bounds: { x: node.rect.x, y: node.rect.y, width: node.rect.width, height: node.rect.height },
+      nodeId: candidate.nodeId,
+      selectorSummary: candidate.selectorSummary,
+      announcementPreview: candidate.announcementPreview,
+      nameSource: candidate.nameSource,
+      bounds: candidate.bounds,
     });
   }
   counts.omittedFrame = omittedFrameContextCount(snapshot, omittedFrames);
   if (counts.omittedFrame > 0) limitations.add('frame-content-omitted');
   if (closedShadowOmitted) limitations.add('closed-shadow-root-omitted');
   counts.annotated = entries.length;
+  counts.eligible = kept.length + counts.omittedNoRect;
   return { entries, legend: entries.map(({ bounds, ...entry }) => entry), counts, limitations: canonicalLimitations(limitations) };
 }
 
@@ -388,14 +424,24 @@ function placeMarkers(entries, width, height) {
   const placements = [];
   let unresolved = 0;
   for (const entry of entries) {
+    // Custo = colisões (peso dominante, para a anticolisão continuar mandando) + distância até o canto
+    // superior-esquerdo exterior do próprio elemento, que é a primeira candidata de `markerCandidates`.
+    const anchor = { x: entry.bounds.x, y: entry.bounds.y };
     const candidates = markerCandidates(entry.bounds, MARKER_RADIUS, width, height);
-    const scored = candidates.map((candidate, index) => ({
-      ...candidate, index,
-      score: placements.reduce((total, placed) => total + (distanceSquared(candidate, placed) < MARKER_CLEARANCE ** 2 ? 1 : 0), 0),
-    })).sort((left, right) => left.score - right.score || left.index - right.index);
+    const scored = candidates.map((candidate, index) => {
+      const collisions = placements.reduce((total, placed) => total + (distanceSquared(candidate, placed) < MARKER_CLEARANCE ** 2 ? 1 : 0), 0);
+      return {
+        ...candidate, index, collisions,
+        score: collisions * MARKER_COLLISION_COST + Math.sqrt(distanceSquared(candidate, anchor)),
+      };
+    }).sort((left, right) => left.score - right.score || left.index - right.index);
     const selected = scored[0];
-    if (selected.score > 0) unresolved += 1;
-    placements.push({ number: entry.number, x: selected.x, y: selected.y, targetX: entry.bounds.x + entry.bounds.width / 2, targetY: entry.bounds.y + entry.bounds.height / 2, overlapped: selected.score > 0 });
+    if (selected.collisions > 0) unresolved += 1;
+    placements.push({
+      number: entry.number, x: selected.x, y: selected.y,
+      targetX: entry.bounds.x + entry.bounds.width / 2, targetY: entry.bounds.y + entry.bounds.height / 2,
+      bounds: entry.bounds, overlapped: selected.collisions > 0,
+    });
   }
   return { placements, unresolved };
 }
@@ -659,6 +705,48 @@ function canvasHeightFor(segment, geometry, sourceWidth) {
   return { imageHeight, legendHeight, height: imageHeight + legendHeight, width: sourceWidth };
 }
 
+function segmentOutlineRect(marker, geometry, dimensions) {
+  const bounds = marker.bounds;
+  if (!usefulRect(bounds)) return null;
+  const imageHeight = Math.max(0, dimensions.imageHeight);
+  const x = clamp(bounds.x * geometry.scaleX, 0, dimensions.width);
+  const y = clamp(bounds.y * geometry.scaleY, 0, imageHeight);
+  const right = clamp((bounds.x + bounds.width) * geometry.scaleX, x, dimensions.width);
+  const bottom = clamp((bounds.y + bounds.height) * geometry.scaleY, y, imageHeight);
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
+function strokeRectPath(context, rect) {
+  context.beginPath();
+  context.moveTo(rect.x, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y + rect.height);
+  context.lineTo(rect.x, rect.y + rect.height);
+  context.lineTo(rect.x, rect.y);
+  context.stroke();
+}
+
+/**
+ * Contorno fino do elemento anotado, na mesma cor do marcador e com halo branco: liga visualmente o
+ * número ao alvo sem depender só da linha-guia. Como no relatório, os halos de todos os contornos
+ * saem antes dos traços coloridos, para um contorno colorido vizinho nunca ficar coberto.
+ */
+function drawElementOutlines(context, segment, plan, dimensions) {
+  const outlines = segment.placements
+    .map(marker => ({ marker, rect: segmentOutlineRect(marker, plan.geometry, dimensions) }))
+    .filter(entry => entry.rect);
+  if (!outlines.length) return;
+  const strokeWidth = Math.max(2, Math.round(2 * Math.min(plan.geometry.scaleX, plan.geometry.scaleY)));
+  context.strokeStyle = '#fff';
+  context.lineWidth = strokeWidth + 4;
+  for (const { rect } of outlines) strokeRectPath(context, rect);
+  context.lineWidth = strokeWidth;
+  for (const { marker, rect } of outlines) {
+    context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
+    strokeRectPath(context, rect);
+  }
+}
+
 function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.fillStyle = '#fff';
   context.fillRect(0, 0, dimensions.width, dimensions.height);
@@ -669,14 +757,16 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.font = '700 16px system-ui';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
+  const scale = Math.min(plan.geometry.scaleX, plan.geometry.scaleY);
+  drawElementOutlines(context, segment, plan, dimensions);
   for (const marker of segment.placements) {
-    const markerRadius = MARKER_RADIUS * Math.min(plan.geometry.scaleX, plan.geometry.scaleY);
+    const markerRadius = MARKER_RADIUS * scale;
     const x = marker.x * plan.geometry.scaleX;
     const y = marker.y * plan.geometry.scaleY;
     const targetX = marker.targetX * plan.geometry.scaleX;
     const targetY = marker.targetY * plan.geometry.scaleY;
-    context.strokeStyle = marker.overlapped ? '#6b4e00' : '#8b1e1e';
-    context.lineWidth = Math.max(2, Math.round(3 * Math.min(plan.geometry.scaleX, plan.geometry.scaleY)));
+    context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
+    context.lineWidth = Math.max(2, Math.round(3 * scale));
     context.beginPath(); context.moveTo(x, y); context.lineTo(targetX, targetY); context.stroke();
     context.fillStyle = '#fff';
     context.beginPath(); context.arc(x, y, markerRadius, 0, Math.PI * 2); context.fill(); context.stroke();

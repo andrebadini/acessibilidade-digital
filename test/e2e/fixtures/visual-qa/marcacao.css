@@ -1,0 +1,219 @@
+/* Fixture de QA visual — "marcacao.html".
+   Página realista em pt-BR com os casos difíceis de marcação reunidos de propósito.
+   As cores de contraste baixo são intencionais: ~2:1, bem abaixo do mínimo de 4.5:1. */
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #1c1c1c;
+  background: #ffffff;
+  /* CASO 6a: a barra de aviso é `position:absolute; top:0`; este preenchimento impede que
+     ela cubra o cabeçalho sem tirá-la do topo da página. */
+  padding-top: 34px;
+}
+
+a { color: #0b4ea2; }
+
+/* CASO 6a — colada em top: 0. */
+.aviso-topo {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #0b2f6b;
+  /* Contraste baixo sobre o azul escuro do próprio fundo. */
+  color: #4a6ea8;
+  font-size: 13px;
+  z-index: 40;
+}
+.aviso-topo a { color: #4a6ea8; }
+
+/* CASO 11 — cabeçalho fixo com botão sem nome acessível. */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: #ffffff;
+  border-bottom: 1px solid #d8d8d8;
+}
+.site-header__inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 20px;
+}
+.marca { font-weight: 700; }
+.menu { display: flex; gap: 16px; margin-left: auto; }
+.site-header__acao,
+.botao-borda,
+.acao-icone,
+.icone-mini,
+.card__acao,
+.acao-escura,
+.ponto {
+  background: transparent;
+  border: 1px solid #b9b9b9;
+  border-radius: 6px;
+  color: #1c1c1c;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+}
+/* CASO 5 — alvos de 16x16 com 4 px entre eles. */
+.tira-icones { display: flex; gap: 4px; }
+.icone-mini { width: 16px; height: 16px; padding: 0; border-radius: 2px; }
+
+/* CASO 4 — link longo de contraste baixo que quebra em três linhas. */
+.termos { max-width: 330px; }
+.link-baixo-contraste { color: #b6b6b6; }
+
+/* CASO 12 — a seção inteira tem contraste baixo, e não um filho isolado. */
+.secao-baixo-contraste { color: #cfcfcf; background: #ffffff; }
+.secao-baixo-contraste h2,
+.secao-baixo-contraste p,
+.secao-baixo-contraste li { color: #cfcfcf; }
+
+/* CASO 7 — fundo escuro com elemento problemático. */
+.bloco--escuro { background: #161616; color: #ededed; }
+.bloco--escuro h2 { color: #ededed; }
+.texto-escuro { color: #3a3a3a; }
+.acao-escura { border-color: #2a2a2a; color: #2a2a2a; }
+
+.hero {
+  position: relative;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 44px 20px 24px;
+}
+.hero h1 { font-size: 34px; margin: 0 0 10px; }
+.hero__linha { margin: 0 0 22px; color: #4a4a4a; }
+.hero__acoes { display: flex; gap: 12px; }
+
+.botao {
+  display: inline-block;
+  padding: 10px 18px;
+  border: 1px solid #0b4ea2;
+  border-radius: 6px;
+  text-decoration: none;
+}
+.botao--primario { background: #0b4ea2; color: #ffffff; }
+
+/* CASO 6b — colado na borda direita da viewport (right: 0). */
+.botao-borda {
+  position: absolute;
+  right: 0;
+  top: 132px;
+  border-radius: 6px 0 0 6px;
+  padding: 8px 6px;
+}
+
+.bloco {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 20px;
+  border-top: 1px solid #ececec;
+}
+.bloco h2 { font-size: 22px; margin: 0 0 12px; }
+
+/* CASO 8 — itens fora da área visível do container. */
+.gaveta {
+  overflow: auto;
+  height: 132px;
+  max-width: 460px;
+  border: 1px solid #d8d8d8;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fafafa;
+}
+.doc {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  border-bottom: 1px solid #e4e4e4;
+}
+.doc h3 { font-size: 15px; margin: 0; }
+.doc p { margin: 0 0 0 auto; color: #5a5a5a; font-size: 13px; }
+
+/* CASO 10 — carrossel: só o slide ativo é exibido; os demais têm área zero. */
+.carrossel { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+.slide { display: none; padding: 14px; }
+.slide.is-active { display: block; }
+.slide img { display: block; max-width: 100%; height: auto; background: #eef2f8; }
+.carrossel__controles { display: flex; gap: 8px; padding: 10px 14px; }
+/* Os marcadores do carrossel têm nome acessível e área de 24x24 de propósito: eles trocam de
+   classe a cada 2 s e não podem ser, eles mesmos, um achado da auditoria. */
+.ponto {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.ponto::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border: 1px solid #b9b9b9;
+  border-radius: 50%;
+}
+.ponto.is-active::after { background: #0b4ea2; border-color: #0b4ea2; }
+
+/* CASO 2 — grade de 6 cards com as mesmas classes. */
+.grade {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.card {
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "midia midia" "titulo acao";
+  align-items: center;
+  gap: 8px;
+}
+.card__midia { grid-area: midia; }
+.card__img { display: block; width: 100%; height: 110px; background: #eef2f8; }
+.card__titulo { grid-area: titulo; font-size: 15px; margin: 0; }
+.card__acao { grid-area: acao; }
+
+/* CASO 3 — classes com hash de CSS-modules. Os nomes não descrevem nada de propósito. */
+.AccountActions_wrap__9d2c1b { display: flex; align-items: center; gap: 10px; }
+.Button_root__x8f3a9c2 { border: 1px solid #b9b9b9; border-radius: 6px; background: transparent; padding: 6px; cursor: pointer; }
+.AccountActions_meta__7ab31f { margin-left: auto; color: #5a5a5a; font-size: 13px; }
+
+.formulario { display: grid; gap: 12px; max-width: 460px; }
+.campo input,
+.campo select,
+.campo textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #b9b9b9;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.rodape {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 20px 60px;
+  border-top: 1px solid #ececec;
+  color: #5a5a5a;
+}

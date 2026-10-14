@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import { captureElement, captureFullPage } from '../../src/browser/capture-evidence.js';
+import { captureElement, captureFullPage, elementContextMargin } from '../../src/browser/capture-evidence.js';
 
 const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
 
@@ -66,8 +66,7 @@ test('converts an explicitly viewport-relative rect to document coordinates befo
   await captureElement(cdp, { x: 20, y: 500, width: 60, height: 40, coordinateSpace: 'viewport' }, {
     cssContentSize: { width: 1000, height: 2000 }, scrollX: 0, scrollY: 1000
   });
-  assert.equal(cdp.calls[0][1].clip.y, 1476);
-  assert.equal(cdp.calls[0][1].clip.x, 0);
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 1460, width: 120, height: 120, scale: 1 });
 });
 
 test('captures clamped element thumbnails and references the full-page evidence id', async () => {
@@ -77,15 +76,25 @@ test('captures clamped element thumbnails and references the full-page evidence 
   });
   assert.deepEqual(cdp.calls, [['Page.captureScreenshot', {
     format: 'png', captureBeyondViewport: true, fromSurface: true,
-    clip: { x: 0, y: 0, width: 64, height: 64, scale: 1 }
+    clip: { x: 0, y: 0, width: 80, height: 80, scale: 1 }
   }]]);
   assert.equal(capture.metadata.kind, 'thumbnail');
   assert.deepEqual(capture.metadata.highlightBox, {
     x: 0, y: 10, width: 40, height: 30,
     coordinateSpace: 'capture-css-px',
   });
-  assert.equal(capture.metadata.annotationMargin, 24);
+  assert.equal(capture.metadata.annotationMargin, elementContextMargin(30, 30));
   assert.equal(capture.fullPageEvidenceId, 'full-page-abc');
+});
+
+test('grows the context margin with the target and keeps it bounded', () => {
+  // 24 px fixos dominavam um botão de ícone e desapareciam ao redor de um bloco grande.
+  assert.equal(elementContextMargin(16, 16), 40);
+  assert.equal(elementContextMargin(60, 40), 40);
+  assert.equal(elementContextMargin(200, 120), 70);
+  assert.equal(elementContextMargin(400, 80), 140);
+  assert.equal(elementContextMargin(600, 300), 160);
+  assert.equal(elementContextMargin(Number.NaN, Number.NaN), 40);
 });
 
 test('visible capture requires the entire context crop inside both CSS viewports', async () => {
@@ -93,17 +102,18 @@ test('visible capture requires the entire context crop inside both CSS viewports
   const metrics = { cssContentSize: { width: 1000, height: 2000 }, cssLayoutViewport: viewport,
     cssVisualViewport: { ...viewport, scale: 1 }, fullPageEvidenceId: 'full-original' };
   for (const [rect, overrides, expected] of [
-    [{ x: 124, y: 224, width: 352, height: 252 }, {}, false],
-    [{ x: 124, y: 224, width: 352.01, height: 252 }, {}, true],
+    // Alvo e contexto inteiramente dentro das duas viewports: captura sem sair do que está visível.
+    [{ x: 200, y: 260, width: 60, height: 40 }, {}, false],
+    [{ x: 160, y: 220, width: 300, height: 240 }, {}, true],
     [{ x: 110, y: 224, width: 20, height: 20 }, {}, true],
-    [{ x: 124, y: 224, width: 20, height: 20 }, { cssVisualViewport: null }, true],
-    [{ x: 124, y: 224, width: 20, height: 20 }, { cssLayoutViewport: { ...viewport, pageX: 125 } }, true],
+    [{ x: 200, y: 260, width: 60, height: 40 }, { cssVisualViewport: null }, true],
+    [{ x: 150, y: 260, width: 60, height: 40 }, { cssLayoutViewport: { ...viewport, pageX: 125 } }, true],
   ]) {
     const cdp = fakeCdp();
     const result = await captureElement(cdp, rect, { ...metrics, ...overrides });
     assert.equal(cdp.calls[0][1].captureBeyondViewport, expected);
     assert.equal(result.fullPageEvidenceId, 'full-original');
-    assert.equal(result.metadata.highlightBox.x, 24);
+    assert.equal(result.metadata.highlightBox.x, elementContextMargin(rect.width, rect.height));
     assert.equal(result.metadata.highlightBox.width, rect.width);
   }
   for (const override of [{ scale: 2 }, { scale: undefined }, { clientWidth: 0 }, { clientHeight: Infinity }, { pageX: NaN }]) {
@@ -121,11 +131,97 @@ test('adds evidence context around an element and records its exact box inside t
     cssContentSize: { width: 800, height: 1000 }, fullPageEvidenceId: 'full-page-context'
   });
 
-  assert.deepEqual(cdp.calls[0][1].clip, { x: 176, y: 276, width: 128, height: 88, scale: 1 });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 160, y: 260, width: 160, height: 120, scale: 1 });
   assert.deepEqual(capture.metadata.highlightBox, {
-    x: 24, y: 24, width: 80, height: 40,
+    x: 40, y: 40, width: 80, height: 40,
     coordinateSpace: 'capture-css-px',
   });
+  assert.deepEqual(capture.metadata.highlightParts, [{ x: 40, y: 40, width: 80, height: 40 }]);
+  assert.equal(capture.metadata.highlightClipped, undefined);
+});
+
+test('prefers the fresh multi-line measurement over the snapshot rect', async () => {
+  const cdp = fakeCdp();
+  // Três fragmentos de linha de um link inline, já em coordenadas do documento.
+  const measuredRects = [
+    { x: 100, y: 200, width: 60, height: 20 },
+    { x: 60, y: 220, width: 80, height: 20 },
+    { x: 60, y: 240, width: 40, height: 20 },
+  ];
+  const capture = await captureElement(cdp, { x: 0, y: 200, width: 300, height: 60 }, {
+    cssContentSize: { width: 400, height: 400 }, measuredRects,
+  });
+
+  // O clip cobre a união das partes com a margem do alvo; o snapshot não é somado nem usado.
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 20, y: 160, width: 180, height: 140, scale: 1 });
+  assert.deepEqual(capture.metadata.highlightParts, [
+    { x: 80, y: 40, width: 60, height: 20 },
+    { x: 40, y: 60, width: 80, height: 20 },
+    { x: 40, y: 80, width: 40, height: 20 },
+  ]);
+  assert.deepEqual(capture.metadata.highlightBox, {
+    x: 40, y: 40, width: 100, height: 60, coordinateSpace: 'capture-css-px',
+  });
+});
+
+test('keeps measured parts in document coordinates even when the snapshot rect is viewport-relative', async () => {
+  const cdp = fakeCdp();
+  const measuredRects = [{ x: 0, y: 1200, width: 200, height: 20 }];
+  await captureElement(cdp, { x: 0, y: 200, width: 200, height: 20, coordinateSpace: 'viewport' }, {
+    cssContentSize: { width: 400, height: 2000 }, scrollX: 0, scrollY: 1000, measuredRects,
+  });
+  // A rolagem já foi aplicada na medição: somá-la de novo colocaria a caixa 1000 px abaixo do alvo.
+  assert.equal(cdp.calls[0][1].clip.y + cdp.calls[0][1].clip.height, 1290);
+});
+
+test('caps drawn parts at eight fragments while the clip still covers every measured line', async () => {
+  const cdp = fakeCdp();
+  const measuredRects = Array.from({ length: 10 }, (_, index) => ({ x: 0, y: 100 + index * 20, width: 100, height: 20 }));
+  const capture = await captureElement(cdp, { x: 0, y: 100, width: 100, height: 200 }, {
+    cssContentSize: { width: 400, height: 400 }, measuredRects,
+  });
+  assert.equal(capture.metadata.highlightParts.length, 8);
+  // 200 px de união + 70 px de margem de cada lado: o recorte não pode encolher por causa do teto de
+  // partes desenhadas, senão o elemento apareceria cortado na imagem.
+  assert.equal(cdp.calls[0][1].clip.height, 340);
+  assert.equal(capture.metadata.highlightBox.height, 200);
+});
+
+test('marks a capture clipped when the element continues beyond the page bounds', async () => {
+  const inside = await captureElement(fakeCdp(), { x: 10, y: 10, width: 40, height: 20 }, {
+    cssContentSize: { width: 800, height: 1000 },
+  });
+  assert.equal(inside.metadata.highlightClipped, undefined);
+
+  const cdp = fakeCdp();
+  const clipped = await captureElement(cdp, { x: 700, y: 900, width: 120, height: 120 }, {
+    cssContentSize: { width: 800, height: 1000 },
+  });
+  assert.equal(clipped.metadata.highlightClipped, true);
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 658, y: 858, width: 142, height: 142, scale: 1 });
+});
+
+test('falls back to the snapshot rect when the fresh measurement is unusable', async () => {
+  for (const measuredRects of [undefined, null, [], [{ x: 0, y: 0, width: 0, height: 10 }], [{ x: Number.NaN, y: 0, width: 10, height: 10 }]]) {
+    const cdp = fakeCdp();
+    const capture = await captureElement(cdp, { x: 200, y: 300, width: 80, height: 40 }, {
+      cssContentSize: { width: 800, height: 1000 }, measuredRects,
+    });
+    assert.equal(capture.status, 'captured');
+    assert.deepEqual(cdp.calls[0][1].clip, { x: 160, y: 260, width: 160, height: 120, scale: 1 });
+  }
+});
+
+test('refuses to capture a node inside an iframe with top-document coordinates', async () => {
+  const cdp = fakeCdp();
+  const result = await captureElement(cdp, { x: 10, y: 10, width: 80, height: 40 }, {
+    cssContentSize: { width: 800, height: 1000 }, framePath: ['frame-host'], fullPageEvidenceId: 'full-original',
+  });
+  assert.equal(result.status, 'cantTell');
+  assert.equal(result.reason, 'frame-context');
+  assert.equal(result.evidenceId, null);
+  assert.equal(result.fullPageEvidenceId, 'full-original');
+  assert.equal(cdp.calls.length, 0);
 });
 
 test('returns explicit cantTell for empty, NaN and off-page rectangles without capturing', async () => {

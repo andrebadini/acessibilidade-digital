@@ -534,7 +534,7 @@ function projectV1Evidence(artifact, pageId) {
       'announcementPreview', 'description', 'descriptionSource', 'name', 'nameSource', 'role', 'states', 'valueStatus', 'visibleText',
     ]);
   }
-  if (artifact.metadata !== undefined) output.metadata = projectRecord(artifact.metadata, ['annotationMargin', 'captureReceivedAt', 'clip', 'height', 'highlightBox', 'kind', 'mimeType', 'width']);
+  if (artifact.metadata !== undefined) output.metadata = projectRecord(artifact.metadata, ['annotationMargin', 'captureReceivedAt', 'clip', 'height', 'highlightBox', 'highlightClipped', 'highlightParts', 'kind', 'mimeType', 'width']);
   return sanitizeEvidenceArtifactUrls(output);
 }
 

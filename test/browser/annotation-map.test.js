@@ -278,6 +278,80 @@ test('uses a bounded deterministic spiral trail before declaring identical marke
   assert.equal(placements.every(marker => marker.targetX === 150 && marker.targetY === 150), true);
 });
 
+test('places each number next to its own element, preferring the outer top-left corner', () => {
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot([
+      { nodeId: 'narrow', tagName: 'button', accessibleName: 'Estreito', axRole: 'button', rect: { x: 100, y: 100, width: 40, height: 40 } },
+      { nodeId: 'wide', tagName: 'button', accessibleName: 'Largo', axRole: 'button', rect: { x: 100, y: 100, width: 400, height: 40 } },
+    ]),
+    sourceMetadata: { width: 600, height: 300 },
+    layoutMetrics: { cssContentSize: { width: 600, height: 300 } },
+  });
+  const placements = plan.segments[0].placements;
+
+  // O primeiro marcador fica no canto superior-esquerdo exterior do próprio elemento.
+  assert.deepEqual([placements[0].x, placements[0].y], [100, 100]);
+  // O segundo tem o mesmo canto ocupado: cai no candidato livre mais perto (logo abaixo do canto), e
+  // não no primeiro livre da trilha, que ficaria no canto superior-direito a 300 px de distância.
+  assert.deepEqual([placements[1].x, placements[1].y], [100, 140]);
+  assert.equal(placements[1].overlapped, false);
+  assert.equal(plan.counts.unresolvedOverlap, 0);
+});
+
+test('replaces containers by their annotated descendants instead of numbering the whole container', () => {
+  const selected = selectAnnouncementMapEntries(snapshot([
+    { nodeId: 'list', tagName: 'ul', axRole: 'list', accessibleName: 'Ações da conta', children: ['item'], rect: { x: 10, y: 10, width: 200, height: 60 } },
+    { nodeId: 'item', parentId: 'list', tagName: 'li', axRole: 'listitem', accessibleName: 'Primeiro item', children: ['link'], rect: { x: 10, y: 10, width: 200, height: 30 } },
+    { nodeId: 'link', parentId: 'item', tagName: 'a', attributes: { href: 'https://example.test/' }, accessibleName: 'Detalhes', axRole: 'link', rect: { x: 16, y: 14, width: 80, height: 20 } },
+    { nodeId: 'lone-region', tagName: 'section', axRole: 'region', accessibleName: 'Sem itens anotados', rect: { x: 10, y: 100, width: 200, height: 30 } },
+  ]));
+
+  // O contêiner com descendente anotado sai; o contêiner sem descendente anotado continua entrando.
+  assert.deepEqual(selected.entries.map(entry => entry.nodeId), ['link', 'lone-region']);
+  assert.deepEqual(selected.counts, {
+    eligible: 2, annotated: 2, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0,
+  });
+  assert.ok(selected.limitations.includes('container-replaced-by-annotated-descendant'));
+});
+
+test('draws a thin haloed outline around each annotated element besides the leader line', async () => {
+  const strokes = [];
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() {
+      const context = {
+        fillRect() {}, drawImage() {}, fill() {}, fillText() {},
+        measureText(value) { return { width: [...String(value)].length * 7 }; },
+        strokeStyle: '', lineWidth: 0,
+        points: [],
+        beginPath() { context.points = []; },
+        moveTo(x, y) { context.points.push([x, y]); },
+        lineTo(x, y) { context.points.push([x, y]); },
+        arc() {},
+        stroke() { strokes.push({ strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, points: context.points }); },
+      };
+      return context;
+    }
+    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+  }
+  const artifact = await composeAnnouncementMap({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(100, 100),
+    snapshot: snapshot([{
+      nodeId: 'action', tagName: 'button', accessibleName: 'Ação segura', axRole: 'button',
+      rect: { x: 10, y: 20, width: 30, height: 40 },
+    }]),
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
+  });
+  const outlines = strokes.filter(stroke => stroke.points.length === 5);
+  const rectangle = [[10, 20], [40, 20], [40, 60], [10, 60], [10, 20]];
+
+  assert.equal(artifact.status, 'complete');
+  assert.deepEqual(outlines.map(stroke => stroke.points), [rectangle, rectangle]);
+  assert.deepEqual(outlines.map(stroke => stroke.strokeStyle), ['#fff', '#8b1e1e']);
+  assert.equal(outlines[0].lineWidth > outlines[1].lineWidth, true, 'o halo branco é mais largo que o traço colorido');
+});
+
 test('wraps raster legend by measured width and exposes bidi controls as visible tokens', () => {
   let measurements = 0;
   const measureLegendText = value => {

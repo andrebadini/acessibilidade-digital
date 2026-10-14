@@ -397,7 +397,7 @@ function assertEvidence(artifact) {
 }
 
 function assertEvidenceMetadata(metadata) {
-  assertAllowedRecord(metadata, set('annotationMargin captureReceivedAt clip height highlightBox kind mimeType width'));
+  assertAllowedRecord(metadata, set('annotationMargin captureReceivedAt clip height highlightBox highlightClipped highlightParts kind mimeType width'));
   for (const key of ['annotationMargin', 'height', 'width']) {
     if (metadata[key] !== undefined && !Number.isFinite(metadata[key])) throw new TypeError();
   }
@@ -411,6 +411,19 @@ function assertEvidenceMetadata(metadata) {
     for (const key of ['x', 'y', 'width', 'height']) if (!Number.isFinite(metadata.highlightBox[key])) throw new TypeError();
     assertString(metadata.highlightBox.coordinateSpace);
   }
+  // Fragmentos de linha do alvo, em `capture-css-px`, no mesmo sistema do `highlightBox`. Auditorias
+  // anteriores à 1.1.57 não têm o campo: quem lê cai na união de `highlightBox`.
+  if (metadata.highlightParts !== undefined) {
+    assertArray(metadata.highlightParts);
+    if (metadata.highlightParts.length === 0 || metadata.highlightParts.length > 8) throw new TypeError();
+    for (const part of metadata.highlightParts) {
+      assertExact(part, set('x y width height'));
+      for (const key of ['x', 'y', 'width', 'height']) if (!Number.isFinite(part[key])) throw new TypeError();
+    }
+  }
+  // O alvo não cabe inteiro na captura (recorte nos limites da página). Só o valor `true` é aceito:
+  // o campo é declarativo e um `false` explícito significaria "afirmo que não houve recorte".
+  if (metadata.highlightClipped !== undefined && metadata.highlightClipped !== true) throw new TypeError();
 }
 
 function assertAnnotationMap(artifact) {
