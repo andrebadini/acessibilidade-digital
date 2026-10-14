@@ -11,7 +11,9 @@
  * O sistema de coordenadas de `metadata.highlightBox`/`metadata.highlightParts` é `capture-css-px`
  * do próprio recorte (`metadata.clip`), que é o mesmo sistema do `viewBox` desenhado. Nunca se usa
  * o tamanho do PNG decodificado: em captura com escala de dispositivo isso misturaria dois sistemas
- * e desalinharia a caixa.
+ * e desalinharia a caixa. Desde a 1.1.57 a miniatura é capturada em 2× para não chegar serrilhada, e
+ * o tamanho do PNG só serve para conferir a relação `width/height × pixelScale`
+ * (`evidenceRasterMatchesCapture`), nunca para posicionar nada.
  */
 
 export const EVIDENCE_HIGHLIGHT_KIND = 'element';
@@ -71,6 +73,35 @@ export function evidenceCaptureSize(artifact) {
   const fromClip = { width: finitePositive(clip?.width), height: finitePositive(clip?.height) };
   if (fromClip.width !== null && fromClip.height !== null) return Object.freeze(fromClip);
   return null;
+}
+
+/**
+ * Escala de pixels declarada na captura da miniatura: 1 quando ausente.
+ *
+ * A miniatura é capturada em 2× (ou na escala do dispositivo) desde a 1.1.57 para não chegar
+ * serrilhada ao relatório; auditorias anteriores não têm o campo e valem 1. Valores fora do contrato
+ * da captura — fracionários, zero ou negativos — também valem 1: nenhuma comparação de tamanho deve
+ * falhar por causa de um campo opcional malformado, e o esquema fechado já recusa esse caso.
+ */
+export function evidencePixelScale(artifact) {
+  const value = artifact?.metadata?.pixelScale;
+  return Number.isSafeInteger(value) && value > 0 ? value : 1;
+}
+
+/**
+ * O raster decodificado mede `metadata.width/height × pixelScale`?
+ *
+ * Quem for dimensionar a imagem com os metadados precisa desta conferência: com a captura em 2× o PNG
+ * é o dobro do quadro, e usar o tamanho errado moveria a caixa e o `viewBox`. A tolerância de 1 px
+ * absorve o arredondamento do retângulo de dispositivo do Chrome quando o recorte tem fração de pixel.
+ * Sem tamanho declarado — ou com um raster que não bate — a resposta é `false` e quem lê usa o tamanho
+ * do próprio PNG, como fazia antes deste campo existir.
+ */
+export function evidenceRasterMatchesCapture(artifact, raster) {
+  const size = evidenceCaptureSize(artifact);
+  if (!size || !raster || !Number.isFinite(raster.width) || !Number.isFinite(raster.height)) return false;
+  const scale = evidencePixelScale(artifact);
+  return Math.abs(raster.width - size.width * scale) <= 1 && Math.abs(raster.height - size.height * scale) <= 1;
 }
 
 function clippedRect(rect, width, height) {

@@ -177,6 +177,32 @@ function cantTell(reason, metrics) {
   return { status: 'cantTell', reason, evidenceId: null, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };
 }
 
+// Nitidez da miniatura. A captura saía em escala 1 (1 px de imagem por CSS px) e, ampliada no relatório,
+// um botão de ícone de 30 px chegava serrilhado à tela. A miniatura passa a ser capturada em 2× — ou na
+// escala do dispositivo, quando maior — mantendo `metadata.width/height` em CSS px, que é o sistema do
+// `viewBox` e da caixa da marcação. O teto de pixels existe pelo mesmo motivo do teto da captura
+// integral: uma miniatura grande em 2× viraria um PNG de dezenas de MB sem ganho de leitura. Acima dele
+// a escala volta para 1 e a imagem sai como antes.
+export const ELEMENT_CAPTURE_PIXEL_LIMITS = Object.freeze({ minScale: 2, maxScale: 3, maxPixels: 4_000_000 });
+
+/**
+ * Escala de pixels da miniatura: inteira, no mínimo 2×, no máximo 3×, e 1× quando o alvo é grande
+ * demais para o teto de pixels.
+ *
+ * A escala é inteira de propósito: a imagem de dispositivo vira, então, um múltiplo exato de
+ * `metadata.width/height` e a relação "PNG = metadados × escala" pode ser conferida sem adivinhar o
+ * arredondamento do Chrome (uma escala fracionária, como 2,5, cairia em 500 ou 501 px de dispositivo
+ * para um recorte ímpar).
+ */
+export function elementCaptureScale(width, height, devicePixelRatio = 1) {
+  const area = (Number.isFinite(width) && width > 0 ? width : 0) * (Number.isFinite(height) && height > 0 ? height : 0);
+  const ratio = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const requested = Math.min(ELEMENT_CAPTURE_PIXEL_LIMITS.maxScale, Math.max(ELEMENT_CAPTURE_PIXEL_LIMITS.minScale, Math.ceil(ratio)));
+  let scale = requested;
+  while (scale > 1 && area * scale * scale > ELEMENT_CAPTURE_PIXEL_LIMITS.maxPixels) scale -= 1;
+  return scale;
+}
+
 /**
  * Captura a miniatura do elemento.
  *
@@ -184,14 +210,21 @@ function cantTell(reason, metrics) {
  * remedição fresca por `DOM.getContentQuads` (um retângulo por fragmento de linha), ela manda: o
  * `rect` fica só como reserva. Nós de iframe não são capturados com coordenadas do documento de topo
  * — o clip seria aplicado ao documento errado — e devolvem `cantTell` com `reason: 'frame-context'`.
+ *
+ * A escala de pixels não entra nas coordenadas: `width`, `height`, `clip`, `highlightBox` e
+ * `highlightParts` continuam em CSS px do recorte, e a escala fica declarada em `pixelScale` para
+ * quem for comparar o raster com os metadados.
  */
 export async function captureElement(cdp, rect, metrics = {}) {
   if (Array.isArray(metrics.framePath) && metrics.framePath.length > 0) return cantTell('frame-context', metrics);
   const geometry = normalizedClip(rect, metrics);
   if (!geometry) return cantTell('invalid-or-outside-rect', metrics);
   const { clip, margin, highlightBox, highlightParts, highlightClipped } = geometry;
-  const result = await capture(cdp, { format: 'png', captureBeyondViewport: !clipInsideViewports(clip, metrics), fromSurface: true, clip }, 'thumbnail', {
-    width: clip.width, height: clip.height, clip, highlightBox, highlightParts, annotationMargin: margin,
+  const pixelScale = elementCaptureScale(clip.width, clip.height, deviceScale(metrics));
+  const scaledClip = pixelScale === 1 ? clip : { ...clip, scale: pixelScale };
+  const result = await capture(cdp, { format: 'png', captureBeyondViewport: !clipInsideViewports(clip, metrics), fromSurface: true, clip: scaledClip }, 'thumbnail', {
+    width: clip.width, height: clip.height, clip: scaledClip, highlightBox, highlightParts, annotationMargin: margin,
+    ...(pixelScale > 1 ? { pixelScale } : {}),
     ...(highlightClipped ? { highlightClipped: true } : {}),
   });
   return { ...result, fullPageEvidenceId: metrics.fullPageEvidenceId ?? metrics.evidenceId ?? null };

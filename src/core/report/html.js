@@ -13,9 +13,11 @@ import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from './evi
 import {
   EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
   EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND,
+  evidenceCaptureSize,
   evidenceHighlight,
   evidenceHighlightLegend,
   evidenceHighlightShapes,
+  evidenceRasterMatchesCapture,
 } from './evidence-highlight.js';
 import { decodePngDataUrl } from '../evidence/png.js';
 import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO } from '../evidence/annotation-map-artifact.js';
@@ -61,6 +63,7 @@ const ANNOTATION_MAP_LIMITATION_LABELS = Object.freeze({
   'legend-limit-reached': 'o limite de legenda ou segmentos foi atingido',
   'unresolved-marker-overlap': 'uma ou mais sobreposições de marcadores permaneceram',
   'non-uniform-pixel-scale': 'as escalas horizontal e vertical da captura não são uniformes',
+  'ancestor-clipped-elements-omitted': 'elementos escondidos por uma área com rolagem própria foram omitidos',
 });
 
 const OUTCOME_PRIORITY = Object.freeze({ failed: 0, cantTell: 1, passed: 2, untested: 3, inapplicable: 4 });
@@ -618,7 +621,7 @@ function announcementMaps(model, imageByEvidenceId) {
 <p class="section-intro">Evidência derivada para relacionar marcadores aos elementos e às prévias calculadas. Ordem observada DOM/AX não é ordem de foco, e a prévia não é transcrição literal de tecnologia assistiva.</p><div class="map-list">${model.pages.map((page, index) => {
     const artifact = maps.find(value => value.pageId === page.pageId);
     if (!artifact) return `<article id="mapa-${index + 1}" class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}" data-map-status="absent"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><div class="map-unavailable"><p><strong>Mapa indisponível nesta auditoria.</strong></p><p>Nenhum artefato derivado validado foi registrado; a captura original permanece separada no anexo quando disponível.</p></div></article>`;
-    const coverage = `${artifact.counts.annotated} de ${artifact.counts.eligible} elementos elegíveis anotados; ${artifact.counts.omittedFrame} contextos de frame, ${artifact.counts.omittedNoRect} elementos sem geometria, ${artifact.counts.omittedLimit} por limite e ${artifact.counts.unresolvedOverlap} sobreposições não resolvidas.`;
+    const coverage = `${artifact.counts.annotated} de ${artifact.counts.eligible} elementos elegíveis anotados; ${artifact.counts.omittedFrame} contextos de frame, ${artifact.counts.omittedNoRect} elementos sem geometria, ${artifact.counts.omittedClipped ?? 0} escondidos por rolagem interna, ${artifact.counts.omittedLimit} por limite e ${artifact.counts.unresolvedOverlap} sobreposições não resolvidas.`;
     const printableAspectRatio = String(ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO).replace('.', ',');
     const limits = `${groupedInteger(artifact.limits.maxNodes)} nós; ${groupedInteger(artifact.limits.maxSourcePixels)} pixels de origem; dimensão ${groupedInteger(artifact.limits.maxDimension)}; ${groupedInteger(artifact.limits.maxCanvasPixels)} pixels por segmento; ${groupedInteger(artifact.limits.maxSegments)} segmentos; ${groupedInteger(artifact.limits.maxDerivedBytes)} bytes derivados; ${groupedInteger(artifact.limits.maxLegendCodePoints)} pontos de código de legenda; proporção raster imprimível até ${printableAspectRatio}:1 (regra do algoritmo).`;
     const limitations = artifact.limitations.length
@@ -852,20 +855,28 @@ function createImageRegistry(artifacts) {
   const definitions = [];
   const byEvidenceId = new Map();
   const byDataUrl = new Map();
-  const register = (key, dataUrl) => {
-    const metadata = pngMetadata(dataUrl);
-    if (!metadata) return;
+  const register = (key, dataUrl, artifact) => {
+    const raster = pngMetadata(dataUrl);
+    if (!raster) return;
     let image = byDataUrl.get(dataUrl);
     if (!image) {
-      image = Object.freeze({ id: `evidence-image-${definitions.length}`, dataUrl, width: metadata.width, height: metadata.height });
+      // O quadro declarado manda quando o raster é o esperado (`width/height × pixelScale`): a captura
+      // de elemento em 2× ocupa a mesma caixa de antes e o pixel a mais vira nitidez, não tamanho.
+      // Sem essa conferência vale o tamanho do próprio PNG — auditorias anteriores à 1.1.57 e os
+      // segmentos do mapa, que não declaram quadro.
+      const declared = evidenceRasterMatchesCapture(artifact, raster) ? evidenceCaptureSize(artifact) : null;
+      image = Object.freeze({
+        id: `evidence-image-${definitions.length}`, dataUrl,
+        width: declared?.width ?? raster.width, height: declared?.height ?? raster.height,
+      });
       definitions.push(image);
       byDataUrl.set(dataUrl, image);
     }
     byEvidenceId.set(key, image);
   };
   for (const artifact of artifacts) {
-    register(artifact.evidenceId, artifact.dataUrl);
-    for (const segment of artifact.kind === 'announcement-map' ? artifact.segments : []) register(segment.segmentId, segment.dataUrl);
+    register(artifact.evidenceId, artifact.dataUrl, artifact);
+    for (const segment of artifact.kind === 'announcement-map' ? artifact.segments : []) register(segment.segmentId, segment.dataUrl, segment);
   }
   return { definitions, byEvidenceId };
 }

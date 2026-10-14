@@ -28,6 +28,9 @@ export const ANNOTATION_MAP_LIMITATIONS = Object.freeze([
   'legend-limit-reached',
   'unresolved-marker-overlap',
   'non-uniform-pixel-scale',
+  // Acrescentada depois da 1.1.0, sempre no fim: a ordem canônica é a da lista, então anexar mantém
+  // válidos os mapas já guardados.
+  'ancestor-clipped-elements-omitted',
 ]);
 
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -44,6 +47,11 @@ const SEGMENT_KEYS = Object.freeze(['segmentId', 'index', 'count', 'role', 'sour
 const OMITTED_SEGMENT_KEYS = Object.freeze(SEGMENT_KEYS.filter(key => key !== 'dataUrl'));
 const LEGEND_KEYS = Object.freeze(['number', 'nodeId', 'selectorSummary', 'announcementPreview', 'nameSource', 'segmentIndex']);
 const COUNT_KEYS = Object.freeze(['eligible', 'annotated', 'omittedNoRect', 'omittedFrame', 'omittedLimit', 'unresolvedOverlap']);
+/**
+ * Contagem acrescentada depois da 1.1.0: mapas já guardados não a trazem e continuam válidos, então
+ * ela é aceita quando presente e nunca exigida.
+ */
+const OPTIONAL_COUNT_KEYS = Object.freeze(['omittedClipped']);
 const LIMIT_KEYS = Object.freeze(['maxNodes', 'maxSourcePixels', 'maxDimension', 'maxCanvasPixels', 'maxSegments', 'maxDerivedBytes', 'maxLegendCodePoints']);
 const REQUIRED_LIMITATIONS = Object.freeze([
   'observed-dom-ax-order-not-literal-assistive-technology',
@@ -60,6 +68,11 @@ function nearlyEqual(left, right) {
 function exactKeys(value, expected) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
     canonicalStringify(Object.keys(value).sort()) === canonicalStringify([...expected].sort());
+}
+
+/** Conjunto fechado com as chaves opcionais que o registro realmente traz. */
+function countKeys(counts) {
+  return [...COUNT_KEYS, ...OPTIONAL_COUNT_KEYS.filter(key => counts?.[key] !== undefined)];
 }
 
 function canonicalId(value, label) {
@@ -279,9 +292,12 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
       throw new TypeError('Legenda do mapa excede o limite agregado de pontos de código.');
     }
   }
-  if (!exactKeys(artifact.counts, COUNT_KEYS) || !COUNT_KEYS.every(key => Number.isSafeInteger(artifact.counts[key]) && artifact.counts[key] >= 0) ||
+  const omittedClipped = artifact.counts?.omittedClipped ?? 0;
+  const allowedCountKeys = countKeys(artifact.counts);
+  if (!exactKeys(artifact.counts, allowedCountKeys) ||
+    !allowedCountKeys.every(key => Number.isSafeInteger(artifact.counts[key]) && artifact.counts[key] >= 0) ||
     artifact.counts.annotated !== artifact.legend.length ||
-    artifact.counts.eligible !== artifact.counts.annotated + artifact.counts.omittedNoRect + artifact.counts.omittedLimit) {
+    artifact.counts.eligible !== artifact.counts.annotated + artifact.counts.omittedNoRect + artifact.counts.omittedLimit + omittedClipped) {
     throw new TypeError('Contagens do mapa inválidas.');
   }
   if (!exactKeys(artifact.limits, LIMIT_KEYS) || canonicalStringify(artifact.limits) !== canonicalStringify(ANNOTATION_MAP_LIMITS)) {
@@ -299,22 +315,25 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
   const hasNodeLimit = artifact.limitations.includes('node-limit-reached');
   const hasLegendLimit = artifact.limitations.includes('legend-limit-reached');
   const hasOverlap = artifact.limitations.includes('unresolved-marker-overlap');
+  const hasClipped = artifact.limitations.includes('ancestor-clipped-elements-omitted');
   const nonUniformScale = Math.abs(artifact.derivation.geometry.scaleX - artifact.derivation.geometry.scaleY) /
     Math.max(artifact.derivation.geometry.scaleX, artifact.derivation.geometry.scaleY) > 0.01;
   if (hasFrameLimitation !== (artifact.counts.omittedFrame > 0) ||
     (artifact.counts.omittedLimit > 0) !== (hasNodeLimit || hasLegendLimit) ||
     (artifact.counts.omittedLimit === 0 && (hasNodeLimit || hasLegendLimit)) ||
     hasOverlap !== (artifact.counts.unresolvedOverlap > 0) ||
+    hasClipped !== (omittedClipped > 0) ||
     artifact.limitations.includes('non-uniform-pixel-scale') !== nonUniformScale) {
     throw new TypeError('Limitações e contagens do mapa são incoerentes.');
   }
   if (artifact.derivation.geometry.annotations.length !== artifact.legend.length) throw new TypeError('Geometria e legenda têm quantidades divergentes.');
-  if (artifact.status === 'empty' && (artifact.legend.length !== 0 || artifact.segments.length !== 0 || artifact.counts.eligible !== 0 || artifact.counts.omittedFrame !== 0)) {
+  if (artifact.status === 'empty' && (artifact.legend.length !== 0 || artifact.segments.length !== 0 ||
+    artifact.counts.eligible !== 0 || artifact.counts.omittedFrame !== 0 || omittedClipped !== 0)) {
     throw new TypeError('Mapa vazio contém cobertura, segmentos ou legenda.');
   }
   if (artifact.status === 'complete' && (artifact.legend.length === 0 || artifact.segments.length === 0)) throw new TypeError('Mapa completo não contém segmentos ou legenda.');
   if (artifact.legend.length === 0 && artifact.segments.length !== 0) throw new TypeError('Mapa sem legenda não pode conter segmentos.');
-  const materiallyPartial = artifact.counts.omittedNoRect > 0 || artifact.counts.omittedFrame > 0 ||
+  const materiallyPartial = artifact.counts.omittedNoRect > 0 || artifact.counts.omittedFrame > 0 || omittedClipped > 0 ||
     artifact.counts.omittedLimit > 0 || artifact.counts.unresolvedOverlap > 0 || artifact.limitations.includes('closed-shadow-root-omitted');
   if ((artifact.status === 'partial') !== materiallyPartial) {
     throw new TypeError('Estado parcial do mapa diverge das contagens.');

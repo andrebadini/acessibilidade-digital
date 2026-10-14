@@ -14,6 +14,8 @@ import {
   evidenceHighlightRects,
   evidenceHighlightShapes,
   evidenceOutlineRect,
+  evidencePixelScale,
+  evidenceRasterMatchesCapture,
   evidenceSpotlightPath,
 } from '../../src/core/report/evidence-highlight.js';
 import { EVIDENCE_TREATMENTS_V1 } from '../../src/core/report/evidence-treatment.js';
@@ -34,6 +36,32 @@ test('sizes the drawn frame from the capture metadata, never from the decoded PN
   for (const metadata of [undefined, null, {}, { width: 128 }, { width: 0, height: 88 }, { clip: { width: Number.NaN, height: 10 } }]) {
     assert.equal(evidenceCaptureSize(elementEvidence(metadata)), null);
   }
+});
+
+test('accepts a raster that is the declared frame times the pixel scale', () => {
+  // Miniatura capturada em 2×: o quadro é 110×110 CSS px e o PNG mede 220×220.
+  const doubled = elementEvidence({ width: 110, height: 110, clip: { x: 0, y: 0, width: 110, height: 110, scale: 2 }, pixelScale: 2 });
+  assert.equal(evidencePixelScale(doubled), 2);
+  assert.equal(evidenceRasterMatchesCapture(doubled, { width: 220, height: 220 }), true);
+  // Um pixel de diferença é arredondamento do retângulo de dispositivo do Chrome, não desalinhamento.
+  assert.equal(evidenceRasterMatchesCapture(doubled, { width: 221, height: 219 }), true);
+  assert.equal(evidenceRasterMatchesCapture(doubled, { width: 110, height: 110 }), false, 'o PNG cru não é o quadro');
+  assert.equal(evidenceRasterMatchesCapture(doubled, { width: 330, height: 330 }), false);
+
+  // Auditorias anteriores à 1.1.57 não declaram escala: o PNG mede exatamente o quadro.
+  const legacy = elementEvidence({ width: 128, height: 88 });
+  assert.equal(evidencePixelScale(legacy), 1);
+  assert.equal(evidenceRasterMatchesCapture(legacy, { width: 128, height: 88 }), true);
+  assert.equal(evidenceRasterMatchesCapture(legacy, { width: 256, height: 176 }), false);
+
+  // Campo opcional malformado não vira escala: vale 1 e a comparação usa o próprio PNG.
+  for (const pixelScale of [0, -2, 1.5, '2', Number.NaN, Number.POSITIVE_INFINITY]) {
+    const hostile = elementEvidence({ width: 110, height: 110, pixelScale });
+    assert.equal(evidencePixelScale(hostile), 1);
+    assert.equal(evidenceRasterMatchesCapture(hostile, { width: 220, height: 220 }), false);
+  }
+  assert.equal(evidenceRasterMatchesCapture(elementEvidence({}), { width: 10, height: 10 }), false);
+  assert.equal(evidenceRasterMatchesCapture(doubled, null), false);
 });
 
 test('reads the target rectangles from highlightParts and understands audits written before 1.1.57', () => {

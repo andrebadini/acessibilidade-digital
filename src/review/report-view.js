@@ -7,9 +7,11 @@ import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import {
   EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
+  evidenceCaptureSize,
   evidenceHighlight,
   evidenceHighlightLegend,
   evidenceHighlightShapes,
+  evidencePixelScale,
 } from '../core/report/evidence-highlight.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
@@ -547,6 +549,22 @@ function evidenceFrame(artifact) {
   return frame;
 }
 
+/**
+ * Fixa a caixa da miniatura em CSS px quando a captura é em escala maior que 1.
+ *
+ * Sem os atributos, o navegador usa o tamanho do próprio PNG e uma miniatura capturada em 2× apareceria
+ * com o dobro do tamanho — diferente do relatório estático, que declara a mesma caixa. Em 1× nada muda:
+ * os atributos ficam de fora e a imagem se dimensiona como sempre se dimensionou.
+ */
+function applyDeclaredCaptureSize(image, artifact) {
+  if (evidencePixelScale(artifact) <= 1) return image;
+  const declared = evidenceCaptureSize(artifact);
+  if (!declared) return image;
+  image.setAttribute('width', String(declared.width));
+  image.setAttribute('height', String(declared.height));
+  return image;
+}
+
 function appendEvidenceMedia(document, figure, artifact, tone) {
   const label = `${evidenceKindLabel(artifact.kind)} local da evidência ${artifact.evidenceId}`;
   const treatment = artifact.kind === 'element' && tone ? EVIDENCE_TREATMENTS_V1[tone] : null;
@@ -556,6 +574,7 @@ function appendEvidenceMedia(document, figure, artifact, tone) {
     image.setAttribute('src', artifact.dataUrl);
     image.setAttribute('alt', label);
     image.setAttribute('class', 'evidence-media');
+    applyDeclaredCaptureSize(image, artifact);
     figure.append(image);
     return `${label}.`;
   }
@@ -1395,7 +1414,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     if (isSafePngDataUrl(evidence.dataUrl)) {
       const image = document.createElement('img'); image.setAttribute('src', evidence.dataUrl);
       image.setAttribute('alt', `${evidenceKindLabel(evidence.kind)} local da evidência ${evidence.evidenceId}`);
-      image.setAttribute('class', 'evidence-media'); card.append(image);
+      image.setAttribute('class', 'evidence-media'); applyDeclaredCaptureSize(image, evidence); card.append(image);
     } else card.append(element(document, 'p', 'Imagem segura: PNG local não disponível.'));
     sources.append(card);
   }

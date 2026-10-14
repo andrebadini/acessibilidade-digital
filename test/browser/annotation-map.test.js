@@ -100,7 +100,7 @@ test('selects a stable safe DOM/AX projection with structural selectors only', (
     [2, 'shadow-button', 'Ajuda, botão'],
   ]);
   assert.deepEqual(result.counts, {
-    eligible: 3, annotated: 2, omittedNoRect: 1, omittedFrame: 1, omittedLimit: 0, unresolvedOverlap: 0,
+    eligible: 3, annotated: 2, omittedNoRect: 1, omittedFrame: 1, omittedLimit: 0, unresolvedOverlap: 0, omittedClipped: 0,
   });
   assert.match(result.entries[0].selectorSummary, /^main > button:nth-of-type\(1\)$/u);
   assert.match(result.entries[1].selectorSummary, /x-actions >>> button/u);
@@ -298,6 +298,63 @@ test('places each number next to its own element, preferring the outer top-left 
   assert.equal(plan.counts.unresolvedOverlap, 0);
 });
 
+test('omits what an ancestor with its own scrolling hides, without moving what stays visible', () => {
+  const selected = selectAnnouncementMapEntries(snapshot([
+    { nodeId: 'drawer', tagName: 'div', styles: { 'overflow-x': 'auto', 'overflow-y': 'auto' }, rect: { x: 100, y: 400, width: 460, height: 132 } },
+    { nodeId: 'visible', parentId: 'drawer', tagName: 'button', accessibleName: 'Primeiro item', axRole: 'button', rect: { x: 110, y: 446, width: 442, height: 56 } },
+    { nodeId: 'sliver', parentId: 'drawer', tagName: 'button', accessibleName: 'Item na borda', axRole: 'button', rect: { x: 110, y: 520, width: 442, height: 56 } },
+    { nodeId: 'gone', parentId: 'drawer', tagName: 'button', accessibleName: 'Item rolado para fora', axRole: 'button', rect: { x: 110, y: 614, width: 442, height: 56 } },
+    { nodeId: 'far', parentId: 'drawer', tagName: 'button', accessibleName: 'Item muito abaixo', axRole: 'button', rect: { x: 110, y: 782, width: 442, height: 56 } },
+  ]));
+
+  // O que está fora aparece na captura integral em outro lugar da página: marcar a posição de layout
+  // poria o número sobre um conteúdo que não é o elemento.
+  assert.deepEqual(selected.entries.map(entry => entry.nodeId), ['visible', 'sliver']);
+  assert.deepEqual(selected.entries.map(entry => entry.bounds.y), [446, 520], 'a caixa anotada continua sendo a do layout, não a recortada');
+  assert.deepEqual(selected.counts, {
+    eligible: 4, annotated: 2, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0, omittedClipped: 2,
+  });
+  assert.ok(selected.limitations.includes('ancestor-clipped-elements-omitted'));
+});
+
+test('only an ancestor that really clips removes elements', () => {
+  const styles = [
+    // Rolagem da página não esconde nada da captura integral.
+    { nodeId: 'root', tagName: 'html', styles: { 'overflow-y': 'hidden' }, rect: { x: 0, y: 0, width: 800, height: 600 } },
+    { nodeId: 'page', parentId: 'root', tagName: 'body', styles: { 'overflow-x': 'hidden' }, rect: { x: 0, y: 0, width: 800, height: 600 } },
+    { nodeId: 'plain', parentId: 'page', tagName: 'div', styles: { 'overflow-y': 'visible' }, rect: { x: 0, y: 0, width: 800, height: 100 } },
+    { nodeId: 'hidden-box', parentId: 'plain', tagName: 'div', styles: { 'overflow-y': 'hidden' }, rect: { x: 0, y: 0, width: 800, height: 100 } },
+    { nodeId: 'inner', parentId: 'hidden-box', tagName: 'button', accessibleName: 'Dentro', axRole: 'button', rect: { x: 10, y: 20, width: 80, height: 30 } },
+    { nodeId: 'outer', parentId: 'page', tagName: 'button', accessibleName: 'Abaixo de tudo', axRole: 'button', rect: { x: 10, y: 4000, width: 80, height: 30 } },
+  ];
+  const selected = selectAnnouncementMapEntries(snapshot(styles));
+  assert.deepEqual(selected.entries.map(entry => entry.nodeId), ['inner', 'outer']);
+  assert.equal(selected.counts.omittedClipped, 0);
+  assert.equal(selected.limitations.includes('ancestor-clipped-elements-omitted'), false);
+
+  // `visible` não recorta: um irmão fora da caixa do pai continua anotado.
+  const overflowing = selectAnnouncementMapEntries(snapshot([
+    { nodeId: 'plain', tagName: 'div', styles: { 'overflow-y': 'visible' }, rect: { x: 0, y: 0, width: 100, height: 100 } },
+    { nodeId: 'child', parentId: 'plain', tagName: 'button', accessibleName: 'Sai da caixa', axRole: 'button', rect: { x: 10, y: 400, width: 80, height: 30 } },
+  ]));
+  assert.deepEqual(overflowing.entries.map(entry => entry.nodeId), ['child']);
+});
+
+test('compounds nested scrollports and needs a whole visible pixel to keep an annotation', () => {
+  const selected = selectAnnouncementMapEntries(snapshot([
+    { nodeId: 'outer', tagName: 'div', styles: { 'overflow-y': 'hidden' }, rect: { x: 0, y: 0, width: 200, height: 200 } },
+    { nodeId: 'inner', parentId: 'outer', tagName: 'div', styles: { 'overflow-x': 'scroll' }, rect: { x: 50, y: 50, width: 100, height: 100 } },
+    { nodeId: 'both', parentId: 'inner', tagName: 'button', accessibleName: 'Nos dois', axRole: 'button', rect: { x: 100, y: 100, width: 200, height: 200 } },
+    { nodeId: 'left-out', parentId: 'inner', tagName: 'button', accessibleName: 'Sai pela esquerda', axRole: 'button', rect: { x: 0, y: 60, width: 40, height: 20 } },
+    { nodeId: 'half-pixel', parentId: 'inner', tagName: 'button', accessibleName: 'Vinco', axRole: 'button', rect: { x: 60, y: 150, width: 60, height: 0.4 } },
+  ]));
+  // O que sobra é o cruzamento dos dois recortes: o do pai morde o filho, e nenhum deles volta atrás.
+  assert.deepEqual(selected.entries.map(entry => [entry.nodeId, entry.bounds]), [
+    ['both', { x: 100, y: 100, width: 200, height: 200 }],
+  ]);
+  assert.equal(selected.counts.omittedClipped, 2);
+});
+
 test('replaces containers by their annotated descendants instead of numbering the whole container', () => {
   const selected = selectAnnouncementMapEntries(snapshot([
     { nodeId: 'list', tagName: 'ul', axRole: 'list', accessibleName: 'Ações da conta', children: ['item'], rect: { x: 10, y: 10, width: 200, height: 60 } },
@@ -309,7 +366,7 @@ test('replaces containers by their annotated descendants instead of numbering th
   // O contêiner com descendente anotado sai; o contêiner sem descendente anotado continua entrando.
   assert.deepEqual(selected.entries.map(entry => entry.nodeId), ['link', 'lone-region']);
   assert.deepEqual(selected.counts, {
-    eligible: 2, annotated: 2, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0,
+    eligible: 2, annotated: 2, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0, omittedClipped: 0,
   });
   assert.ok(selected.limitations.includes('container-replaced-by-annotated-descendant'));
 });

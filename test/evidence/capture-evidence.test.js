@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import { captureElement, captureFullPage, elementContextMargin } from '../../src/browser/capture-evidence.js';
+import { captureElement, captureFullPage, elementCaptureScale, elementContextMargin } from '../../src/browser/capture-evidence.js';
 
 const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
 
@@ -66,7 +66,7 @@ test('converts an explicitly viewport-relative rect to document coordinates befo
   await captureElement(cdp, { x: 20, y: 500, width: 60, height: 40, coordinateSpace: 'viewport' }, {
     cssContentSize: { width: 1000, height: 2000 }, scrollX: 0, scrollY: 1000
   });
-  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 1460, width: 120, height: 120, scale: 1 });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 1460, width: 120, height: 120, scale: 2 });
 });
 
 test('captures clamped element thumbnails and references the full-page evidence id', async () => {
@@ -76,7 +76,7 @@ test('captures clamped element thumbnails and references the full-page evidence 
   });
   assert.deepEqual(cdp.calls, [['Page.captureScreenshot', {
     format: 'png', captureBeyondViewport: true, fromSurface: true,
-    clip: { x: 0, y: 0, width: 80, height: 80, scale: 1 }
+    clip: { x: 0, y: 0, width: 80, height: 80, scale: 2 }
   }]]);
   assert.equal(capture.metadata.kind, 'thumbnail');
   assert.deepEqual(capture.metadata.highlightBox, {
@@ -95,6 +95,47 @@ test('grows the context margin with the target and keeps it bounded', () => {
   assert.equal(elementContextMargin(400, 80), 140);
   assert.equal(elementContextMargin(600, 300), 160);
   assert.equal(elementContextMargin(Number.NaN, Number.NaN), 40);
+});
+
+test('captures the thumbnail at 2x and declares the scale beside the CSS frame', async () => {
+  const cdp = fakeCdp();
+  const capture = await captureElement(cdp, { x: 200, y: 300, width: 30, height: 30 }, {
+    cssContentSize: { width: 800, height: 1000 },
+  });
+  // 30 px de alvo + 40 px de margem de cada lado: o quadro continua em CSS px — é o `viewBox` da
+  // marcação — e a escala fica declarada ao lado, não embutida nas coordenadas.
+  assert.equal(capture.metadata.width, 110);
+  assert.equal(capture.metadata.height, 110);
+  assert.equal(capture.metadata.clip.width, 110);
+  assert.equal(capture.metadata.pixelScale, 2);
+  assert.equal(capture.metadata.clip.scale, capture.metadata.pixelScale, 'o clip enviado ao Chrome declara a mesma escala');
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 160, y: 260, width: 110, height: 110, scale: 2 });
+});
+
+test('scales the thumbnail to the device, capped, and falls back to 1x on a big crop', () => {
+  // Botão de ícone: 2× é o mínimo pedido, mesmo em tela comum.
+  assert.equal(elementCaptureScale(110, 110, 1), 2);
+  assert.equal(elementCaptureScale(110, 110, 1.5), 2);
+  assert.equal(elementCaptureScale(110, 110, 2), 2);
+  // Tela de dispositivo maior manda, com teto de 3×.
+  assert.equal(elementCaptureScale(110, 110, 3), 3);
+  assert.equal(elementCaptureScale(110, 110, 4), 3);
+  assert.equal(elementCaptureScale(110, 110, Number.NaN), 2);
+  // Teto de 4 Mpx de imagem: 1000×1000 ainda cabe em 2×, um pixel a mais não.
+  assert.equal(elementCaptureScale(1000, 1000, 2), 2);
+  assert.equal(elementCaptureScale(1001, 1000, 2), 1);
+  assert.equal(elementCaptureScale(666, 666, 3), 3);
+  assert.equal(elementCaptureScale(667, 667, 3), 2);
+  // Um bloco grande com 160 px de margem estoura o teto: volta a 1×, como antes desta versão.
+  assert.equal(elementCaptureScale(1600, 1200, 2), 1);
+  assert.equal(elementCaptureScale(0, 0, 2), 2);
+});
+
+test('leaves the full-page capture at scale 1', async () => {
+  const cdp = fakeCdp();
+  const capture = await captureFullPage(cdp, { cssContentSize: { width: 800, height: 1200 }, contentSize: { width: 1600, height: 2400 } });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 0, width: 800, height: 1200, scale: 1 });
+  assert.equal(capture.metadata.pixelScale, undefined);
 });
 
 test('visible capture requires the entire context crop inside both CSS viewports', async () => {
@@ -131,7 +172,7 @@ test('adds evidence context around an element and records its exact box inside t
     cssContentSize: { width: 800, height: 1000 }, fullPageEvidenceId: 'full-page-context'
   });
 
-  assert.deepEqual(cdp.calls[0][1].clip, { x: 160, y: 260, width: 160, height: 120, scale: 1 });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 160, y: 260, width: 160, height: 120, scale: 2 });
   assert.deepEqual(capture.metadata.highlightBox, {
     x: 40, y: 40, width: 80, height: 40,
     coordinateSpace: 'capture-css-px',
@@ -153,7 +194,7 @@ test('prefers the fresh multi-line measurement over the snapshot rect', async ()
   });
 
   // O clip cobre a união das partes com a margem do alvo; o snapshot não é somado nem usado.
-  assert.deepEqual(cdp.calls[0][1].clip, { x: 20, y: 160, width: 180, height: 140, scale: 1 });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 20, y: 160, width: 180, height: 140, scale: 2 });
   assert.deepEqual(capture.metadata.highlightParts, [
     { x: 80, y: 40, width: 60, height: 20 },
     { x: 40, y: 60, width: 80, height: 20 },
@@ -198,7 +239,7 @@ test('marks a capture clipped when the element continues beyond the page bounds'
     cssContentSize: { width: 800, height: 1000 },
   });
   assert.equal(clipped.metadata.highlightClipped, true);
-  assert.deepEqual(cdp.calls[0][1].clip, { x: 658, y: 858, width: 142, height: 142, scale: 1 });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 658, y: 858, width: 142, height: 142, scale: 2 });
 });
 
 test('falls back to the snapshot rect when the fresh measurement is unusable', async () => {
@@ -208,7 +249,7 @@ test('falls back to the snapshot rect when the fresh measurement is unusable', a
       cssContentSize: { width: 800, height: 1000 }, measuredRects,
     });
     assert.equal(capture.status, 'captured');
-    assert.deepEqual(cdp.calls[0][1].clip, { x: 160, y: 260, width: 160, height: 120, scale: 1 });
+    assert.deepEqual(cdp.calls[0][1].clip, { x: 160, y: 260, width: 160, height: 120, scale: 2 });
   }
 });
 

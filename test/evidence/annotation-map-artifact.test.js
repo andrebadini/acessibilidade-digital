@@ -187,6 +187,51 @@ test('enforces the aggregate legend budget and couples omission counts to their 
   }
 });
 
+test('accepts the optional count of elements hidden by an inner scrollport and keeps older maps valid', async () => {
+  // Mapas guardados antes desse campo seguem válidos: a chave é opcional e ausente vale zero.
+  const stored = await completeArtifact();
+  assert.equal('omittedClipped' in stored.counts, false);
+  assert.equal(validateAnnotationMapArtifact(stored), stored);
+
+  const clipped = await completeArtifact();
+  clipped.status = 'partial';
+  clipped.counts = { ...clipped.counts, eligible: 3, omittedClipped: 2 };
+  clipped.limitations = [...clipped.limitations, 'ancestor-clipped-elements-omitted'];
+  clipped.hash = await hashAnnotationMapArtifact(clipped);
+
+  assert.equal(validateAnnotationMapArtifact(clipped), clipped);
+  assert.equal(await hashAnnotationMapArtifact(clipped), clipped.hash, 'a contagem entra no hash derivado');
+});
+
+test('rejects a clipped-omission count that contradicts its limitation or the eligible total', async () => {
+  const clipped = value => {
+    value.status = 'partial';
+    value.counts = { ...value.counts, eligible: 3, omittedClipped: 2 };
+    value.limitations = [...value.limitations, 'ancestor-clipped-elements-omitted'];
+  };
+  for (const mutate of [
+    // Contagem sem a limitação que a explica.
+    value => { value.status = 'partial'; value.counts = { ...value.counts, eligible: 3, omittedClipped: 2 }; },
+    // Limitação sem contagem alguma.
+    value => { value.limitations = [...value.limitations, 'ancestor-clipped-elements-omitted']; },
+    // Total de elegíveis que ignora o que ficou escondido.
+    value => {
+      clipped(value);
+      value.counts = { ...value.counts, eligible: 1 };
+    },
+    // O conjunto de contagens continua fechado: chave nova não passa.
+    value => { value.counts = { ...value.counts, omittedHidden: 1 }; },
+    // Estado completo não pode carregar omissão material.
+    value => { clipped(value); value.status = 'complete'; },
+    // Contagem negativa ou fracionária.
+    value => { clipped(value); value.counts = { ...value.counts, omittedClipped: -1 }; },
+  ]) {
+    const artifact = await completeArtifact();
+    mutate(artifact);
+    assert.throws(() => validateAnnotationMapArtifact(artifact), TypeError);
+  }
+});
+
 test('rejects an empty status when a closed shadow root makes coverage materially partial', async () => {
   const artifact = await completeArtifact();
   artifact.status = 'empty';

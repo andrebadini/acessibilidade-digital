@@ -115,6 +115,67 @@ function usefulRect(rect) {
   return rect && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0;
 }
 
+const CLIPPING_OVERFLOW = new Set(['auto', 'clip', 'hidden', 'scroll']);
+/** Raízes de rolagem da página: a captura integral cobre o documento todo, então elas não escondem nada. */
+const DOCUMENT_ROOT_TAGS = new Set(['body', 'html']);
+/** Faixa mínima visível para valer uma anotação: menos que isto é o vinco do recorte, não o elemento. */
+const CLIPPED_VISIBLE_MIN_PX = 1;
+
+function styleValue(node, name) {
+  const styles = node?.styles;
+  if (!styles || typeof styles !== 'object') return '';
+  const camel = name.replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
+  return text(styles[name] ?? styles[camel]).toLowerCase();
+}
+
+/**
+ * Ancestrais que recortam o próprio conteúdo — `overflow` diferente de `visible`.
+ *
+ * O instantâneo já traz o `overflow` computado de cada nó, então o recorte é deduzido do que foi
+ * coletado: nenhuma ida extra ao navegador e nenhuma mudança na geometria declarada. A caixa usada é a
+ * de borda, um pouco maior que a área realmente visível; erra para o lado de anotar demais, nunca para
+ * o de esconder um elemento que aparece na imagem.
+ *
+ * Limitação conhecida: um descendente posicionado que escapa do recorte (por exemplo `position: fixed`
+ * dentro de um contêiner com `overflow: hidden`) é tratado como recortado. O resultado é uma omissão a
+ * mais, registrada na limitação do mapa, nunca uma marcação sobre o vazio.
+ */
+function clippingAncestorRects(node, indexes) {
+  const rects = [];
+  const visited = new Set();
+  let current = node?.parentId === null || node?.parentId === undefined ? null : indexes.byNodeId.get(String(node.parentId));
+  while (current && !visited.has(String(current.nodeId))) {
+    visited.add(String(current.nodeId));
+    if (!DOCUMENT_ROOT_TAGS.has(safeTag(current)) && usefulRect(current.rect) &&
+      (CLIPPING_OVERFLOW.has(styleValue(current, 'overflow-x')) || CLIPPING_OVERFLOW.has(styleValue(current, 'overflow-y')))) {
+      rects.push(current.rect);
+    }
+    current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
+  }
+  return rects;
+}
+
+/**
+ * Recorta o retângulo pelos ancestrais com rolagem. Retorna `null` quando nada de útil sobra: um
+ * elemento guardado dentro do rolador aparece na captura integral, e marcar o lugar onde ele estaria
+ * poria o número sobre outro conteúdo.
+ */
+function visibleRect(node, indexes) {
+  let left = node.rect.x;
+  let top = node.rect.y;
+  let right = left + node.rect.width;
+  let bottom = top + node.rect.height;
+  for (const clip of clippingAncestorRects(node, indexes)) {
+    left = Math.max(left, clip.x);
+    top = Math.max(top, clip.y);
+    right = Math.min(right, clip.x + clip.width);
+    bottom = Math.min(bottom, clip.y + clip.height);
+  }
+  return right - left >= CLIPPED_VISIBLE_MIN_PX && bottom - top >= CLIPPED_VISIBLE_MIN_PX
+    ? { x: left, y: top, width: right - left, height: bottom - top }
+    : null;
+}
+
 function significant(node, projection) {
   return Boolean(projection.announcementPreview && (SIGNIFICANT_ROLES.has(projection.role) || SIGNIFICANT_TAGS.has(safeTag(node))));
 }
@@ -265,7 +326,7 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     ? Math.min(options.maxNodes, ANNOTATION_MAP_LIMITS.maxNodes)
     : ANNOTATION_MAP_LIMITS.maxNodes;
   const entries = [];
-  const counts = { eligible: 0, annotated: 0, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0 };
+  const counts = { eligible: 0, annotated: 0, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0, omittedClipped: 0 };
   const limitations = new Set(['observed-dom-ax-order-not-literal-assistive-technology', 'top-document-open-shadow-only']);
   const dedupe = new Set();
   const omittedFrames = new Set();
@@ -294,6 +355,11 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     dedupe.add(key);
     if (!usefulRect(node.rect)) {
       counts.omittedNoRect += 1;
+      continue;
+    }
+    if (!visibleRect(node, indexes)) {
+      counts.omittedClipped += 1;
+      limitations.add('ancestor-clipped-elements-omitted');
       continue;
     }
     candidates.push({
@@ -335,7 +401,7 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
   if (counts.omittedFrame > 0) limitations.add('frame-content-omitted');
   if (closedShadowOmitted) limitations.add('closed-shadow-root-omitted');
   counts.annotated = entries.length;
-  counts.eligible = kept.length + counts.omittedNoRect;
+  counts.eligible = kept.length + counts.omittedNoRect + counts.omittedClipped;
   return { entries, legend: entries.map(({ bounds, ...entry }) => entry), counts, limitations: canonicalLimitations(limitations) };
 }
 
@@ -605,7 +671,7 @@ export function buildAnnotationMapPlan({
     entries.push({ ...entry, number: entries.length + 1, bounds });
   }
   const counts = { ...selected.counts, annotated: entries.length, omittedNoRect: selected.counts.omittedNoRect + outside };
-  counts.eligible = counts.annotated + counts.omittedNoRect + counts.omittedLimit;
+  counts.eligible = counts.annotated + counts.omittedNoRect + counts.omittedLimit + counts.omittedClipped;
   if (measureLegendText !== undefined && typeof measureLegendText !== 'function') {
     throw new TypeError('A função de medição da legenda é inválida.');
   }
@@ -889,7 +955,7 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
     sourceEvidenceId: fullPageEvidence.evidenceId, sourceHash, geometrySnapshotHash, geometry,
   };
   if (!plan.entries.length) {
-    const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 ||
+    const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 || plan.counts.omittedClipped > 0 ||
       plan.counts.omittedLimit > 0 || plan.counts.unresolvedOverlap > 0 || plan.limitations.includes('closed-shadow-root-omitted');
     const empty = {
       evidenceId, pageId, kind: 'announcement-map', state: 'derived', fullPageEvidenceId: fullPageEvidence.evidenceId,
@@ -956,7 +1022,7 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
   const segments = rendered.map((segment, offset) => ({
     segmentId: `${evidenceId}-segment-${offset + 1}`, index: offset + 1, count: rendered.length, ...segment,
   }));
-  const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 ||
+  const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 || plan.counts.omittedClipped > 0 ||
     plan.counts.omittedLimit > 0 || plan.counts.unresolvedOverlap > 0 || plan.limitations.includes('closed-shadow-root-omitted');
   const artifact = {
     evidenceId, pageId, kind: 'announcement-map', state: 'derived', fullPageEvidenceId: fullPageEvidence.evidenceId,

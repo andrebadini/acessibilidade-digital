@@ -7,6 +7,7 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { labelComparisonFixture } from './label-comparison-fixture.js';
 import { hashAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from './annotation-map-fixture.js';
+import { pngDataUrl } from '../support/png-fixture.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderHtmlReport, REPORT_OCCURRENCE_DETAIL_LIMIT, REPORT_REVIEW_DETAIL_LIMIT } from '../../src/core/report/html.js';
 import {
@@ -306,6 +307,26 @@ function withElementFrameMetadata(audit) {
   };
   return input;
 }
+
+test('keeps the reported box in CSS px when the thumbnail was captured at 2x', () => {
+  // A miniatura em 2× existe para o contorno não chegar serrilhado. O quadro declarado continua sendo o
+  // sistema do `viewBox`: se o relatório usasse o tamanho do PNG, o mesmo elemento apareceria com o
+  // dobro do tamanho — e a caixa da marcação, calculada em CSS px, sairia fora do lugar.
+  const audit = withElementFrameMetadata(SAMPLE_AUDIT);
+  const doubled = pngDataUrl(256, 176);
+  audit.evidence[1].dataUrl = doubled;
+  audit.evidence[1].metadata.pixelScale = 2;
+  audit.evidence[1].metadata.clip = { x: 0, y: 0, width: 128, height: 88, scale: 2 };
+  const html = renderHtmlReport(audit);
+
+  const at = html.indexOf(`href="${doubled}"`);
+  assert.ok(at > 0, 'a imagem de 256×176 precisa estar embutida');
+  const definition = html.slice(html.lastIndexOf('<image', at), html.indexOf('>', at));
+  assert.match(definition, /width="128" height="88"/u);
+  const id = definition.match(/id="([^"]+)"/u)[1];
+  assert.match(html, new RegExp(`<use href="#${id}" width="128" height="88"`, 'u'));
+  assert.doesNotMatch(html, /width="256"|height="176"/u);
+});
 
 test('embeds occurrence-specific marked screenshots and raw evidence with useful alt and self-contained A4 CSS', () => {
   const html = renderHtmlReport(withElementFrameMetadata(SAMPLE_AUDIT));
@@ -743,6 +764,26 @@ test('renders absent, empty, partial, complete and legend-continuation map state
   assert.match(complete, /\.map-card,\.announcement-map-segment,\.announcement-map-legend\{min-width:0\}/u);
   assert.match(complete, /\.map-meta code,\.announcement-map-segment figcaption code,\.legend-selector code\{word-break:break-all\}/u);
   assert.doesNotMatch(complete.match(/<section id="mapas"[^]*?<\/section>/u)?.[0] ?? '', /data-impact=|data-wcag=/u);
+
+  // Auditoria guardada antes da contagem de rolagem interna: a cobertura diz zero, sem quebrar.
+  assert.match(complete, /0 escondidos por rolagem interna/u);
+  const clipped = structuredClone(SAMPLE_AUDIT);
+  clipped.evidence[0] = createPristineMapSource();
+  const clippedMap = await createAnnotationMapFixture({ status: 'partial' });
+  clippedMap.counts = { ...clippedMap.counts, eligible: 3, omittedClipped: 2 };
+  clippedMap.limitations = [...clippedMap.limitations, 'ancestor-clipped-elements-omitted'];
+  clippedMap.hash = await hashAnnotationMapArtifact(clippedMap);
+  clipped.evidence.push(clippedMap);
+  const clippedDiagnostic = {
+    code: 'ANNOTATION_MAP_PARTIAL',
+    message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.',
+    at: '2026-08-26T14:00:31.000Z', recoverable: true,
+  };
+  clipped.pages[0].diagnostics.push(structuredClone(clippedDiagnostic));
+  clipped.session.diagnostics.push(clippedDiagnostic);
+  const clippedHtml = renderHtmlReport(clipped);
+  assert.match(clippedHtml, /2 escondidos por rolagem interna/u);
+  assert.match(clippedHtml, /ancestor-clipped-elements-omitted — elementos escondidos por uma área com rolagem própria foram omitidos/u);
 
   const continued = structuredClone(SAMPLE_AUDIT);
   continued.evidence[0] = createPristineMapSource();
