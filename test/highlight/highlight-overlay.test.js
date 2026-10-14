@@ -6,6 +6,7 @@ import {
   canonicalPath,
   createStructuralSignatureV1,
   parseCssSelectorV1,
+  parseHighlightSelectorV1,
   roleForStructuralSignature,
 } from '../../src/background/highlight-locator.js';
 import { runAuditaHighlightCommand } from '../../src/browser/highlight-overlay.js';
@@ -316,8 +317,10 @@ function createEnvironment({ tag = 'button', attributes = { id: 'action', class:
   return { environment, document, html, body, main, target, priorFocus };
 }
 
-async function installCommand(fixture, overrides = {}) {
-  const located = canonicalPath(fixture.target, { scopeRoot: fixture.document, maxSegments: 16 });
+async function installCommand(fixture, overrides = {}, selectorValue = null) {
+  const located = selectorValue === null
+    ? canonicalPath(fixture.target, { scopeRoot: fixture.document, maxSegments: 16 })
+    : parseHighlightSelectorV1(selectorValue);
   const selector = {
     syntax: located.syntax,
     value: located.value,
@@ -522,6 +525,57 @@ test('rejects extra, inherited and malformed install data before querying or tou
   }
   assert.equal(fixture.document.selectorQueryCalls, 0);
   assert.equal(fixture.document.querySelector('[data-audita-highlight-root]'), null);
+});
+
+test('accepts a signal-shaped semantic attribute selector and still refuses a forged one', async () => {
+  // `input[name="q"]` é a forma que os sinais dão a um controle sem id único. O destaque individual
+  // passou a aceitá-la; a revalidação aqui é independente da do worker de propósito.
+  const fixture = createEnvironment({ tag: 'input', attributes: { name: 'q' } });
+  const command = await installCommand(fixture, {}, 'input[name="q"]');
+
+  assert.deepEqual(await runAuditaHighlightCommand(command, fixture.environment), {
+    ok: true,
+    nonce: FAILED_NONCE,
+  });
+  const root = fixture.document.querySelector('[data-audita-highlight-root]');
+  assert.ok(root);
+  assert.equal(root.parentNode, fixture.document.documentElement);
+  assert.deepEqual(fixture.target.scrollCalls, [{ block: 'center', inline: 'nearest' }]);
+  assert.equal(fixture.document.selectorQueryCalls, 2);
+
+  // Um atributo fora do vocabulário dos sinais, um valor com cara de credencial ou um valor
+  // escapado que não volta à forma original continuam sendo recusados antes de tocar no DOM.
+  const escaped = createEnvironment({ tag: 'input', attributes: { name: 'q' } });
+  const forged = (value) => ({
+    version: 1,
+    op: 'install',
+    nonce: FAILED_NONCE,
+    documentId: 'doc-main',
+    frameId: 0,
+    selector: {
+      syntax: 'CSSSelectorV1',
+      value,
+      byteLength: new TextEncoder().encode(value).byteLength,
+      complexity: value.split(' > ').length === 1 ? 3 : 5,
+    },
+    structuralSignature: { version: 'StructuralSignatureV1', sha256: 'a'.repeat(64) },
+    kind: 'failed',
+    markerNumber: 17,
+  });
+  for (const value of [
+    'input[data-test="q"]',
+    'input[href="/sair"]',
+    'input[name="access_token"]',
+    'input[name="Cliente 550e8400-e29b-41d4-a716-446655440000"]',
+    `input[name="${'x'.repeat(257)}"]`,
+  ]) {
+    assert.deepEqual(await runAuditaHighlightCommand(forged(value), escaped.environment), {
+      ok: false,
+      reason: 'invalid-command',
+    });
+  }
+  assert.equal(escaped.document.selectorQueryCalls, 0);
+  assert.equal(escaped.document.querySelector('[data-audita-highlight-root]'), null);
 });
 
 test('snapshots command descriptors without invoking value getters', async () => {

@@ -20,6 +20,13 @@ const FOUR_DECIMALS_PATTERN = /[0-9]{4}/u;
 const EIGHT_HEX_PATTERN = /[0-9a-f]{8}/iu;
 const RAW_SELECTOR_TOKEN_PATTERN = /[#.]([^#.\[\]:()>\t\n\f\r ,\\*]+)/gu;
 const SEGMENT_PATTERN = /^([a-z][a-z0-9-]{0,62})(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?((?:\.-?[_A-Za-z][_A-Za-z0-9-]*){0,2})(?:\[(role|type)="([a-z]+)"\])?(?::nth-of-type\(([1-9][0-9]*)\))?$/u;
+// Mesma forma, com o vocabulário semântico dos sinais no lugar das enumerações de role/type.
+const SEMANTIC_SEGMENT_PATTERN = new RegExp(
+  '^([a-z][a-z0-9-]{0,62})'
+  + '(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?'
+  + '((?:\\.-?[_A-Za-z][_A-Za-z0-9-]*){0,2})'
+  + '(?:\\[([a-z][a-z0-9-]{0,31})="((?:[^"\\\\]|\\\\.)*)"\\])?'
+  + '(?::nth-of-type\\(([1-9][0-9]*)\\))?$', 'u');
 const CLASS_PATTERN = /\.(-?[_A-Za-z][_A-Za-z0-9-]*)/gu;
 
 // ---------------------------------------------------------------------------------------------
@@ -38,11 +45,18 @@ const CLASS_PATTERN = /\.(-?[_A-Za-z][_A-Za-z0-9-]*)/gu;
 //     aceitos com valor até 256 caracteres.
 //
 // Nenhum destes afrouxamentos vale para o relatório/exportação: `parseCssSelectorV1` continua
-// sendo a gramática estrita usada pelo modelo, pela captura e pelo destaque individual.
+// sendo a gramática estrita usada pelo modelo e pela captura.
 // The individual highlight walks the same ancestry the page walks. It is deeper than the strict
 // 16-segment export grammar because a page that nests controls 20 levels down still deserves a
 // highlight, and the ancestry depth never leaves the page: it only feeds the SHA-256 structural
 // signature that the page and the worker compute independently.
+//
+// O destaque individual também usa a gramática ampliada (`parseHighlightSelectorV1`), e por isso
+// aceita os mesmos `tag[atributo-semântico="valor"]` que os sinais aceitam: sem isso, um `<input
+// name="q">` sem classe — que `buildStableSelector` descreve exatamente assim — ganhava sinal na
+// página e não ganhava destaque. A profundidade da assinatura (`MAX_SIGNATURE_ANCESTRY`) e o
+// vocabulário do segmento são os mesmos nos dois caminhos, e o anel desenhado pelo destaque usa
+// esse mesmo teto dentro da página.
 export const MAX_SIGNATURE_ANCESTRY = 64;
 export const SIGNAL_SEMANTIC_ATTRIBUTES = Object.freeze([
   'name', 'alt', 'title', 'aria-label', 'data-testid', 'role',
@@ -184,7 +198,16 @@ export function classifySelectorToken(value) {
 // individual highlight, which is re-proved inside the page by the structural signature and must not
 // refuse an element merely because its id or class carries four digits or eight hex characters.
 // Credential-shaped names stay refused in both.
-function parseSelectorV1(value, { maxSegments, maxComplexity, sensitive }) {
+// A gramática ampliada aceita duas leituras do mesmo campo: as enumerações que o modelo exporta
+// (role/type) e o atributo semântico do próprio elemento, exatamente como os sinais o revalidam
+// dentro da página.
+function allowsSemanticAttribute(name, value) {
+  const enumerations = name === 'role' ? ALLOWED_ROLES : name === 'type' ? ALLOWED_TYPES : null;
+  if (enumerations?.has(value)) return true;
+  return SIGNAL_SEMANTIC_ATTRIBUTES.includes(name) && isSafeSignalAttributeValue(value);
+}
+
+function parseSelectorV1(value, { maxSegments, maxComplexity, sensitive, vocabulary = 'enum' }) {
   if (typeof value !== 'string') throw invalidSelector('O seletor deve ser texto primitivo.');
   if (value.length > MAX_SELECTOR_BYTES) throw invalidSelector('CSSSelectorV1 excede 2.048 bytes.');
   const byteLength = utf8(value).byteLength;
@@ -202,20 +225,27 @@ function parseSelectorV1(value, { maxSegments, maxComplexity, sensitive }) {
   const assertSafeToken = token => {
     if (sensitive(token) || !tokenShapeOk(token)) throw invalidSelector('Token sensível proibido em CSSSelectorV1.');
   };
+  const semantic = vocabulary === 'semantic';
   const segments = [];
   let complexity = Math.max(0, rawSegments.length - 1);
   for (const rawSegment of rawSegments) {
-    const match = SEGMENT_PATTERN.exec(rawSegment);
+    const match = (semantic ? SEMANTIC_SEGMENT_PATTERN : SEGMENT_PATTERN).exec(rawSegment);
     if (!match) throw invalidSelector('CSSSelectorV1 não pertence à gramática fechada.');
-    const [, tag, id = null, rawClasses = '', attributeName, attributeValue, rawNth] = match;
+    const [, tag, id = null, rawClasses = '', attributeName, rawAttributeValue, rawNth] = match;
     const classes = [...rawClasses.matchAll(CLASS_PATTERN)].map(entry => entry[1]);
     if (id !== null) assertSafeToken(id);
     for (const className of classes) assertSafeToken(className);
 
     let enumAttribute = null;
     if (attributeName !== undefined) {
-      const allowedValues = attributeName === 'role' ? ALLOWED_ROLES : ALLOWED_TYPES;
-      if (!allowedValues.has(attributeValue)) throw invalidSelector('Atributo enumerado não permitido em CSSSelectorV1.');
+      // Duas leituras do mesmo campo: a estrita só admite as enumerações de role/type exportadas no
+      // modelo; a ampliada admite o atributo semântico do próprio elemento, com o mesmo teste de
+      // valor que os sinais fazem dentro da página.
+      const attributeValue = semantic ? unescapeCssString(rawAttributeValue) : rawAttributeValue;
+      const allowed = semantic
+        ? allowsSemanticAttribute(attributeName, attributeValue)
+        : (attributeName === 'role' ? ALLOWED_ROLES : ALLOWED_TYPES).has(attributeValue);
+      if (!allowed) throw invalidSelector('Atributo semântico não permitido em CSSSelectorV1.');
       enumAttribute = { name: attributeName, value: attributeValue };
     }
 
@@ -248,6 +278,7 @@ export function parseHighlightSelectorV1(value) {
     maxSegments: MAX_SIGNAL_SEGMENTS,
     maxComplexity: MAX_SIGNAL_COMPLEXITY,
     sensitive: isSignalSensitiveToken,
+    vocabulary: 'semantic',
   });
 }
 
