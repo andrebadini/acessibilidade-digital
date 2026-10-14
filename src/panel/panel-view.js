@@ -1285,9 +1285,13 @@ function labeledCode(document, label, value) {
 function renderUnavailable(document, view, emit) {
   const root = section(document, 'panel-screen panel-unavailable');
   root.dataset.screen = 'unavailable';
+  // A recarga da própria página não é falha do painel: o rótulo e o título dizem o que houve com a auditoria.
+  const reloaded = typeof view.reason === 'string' && view.reason.startsWith('A página recarregou');
+  const notStarted = reloaded && view.reason.includes('não começou');
   root.append(
-    paragraph(document, 'Painel indisponível', 'status-label status-unavailable'),
-    heading(document, 2, 'Não foi possível mostrar a auditoria'),
+    paragraph(document, reloaded ? 'Página recarregada' : 'Painel indisponível', 'status-label status-unavailable'),
+    heading(document, 2, notStarted ? 'A auditoria não começou'
+      : reloaded ? 'A auditoria foi interrompida' : 'Não foi possível mostrar a auditoria'),
     paragraph(document, view.reason ?? 'Não foi possível concluir a operação local.', 'unavailable-reason'),
     actionButton(document, 'Tentar novamente', 'RETRY', 'retry', emit, 'primary-action'),
     // N-1 da re-verificação da 1.1.47: a mensagem desta tela sugere outro modo de evidência, e "Iniciar nova

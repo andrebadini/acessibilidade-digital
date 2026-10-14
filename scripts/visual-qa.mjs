@@ -670,7 +670,24 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
     });
     if (!started.ok) return summary;
 
-    const outcome = await attempt('aguardar-resultado', () => waitForPanelScreen(panel, ['result', 'unavailable'], 180_000));
+    let outcome = await attempt('aguardar-resultado', () => waitForPanelScreen(panel, ['result', 'unavailable'], 180_000));
+    // Páginas que se recarregam sozinhas quando o painel abre: o painel recriado explica e oferece "Tentar
+    // novamente". O roteiro registra a recarga (é parte do que o usuário vê) e tenta de novo, como ele faria.
+    summary.selfReloads = 0;
+    if (outcome.value?.screen === 'unavailable' && !/recarregou/u.test(String(outcome.value?.text ?? ''))) {
+      // O painel antigo pode mostrar a negação genérica por um instante antes de ser recriado pela recarga.
+      await sleep(5000);
+      outcome = await attempt('aguardar-resultado', () => waitForPanelScreen(panel, ['result', 'unavailable'], 180_000));
+    }
+    for (let retry = 0; retry < 2 && outcome.value?.screen === 'unavailable' &&
+      /recarregou/u.test(String(outcome.value?.text ?? '')); retry += 1) {
+      summary.selfReloads += 1;
+      await shot(`00-recarga-${retry + 1}.png`, () => captureViewport(panel, directory, `00-recarga-${retry + 1}.png`));
+      await sleep(3000);
+      await attempt('tentar-novamente', () => click(panel, 'button[data-intent="RETRY"]'));
+      await sleep(2000);
+      outcome = await attempt('aguardar-resultado', () => waitForPanelScreen(panel, ['result', 'unavailable'], 180_000));
+    }
     const finalScreen = outcome.value ?? { screen: null, auditId: null };
     summary.outcome = finalScreen.screen ?? 'desconhecido';
     summary.auditId = finalScreen.auditId ?? null;
@@ -805,6 +822,10 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
         highlightOffered: false, highlightAction: null, highlightBox: null };
       const selected = await attempt(`selecionar-${index + 1}`, async () => {
         await clickByFocusId(panel, occurrence.focusId);
+        // Como o usuário faria: "Ir ao elemento do sinal N" rola a página até o elemento e o seleciona.
+        await sleep(250);
+        const go = await evaluate(panel, `Boolean(document.querySelector('[data-result-detail] .detail-actions [data-action="go-to-page-marker"]'))`);
+        if (go) await click(panel, '[data-result-detail] .detail-actions [data-action="go-to-page-marker"]');
         await waitForValue(page, ringForNumber(number), value => value?.ringVisible === true,
           { timeoutMs: 15_000, intervalMs: 100 });
         await sleep(300);

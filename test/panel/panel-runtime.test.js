@@ -1483,6 +1483,72 @@ test('o painel recriado depois de a página recarregar diz que a auditoria foi i
     'a retentativa começa uma auditoria nova');
 });
 
+test('início negado por recarga própria: o painel recriado depois de a página recarregar diz que a auditoria foi interrompida (1.1.56)', async t => {
+  // Medido numa loja que recarrega a própria página quando a largura muda ao abrir o painel: a auditoria era
+  // liquidada, o painel era recriado e voltava à tela inicial em silêncio. O worker avisa o primeiro painel
+  // ocioso daquela aba e o painel mostra o motivo, com a retentativa.
+  const originalDocument = globalThis.document;
+  const originalChrome = globalThis.chrome;
+  const originalLocation = globalThis.location;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  t.after(() => {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+    if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  });
+
+  const document = {
+    activeElement: null,
+    createElement(tagName) { return new RuntimeElement(tagName, document); },
+    querySelector(selector) { return selector === '#panel-root' ? document.root : null; },
+  };
+  document.root = new RuntimeElement('main', document);
+  globalThis.setTimeout = () => ({ cleared: false });
+  globalThis.clearTimeout = timer => { if (timer) timer.cleared = true; };
+  const ports = [];
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      connect({ name }) {
+        const port = {
+          name, posted: [], onMessage: runtimeEvent(), onDisconnect: runtimeEvent(), disconnects: 0,
+          postMessage(message) { this.posted.push(structuredClone(message)); },
+          disconnect() { this.disconnects += 1; },
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  globalThis.document = document;
+  globalThis.chrome = chrome;
+  globalThis.location = {
+    href: `chrome-extension://${chrome.runtime.id}/src/panel/index.html?launch=${'A'.repeat(43)}`,
+  };
+
+  await import(`../../src/panel/panel.js?reloaded-before-start-notice=${Date.now()}`);
+  const port = ports[0];
+  port.onMessage.emit({
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null, notice: 'page-reloaded-before-start',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(document.root.querySelector('[data-screen="unavailable"]'));
+  assert.match(document.root.textContent, /A página recarregou sozinha logo depois que você pediu a auditoria/u);
+  assert.match(document.root.textContent, /clique em "Auditar a página atual" de novo/u);
+  const retry = document.root.querySelector('button[data-intent="RETRY"]');
+  assert.ok(retry, 'a tela precisa oferecer a retentativa');
+  assert.ok(document.root.querySelector('button[data-intent="NEW_AUDIT"]'));
+
+  // Sem auditoria correlacionada, "Tentar novamente" inicia uma auditoria nova da página atual.
+  await retry.dispatch('click');
+  assert.ok(port.posted.some(packet => packet?.envelope?.type === 'PREPARE_PANEL_CAPABILITY'),
+    'a retentativa começa uma auditoria nova');
+});
+
 test('a indisponibilidade oferece repetir e escolher outro modo, e a retentativa não apaga o motivo (N-1 da 1.1.47)', async t => {
   const originalDocument = globalThis.document;
   const originalChrome = globalThis.chrome;

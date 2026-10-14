@@ -2020,6 +2020,20 @@ async function buildDefaultRuntime(chromeApi, options) {
       }
     },
   });
+  // Início negado porque a aba estava no meio de uma recarga (navegação pendente): o painel desta aba vai
+  // ser recriado pela navegação e precisa dizer por que a auditoria pedida não começou. Só o pedido de
+  // auditoria da página atual conta; nenhum dado da página é guardado, só a aba e um prazo curto.
+  async function noteStartDeniedDuringReload(request, result) {
+    try {
+      if (result?.ok !== false || request?.envelope?.type !== 'PREPARE_PANEL_CAPABILITY') return;
+      const tabId = request.launchTabId;
+      if (!Number.isSafeInteger(tabId) || tabId < 0) return;
+      const tab = await chromeApi.tabs.get(tabId);
+      const pending = typeof tab?.pendingUrl === 'string' && tab.pendingUrl !== '';
+      if (tab?.status !== 'loading' || !pending) return;
+      panelCoordinator?.noteNavigationInterruption?.({ tabId, beforeStart: true });
+    } catch { /* aviso de melhor esforço */ }
+  }
   const router = createSidePanelIntentRouter({
     chromeApi, authority, auditStarter, chromeAdapter,
     panelCoordinator: Object.freeze({
@@ -2037,7 +2051,11 @@ async function buildDefaultRuntime(chromeApi, options) {
   });
   panelIntentDispatcher = createPageMarkersPanelDispatcher({
     pageMarkersController: pageMarkersCleanupController,
-    dispatchFallback: request => router.dispatch(request),
+    dispatchFallback: async request => {
+      const result = await router.dispatch(request);
+      await noteStartDeniedDuringReload(request, result);
+      return result;
+    },
   });
   const panelLauncher = options.panelLauncher ??
     createPanelLauncher({ chromeApi, launchAuthority: panelLaunchAuthority, logger: options.logger });

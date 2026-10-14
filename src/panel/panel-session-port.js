@@ -29,7 +29,7 @@ const RUNNING_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'captureMode'])
 // Único aviso aceito num bootstrap ocioso: a auditoria daquela aba foi interrompida porque a página
 // recarregou ou navegou (o painel foi recriado e não tem memória da tentativa).
 const INITIAL_NOTICE_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'notice']);
-const INITIAL_NOTICES = new Set(['page-reloaded']);
+const INITIAL_NOTICES = new Set(['page-reloaded', 'page-reloaded-before-start']);
 const ATTACHED_PRIVACY_PAUSED_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
   'consentId', 'mode', 'categories', 'message',
