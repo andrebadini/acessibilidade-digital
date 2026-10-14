@@ -321,9 +321,11 @@ export function validateKeyboardMapArtifact(artifact, { sourceArtifact } = {}) {
     (artifact.limitations.includes('cursor-style-not-collected') && artifact.suspects.some(entry => entry.reason === 'cursor-pointer'))) {
     throw new TypeError('Limitações e contagens do mapa do teclado são incoerentes.');
   }
+  // Pixels omitidos pelo orçamento do lote não mudam o estado do mapa (como no mapa de anúncios): a omissão
+  // já é declarada por `pixelState` e pelo diagnóstico do orçamento, e o mapa continua verificável.
   const expectedStatus = keyboardMapStatus({
     stops: artifact.stops, suspects: artifact.suspects, segments: artifact.segments,
-    limitations: artifact.limitations, pixelsOmitted,
+    limitations: artifact.limitations,
   });
   if (artifact.status !== expectedStatus) {
     throw new TypeError('Estado do mapa do teclado diverge das contagens e limitações.');

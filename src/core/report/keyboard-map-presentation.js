@@ -21,6 +21,9 @@ const REASON_LABELS = Object.freeze({
   'cursor-pointer': 'mostra a seta de clique e mesmo assim não recebe o Tab',
 });
 
+// O achado de conteúdo só com mouse diz exatamente o que a pessoa vai ver ao passar o mouse no cartão.
+const HOVER_ONLY_REASON = 'abre opções só quando o mouse passa por cima; o Tab não chega até elas';
+
 const LIMITATIONS = Object.freeze({
   'tab-order-estimated-not-observed': 'A ordem da lista é estimada pelo código da página; não foi observada pressionando Tab.',
   'top-document-open-shadow-only': 'A lista cobre o documento principal e o Shadow DOM aberto.',
@@ -87,7 +90,8 @@ export function keyboardMapPresentation(pages, maps) {
     }));
     const suspects = map.suspects.map(entry => ({
       number: entry.number, name: entryName(entry),
-      reason: REASON_LABELS[entry.reason] ?? entry.reason,
+      reason: (entry.ruleId === 'hover-only-interactive-content' ? HOVER_ONLY_REASON : null) ??
+        REASON_LABELS[entry.reason] ?? entry.reason,
       location: entryLocation(entry), nodeId: entry.nodeId,
     }));
     return {

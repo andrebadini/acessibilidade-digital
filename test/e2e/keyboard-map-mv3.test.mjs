@@ -108,7 +108,10 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
     assert.equal(live.suspects.filter(entry => entry.includes(label)).length, 1,
       `o cartão "${label}" precisa aparecer uma vez entre os itens sem caixa: ${JSON.stringify(live.suspects)}`);
   }
-  assert.ok(live.suspects.every(entry => /mostra a seta de clique e mesmo assim não recebe o Tab/u.test(entry)));
+  // Com a regra de conteúdo só com mouse (1.1.58), os cartões chegam como achado dela; sem ela, pelo cursor.
+  assert.ok(live.suspects.every(entry =>
+    /mostra a seta de clique e mesmo assim não recebe o Tab|abre opções só quando o mouse passa por cima/u.test(entry)),
+  JSON.stringify(live.suspects));
   t.diagnostic(`keyboard-map live: stops=${live.stops.length}; suspects=${live.suspects.length}; counts=${live.counts}`);
 
   await extension.evaluate(report, `document.querySelector('[data-keyboard-map-page="page-1"]').scrollIntoView({ behavior: 'instant', block: 'start' })`);
@@ -185,7 +188,9 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.equal(map.counts.suspects, map.suspects.length);
   assert.equal(map.stops.some(stop => CARD_LABELS.some(label => (stop.name ?? '').includes(label))), false);
   const cardSuspects = map.suspects.filter(suspect => CARD_LABELS.some(label => (suspect.name ?? '').includes(label)));
-  assert.deepEqual(cardSuspects.map(suspect => suspect.reason), ['cursor-pointer', 'cursor-pointer', 'cursor-pointer', 'cursor-pointer']);
+  // A regra de conteúdo só com mouse acha os quatro cartões; o mapa os recebe como achado dela.
+  assert.deepEqual(cardSuspects.map(suspect => [suspect.reason, suspect.ruleId]),
+    Array(4).fill(['keyboard-rule', 'hover-only-interactive-content']));
   assert.equal(cardSuspects.every(suspect => suspect.nameSource !== 'attribute'), true);
   assert.ok(map.stops.some(stop => stop.kind === 'summary'), 'o resumo que abre e fecha é uma parada do Tab');
   assert.ok(map.stops.some(stop => stop.kind === 'tabindex'), 'o elemento que só entra na ordem do Tab por tabindex precisa aparecer');

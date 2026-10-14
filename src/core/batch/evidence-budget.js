@@ -1,6 +1,9 @@
 import { hashEvidenceArtifact } from '../evidence/artifact-hash.js';
 import { pngDataUrlDecodedByteLength } from '../evidence/png.js';
 
+// Mapas derivados da captura integral (anúncios e teclado): segmentos com pixels e dependência da origem.
+const DERIVED_MAP_KINDS = new Set(['announcement-map', 'keyboard-map']);
+
 export const DEFAULT_BATCH_EVIDENCE_BUDGET_BYTES = 256 * 1024 * 1024;
 
 /** Applies the global decoded-PNG budget to one remapped page without breaking graph references. */
@@ -24,7 +27,7 @@ export async function applyBatchEvidenceBudget(pageResult, {
   for (const artifact of result.evidence) {
     const bytes = artifactBytes(artifact);
     const hasPixels = hasPixelPayload(artifact);
-    const mapDependsOnOmittedSource = artifact.kind === 'announcement-map' &&
+    const mapDependsOnOmittedSource = DERIVED_MAP_KINDS.has(artifact.kind) &&
       omittedSources.has(artifact.fullPageEvidenceId);
     if (hasPixels && (exhausted || mapDependsOnOmittedSource || consumed + bytes > limitBytes)) {
       exhausted = true;
@@ -51,7 +54,7 @@ export async function applyBatchEvidenceBudget(pageResult, {
     .map(artifact => artifact.evidenceId));
   const dependencySafe = [];
   for (const artifact of retained) {
-    if (artifact.kind !== 'announcement-map' || !omittedPixelSources.has(artifact.fullPageEvidenceId) ||
+    if (!DERIVED_MAP_KINDS.has(artifact.kind) || !omittedPixelSources.has(artifact.fullPageEvidenceId) ||
       artifact.pixelState === 'omitted-budget' || !hasPixelPayload(artifact)) {
       dependencySafe.push(artifact);
       continue;
@@ -88,7 +91,7 @@ export async function applyBatchEvidenceBudget(pageResult, {
 
 function artifactBytes(artifact) {
   let total = pngBytes(artifact?.dataUrl);
-  if (artifact?.kind === 'announcement-map') {
+  if (DERIVED_MAP_KINDS.has(artifact?.kind)) {
     for (const segment of artifact.segments ?? []) total += pngBytes(segment?.dataUrl);
   }
   return total;
@@ -96,13 +99,13 @@ function artifactBytes(artifact) {
 
 function hasPixelPayload(artifact) {
   if (typeof artifact?.dataUrl === 'string') return true;
-  return artifact?.kind === 'announcement-map' &&
+  return DERIVED_MAP_KINDS.has(artifact?.kind) &&
     Array.isArray(artifact.segments) && artifact.segments.some(segment => typeof segment?.dataUrl === 'string');
 }
 
 function omitArtifactPixels(artifact) {
   delete artifact.dataUrl;
-  if (artifact.kind === 'announcement-map') {
+  if (DERIVED_MAP_KINDS.has(artifact.kind)) {
     for (const segment of artifact.segments ?? []) delete segment.dataUrl;
   }
 }
