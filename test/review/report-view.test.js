@@ -16,6 +16,7 @@ import { readerMapPresentation } from '../../src/core/report/reader-map-presenta
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
+import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 
 const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
 const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_PAGE_CAPTURE_OMITTED_MESSAGE}`;
@@ -639,6 +640,88 @@ test('the interactive and exported map legends expose bidi controls without chan
   assert.equal(JSON.stringify(model), before);
 });
 
+async function keyboardMapFixture(status = 'complete') {
+  const map = await createKeyboardMapFixture({ status });
+  return fixture({ mutateDraft(draft) {
+    draft.evidence[0] = createPristineMapSource();
+    draft.evidence.push(map);
+    if (status === 'partial') {
+      const diagnostic = {
+        code: 'KEYBOARD_MAP_PARTIAL', message: 'O mapa do teclado foi gerado com cobertura parcial e limitações explícitas.',
+        at: draft.pages[0].timestamps.endedAt, recoverable: true,
+      };
+      draft.pages[0].diagnostics.push(diagnostic);
+      draft.session.diagnostics.push({ ...diagnostic });
+    }
+    return draft;
+  } });
+}
+
+test('the keyboard map section shows the numbered Tab stops with the legend promised to lay reviewers', async () => {
+  const { model, summary } = await keyboardMapFixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const before = JSON.stringify(model);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-keyboard-map-page="page-1"]');
+  assert.ok(card, 'the keyboard map must render as a page visual, not just an artifact ID');
+  assert.equal(card.getAttribute('data-map-status'), 'complete');
+  assert.ok(root.textContent.includes('Cada caixa azul numerada é um lugar onde a tecla Tab para, na ordem dos números. Caixas laranja tracejadas: itens que parecem clicáveis, mas o Tab não chega até eles.'));
+  assert.ok(card.textContent.includes('1 lugar onde o Tab para; 0 itens que parecem clicáveis e o Tab não alcança.'));
+  const image = card.querySelector('img[data-map-segment-image]');
+  assert.equal(image?.getAttribute('src'), TEST_PNG);
+  assert.match(image?.getAttribute('alt') ?? '', /Trecho 1 de 1/u);
+  const stop = card.querySelector('li[data-keyboard-map-stop="1"]');
+  assert.equal(stop?.getAttribute('value'), '1');
+  assert.ok(stop.textContent.includes('Consultar, botão — botão'));
+  assert.match(stop.textContent, /Trecho 1 da imagem/u);
+  assert.ok(card.querySelector('[data-keyboard-map-provenance]').textContent.includes(view.keyboardMaps[0].hash));
+  assert.equal(JSON.stringify(model), before, 'presenting the keyboard map must not change original evidence');
+});
+
+test('the exported report carries the keyboard map legend, pixels and counts in both render paths', async () => {
+  const { model, summary } = await keyboardMapFixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const html = renderHtmlReport(model, { reportView: view });
+  for (const marker of ['data-keyboard-map-page="page-1"', 'data-map-segment-image', 'data-keyboard-map-stop="1"']) {
+    assert.ok(html.includes(marker), `the delivered report must keep ${marker}`);
+  }
+  assert.ok(html.includes(TEST_PNG));
+  assert.ok(html.includes(view.keyboardMaps[0].derivation.sourceHash));
+  assert.equal((html.match(/Cada caixa azul numerada é um lugar onde a tecla Tab para/gu) ?? []).length, 1);
+
+  // A rota estática (sem ReportView) preserva a mesma âncora e a mesma legenda.
+  const legacy = renderHtmlReport(model);
+  assert.ok(legacy.includes('id="mapa-teclado"'));
+  assert.ok(legacy.includes('href="#mapa-teclado"'));
+  assert.ok(legacy.includes('Cada caixa azul numerada é um lugar onde a tecla Tab para'));
+  assert.ok(legacy.includes('1 lugar onde o Tab para; 0 itens que parecem clicáveis e o Tab não alcança.'));
+  assert.ok(legacy.includes('data-keyboard-map-stop="1"'));
+});
+
+test('keyboard map absence and partial coverage are explicit without inventing boxes or approval', async () => {
+  const absent = await fixture();
+  const absentView = buildReportView({
+    model: absent.model, summary: absent.summary, modelRevision: 1, modelHash: absent.model.integrity.canonicalModelHash,
+  });
+  const absentRoot = renderReportView({ view: absentView, document: new Document(), onExport() {} });
+  const absentCard = absentRoot.querySelector('[data-keyboard-map-page="page-1"]');
+  assert.equal(absentCard?.getAttribute('data-map-status'), 'absent');
+  assert.equal(absentCard.querySelectorAll('img').length, 0);
+  assert.match(absentCard.textContent, /Mapa do teclado não coletado/u);
+  assert.equal(absentView.keyboardMaps.length, 0);
+
+  const partial = await keyboardMapFixture('partial');
+  const view = buildReportView({
+    model: partial.model, summary: partial.summary, modelRevision: 1, modelHash: partial.model.integrity.canonicalModelHash,
+  });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-keyboard-map-page="page-1"]');
+  assert.equal(card.getAttribute('data-map-status'), 'partial');
+  assert.match(card.textContent, /cobertura parcial/u);
+  assert.match(card.textContent, /frames internos não entra na lista/u);
+  assert.ok(renderHtmlReport(partial.model, { reportView: view }).includes('data-map-status="partial"'));
+});
+
 test('reader map absence and empty selection are explicit without inventing an image or conformity', async () => {
   for (const [setup, status] of [[fixture, 'absent'], [() => readerMapFixture('empty'), 'empty']]) {
     const { model, summary } = await setup();
@@ -728,7 +811,8 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   });
   assert.deepEqual(Object.keys(view), [
     'version', 'auditId', 'modelRevision', 'modelHash', 'filters', 'executive', 'issues',
-    'checklist', 'technicalEvidence', 'readerMaps', 'methodology', 'exports', 'matrix', 'reviewHistory', 'findingsBoard',
+    'checklist', 'technicalEvidence', 'readerMaps', 'keyboardMaps', 'methodology', 'exports', 'matrix',
+    'reviewHistory', 'findingsBoard',
   ]);
   assert.deepEqual(Object.keys(view.filters), ['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
   assert.deepEqual(Object.keys(view.issues), ['failed', 'alerts', 'humanReview', 'passed']);
@@ -935,13 +1019,14 @@ test('live report puts the decision summary before compact navigation and expose
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
   let exportCalls = 0;
   const root = renderReportView({ view, document: new Document(), onExport() { exportCalls += 1; } });
-  assert.equal(root.querySelectorAll('h2').length, 7);
+  assert.equal(root.querySelectorAll('h2').length, 8);
   assert.deepEqual(root.querySelectorAll('h2').map(node => node.textContent), [
     'Sumário executivo e limitações críticas',
     'Cobertura e quatro grupos de resultado',
     'Quadro de constatações (requisitos da ABNT NBR 17225:2025)',
     'Revisão humana guiada e conclusões registradas',
     'Mapas de anúncios',
+    'Mapa do teclado',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
   ]);
@@ -966,11 +1051,11 @@ test('live report puts the decision summary before compact navigation and expose
   assert.equal(root.children.indexOf(navigation) < root.children.indexOf(secondSection), true);
   assert.deepEqual(navigation.querySelectorAll('a').map(link => link.getAttribute('href')), [
     '#report-section-1', '#report-section-2', '#report-section-3', '#report-section-4',
-    '#report-section-5', '#report-section-6', '#report-section-7',
+    '#report-section-5', '#report-section-6', '#report-section-7', '#report-section-8',
   ]);
   assert.deepEqual(navigation.querySelectorAll('a').map(link => link.textContent), [
     'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
-    'Matriz ABNT', 'Metodologia e evidências',
+    'Teclado', 'Matriz ABNT', 'Metodologia e evidências',
   ]);
   assert.ok(firstSection.querySelector('[data-report-outcome]'));
   assert.match(firstSection.querySelector('[data-report-outcome]').textContent, /Estado|conclu/iu);

@@ -125,6 +125,7 @@ const technicalPageDiagnostics = [
   }),
   page({ code: 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', message: 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.', fact: 'element-capture-skipped' }),
   page({ code: 'ANNOTATION_MAP_PARTIAL', message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.', fact: 'annotation-partial', group: 'annotation' }),
+  page({ code: 'KEYBOARD_MAP_PARTIAL', message: 'O mapa do teclado foi gerado com cobertura parcial e limitações explícitas.', fact: 'keyboard-map-partial', group: 'keyboard-map' }),
   page({ code: 'CDP_DISCONNECT_FAILED', message: 'A sessão de depuração não pôde ser encerrada automaticamente.', fact: 'cleanup-cdp', timestampScope: 'root' }),
 ];
 
@@ -156,6 +157,28 @@ const annotationFailureDiagnostics = annotationFailureCodes.map(code => page({
   code,
   message: 'O mapa visual derivado não pôde ser gerado localmente; a captura original foi preservada.',
   fact: 'annotation-failed', group: 'annotation',
+}));
+
+const keyboardMapFailureCodes = Object.freeze([
+  'KEYBOARD_MAP_COMPOSITOR_UNAVAILABLE',
+  'KEYBOARD_MAP_SOURCE_INVALID',
+  'KEYBOARD_MAP_SOURCE_HASH_MISMATCH',
+  'KEYBOARD_MAP_SOURCE_LIMIT',
+  'KEYBOARD_MAP_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_PRINT_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_DERIVED_BYTES_LIMIT',
+  'KEYBOARD_MAP_OUTPUT_INVALID',
+  'KEYBOARD_MAP_TIMEOUT',
+]);
+
+// Grupo próprio: o agrupamento é a cardinalidade da mesma operação de geração, e o mapa do teclado
+// é uma segunda derivação da mesma captura. Compartilhar 'annotation' tornava o mapa visual e o mapa
+// do teclado mutuamente exclusivos — um mapa visual parcial mais qualquer diagnóstico do teclado
+// invalidava o modelo inteiro e a auditoria terminava sem resultado.
+const keyboardMapFailureDiagnostics = keyboardMapFailureCodes.map(code => page({
+  code,
+  message: 'O mapa do teclado não pôde ser gerado localmente; a captura original foi preservada.',
+  fact: 'keyboard-map-failed', group: 'keyboard-map',
 }));
 
 const terminalPageDiagnostics = [
@@ -223,6 +246,7 @@ export const SYSTEM_DIAGNOSTIC_POLICY = Object.freeze([
   ...technicalPageDiagnostics,
   ...occurrencePageDiagnostics,
   ...annotationFailureDiagnostics,
+  ...keyboardMapFailureDiagnostics,
   page({
     code: 'ATTACHED_COPY_RELOADED',
     message: ATTACHED_COPY_RELOADED_MESSAGE,

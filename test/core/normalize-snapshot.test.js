@@ -18,7 +18,7 @@ const COMPUTED_STYLES = [
       'letter-spacing', 'word-spacing', 'text-align', 'direction', 'outline-color', 'outline-style',
   'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
   'overflow-y', 'animation-duration', 'animation-iteration-count',
-  'transition-duration'
+  'transition-duration', 'cursor'
 ];
 
 function columnarRaw() {

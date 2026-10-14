@@ -1,6 +1,9 @@
 import { collectPage } from '../browser/collect-page.js';
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
 import { composeAnnouncementMapForProduction as composeAnnouncementMap } from '../browser/annotation-map.js';
+// O mapa do teclado deriva da mesma captura integral: não entra na CapturePolicyV1 fechada porque só
+// é composto quando existe captura pristine, que é exatamente o que `captureFullPage` já controla.
+import { composeKeyboardMapForProduction as composeKeyboardMap } from '../browser/keyboard-map.js';
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { sanitizeEvidenceUrlV1 } from '../core/privacy.js';
@@ -1732,6 +1735,7 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
     captureFullPage,
     captureElement,
     composeAnnouncementMap,
+    composeKeyboardMap,
     runDynamicProbes(tabId, cdp, options = {}) { return runDynamicProbes({ adapter: createProbeAdapter(tabId, cdp), signal: options.signal }); },
     async getEnvironment(tabId, cdp) {
       const [version, viewport] = await Promise.allSettled([

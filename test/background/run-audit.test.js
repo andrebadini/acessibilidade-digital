@@ -22,6 +22,7 @@ import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
+import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 import { captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
 import { createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
@@ -990,6 +991,11 @@ function fakeAdapter(options = {}) {
     if (options.mapFailure) throw options.mapFailure;
     return options.composeMap(input);
   };
+  if (options.composeKeyboardMap || options.keyboardMapFailure) adapter.composeKeyboardMap = async input => {
+    events.push('keyboard-map');
+    if (options.keyboardMapFailure) throw options.keyboardMapFailure;
+    return options.composeKeyboardMap(input);
+  };
   return adapter;
 }
 
@@ -1469,6 +1475,65 @@ test('attached full-evidence derives one map from the authorized pristine source
   const raster = adapter.events.indexOf('full-page');
   assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
   assert.deepEqual(gateCalls, ['after']);
+});
+
+test('attached full-evidence derives the keyboard map from the same authorized pristine source', async () => {
+  const auditId = 'audit-attached-keyboard-map';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+    composeKeyboardMap: async input => createKeyboardMapFixture({
+      sourceEvidenceId: input.fullPageEvidence.evidenceId,
+      pageId: input.fullPageEvidence.pageId ?? 'page-1',
+      name: 'Buscar, botão',
+    }),
+  });
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, [], { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+  assert.equal(result.state, 'model');
+  assert.equal(adapter.events.filter(event => event === 'keyboard-map').length, 1);
+  const original = result.model.evidence.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
+  const map = result.model.evidence.find(artifact => artifact.kind === 'keyboard-map');
+  assert.equal(map?.fullPageEvidenceId, original.evidenceId);
+  assert.equal(map?.derivation.sourceHash, original.hash);
+  assert.ok(result.model.evidence.some(artifact => artifact.kind === 'announcement-map'), 'as duas derivações coexistem');
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'KEYBOARD_MAP_PARTIAL'), false);
+});
+
+test('a rejected keyboard map preserves the pristine capture and records an explicit derivation failure', async () => {
+  for (const corrupt of ['source-id', 'page-id', 'source-hash', 'segment-hash']) {
+    const auditId = `audit-keyboard-map-rejected-${corrupt}`;
+    const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+    const adapter = fakeAdapter({
+      trackCaptureCalls: true,
+      composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+      composeKeyboardMap: async input => {
+        const map = await createKeyboardMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+        if (corrupt === 'source-id') map.fullPageEvidenceId = 'foreign-source';
+        if (corrupt === 'page-id') map.pageId = 'foreign-page';
+        if (corrupt === 'source-hash') map.derivation.sourceHash = 'e'.repeat(64);
+        if (corrupt === 'segment-hash') map.segments[0].contentHash = 'e'.repeat(64);
+        return map;
+      },
+    });
+    const result = await runAttachedAuditExecution({
+      auditId, sessionCapabilityId: 'S'.repeat(22),
+      target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+      capturePolicy: policy, privacyGate: attachedPixelGate(policy, [], { auditId }),
+      chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => {}, persistAuditModel: async () => {},
+    });
+    assert.equal(result.state, 'model', corrupt);
+    assert.equal(result.model.evidence.some(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine'), true, corrupt);
+    assert.equal(result.model.evidence.some(artifact => artifact.kind === 'keyboard-map'), false, corrupt);
+    assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'KEYBOARD_MAP_OUTPUT_INVALID'), corrupt);
+  }
 });
 
 test('navigation during map composition denies the terminal commit and exposes no derived model', async () => {
