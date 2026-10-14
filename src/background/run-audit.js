@@ -42,7 +42,7 @@ import { testedWcagRefsForCoreRule } from '../core/report/tested-criteria.js';
 import {
   ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE, ELEMENT_CAPTURE_BUDGET_MESSAGE,
   ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE, ELEMENT_MEASUREMENT_FALLBACK_MESSAGE,
-  FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE,
+  FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE, PAGE_NAVIGATION_HELD_MESSAGE,
 } from '../core/report/diagnostic-policy.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
@@ -775,6 +775,7 @@ async function runLegacyAudit({
   };
   let tab = null;
   let cdp = null;
+  let navigationFreeze = null;
   let fatal = false;
   let recoverableFailure = false;
   let furtherPixelCaptureSuppressed = false;
@@ -861,6 +862,15 @@ async function runLegacyAudit({
     state.finalUrlObserved = true;
     cdp = await awaitStep(() => chromeAdapter.connectCdp(tab.id, { signal }));
     if (!cdp || typeof cdp.command !== 'function') throw new Error('CDP inválido');
+    // Congelamento de navegação (1.1.58). Só depois do anexo — e, portanto, depois da navegação que a
+    // própria extensão pediu (`navigateTab` acontece bem antes, na linha 856) — a página passa a ter as
+    // trocas de documento do frame principal seguradas. É best-effort: uma recusa aqui não derruba a
+    // auditoria, apenas a deixa como era antes do congelamento.
+    if (typeof chromeAdapter.beginNavigationFreeze === 'function') {
+      try {
+        navigationFreeze = await chromeAdapter.beginNavigationFreeze(cdp, tab.id);
+      } catch { navigationFreeze = null; }
+    }
 
     let pristineMetrics = {};
     if (chromeAdapter.captureFullPageEnabled === false) {
@@ -1208,6 +1218,19 @@ async function runLegacyAudit({
     if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
     if (!error?.auditHandled) fail('NAVIGATION_FAILED', signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
   } finally {
+    // O congelamento morre ANTES do desanexo, em qualquer desfecho: `Fetch.disable` libera os pedidos
+    // eventualmente pausados, e o depurador só então é desanexado. Nenhuma interceptação sobrevive à
+    // auditoria — e o e2e prova isso medindo a recarga da página depois do fim.
+    if (navigationFreeze) {
+      const freeze = navigationFreeze;
+      navigationFreeze = null;
+      let blocked = 0;
+      try { blocked = freeze.blocked(); } catch { blocked = 0; }
+      try { await freeze.stop(); } catch { /* best-effort: o desanexo abaixo também desfaz o Fetch */ }
+      if (Number.isSafeInteger(blocked) && blocked > 0) {
+        appendDiagnosticOnce('PAGE_NAVIGATION_HELD', PAGE_NAVIGATION_HELD_MESSAGE, true);
+      }
+    }
     if (cdp) {
       try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
     }
@@ -1868,7 +1891,7 @@ function captureLegacyEffects(adapter) {
   const captured = { manifestVersion: typeof version === 'string' && /^\d{1,5}(?:\.\d{1,5}){0,3}$/u.test(version)
     ? version : 'não disponível' };
   for (const name of [
-    'connectCdp', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
+    'connectCdp', 'beginNavigationFreeze', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
     'emitProgress', 'handoffReport', 'executeScript', 'createProbeAdapter',
     'captureFullPage', 'captureElement', 'composeAnnouncementMap',
   ]) {
