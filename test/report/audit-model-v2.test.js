@@ -534,8 +534,8 @@ function editorialInapplicableRule() {
   };
 }
 
-test('requires the exact 130-rule registered core inventory for complete and partial sessions', () => {
-  assert.equal(SAMPLE_AUDIT.ruleResults.filter(rule => rule.source.engine === 'audita-core').length, 130);
+test('requires the exact 131-rule registered core inventory for complete and partial sessions', () => {
+  assert.equal(SAMPLE_AUDIT.ruleResults.filter(rule => rule.source.engine === 'audita-core').length, 131);
 
   for (const status of ['complete', 'partial']) {
     const zero = withoutCoreExecution();
@@ -1677,13 +1677,13 @@ test('conclusive failed requirements and recommendations use the same catalog re
   assert.doesNotMatch(JSON.stringify(canonical.occurrences), /violatedLaw|illegal|liability|sanction/iu);
 });
 
-test('allows supplemental and editorial rules without weakening the exact 130-core and 146-item contracts', () => {
+test('allows supplemental and editorial rules without weakening the exact 131-core and 146-item contracts', () => {
   const model = structuredClone(createAuditModel(reportInput()));
   model.methodology = {
     ...model.methodology,
-    coreRuleCount: 130,
+    coreRuleCount: 131,
     supplementalRuleCount: 1,
-    ruleCount: 131,
+    ruleCount: 132,
   };
   model.ruleResults.push({
     ruleId: 'editorial.placeholder-text', outcome: 'failed', mode: 'automated',
@@ -1709,7 +1709,7 @@ test('allows supplemental and editorial rules without weakening the exact 130-co
 
   const canonical = createAuditModel(model);
   assert.equal(canonical.itemResults.length, 146);
-  assert.equal(canonical.methodology.coreRuleCount, 130);
+  assert.equal(canonical.methodology.coreRuleCount, 131);
   assert.equal(canonical.ruleResults.at(-1).nbrItems.length, 0);
   assert.equal(canonical.occurrences.at(-1).legalAnalysis, null);
 

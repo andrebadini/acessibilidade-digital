@@ -309,6 +309,15 @@ register(['table-title-association'], 'table-title-not-associated');
 register(['form-submit-button'], 'missing-submit-button');
 register(['custom-component-state'], 'missing-custom-component-state', ['states']);
 
+// 5.1.13 / WCAG 2.1.1 — conteúdo que só aparece com o mouse. O texto é a explicação que a pessoa lê
+// na ocorrência, então diz o que acontece e o que fazer, sem jargão.
+register(['hover-only-interactive-content'], 'hover-only-content-not-keyboard-reachable', [],
+  'Os links deste bloco só aparecem com o mouse, e o teclado (TAB) não chega até eles. Torne o bloco focável para abrir o conteúdo, ou mostre o conteúdo também com o foco.');
+register(['hover-only-interactive-content'], 'hover-only-keyboard-path-unconfirmed', [],
+  'Este bloco tem um controle focável, mas o conteúdo oculto não apareceu ao forçar o foco. Use TAB e Enter sem tocar no mouse para confirmar se o menu abre pelo teclado.');
+register(['hover-only-interactive-content'], 'hover-only-observation-unavailable', [],
+  'A sondagem de conteúdo revelado apenas por hover não foi executada ou não cobriu a página inteira. Confirme com o teclado se algo só aparece com o mouse.');
+
 const HUMAN_TARGET_RULES = new Set([
   'focus-order', 'focusable-elements-interactive', 'keyboard-focus-trap', 'full-keyboard-access',
   'partial-keyboard-access', 'single-key-shortcuts', 'single-key-shortcut-control',

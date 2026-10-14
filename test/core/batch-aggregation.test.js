@@ -446,7 +446,7 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
     'uma página falha impede aprovação global automática');
   assert.equal(raw.itemResults.length, 146);
   assert.equal(raw.itemResults.find(item => item.id === '5.1.1').outcome, 'cantTell');
-  assert.equal(raw.methodology.coreRuleCount, 130);
+  assert.equal(raw.methodology.coreRuleCount, 131);
   assert.equal(raw.methodology.itemCount, 146);
   assert.equal(Object.hasOwn(raw, 'presentation'), false);
   assert.doesNotMatch(JSON.stringify(raw), /SECRET_A|token=/u);

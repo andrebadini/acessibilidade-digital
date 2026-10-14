@@ -73,7 +73,7 @@ const PAGE_EXECUTION_STATE_MATRIX = Object.freeze({
 });
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
 const METHODOLOGY_NAME = 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2';
-const EXPECTED_RULE_COUNT = 130;
+const EXPECTED_RULE_COUNT = 131;
 const URL_VALUE_KEYS = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src', 'currentsrc']);
 const NORMATIVE_FIELDS = Object.freeze(['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs']);
 const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.map(ruleId => [ruleId, Object.freeze({
@@ -82,6 +82,13 @@ const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.m
   wcag: Object.freeze(item.wcag.map(reference => reference.id)),
 })])));
 const EXPECTED_CORE_RULE_IDS = Object.freeze([...CORE_RULE_METADATA.keys()]);
+// Auditorias concluídas antes desta versão foram gravadas com uma regra por item normativo (o item
+// 5.1.13 ainda não declarava a detecção de conteúdo revelado apenas por hover). Elas continuam
+// íntegras: o inventário da própria versão é aceito, sem reescrever o registro guardado.
+const LEGACY_CORE_RULE_IDS = Object.freeze(NBR17225_ITEMS
+  .map(item => item.ruleIds[0])
+  .filter(ruleId => typeof ruleId === 'string'));
+const ACCEPTED_CORE_RULE_COUNTS = Object.freeze([EXPECTED_RULE_COUNT, LEGACY_CORE_RULE_IDS.length]);
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
   impact: 'minor',
@@ -1272,8 +1279,8 @@ function validateMethodology(methodology, versions, reproducibility) {
   if (canonicalText(methodology.name, 'methodology.name') !== METHODOLOGY_NAME) throw new TypeError('Nome da metodologia inválido.');
   const version = canonicalText(methodology.version, 'methodology.version');
   if (version !== versions.rules) throw new TypeError('Versão da metodologia incoerente com a versão das regras.');
-  if (!Number.isSafeInteger(methodology.coreRuleCount) || methodology.coreRuleCount !== EXPECTED_RULE_COUNT) {
-    throw new TypeError('methodology.coreRuleCount deve registrar exatamente as 130 regras próprias.');
+  if (!Number.isSafeInteger(methodology.coreRuleCount) || !ACCEPTED_CORE_RULE_COUNTS.includes(methodology.coreRuleCount)) {
+    throw new TypeError('methodology.coreRuleCount deve registrar as regras próprias da versão instalada.');
   }
   if (!Number.isSafeInteger(methodology.supplementalRuleCount) || methodology.supplementalRuleCount < 0) {
     throw new TypeError('methodology.supplementalRuleCount inválido.');
@@ -1378,6 +1385,16 @@ function validateIntegrity(integrity) {
   }
 }
 
+// A declaração de regras de um item é reproduzida no modelo guardado. Auditorias gravadas antes de o
+// item 5.1.13 ganhar a regra de conteúdo revelado apenas por hover trazem a declaração anterior, que é
+// exatamente o prefixo da atual. Só esse prefixo é aceito; qualquer outra divergência continua sendo
+// tratada como adulteração do catálogo normativo.
+function matchesNormativeRuleIds(actual, expected) {
+  if (canonicalStringify(actual) === canonicalStringify(expected.ruleIds)) return true;
+  return Array.isArray(actual) && actual.length > 0 && actual.length < expected.ruleIds.length &&
+    actual.every((ruleId, index) => ruleId === expected.ruleIds[index]);
+}
+
 function validateItems(items) {
   if (!Array.isArray(items) || items.length !== NBR17225_ITEMS.length) throw new TypeError('O modelo deve conter exatamente 146 resultados de item.');
   const byId = new Map();
@@ -1398,7 +1415,7 @@ function validateItems(items) {
       if (item[field] !== expected[field]) throw new TypeError(`Metadado normativo adulterado em ${expected.id}.${field}.`);
     }
     if (canonicalStringify(item.wcag) !== canonicalStringify(expected.wcag)
-      || canonicalStringify(item.ruleIds) !== canonicalStringify(expected.ruleIds)) {
+      || !matchesNormativeRuleIds(item.ruleIds, expected)) {
       throw new TypeError(`Referências normativas adulteradas no item ${expected.id}.`);
     }
   }
@@ -1478,11 +1495,12 @@ function validateRuleInventory(model, ruleById) {
     throw new TypeError('Contagens da metodologia divergem do inventário real de regras.');
   }
 
-  const completeCoreInventory = coreRules.length === EXPECTED_RULE_COUNT &&
-    EXPECTED_CORE_RULE_IDS.every(ruleId => ruleById.get(ruleId)?.source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine);
+  const completeInventory = ruleIds => coreRules.length === ruleIds.length &&
+    ruleIds.every(ruleId => ruleById.get(ruleId)?.source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine);
+  const completeCoreInventory = completeInventory(EXPECTED_CORE_RULE_IDS);
   if (['complete', 'partial'].includes(model.session.status)) {
-    if (!completeCoreInventory) {
-      throw new TypeError('Sessão concluída deve conter exatamente as 130 regras core registradas.');
+    if (!completeCoreInventory && !completeInventory(LEGACY_CORE_RULE_IDS)) {
+      throw new TypeError('Sessão concluída deve conter exatamente as regras core registradas.');
     }
     return;
   }
