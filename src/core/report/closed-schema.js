@@ -1,3 +1,4 @@
+import { validateKeyboardMapArtifact } from '../keyboard/keyboard-map-artifact.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { canonicalStringify } from './canonical-json.js';
@@ -38,7 +39,10 @@ const MAP_MARKER_KEYS = set('x y size leaderX leaderY');
 const MAP_SEGMENT_KEYS = set('segmentId index count role sourceCssClip width height dataUrl contentHash');
 const MAP_LEGEND_KEYS = set('number nodeId selectorSummary announcementPreview nameSource segmentIndex');
 const MAP_COUNT_KEYS = set('eligible annotated omittedNoRect omittedFrame omittedLimit unresolvedOverlap');
+/** Contagem opcional acrescentada depois da 1.1.0: mapas guardados antes dela continuam aceitos. */
+const MAP_OPTIONAL_COUNT_KEYS = set('omittedClipped');
 const MAP_LIMIT_KEYS = set('maxNodes maxSourcePixels maxDimension maxCanvasPixels maxSegments maxDerivedBytes maxLegendCodePoints');
+const EVIDENCE_KINDS = Object.freeze(['full-page', 'element', 'announcement-map', 'keyboard-map']);
 const SHA256 = /^[a-f0-9]{64}$/u;
 
 /** Validates every retained V2 field. Unknown data is rejected, never stripped. */
@@ -175,7 +179,7 @@ function assertPage(page) {
     for (const omitted of page.omittedEvidence) {
       assertExact(omitted, set('evidenceId kind contentHash reason'));
       assertString(omitted.evidenceId);
-      if (!['full-page', 'element', 'announcement-map'].includes(omitted.kind) ||
+      if (!EVIDENCE_KINDS.includes(omitted.kind) ||
         !SHA256.test(omitted.contentHash ?? '') || omitted.reason !== 'budget') throw new TypeError();
     }
   }
@@ -358,6 +362,7 @@ function assertEvidence(artifact) {
   if (artifact.kind === 'full-page') assertAllowed(artifact, FULL_PAGE_EVIDENCE_KEYS);
   else if (artifact.kind === 'element') assertAllowed(artifact, ELEMENT_EVIDENCE_KEYS);
   else if (artifact.kind === 'announcement-map') return assertAnnotationMap(artifact);
+  else if (artifact.kind === 'keyboard-map') return assertKeyboardMap(artifact);
   else throw new TypeError();
   for (const key of ['evidenceId', 'pageId', 'kind']) requireOwn(artifact, key);
   for (const key of ['evidenceId', 'pageId', 'kind']) assertString(artifact[key]);
@@ -396,11 +401,26 @@ function assertEvidence(artifact) {
   if (artifact.metadata !== undefined) assertEvidenceMetadata(artifact.metadata);
 }
 
+// Teto da escala de pixels da miniatura de elemento. Acompanha `ELEMENT_CAPTURE_PIXEL_LIMITS.maxScale`
+// (src/browser/capture-evidence.js): a captura nunca pede mais que isto e a auditoria que declara mais
+// está fora do contrato. O limite é repetido aqui porque o esquema fechado não importa o navegador.
+const ELEMENT_PIXEL_SCALE_MAX = 3;
+
 function assertEvidenceMetadata(metadata) {
-  assertAllowedRecord(metadata, set('annotationMargin captureReceivedAt clip height highlightBox kind mimeType width'));
+  assertAllowedRecord(metadata, set('annotationMargin captureReceivedAt clip height highlightBox highlightClipped highlightParts kind mimeType pixelScale width'));
   for (const key of ['annotationMargin', 'height', 'width']) {
     if (metadata[key] !== undefined && !Number.isFinite(metadata[key])) throw new TypeError();
   }
+  // Escala de pixels do raster da miniatura, quando maior que 1. `width`/`height` continuam em CSS px:
+  // o PNG mede `width × pixelScale`. Inteiro de propósito — a imagem de dispositivo é um múltiplo
+  // exato do quadro, e é isso que permite conferir o raster contra os metadados.
+  if (metadata.pixelScale !== undefined &&
+    (!Number.isSafeInteger(metadata.pixelScale) || metadata.pixelScale < 1 || metadata.pixelScale > ELEMENT_PIXEL_SCALE_MAX)) {
+    throw new TypeError();
+  }
+  // A auditoria declara a escala uma vez só: o `clip.scale` é o mesmo número que foi enviado ao Chrome.
+  if (metadata.pixelScale !== undefined && metadata.clip !== undefined &&
+    metadata.clip?.scale !== metadata.pixelScale) throw new TypeError();
   for (const key of ['kind', 'mimeType']) if (metadata[key] !== undefined) assertString(metadata[key]);
   if (metadata.clip !== undefined) {
     assertExact(metadata.clip, set('x y width height scale'));
@@ -411,6 +431,26 @@ function assertEvidenceMetadata(metadata) {
     for (const key of ['x', 'y', 'width', 'height']) if (!Number.isFinite(metadata.highlightBox[key])) throw new TypeError();
     assertString(metadata.highlightBox.coordinateSpace);
   }
+  // Fragmentos de linha do alvo, em `capture-css-px`, no mesmo sistema do `highlightBox`. Auditorias
+  // anteriores à 1.1.57 não têm o campo: quem lê cai na união de `highlightBox`.
+  if (metadata.highlightParts !== undefined) {
+    assertArray(metadata.highlightParts);
+    if (metadata.highlightParts.length === 0 || metadata.highlightParts.length > 8) throw new TypeError();
+    for (const part of metadata.highlightParts) {
+      assertExact(part, set('x y width height'));
+      for (const key of ['x', 'y', 'width', 'height']) if (!Number.isFinite(part[key])) throw new TypeError();
+    }
+  }
+  // O alvo não cabe inteiro na captura (recorte nos limites da página). Só o valor `true` é aceito:
+  // o campo é declarativo e um `false` explícito significaria "afirmo que não houve recorte".
+  if (metadata.highlightClipped !== undefined && metadata.highlightClipped !== true) throw new TypeError();
+}
+
+// O mapa do teclado tem um validador próprio, fechado por chave em todos os níveis e ligado à versão
+// que o artefato declara. Repetir aqui as listas de chaves criaria uma segunda verdade que pode
+// divergir da primeira; a conferência estrutural é delegada e continua rejeitando campo inventado.
+function assertKeyboardMap(artifact) {
+  validateKeyboardMapArtifact(artifact);
 }
 
 function assertAnnotationMap(artifact) {
@@ -437,7 +477,8 @@ function assertAnnotationMap(artifact) {
   }
   assertArray(artifact.legend);
   for (const legend of artifact.legend) assertExact(legend, MAP_LEGEND_KEYS);
-  assertExact(artifact.counts, MAP_COUNT_KEYS);
+  assertExact(artifact.counts, new Set([...MAP_COUNT_KEYS,
+    ...[...MAP_OPTIONAL_COUNT_KEYS].filter(key => artifact.counts?.[key] !== undefined)]));
   assertExact(artifact.limits, MAP_LIMIT_KEYS);
   assertArray(artifact.limitations);
 }

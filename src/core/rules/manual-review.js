@@ -1,5 +1,6 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
 import { FORM_RULES } from './forms.js';
+import { HOVER_ONLY_RULES } from './hover-only.js';
 import { INTERACTIVE_RULES } from './interactive.js';
 import { MEDIA_RULES } from './media.js';
 import { createRuleRegistry } from './registry.js';
@@ -23,9 +24,9 @@ import {
 import { STRUCTURE_RULES } from './structure.js';
 import { VISUAL_RULES } from './visual.js';
 
-function definition(item, evaluate) {
+function definition(item, evaluate, ruleId = item.ruleIds[0]) {
   return {
-    id: item.ruleIds[0],
+    id: ruleId,
     mode: item.evaluation,
     nbrItems: [item.id],
     wcag: [...new Set(item.wcag.map(reference => reference.id))],
@@ -151,11 +152,11 @@ function scopedCandidates(ruleId, nodes) {
   return null;
 }
 
-function assistedReview(snapshot, item) {
+function assistedReview(snapshot, item, ruleId = item.ruleIds[0]) {
   return reviewResult(snapshot, ({ document, nodes }) => {
-    const candidates = scopedCandidates(item.ruleIds[0], nodes);
+    const candidates = scopedCandidates(ruleId, nodes);
     if (Array.isArray(candidates) && candidates.length === 0) {
-      if (!PAGE_LEVEL_WHEN_EMPTY.has(item.ruleIds[0])) {
+      if (!PAGE_LEVEL_WHEN_EMPTY.has(ruleId)) {
         return result('inapplicable', `Não há alvos observáveis para revisar: ${item.title}.`);
       }
       return result('cantTell', `A coleta de alvos para “${item.title}” é insuficiente para concluir a aplicabilidade.`, [
@@ -172,18 +173,22 @@ function assistedReview(snapshot, item) {
 }
 
 const IMPLEMENTED_IDS = new Set([
-  ...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES
+  ...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES, ...HOVER_ONLY_RULES
 ].map(rule => rule.id));
 
-const REMAINING_ITEMS = NBR17225_ITEMS.filter(item => item.ruleIds.length === 1 && !IMPLEMENTED_IDS.has(item.ruleIds[0]));
+// Um item pode declarar mais de uma regra (5.1.13 declara a revisão humana e a detecção automática de
+// conteúdo revelado apenas por hover). Cada regra ainda não implementada por outra família vira uma
+// regra de revisão humana própria, para que nenhuma identidade normativa desapareça da composição.
+const REMAINING_RULES = NBR17225_ITEMS.flatMap(item =>
+  item.ruleIds.filter(ruleId => !IMPLEMENTED_IDS.has(ruleId)).map(ruleId => ({ item, ruleId })));
 const AUTOMATED_EVALUATORS = Object.freeze({
   'table-title-association': tableTitleAssociation,
   'form-submit-button': formSubmitButton,
   'custom-component-state': customComponentState
 });
 
-export const MANUAL_REVIEW_RULES = createRuleRegistry(REMAINING_ITEMS.map(item =>
-  definition(item, AUTOMATED_EVALUATORS[item.ruleIds[0]] ?? (snapshot => assistedReview(snapshot, item)))
+export const MANUAL_REVIEW_RULES = createRuleRegistry(REMAINING_RULES.map(({ item, ruleId }) =>
+  definition(item, AUTOMATED_EVALUATORS[ruleId] ?? (snapshot => assistedReview(snapshot, item, ruleId)), ruleId)
 ));
 
 function manualEvidenceRequest(item) {

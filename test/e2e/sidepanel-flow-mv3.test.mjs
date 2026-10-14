@@ -40,6 +40,10 @@ const knownOccurrence = Object.freeze({
   selectors: Object.freeze(['button#missing-name', 'html > body > main > button']),
 });
 const canonicalReportTitle = 'Relatório de auditoria — Audita Acessibilidade';
+// A seção "Mapa do teclado" entrou antes de matriz e metodologia, então a posição da metodologia
+// deixou de ser fixa. Localizar pelo título mantém o roteiro válido quando outra seção é somada.
+const methodologySection = "([...document.querySelectorAll('[data-report-section]')]"
+  + ".find(node => /^Metodologia/u.test(node.querySelector('h2')?.textContent ?? '')))";
 const exportMime = Object.freeze({
   html: 'text/html;charset=utf-8', pdf: 'application/pdf',
   csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
@@ -118,14 +122,28 @@ async function markerRecordFingerprint(extension, auditId) {
 
 const markerSurface = `(() => {
   const host=document.querySelector('[data-audita-page-markers-root="v1"]');
-  const buttons=[...host?.shadowRoot?.querySelectorAll('.audita-marker')??[]];
+  const groups=[...host?.shadowRoot?.querySelectorAll('.audita-group')??[]];
+  const ringOf=group=>group.querySelector('.audita-ring');
+  const markerOf=group=>group.querySelector('.audita-marker');
+  const number=button=>Number(button.getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]);
   return {roots:document.querySelectorAll('[data-audita-page-markers-root="v1"]').length,
-    buttons:buttons.map(button=>({label:button.getAttribute('aria-label'),text:button.textContent,
-      hidden:button.style.display==='none'})),
-    rings:[...host?.shadowRoot?.querySelectorAll('.audita-ring')??[]].filter(node=>node.style.display!=='none').length,
-    selectedNumbers:[...host?.shadowRoot?.querySelectorAll('.audita-ring')??[]].filter(node=>node.style.display!=='none')
-      .map(node=>Number(node.parentElement.querySelector('.audita-marker').getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]))};
+    buttons:groups.map(group=>({label:markerOf(group).getAttribute('aria-label'),text:markerOf(group).textContent,
+      hidden:markerOf(group).style.display==='none',number:number(markerOf(group)),
+      ringHidden:ringOf(group).style.display==='none',border:ringOf(group).style.borderWidth,
+      labelHeight:markerOf(group).style.height,opacity:markerOf(group).style.opacity})),
+    rings:groups.filter(group=>ringOf(group).style.display!=='none').length,
+    selectedNumbers:groups.filter(group=>ringOf(group).style.display!=='none').map(group=>number(markerOf(group)))};
 })()`;
+
+// C.16: o sinal selecionado é o único com a etiqueta maior (24 px, 14 px de fonte) e o contorno de
+// 3 px; os demais continuam desenhados, com opacidade reduzida — selecionar não apaga os outros
+// sinais. A etiqueta é o critério decisivo: o contorno de 3 px também marca o sinal sob o ponteiro
+// (o realce de hover), e os dois estados não podem ser confundidos.
+function selectedSignalNumber(surface) {
+  const emphasized = (surface?.buttons ?? []).filter(button =>
+    !button.ringHidden && button.labelHeight === '24px' && button.border === '3px');
+  return emphasized.length === 1 ? emphasized[0].number : null;
+}
 
 async function waitForMarkerState(extension, panel, expected) {
   return extension.waitForValue(panel, `(() => ({
@@ -248,41 +266,75 @@ for (const scenario of [
       assert.equal(surface.roots, 1);
       assert.ok(surface.buttons.length >= 2, JSON.stringify(surface));
       assert.ok(surface.buttons.some(button => /[2-9] ocorrências/u.test(button.label)), 'shared element has one signal for several occurrences');
-      assert.ok(state.counts.some(text => /^[1-9]\d* ocorrências? não localizadas?/u.test(text)), JSON.stringify(state));
+      // O eased vocabulary do localizador reencontra todos os elementos deste fixture — inclusive os que
+      // não têm id —, então o resumo tem de declarar tudo localizado e nada de fora. Era o contrário
+      // antes da 1.1.57 (7 de 11 localizadas), e é justamente isso que a mudança veio corrigir.
+      const located = state.counts.find(text => /ocorrências? localizadas?$/u.test(text));
+      const unlocated = state.counts.find(text => /ocorrências? não localizadas?$/u.test(text));
+      assert.match(located ?? '', /^[1-9]\d* ocorrências localizadas$/u, JSON.stringify(state));
+      assert.equal(unlocated, '0 ocorrências não localizadas', JSON.stringify(state));
       assert.deepEqual(await extension.evaluate(extension.startPage.page, `({x:scrollX,y:scrollY,
         active:document.activeElement?.id,notes:document.querySelector('#source-notes').value})`), preserved);
     });
     if (!scenario.idle) await step('IDLESS_ORIGINAL_ELEMENT', async () => {
-      const number = await extension.evaluate(extension.startPage.page, `(() => {
+      // B.11: o sinal só é desenhado quando o elemento está dentro da viewport. A auditoria termina
+      // com a página rolada além da faixa avaliada, então a revisão rola até o botão — como faria um
+      // leitor — antes de correlacionar o contorno ao elemento. O contorno agora é desenhado POR FORA
+      // do elemento (C.12: folga de 3 px mais a borda), então a correlação é de contenção, não de
+      // igualdade de coordenadas.
+      const idlessBaseline = await extension.evaluate(extension.startPage.page, `(() => {
+        document.querySelector('button.idless-primary').scrollIntoView({behavior:'instant',block:'center'});
+        return {x:scrollX,y:scrollY};
+      })()`);
+      const number = await extension.waitForValue(extension.startPage.page, `(() => {
         const target=document.querySelector('button.idless-primary');
         if(!target||target.hasAttribute('id'))throw Error('IDLESS_FIXTURE_INVALID');
         const rect=target.getBoundingClientRect();
         const root=document.querySelector('[data-audita-page-markers-root="v1"]');
         const groups=[...root.shadowRoot.querySelectorAll('.audita-group')].filter(group=>{
           const ring=group.querySelector('.audita-ring');
-          return ['left','top','width','height'].every(key=>Math.abs(parseFloat(ring.style[key])-rect[key])<1);
+          const left=parseFloat(ring.style.left),top=parseFloat(ring.style.top);
+          const width=parseFloat(ring.style.width),height=parseFloat(ring.style.height);
+          return [left,top,width,height].every(Number.isFinite)&&left<=rect.left&&top<=rect.top&&
+            left+width>=rect.right&&top+height>=rect.bottom;
         });
-        if(groups.length!==1)return {reason:'IDLESS_MARKER_NOT_CORRELATED',matches:groups.length,total:root.shadowRoot.querySelectorAll('.audita-group').length};
-        const button=groups[0].querySelector('.audita-marker');
-        const number=Number(button.getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]);
-        button.click();return number;
-      })()`, { userGesture: true });
+        const button=groups.length===1?groups[0].querySelector('.audita-marker'):null;
+        if(!button)return {reason:'IDLESS_MARKER_NOT_CORRELATED',matches:groups.length,
+          total:root.shadowRoot.querySelectorAll('.audita-group').length,
+          target:[rect.left,rect.top,rect.width,rect.height].map(Math.round),
+          rings:[...root.shadowRoot.querySelectorAll('.audita-group')].map(group=>{const ring=group.querySelector('.audita-ring');
+            return [ring.style.display,ring.style.left,ring.style.top,ring.style.width,ring.style.height,
+              group.querySelector('.audita-marker').textContent].join(' ');})};
+        return Number(button.getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]);
+      })()`, value => typeof value === 'number',
+      // The overlay follows the scroll on the next animation frame; under load the first read can
+      // still see the pre-scroll contour, so keep polling instead of failing on the first miss.
+      { timeoutMs: 10_000, intervalMs: 50 });
       assert.equal(typeof number, 'number', JSON.stringify(number));
+      await extension.evaluate(extension.startPage.page, `(() => {
+        const root=document.querySelector('[data-audita-page-markers-root="v1"]');
+        const group=[...root.shadowRoot.querySelectorAll('.audita-group')].find(node=>
+          Number(node.querySelector('.audita-marker').getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1])===${number});
+        group.querySelector('.audita-marker').click();return true;
+      })()`, { userGesture: true });
       await extension.waitForValue(panel, `(() => ({
         number:Number(document.querySelector('[data-intent="SELECT_OCCURRENCE"][aria-pressed="true"] [data-page-marker-number]')?.dataset.pageMarkerNumber),
         technical:document.querySelector('[data-detail-block="technical"]')?.textContent??'',
         normative:document.querySelector('[data-detail-block="normative"]')?.textContent??''
       }))()`, value => value?.number === number && value.technical.includes('html > body > main > button') && /ABNT NBR 17225: 5\./u.test(value.normative));
-      assert.deepEqual(await extension.evaluate(extension.startPage.page, '({x:scrollX,y:scrollY})'), { x: preserved.x, y: preserved.y });
+      assert.deepEqual(await extension.evaluate(extension.startPage.page, '({x:scrollX,y:scrollY})'), idlessBaseline);
       await extension.click(panel, '[data-intent="GO_TO_PAGE_MARKER"]');
       await extension.waitForValue(extension.startPage.page, `(() => {
         const r=document.querySelector('button.idless-primary').getBoundingClientRect();
         const roots=[...document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.querySelectorAll('.audita-ring')];
         return r.top>=0&&r.bottom<=innerHeight&&roots.some(ring=>ring.style.display!=='none'&&
-          Math.abs(parseFloat(ring.style.top)-r.top)<1&&Math.abs(parseFloat(ring.style.left)-r.left)<1);
+          parseFloat(ring.style.left)<=r.left&&parseFloat(ring.style.top)<=r.top&&
+          parseFloat(ring.style.left)+parseFloat(ring.style.width)>=r.right&&
+          parseFloat(ring.style.top)+parseFloat(ring.style.height)>=r.bottom);
       })()`, Boolean);
       await extension.captureJourney('idless-original-selected', extension.startPage.page, { captureBeyondViewport: false });
-      // Restore only the harness scroll baseline for the unchanged silent-selection checks below.
+      // Put the page back where the audit left it, so the rest of the journey starts from the same
+      // baseline as the idle scenario (which never scrolls here).
       await extension.evaluate(extension.startPage.page, `scrollTo({left:${preserved.x},top:${preserved.y},behavior:'instant'})`);
     });
     if (scenario.idle) await step('IDLE_WITH_SIGNALS', async () => {
@@ -292,7 +344,33 @@ for (const scenario of [
       assert.equal((await extension.evaluate(extension.startPage.page, markerSurface)).roots, 1);
       assert.equal((await waitForMarkerState(extension, panel, 'active')).state, 'active');
     });
+    // B.11: um elemento fora da viewport não recebe desenho, e o sinal volta assim que o leitor rola
+    // até ele. Este passo prova as duas metades da regra antes de continuar — rolando a página até o
+    // fim da fixture (a faixa avaliada fica muito acima), nada é desenhado; rolando de volta à faixa,
+    // todo sinal localizado reaparece. Sem isso, "os sinais não somem sozinhos" ficaria sem prova no
+    // navegador real, e a suíte confundiria a regra com o desaparecimento que ela existe para evitar.
+    let baseline = preserved;
     const expectedSelection = await step('PAGE_TO_ABNT', async () => {
+      await extension.evaluate(extension.startPage.page,
+        `(() => { scrollTo({left:0,top:document.documentElement.scrollHeight,behavior:'instant'}); return true; })()`);
+      // O overlay só redesenha no quadro seguinte ao evento de rolagem: esperar o rAF, em vez de ler um
+      // instantâneo do mesmo tique, é o que separa "não desenhou" de "ainda não redesenhou".
+      const away = await extension.waitForValue(extension.startPage.page, markerSurface,
+        value => value.rings === 0, { timeoutMs: 10_000, intervalMs: 50 })
+        .catch(() => extension.evaluate(extension.startPage.page, markerSurface));
+      assert.equal(away.rings, 0,
+        `nenhum contorno pode ser desenhado para uma faixa fora da viewport: ${JSON.stringify(away)}`);
+      assert.ok(away.buttons.every(button => button.hidden === true),
+        `as etiquetas da faixa fora da viewport também ficam ocultas: ${JSON.stringify(away)}`);
+
+      baseline = { x: 0, y: 100 };
+      await extension.evaluate(extension.startPage.page,
+        `(() => { scrollTo({left:${baseline.x},top:${baseline.y},behavior:'instant'}); return true; })()`);
+      const revealed = await extension.waitForValue(extension.startPage.page, markerSurface,
+        value => value.rings >= 2, { timeoutMs: 10_000, intervalMs: 50 });
+      assert.equal(revealed.rings, revealed.buttons.length,
+        `rolando de volta à faixa, todo sinal localizado volta a ser desenhado: ${JSON.stringify(revealed)}`);
+
       const number = await extension.evaluate(extension.startPage.page, `(() => {
         const button=document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.querySelector('.audita-marker');
         return Number(button.getAttribute('aria-label').match(/^Sinal ([0-9]+)/)[1]);
@@ -315,16 +393,22 @@ for (const scenario of [
           focusId:button?.dataset.focusId,abnt:button?.closest('details[data-abnt-group]')?.dataset.abntGroup,
           open:button?.closest('details[data-abnt-group]')?.open===true,
           normative:document.querySelector('[data-detail-block="normative"]')?.textContent??'',
+          technical:document.querySelector('[data-detail-block="technical"]')?.textContent??'',
           announcement:document.querySelector('[data-detail-block="accessibility"]')?.textContent??''};
       })()`, value => value?.number === number && value.focusId === expected.focusId && value.open === true);
       assert.equal(selection.abnt, expected.abnt);
       assert.ok(selection.normative.includes(`ABNT NBR 17225: ${expected.abnt}`));
-      assert.match(selection.announcement, /Anúncio esperado:/u);
+      // O primeiro sinal é o do elemento de menor identificador de ocorrência — aqui a seção da
+      // fixture, que não tem nome acessível. O painel tem de descrever a acessibilidade DESSE alvo
+      // (o bloco técnico nomeia o mesmo seletor) e dizer que o nome está ausente, em vez de inventar
+      // um anúncio que o elemento não produz.
+      assert.match(selection.technical, /html > body > main > section/u, JSON.stringify(selection));
+      assert.match(selection.announcement, /AcessibilidadeNome acessível ausente/u, JSON.stringify(selection));
       assert.equal(await extension.evaluate(extension.startPage.page, 'globalThis.__markerControlClicks'), 0);
       // Panel selection and the page's validated select command arrive through
-      // separate asynchronous channels. Require the exact ring, not a same-tick snapshot.
+      // separate asynchronous channels. Require the emphasized signal, not a same-tick snapshot.
       await extension.waitForValue(extension.startPage.page, markerSurface,
-        value => value.rings === 1 && value.selectedNumbers[0] === number,
+        value => selectedSignalNumber(value) === number,
         { timeoutMs: 10_000, intervalMs: 50 });
       return expected;
     });
@@ -338,11 +422,11 @@ for (const scenario of [
       })()`, { userGesture: true });
       assert.ok(otherNumber > 0 && otherNumber !== expectedSelection.number);
       await extension.waitForValue(extension.startPage.page, markerSurface,
-        value => value.rings === 1 && value.selectedNumbers[0] === otherNumber);
-      assert.deepEqual(await extension.evaluate(extension.startPage.page, '({x:scrollX,y:scrollY})'), { x: preserved.x, y: preserved.y });
+        value => selectedSignalNumber(value) === otherNumber);
+      assert.deepEqual(await extension.evaluate(extension.startPage.page, '({x:scrollX,y:scrollY})'), { x: baseline.x, y: baseline.y });
       await step('EXPLICIT_GO', async () => {
         await extension.click(panel, '[data-intent="GO_TO_PAGE_MARKER"]');
-        await extension.waitForValue(extension.startPage.page, 'scrollY', value => value !== preserved.y);
+        await extension.waitForValue(extension.startPage.page, 'scrollY', value => value !== baseline.y);
       });
       // Start from the final native page control, then Tab into the first
       // overlay button. Only the starting point is focused by the harness.
@@ -358,7 +442,8 @@ for (const scenario of [
           .find(button=>Number(button.querySelector('[data-page-marker-number]')?.dataset.pageMarkerNumber)===${otherNumber});
         other.click();return true;
       })()`, { userGesture: true });
-      await extension.waitForValue(extension.startPage.page, markerSurface, value => value.selectedNumbers[0] === otherNumber);
+      await extension.waitForValue(extension.startPage.page, markerSurface,
+        value => selectedSignalNumber(value) === otherNumber);
       // Selecting a control in the panel is an explicit focus interaction.
       // Return through the page's native tab order before testing Space there.
       await extension.evaluate(extension.startPage.page, `(() => {
@@ -368,7 +453,7 @@ for (const scenario of [
       assert.equal(await extension.evaluate(extension.startPage.page, `document.querySelector('[data-audita-page-markers-root="v1"]').shadowRoot.activeElement?.className`), 'audita-marker');
       await activateMarkerByKey(extension, extension.startPage.page, ' ');
       await extension.waitForValue(extension.startPage.page, markerSurface,
-        value => value.selectedNumbers[0] === expectedSelection.number);
+        value => selectedSignalNumber(value) === expectedSelection.number);
       assert.equal(await extension.evaluate(extension.startPage.page, 'globalThis.__markerControlClicks'), 0);
       if (!scenario.idle) await step('QA_SCREENSHOTS', async () => {
         await extension.captureJourney('markers-original-selected', extension.startPage.page, { captureBeyondViewport: false });
@@ -430,7 +515,7 @@ for (const scenario of [
       assert.ok(Object.keys(expected.counts).length > 0);
       await extension.click(panel, `[data-result-filter="${expected.classification}"]`);
       const symbol = expected.classification === 'passed' ? '✓' : '×';
-      const expectedLabels = Object.entries(expected.counts).map(([number, count]) => `${number}${symbol}${count}`).sort();
+      const expectedLabels = Object.entries(expected.counts).map(([number, count]) => (count > 1 ? `${number} ${symbol} (${count})` : `${number} ${symbol}`)).sort();
       await extension.waitForValue(extension.startPage.page, markerSurface, value => value.roots === 1 &&
         JSON.stringify(value.buttons.filter(button=>!button.hidden).map(button=>button.text).sort()) === JSON.stringify(expectedLabels));
       assert.deepEqual(await extension.evaluate(panel, `[...document.querySelectorAll('[data-result-filter]')].map(node=>node.textContent)`), totals);
@@ -471,7 +556,7 @@ for (const scenario of [
           cards:document.querySelectorAll('#review-list details.lay-card').length,
           target:Boolean(document.querySelector('[data-review-controls-target]')),
           evaluator:Boolean(document.querySelector('#review-evaluator')),
-          identity:/Revisão do modelo: [0-9]+/.test(document.querySelector('[data-report-section="7"]')?.textContent??'')
+          identity:/Revisão do modelo: [0-9]+/.test(${methodologySection}?.textContent??'')
         }))()`);
         assert.ok(prerequisites.cards >= 2 && prerequisites.target && prerequisites.evaluator && prerequisites.identity,
           JSON.stringify(prerequisites));
@@ -490,7 +575,7 @@ for (const scenario of [
           next.querySelector('.lay-note textarea').value='Nota ainda não salva';
           window.__reviewPreserved={list:document.querySelector('#review-list'),evaluator:document.querySelector('#review-evaluator'),next,
             key:first.getAttribute('data-lay-card')};
-          const methodology=document.querySelector('[data-report-section="7"]').textContent;
+          const methodology=${methodologySection}.textContent;
           const before=Number(methodology.match(/Revisão do modelo: ([0-9]+)/)[1]);
           first.querySelector('[data-lay-answer="não conforme"]').click();
           first.querySelector('.lay-finding textarea').value='Barreira confirmada no teste local';
@@ -502,7 +587,7 @@ for (const scenario of [
         assert.match(savedStatus, /Resposta salva/u);
         const refreshed = await extension.evaluate(report, `(() => {
           const kept=window.__reviewPreserved;
-          const text=document.querySelector('[data-report-section="7"]').textContent;
+          const text=${methodologySection}.textContent;
           const answeredCard=[...kept.list.querySelectorAll('details.lay-card')].find(card=>card.getAttribute('data-lay-card')===kept.key);
           return {revision:Number(text.match(/Revisão do modelo: ([0-9]+)/)[1]),
             sameForms:document.querySelector('#review-list')===kept.list&&document.querySelector('#review-evaluator')===kept.evaluator,
@@ -1855,10 +1940,15 @@ test('passive current-page observes memory-only elements without navigation or i
     value => value === 'clear', { timeoutMs: 15_000 });
   const highlightedSource = await extension.attachPage(extension.startPage.targetId);
   assert.equal(await extension.evaluate(highlightedSource, 'document.querySelectorAll("[data-audita-highlight-root=v1]").length'), 1);
+  // C.19: o destaque é um contorno POR FORA do elemento — 3 px de folga mais 3 px de borda de cada
+  // lado — para não cobrir o conteúdo. O que se exige é que ele envolva exatamente o alvo (e não
+  // outro nó), então a comparação é com a caixa inflada, não com a caixa do elemento.
   assert.equal(await extension.evaluate(highlightedSource, `(() => {
     const overlay=document.querySelector('[data-audita-highlight-root=v1]').getBoundingClientRect();
     const target=document.querySelector('#memory-only-unnamed').getBoundingClientRect();
-    return ['left','top','width','height'].every(key=>Math.abs(overlay[key]-target[key])<1);
+    const slack=6;
+    return Math.abs(overlay.left-(target.left-slack))<=1 && Math.abs(overlay.top-(target.top-slack))<=1 &&
+      Math.abs(overlay.width-(target.width+2*slack))<=2 && Math.abs(overlay.height-(target.height+2*slack))<=2;
   })()`), true, 'the overlay must surround the audited element, not another node');
   await extension.browser.command('Target.detachFromTarget', { sessionId: highlightedSource.sessionId });
   await extension.click(report, controlSelector);

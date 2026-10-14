@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 
 import { FORM_RULES } from '../../src/core/rules/forms.js';
+import { HOVER_ONLY_RULES } from '../../src/core/rules/hover-only.js';
 import { INTERACTIVE_RULES } from '../../src/core/rules/interactive.js';
 import { MANUAL_REVIEW_RULES } from '../../src/core/rules/manual-review.js';
 import { MEDIA_RULES } from '../../src/core/rules/media.js';
@@ -15,7 +16,7 @@ import { registeredCoreRemediationReasons } from '../../src/core/report/remediat
 // rótulo fora da tela passaram a terminar em "A auditoria foi encerrada antes de concluir" (1.1.48 a
 // 1.1.55). Estes testes leem os motivos literais das regras e exigem cada um no catálogo.
 const HUMAN_REASONS = new Set(['human-judgment-required', 'page-level-insufficient-observation', 'page-level-human-judgment']);
-const CORE_RULES = [FORM_RULES, INTERACTIVE_RULES, MANUAL_REVIEW_RULES, MEDIA_RULES, STRUCTURE_RULES, VISUAL_RULES].flat();
+const CORE_RULES = [FORM_RULES, HOVER_ONLY_RULES, INTERACTIVE_RULES, MANUAL_REVIEW_RULES, MEDIA_RULES, STRUCTURE_RULES, VISUAL_RULES].flat();
 const REASON_LITERAL = /reason:\s*'([a-z0-9]+(?:-[a-z0-9]+)*)'/gu;
 
 function literalReasons(source) {

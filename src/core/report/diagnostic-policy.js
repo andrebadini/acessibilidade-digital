@@ -23,6 +23,28 @@ export const FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE =
 export const ELEMENT_CAPTURE_BUDGET_MESSAGE =
   'O limite de evidências por página foi atingido; as demais ocorrências continuam no relatório com seletor e descrição, sem miniatura própria e, em páginas muito grandes, sem trecho de código.';
 
+// A miniatura de elemento é recortada pela posição do alvo. Quando essa posição não pôde ser remedida
+// no instante da captura (`DOM.getContentQuads`/`DOM.getBoxModel` recusaram o nó), a miniatura usa a
+// medida do snapshot — que pode estar desatualizada se a página mudou de layout desde a coleta. A
+// limitação é declarada em vez de escondida; nada disso impede a auditoria de concluir.
+export const ELEMENT_MEASUREMENT_FALLBACK_MESSAGE =
+  'A posição de um ou mais elementos não pôde ser remedida no instante da miniatura; nesses casos a imagem usa a medida do snapshot e pode estar deslocada se a página mudou de layout.';
+
+// (P3/16 do diagnóstico 1.1.57.) Nó de subframe tem o `rect` no sistema de coordenadas do próprio
+// documento; aplicar esse clip ao documento de topo recortaria uma região arbitrária. Enquanto não
+// houver captura dentro do quadro, o comportamento é declarar em vez de desenhar no lugar errado.
+export const ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE =
+  'Elementos dentro de iframes não recebem miniatura própria: a posição medida no quadro não pode ser aplicada ao documento de topo. O achado continua no relatório com seletor, descrição e captura integral da página.';
+
+// Congelamento de navegação (1.1.58). A página tentou trocar de documento durante a auditoria (recarga por
+// `<meta http-equiv="refresh">`, `location.reload()` por temporizador, redirecionamento por script) e a
+// navegação foi segurada com o depurador anexado até o fim — é o que faz o resultado corresponder à página
+// analisada. Não é uma degradação: nada foi perdido, e por isso a mensagem não força `partial`. A contagem de
+// tentativas existe no runtime, mas o catálogo é fechado e compara mensagem exata; o número não entra no
+// texto para não transformar uma mensagem factual em texto livre.
+export const PAGE_NAVIGATION_HELD_MESSAGE =
+  'A página tentou recarregar ou navegar sozinha durante a auditoria; a navegação foi segurada até o fim para que o resultado corresponda à página analisada.';
+
 export const EXPORT_ISSUE_MESSAGES = Object.freeze({
   REPORT_PDF_UNAVAILABLE: 'O PDF não foi gerado devido a uma limitação técnica local.',
   REPORT_CSV_UNAVAILABLE: 'O CSV não foi gerado devido a uma limitação técnica local.',
@@ -102,8 +124,17 @@ const technicalPageDiagnostics = [
   page({ code: 'AXE_EXECUTION_FAILED', message: 'O motor suplementar axe-core teve cobertura parcial; o motor próprio continuou normalmente.', fact: 'axe-partial', group: 'axe' }),
   page({ code: 'FULL_PAGE_CAPTURE_TRUNCATED', message: FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE, fact: 'full-page-truncated' }),
   page({ code: 'ELEMENT_CAPTURE_BUDGET_REACHED', message: ELEMENT_CAPTURE_BUDGET_MESSAGE, fact: 'element-capture-budget' }),
+  page({
+    code: 'ELEMENT_MEASUREMENT_FALLBACK', message: ELEMENT_MEASUREMENT_FALLBACK_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES, fact: 'element-measurement-fallback', causePartial: false,
+  }),
+  page({
+    code: 'ELEMENT_CAPTURE_FRAME_CONTEXT', message: ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES, fact: 'element-frame-context', causePartial: false,
+  }),
   page({ code: 'ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', message: 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.', fact: 'element-capture-skipped' }),
   page({ code: 'ANNOTATION_MAP_PARTIAL', message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.', fact: 'annotation-partial', group: 'annotation' }),
+  page({ code: 'KEYBOARD_MAP_PARTIAL', message: 'O mapa do teclado foi gerado com cobertura parcial e limitações explícitas.', fact: 'keyboard-map-partial', group: 'keyboard-map' }),
   page({ code: 'CDP_DISCONNECT_FAILED', message: 'A sessão de depuração não pôde ser encerrada automaticamente.', fact: 'cleanup-cdp', timestampScope: 'root' }),
 ];
 
@@ -135,6 +166,28 @@ const annotationFailureDiagnostics = annotationFailureCodes.map(code => page({
   code,
   message: 'O mapa visual derivado não pôde ser gerado localmente; a captura original foi preservada.',
   fact: 'annotation-failed', group: 'annotation',
+}));
+
+const keyboardMapFailureCodes = Object.freeze([
+  'KEYBOARD_MAP_COMPOSITOR_UNAVAILABLE',
+  'KEYBOARD_MAP_SOURCE_INVALID',
+  'KEYBOARD_MAP_SOURCE_HASH_MISMATCH',
+  'KEYBOARD_MAP_SOURCE_LIMIT',
+  'KEYBOARD_MAP_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_PRINT_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_DERIVED_BYTES_LIMIT',
+  'KEYBOARD_MAP_OUTPUT_INVALID',
+  'KEYBOARD_MAP_TIMEOUT',
+]);
+
+// Grupo próprio: o agrupamento é a cardinalidade da mesma operação de geração, e o mapa do teclado
+// é uma segunda derivação da mesma captura. Compartilhar 'annotation' tornava o mapa visual e o mapa
+// do teclado mutuamente exclusivos — um mapa visual parcial mais qualquer diagnóstico do teclado
+// invalidava o modelo inteiro e a auditoria terminava sem resultado.
+const keyboardMapFailureDiagnostics = keyboardMapFailureCodes.map(code => page({
+  code,
+  message: 'O mapa do teclado não pôde ser gerado localmente; a captura original foi preservada.',
+  fact: 'keyboard-map-failed', group: 'keyboard-map',
 }));
 
 const terminalPageDiagnostics = [
@@ -202,12 +255,21 @@ export const SYSTEM_DIAGNOSTIC_POLICY = Object.freeze([
   ...technicalPageDiagnostics,
   ...occurrencePageDiagnostics,
   ...annotationFailureDiagnostics,
+  ...keyboardMapFailureDiagnostics,
   page({
     code: 'ATTACHED_COPY_RELOADED',
     message: ATTACHED_COPY_RELOADED_MESSAGE,
     statuses: ALL_TERMINAL_STATUSES,
     recoverable: true,
     fact: 'attached-copy-reloaded',
+    causePartial: false,
+  }),
+  page({
+    code: 'PAGE_NAVIGATION_HELD',
+    message: PAGE_NAVIGATION_HELD_MESSAGE,
+    statuses: ALL_TERMINAL_STATUSES,
+    recoverable: true,
+    fact: 'page-navigation-held',
     causePartial: false,
   }),
   page({

@@ -51,6 +51,7 @@ import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.
 import { aggregateItems } from '../rules/aggregate-items.js';
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
 import { validateAnnotationMapArtifact } from '../evidence/annotation-map-artifact.js';
+import { validateKeyboardMapArtifact } from '../keyboard/keyboard-map-artifact.js';
 import {
   AUDITA_RULES_VERSION,
   hasRegisteredSource,
@@ -73,7 +74,7 @@ const PAGE_EXECUTION_STATE_MATRIX = Object.freeze({
 });
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
 const METHODOLOGY_NAME = 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2';
-const EXPECTED_RULE_COUNT = 130;
+const EXPECTED_RULE_COUNT = 131;
 const URL_VALUE_KEYS = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src', 'currentsrc']);
 const NORMATIVE_FIELDS = Object.freeze(['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs']);
 const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.map(ruleId => [ruleId, Object.freeze({
@@ -82,6 +83,13 @@ const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.m
   wcag: Object.freeze(item.wcag.map(reference => reference.id)),
 })])));
 const EXPECTED_CORE_RULE_IDS = Object.freeze([...CORE_RULE_METADATA.keys()]);
+// Auditorias concluídas antes desta versão foram gravadas com uma regra por item normativo (o item
+// 5.1.13 ainda não declarava a detecção de conteúdo revelado apenas por hover). Elas continuam
+// íntegras: o inventário da própria versão é aceito, sem reescrever o registro guardado.
+const LEGACY_CORE_RULE_IDS = Object.freeze(NBR17225_ITEMS
+  .map(item => item.ruleIds[0])
+  .filter(ruleId => typeof ruleId === 'string'));
+const ACCEPTED_CORE_RULE_COUNTS = Object.freeze([EXPECTED_RULE_COUNT, LEGACY_CORE_RULE_IDS.length]);
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
   impact: 'minor',
@@ -523,7 +531,10 @@ function projectV1Evidence(artifact, pageId) {
   for (const key of [
     'evidenceId', 'kind', 'hash', 'pixelState', 'pixelContentHash', 'state', 'dataUrl',
     'nodeId', 'backendNodeId', 'snippet', 'fullPageEvidenceId', 'mediaUrl',
-    'derivation', 'status', 'segments', 'legend', 'counts', 'limits', 'limitations',
+    // `legend` são as entradas do mapa de anúncios; `stops`/`suspects` são as do mapa do teclado.
+    // Sem eles na lista, a projeção do modelo apagava as duas listas em silêncio e o mapa do teclado
+    // chegava ao relatório sem nenhuma parada — e sem nada para a caixa numerada do desenho conferir.
+    'derivation', 'status', 'segments', 'legend', 'stops', 'suspects', 'counts', 'limits', 'limitations',
   ]) copyOwnData(output, artifact, key);
   output.pageId = artifact.pageId ?? pageId;
   if (artifact.selector !== undefined) {
@@ -534,7 +545,7 @@ function projectV1Evidence(artifact, pageId) {
       'announcementPreview', 'description', 'descriptionSource', 'name', 'nameSource', 'role', 'states', 'valueStatus', 'visibleText',
     ]);
   }
-  if (artifact.metadata !== undefined) output.metadata = projectRecord(artifact.metadata, ['annotationMargin', 'captureReceivedAt', 'clip', 'height', 'highlightBox', 'kind', 'mimeType', 'width']);
+  if (artifact.metadata !== undefined) output.metadata = projectRecord(artifact.metadata, ['annotationMargin', 'captureReceivedAt', 'clip', 'height', 'highlightBox', 'highlightClipped', 'highlightParts', 'kind', 'mimeType', 'pixelScale', 'width']);
   return sanitizeEvidenceArtifactUrls(output);
 }
 
@@ -1272,8 +1283,8 @@ function validateMethodology(methodology, versions, reproducibility) {
   if (canonicalText(methodology.name, 'methodology.name') !== METHODOLOGY_NAME) throw new TypeError('Nome da metodologia inválido.');
   const version = canonicalText(methodology.version, 'methodology.version');
   if (version !== versions.rules) throw new TypeError('Versão da metodologia incoerente com a versão das regras.');
-  if (!Number.isSafeInteger(methodology.coreRuleCount) || methodology.coreRuleCount !== EXPECTED_RULE_COUNT) {
-    throw new TypeError('methodology.coreRuleCount deve registrar exatamente as 130 regras próprias.');
+  if (!Number.isSafeInteger(methodology.coreRuleCount) || !ACCEPTED_CORE_RULE_COUNTS.includes(methodology.coreRuleCount)) {
+    throw new TypeError('methodology.coreRuleCount deve registrar as regras próprias da versão instalada.');
   }
   if (!Number.isSafeInteger(methodology.supplementalRuleCount) || methodology.supplementalRuleCount < 0) {
     throw new TypeError('methodology.supplementalRuleCount inválido.');
@@ -1378,6 +1389,16 @@ function validateIntegrity(integrity) {
   }
 }
 
+// A declaração de regras de um item é reproduzida no modelo guardado. Auditorias gravadas antes de o
+// item 5.1.13 ganhar a regra de conteúdo revelado apenas por hover trazem a declaração anterior, que é
+// exatamente o prefixo da atual. Só esse prefixo é aceito; qualquer outra divergência continua sendo
+// tratada como adulteração do catálogo normativo.
+function matchesNormativeRuleIds(actual, expected) {
+  if (canonicalStringify(actual) === canonicalStringify(expected.ruleIds)) return true;
+  return Array.isArray(actual) && actual.length > 0 && actual.length < expected.ruleIds.length &&
+    actual.every((ruleId, index) => ruleId === expected.ruleIds[index]);
+}
+
 function validateItems(items) {
   if (!Array.isArray(items) || items.length !== NBR17225_ITEMS.length) throw new TypeError('O modelo deve conter exatamente 146 resultados de item.');
   const byId = new Map();
@@ -1398,7 +1419,7 @@ function validateItems(items) {
       if (item[field] !== expected[field]) throw new TypeError(`Metadado normativo adulterado em ${expected.id}.${field}.`);
     }
     if (canonicalStringify(item.wcag) !== canonicalStringify(expected.wcag)
-      || canonicalStringify(item.ruleIds) !== canonicalStringify(expected.ruleIds)) {
+      || !matchesNormativeRuleIds(item.ruleIds, expected)) {
       throw new TypeError(`Referências normativas adulteradas no item ${expected.id}.`);
     }
   }
@@ -1478,11 +1499,12 @@ function validateRuleInventory(model, ruleById) {
     throw new TypeError('Contagens da metodologia divergem do inventário real de regras.');
   }
 
-  const completeCoreInventory = coreRules.length === EXPECTED_RULE_COUNT &&
-    EXPECTED_CORE_RULE_IDS.every(ruleId => ruleById.get(ruleId)?.source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine);
+  const completeInventory = ruleIds => coreRules.length === ruleIds.length &&
+    ruleIds.every(ruleId => ruleById.get(ruleId)?.source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine);
+  const completeCoreInventory = completeInventory(EXPECTED_CORE_RULE_IDS);
   if (['complete', 'partial'].includes(model.session.status)) {
-    if (!completeCoreInventory) {
-      throw new TypeError('Sessão concluída deve conter exatamente as 130 regras core registradas.');
+    if (!completeCoreInventory && !completeInventory(LEGACY_CORE_RULE_IDS)) {
+      throw new TypeError('Sessão concluída deve conter exatamente as regras core registradas.');
     }
     return;
   }
@@ -1720,6 +1742,11 @@ function validatePageDiagnosticFacts(model, page, policies) {
   const maps = pageArtifacts.filter(artifact => artifact.kind === 'announcement-map');
   const annotationFailures = policies.filter(policy => policy.fact === 'annotation-failed');
   const partialMaps = maps.filter(artifact => artifact.status === 'partial');
+  // O mapa do teclado deriva da mesma captura, mas é julgado pelas próprias regras: um mapa de
+  // anúncios ausente não pode servir de prova de que o mapa do teclado falhou, nem o contrário.
+  const keyboardMaps = pageArtifacts.filter(artifact => artifact.kind === 'keyboard-map');
+  const keyboardFailures = policies.filter(policy => policy.fact === 'keyboard-map-failed');
+  const partialKeyboardMaps = keyboardMaps.filter(artifact => artifact.status === 'partial');
   const hasFullPageFailure = codes.has('FULL_PAGE_CAPTURE_FAILED');
   const hasPixelOmission = codes.has('PIXEL_CAPTURE_OMITTED');
   const hasFullPageOmission = codes.has('FULL_PAGE_CAPTURE_OMITTED');
@@ -1730,16 +1757,16 @@ function validatePageDiagnosticFacts(model, page, policies) {
   if (page.finalUrlObserved && (fullPageStates !== 1 || pristine.length > 1)) {
     throw new TypeError('Captura integral pristine, falha ou omissão por política devem formar um estado factual exclusivo.');
   }
-  if (hasFullPageFailure && (maps.length > 0 ||
-    policies.some(policy => ['annotation-failed', 'annotation-partial'].includes(policy.fact)))) {
+  if (hasFullPageFailure && (maps.length > 0 || keyboardMaps.length > 0 ||
+    policies.some(policy => ['annotation-failed', 'annotation-partial', 'keyboard-map-failed', 'keyboard-map-partial'].includes(policy.fact)))) {
     throw new TypeError('Falha de captura integral contradiz tentativa ou resultado de mapa.');
   }
   const rasterArtifacts = pageArtifacts.filter(artifact => Object.hasOwn(artifact, 'dataUrl') ||
-    artifact.kind === 'announcement-map');
+    ['announcement-map', 'keyboard-map'].includes(artifact.kind));
   if (hasPixelOmission && rasterArtifacts.length > 0) {
     throw new TypeError('Omissão total de pixels contradiz evidência raster retida.');
   }
-  if (hasFullPageOmission && (pristine.length > 0 || maps.length > 0)) {
+  if (hasFullPageOmission && (pristine.length > 0 || maps.length > 0 || keyboardMaps.length > 0)) {
     throw new TypeError('Omissão deliberada da captura integral contradiz pristine ou mapa retido.');
   }
   if (hasFullPageNotAttempted && rasterArtifacts.length > 0) {
@@ -1767,6 +1794,15 @@ function validatePageDiagnosticFacts(model, page, policies) {
   }
   if ((annotationFailures.length > 0 || partialMaps.length > 0) && pristine.length !== 1) {
     throw new TypeError('Tentativa de mapa exige uma captura pristine autoritativa da mesma página.');
+  }
+  if ((partialKeyboardMaps.length > 0) !== codes.has('KEYBOARD_MAP_PARTIAL')) {
+    throw new TypeError('Mapa do teclado parcial e diagnóstico correspondente devem formar uma equivalência exata.');
+  }
+  if (keyboardFailures.length > 0 && keyboardMaps.length > 0) {
+    throw new TypeError('Falha de geração do mapa do teclado não pode coexistir com mapa produzido.');
+  }
+  if ((keyboardFailures.length > 0 || partialKeyboardMaps.length > 0) && pristine.length !== 1) {
+    throw new TypeError('Tentativa de mapa do teclado exige uma captura pristine autoritativa da mesma página.');
   }
   validateOccurrenceDiagnosticFacts(page, pageArtifacts, pageOccurrences);
   validatePageAxeDiagnosticFacts(model, page, codes);
@@ -1939,6 +1975,7 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
   const evidenceIds = new Set();
   const artifactById = new Map();
   const announcementMapByPage = new Map();
+  const keyboardMapByPage = new Map();
   for (const artifact of model.evidence) {
     const id = requiredId(artifact?.evidenceId, 'evidenceId');
     if (evidenceIds.has(id)) throw new TypeError(`Evidência duplicada: ${id}.`);
@@ -1959,6 +1996,10 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
       if (announcementMapByPage.has(pageId)) throw new TypeError(`Mapa de anúncios duplicado na página ${pageId}.`);
       announcementMapByPage.set(pageId, artifact);
     }
+    if (artifact.kind === 'keyboard-map') {
+      if (keyboardMapByPage.has(pageId)) throw new TypeError(`Mapa do teclado duplicado na página ${pageId}.`);
+      keyboardMapByPage.set(pageId, artifact);
+    }
   }
   for (const artifact of model.evidence) {
     if (artifact.fullPageEvidenceId !== undefined) {
@@ -1969,6 +2010,9 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
     }
     if (artifact.kind === 'announcement-map') {
       validateAnnotationMapArtifact(artifact, { sourceArtifact: artifactById.get(artifact.fullPageEvidenceId) });
+    }
+    if (artifact.kind === 'keyboard-map') {
+      validateKeyboardMapArtifact(artifact, { sourceArtifact: artifactById.get(artifact.fullPageEvidenceId) });
     }
   }
   if (!Array.isArray(model.occurrences)) throw new TypeError('occurrences deve ser lista.');
@@ -2061,7 +2105,7 @@ function validateEvidenceAndOccurrences(model, ruleById, pageById, scopeMode = '
       if (!evidenceIds.has(canonicalEvidenceId)) throw new TypeError(`${label} referencia evidência desconhecida.`);
       if (links.has(canonicalEvidenceId)) throw new TypeError(`${label} contém evidência duplicada.`);
       if (artifactById.get(canonicalEvidenceId).pageId !== pageId) throw new TypeError(`${label} referencia evidência de outra página.`);
-      if (artifactById.get(canonicalEvidenceId).kind === 'announcement-map') {
+      if (['announcement-map', 'keyboard-map'].includes(artifactById.get(canonicalEvidenceId).kind)) {
         throw new TypeError(`${label} não pode vincular o mapa derivado da página.`);
       }
       links.add(canonicalEvidenceId);

@@ -7,6 +7,8 @@ import {
   classifySelectorToken,
   createStructuralSignatureV1,
   parseCssSelectorV1,
+  parseHighlightSelectorV1,
+  parseSignalSelectorV1,
   roleForStructuralSignature,
   selectorMatchesOne,
   structuralSignatureMatches,
@@ -258,6 +260,95 @@ test('enforces segment, complexity and UTF-8 budgets at their exact boundaries',
   assert.equal(parseCssSelectorV1(sixteenSegments).segments.length, 16);
   assert.throws(() => parseCssSelectorV1(`${sixteenSegments} > main`), /segmentos/iu);
   assert.throws(() => parseCssSelectorV1('a'.repeat(2_049)), /2\.048 bytes/iu);
+});
+
+test('eases only the highlight vocabulary while the strict export grammar keeps refusing date and hash tokens', () => {
+  // Anything both grammars accept must parse to the exact same record.
+  const shared = 'main > button.primary[type="button"]:nth-of-type(2)';
+  assert.deepEqual(parseHighlightSelectorV1(shared), parseCssSelectorV1(shared));
+
+  for (const [value, complexity] of [
+    ['button#post-1234', 2],
+    ['button.card-2024', 2],
+    ['button.hex-9f8e7d6c', 2],
+    ['main > button.primary.card-2024', 5],
+  ]) {
+    assert.throws(() => parseCssSelectorV1(value), /token sensível/iu, value);
+    const parsed = parseHighlightSelectorV1(value);
+    assert.equal(parsed.value, value);
+    assert.equal(parsed.complexity, complexity);
+    assert.equal(parsed.syntax, 'CSSSelectorV1');
+    assert.equal(Object.isFrozen(parsed), true);
+    assert.equal(Object.isFrozen(parsed.segments), true);
+  }
+
+  // Credential-shaped names, URLs and UUIDs stay refused on both paths.
+  for (const value of [
+    'button#password',
+    'button.token-value',
+    'button.session-id',
+    'button.csrf-token',
+    'button#api-key',
+    'button.cliente-550e8400-e29b-41d4-a716-446655440000',
+    'div.user@example.com',
+  ]) {
+    assert.throws(() => parseHighlightSelectorV1(value), /token sensível/iu, value);
+    assert.throws(() => parseCssSelectorV1(value), /token sensível/iu, value);
+  }
+
+  // The 16-segment / cost-64 export ceilings become 64 segments / cost 320 for the highlight.
+  const deepest = Array.from({ length: 64 }, () => 'main').join(' > ');
+  assert.equal(parseHighlightSelectorV1(deepest).segments.length, 64);
+  assert.equal(parseHighlightSelectorV1(deepest).complexity, 127);
+  assert.throws(() => parseHighlightSelectorV1(`${deepest} > main`), /segmentos/iu);
+  assert.throws(() => parseCssSelectorV1(deepest), /segmentos/iu);
+
+  const strongest = 'button#safe.primary.secondary[type="button"]:nth-of-type(1)';
+  const atCostLimit = [...Array(24).fill(strongest), ...Array(27).fill('button.primary')].join(' > ');
+  assert.equal(parseHighlightSelectorV1(atCostLimit).complexity, 320);
+  assert.throws(() => parseHighlightSelectorV1(`${atCostLimit} > main`), /complexidade/iu);
+  assert.throws(() => parseCssSelectorV1(atCostLimit), /segmentos/iu);
+
+  // Outside the vocabulary both stay closed: no combinators, wildcards, negation or pseudo-classes.
+  for (const value of ['button > *', 'button:hover', 'div + button', 'button:not(.x)', 'button >']) {
+    assert.throws(() => parseHighlightSelectorV1(value), TypeError, value);
+  }
+});
+
+test('accepts the semantic attribute selectors the page signals produce, unescaping the value', () => {
+  // Exatamente as formas que `buildStableSelector` emite para um controle sem id único. Sem elas o
+  // elemento ganhava sinal na página e não ganhava destaque individual.
+  for (const [value, expected] of [
+    ['input[name="q"]', { name: 'name', value: 'q' }],
+    ['img[alt="Mapa do site"]', { name: 'alt', value: 'Mapa do site' }],
+    ['a[title="Ver mais"]', { name: 'title', value: 'Ver mais' }],
+    ['input[aria-label="Buscar"]', { name: 'aria-label', value: 'Buscar' }],
+    // `escapeCssString` escreve as aspas do valor como `\22 `: a leitura de volta tem de ser a
+    // mesma nos dois lados, senão o valor validado aqui não é o valor que a página corrobora.
+    ['button[data-testid="save \\22 draft\\22 "]', { name: 'data-testid', value: 'save "draft"' }],
+    ['button[role="presentation"]', { name: 'role', value: 'presentation' }],
+  ]) {
+    const parsed = parseHighlightSelectorV1(value);
+    assert.equal(parsed.value, value);
+    assert.equal(parsed.complexity, 3);
+    assert.deepEqual(parsed.segments.at(-1).enumAttribute, expected);
+  }
+  assert.equal(parseHighlightSelectorV1('main > input[name="q"]').complexity, 5);
+
+  // O campo continua fechado: só os atributos semânticos dos sinais, nunca um seletor de atributo
+  // arbitrário e nunca um valor com cara de credencial ou com caractere de controle.
+  for (const value of [
+    'div[data-test="x"]',
+    'a[href="/sair"]',
+    'input[type="date"]',
+    'input[name="access_token"]',
+    'input[name="Cliente 550e8400-e29b-41d4-a716-446655440000"]',
+    'input[name="a\u0007b"]',
+    `input[name="${'x'.repeat(257)}"]`,
+  ]) {
+    assert.throws(() => parseHighlightSelectorV1(value), TypeError, value);
+    assert.throws(() => parseSignalSelectorV1(value), TypeError, value);
+  }
 });
 
 test('rejects an oversized code-unit input before constructing or invoking TextEncoder', () => {
@@ -671,9 +762,12 @@ test('structural signatures reject caller-supplied structure, malformed expected
     /assinatura/iu,
   );
 
-  const deep = linearTree(17);
+  // The ancestry ceiling is 64, the same the page walks for the signals and the individual highlight.
+  const deepest = linearTree(64);
+  await createStructuralSignatureV1({ documentId: 'doc-1', frameId: 0, element: deepest.target, scopeRoot: deepest.document, subtle: webcrypto.subtle });
+  const tooDeep = linearTree(65);
   await assert.rejects(
-    () => createStructuralSignatureV1({ documentId: 'doc-1', frameId: 0, element: deep.target, scopeRoot: deep.document, subtle: webcrypto.subtle }),
+    () => createStructuralSignatureV1({ documentId: 'doc-1', frameId: 0, element: tooDeep.target, scopeRoot: tooDeep.document, subtle: webcrypto.subtle }),
     /escopo não alcançado/iu,
   );
 });

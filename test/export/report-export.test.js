@@ -36,6 +36,17 @@ const FALLBACK_PDF = new TextEncoder().encode('%PDF-1.7\nfinal-fallback');
 
 function clone(value) { return structuredClone(value); }
 
+// A amostra antiga não traz o quadro do elemento; sem ele a captura é apresentada sem marcação, e o
+// teste da prévia marcada precisa do quadro que a captura real grava em `metadata`.
+function withElementFrame(audit) {
+  const input = clone(audit);
+  input.evidence.find(evidence => evidence.kind === 'element').metadata = {
+    width: 128, height: 88,
+    highlightBox: { x: 24, y: 12, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
+  };
+  return input;
+}
+
 function completeSingleAudit() {
   const model = clone(SAMPLE_AUDIT);
   model.session.status = 'complete';
@@ -105,7 +116,7 @@ test('keeps technical single and batch status complete when an export artifact i
 });
 
 test('v1 review-ready pending revision persists four exact artifacts and rejects tampering', async () => {
-  const reviewed = await enrichAuditForReport(structuredClone(SAMPLE_AUDIT), { now:()=> '2026-08-26T15:00:00.000Z', timezone:SAMPLE_AUDIT.timezone, manifestVersion:SAMPLE_AUDIT.versions.manifest, rulesVersion:SAMPLE_AUDIT.versions.rules, browserVersion:SAMPLE_AUDIT.environment.chromeVersion });
+  const reviewed = await enrichAuditForReport(withElementFrame(SAMPLE_AUDIT), { now:()=> '2026-08-26T15:00:00.000Z', timezone:SAMPLE_AUDIT.timezone, manifestVersion:SAMPLE_AUDIT.versions.manifest, rulesVersion:SAMPLE_AUDIT.versions.rules, browserVersion:SAMPLE_AUDIT.environment.chromeVersion });
   const inventory = await createInstalledCoreRuleInventory();
   const store = createInMemoryAuditStore();
   const model = reviewed;
@@ -268,7 +279,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   await assert.rejects(persistExportSuccess(wrongRevision, store), /identidade|revisão|proveniência/i);
   assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), await store.getExportReceipt(model.auditId)], durableAfterControl);
   result.exportDeliveryIdentity = originalIdentity;
-  assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
+  assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 8, 'sete seções originais + Mapa do teclado (1.1.58)');
   assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
   const identity = {
     auditId: model.auditId,

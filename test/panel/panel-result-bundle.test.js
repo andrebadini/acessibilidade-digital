@@ -221,7 +221,7 @@ test('keeps an image issue visible when an earlier card alone exceeds the occurr
     draft.reviewDecisions = [];
     draft.evidence = draft.evidence.filter(value => value.evidenceId === 'ev-full');
     for (const rule of draft.ruleResults) {
-      const count = rule.ruleId === 'accessible-component-name' ? 70 : rule.ruleId === 'content-image-alternative' ? 1 : 0;
+      const count = rule.ruleId === 'accessible-component-name' ? 510 : rule.ruleId === 'content-image-alternative' ? 1 : 0;
       rule.outcome = count > 0 ? 'failed' : 'inapplicable';
       rule.targets = [];
       rule.summary = canonicalCoreRuleSummary(rule.ruleId, rule.outcome);
@@ -258,11 +258,11 @@ test('keeps an image issue visible when an earlier card alone exceeds the occurr
   const cards = bundle.summary.groups.failed;
 
   assert.deepEqual(cards.map(card => card.ruleId), ['accessible-component-name', 'content-image-alternative']);
-  assert.deepEqual(cards.map(card => card.occurrenceIds.length), [63, 1]);
-  assert.equal(cards[0].occurrenceIds.at(-1), 'occ-accessible-component-name-062');
+  assert.deepEqual(cards.map(card => card.occurrenceIds.length), [499, 1]);
+  assert.equal(cards[0].occurrenceIds.at(-1), 'occ-accessible-component-name-498');
   assert.equal(cards[1].occurrenceIds[0], 'occ-content-image-alternative-000');
-  assert.equal(bundle.details.length, 64);
-  assert.deepEqual(bundle.summary.counts.errors, { checkKeys: 2, occurrences: 71 });
+  assert.equal(bundle.details.length, 500);
+  assert.deepEqual(bundle.summary.counts.errors, { checkKeys: 2, occurrences: 511 });
   for (const card of cards) {
     assert.deepEqual(card.evidence.evidenceIds,
       ['ev-full', ...card.occurrenceIds.map(id => id.replace(/^occ-/u, 'ev-'))]
@@ -272,7 +272,7 @@ test('keeps an image issue visible when an earlier card alone exceeds the occurr
   const complete = await buildCompleteReportSummary({
     model: input.reportRevision.model, executionCheckpoint: input.reportRevision.checkpoint, inventory: input.inventory,
   });
-  assert.deepEqual(complete.groups.failed.map(card => card.occurrenceIds.length), [70, 1]);
+  assert.deepEqual(complete.groups.failed.map(card => card.occurrenceIds.length), [510, 1]);
   // The panel truncates its interactive projection, but the headline totals must still match
   // the complete report for the same model: a person comparing the panel with the report
   // cannot see two different numbers for the same audit.

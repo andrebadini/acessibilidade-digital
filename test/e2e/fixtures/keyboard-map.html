@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Mapa do teclado — prova local</title>
+    <link rel="stylesheet" href="/keyboard-map.css">
+  </head>
+  <body>
+    <main>
+      <h1>Serviços ao cidadão</h1>
+      <p>Escolha um serviço abaixo. Cada cartão abre um menu de opções.</p>
+      <nav aria-label="Atalhos">
+        <a href="#servicos">Ir para os serviços</a>
+      </nav>
+      <ul class="service-grid" id="servicos">
+        <li class="service-card" data-service="consultar">
+          Consultar processo
+          <span class="service-menu">
+            <a href="#consultar-andamento">Andamento</a>
+            <a href="#consultar-historico">Histórico</a>
+          </span>
+        </li>
+        <li class="service-card" data-service="emitir">
+          Emitir segunda via
+          <span class="service-menu">
+            <a href="#emitir-boleto">Boleto</a>
+            <a href="#emitir-recibo">Recibo</a>
+          </span>
+        </li>
+        <li class="service-card" data-service="agendar">
+          Agendar atendimento
+          <span class="service-menu">
+            <a href="#agendar-unidade">Unidade</a>
+            <a href="#agendar-data">Data</a>
+          </span>
+        </li>
+        <li class="service-card" data-service="registrar">
+          Registrar pedido
+          <span class="service-menu">
+            <a href="#registrar-novo">Novo pedido</a>
+            <a href="#registrar-acompanhar">Acompanhar</a>
+          </span>
+        </li>
+      </ul>
+      <form action="#resultado" method="get">
+        <label for="busca">Buscar serviço</label>
+        <input id="busca" name="busca" type="search">
+        <label for="segredo">Campo com valor privado</label>
+        <input id="segredo" name="segredo" type="password" value="KEYBOARD-MAP-PRIVATE-731905" autocomplete="current-password">
+        <input type="text" value="Campo desativado" disabled>
+        <button type="submit">Buscar</button>
+      </form>
+      <details>
+        <summary>Ver mais serviços</summary>
+        <p>Mais serviços aparecem nesta lista.</p>
+      </details>
+      <div class="counter" tabindex="0">Contador com foco próprio: 3</div>
+      <a href="#rodape" tabindex="3">Link com ordem de foco declarada</a>
+      <button type="button" tabindex="-1">Botão fora da ordem do Tab</button>
+      <div hidden><a href="#escondido">Link em bloco escondido</a></div>
+      <p aria-hidden="true"><a href="#decorativo">Link decorativo</a></p>
+      <footer id="rodape"><p>Fim da página de prova.</p></footer>
+    </main>
+  </body>
+</html>

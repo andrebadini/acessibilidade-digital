@@ -1,4 +1,5 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
+import { measureElementTarget } from '../browser/measure-element.js';
 import { collectPage } from '../browser/collect-page.js';
 import { AXE_PROVENANCE, runAxeInTab } from '../browser/axe-adapter.js';
 import { dedupeFindingsForPresentation } from '../core/axe/dedupe-findings.js';
@@ -25,6 +26,7 @@ import { canonicalInternalReviewUrl } from '../core/report/report-policy.js';
 import { normalizeAuditUrl } from '../core/url.js';
 import { axeEquivalenceForAuditaRule } from '../core/normative/axe-nbr-crosswalk.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
+import { applyHoverOnlyProbe } from '../browser/hover-only-probe.js';
 import { section508ReferencesForWcag } from '../core/normative/section508.js';
 import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
 import { projectAuditResourceOrigin } from '../core/privacy.js';
@@ -40,7 +42,8 @@ import { createAuditModel } from '../core/report/audit-model.js';
 import { testedWcagRefsForCoreRule } from '../core/report/tested-criteria.js';
 import {
   ATTACHED_COPY_RELOADED_MESSAGE, DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE, ELEMENT_CAPTURE_BUDGET_MESSAGE,
-  FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE,
+  ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE, ELEMENT_MEASUREMENT_FALLBACK_MESSAGE,
+  FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE, PAGE_NAVIGATION_HELD_MESSAGE,
 } from '../core/report/diagnostic-policy.js';
 import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { isEvidenceUrlV1, sanitizeEvidenceUrlV1 } from '../core/privacy/evidence-url.js';
@@ -56,7 +59,7 @@ import {
 } from './pixel-privacy-gate.js';
 
 const SCHEMA_VERSION = 1;
-const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 130, itemCount: 146 });
+const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 131, itemCount: 146 });
 const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
   'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE',
@@ -71,6 +74,19 @@ const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_DERIVED_BYTES_LIMIT',
   'ANNOTATION_MAP_OUTPUT_INVALID',
   'ANNOTATION_MAP_TIMEOUT',
+]);
+// Mesmos códigos fechados do compositor do mapa do teclado. A lista fica aqui, e não derivada do erro,
+// porque o diagnóstico persistido só aceita código que a política de diagnóstico já conhece.
+const KEYBOARD_MAP_DIAGNOSTIC_CODES = new Set([
+  'KEYBOARD_MAP_COMPOSITOR_UNAVAILABLE',
+  'KEYBOARD_MAP_SOURCE_INVALID',
+  'KEYBOARD_MAP_SOURCE_HASH_MISMATCH',
+  'KEYBOARD_MAP_SOURCE_LIMIT',
+  'KEYBOARD_MAP_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_PRINT_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_DERIVED_BYTES_LIMIT',
+  'KEYBOARD_MAP_OUTPUT_INVALID',
+  'KEYBOARD_MAP_TIMEOUT',
 ]);
 // Orçamento de miniaturas por página (1.1.53). Cada miniatura passa pela porta de privacidade (várias
 // injeções) e custa ~150 ms; uma vitrine com 1.800 ocorrências levava mais de 2 min só nisso e ainda mais para
@@ -773,6 +789,7 @@ async function runLegacyAudit({
   };
   let tab = null;
   let cdp = null;
+  let navigationFreeze = null;
   let fatal = false;
   let recoverableFailure = false;
   let furtherPixelCaptureSuppressed = false;
@@ -859,6 +876,15 @@ async function runLegacyAudit({
     state.finalUrlObserved = true;
     cdp = await awaitStep(() => chromeAdapter.connectCdp(tab.id, { signal }));
     if (!cdp || typeof cdp.command !== 'function') throw new Error('CDP inválido');
+    // Congelamento de navegação (1.1.58). Só depois do anexo — e, portanto, depois da navegação que a
+    // própria extensão pediu (`navigateTab` acontece bem antes, na linha 856) — a página passa a ter as
+    // trocas de documento do frame principal seguradas. É best-effort: uma recusa aqui não derruba a
+    // auditoria, apenas a deixa como era antes do congelamento.
+    if (typeof chromeAdapter.beginNavigationFreeze === 'function') {
+      try {
+        navigationFreeze = await chromeAdapter.beginNavigationFreeze(cdp, tab.id);
+      } catch { navigationFreeze = null; }
+    }
 
     let pristineMetrics = {};
     if (chromeAdapter.captureFullPageEnabled === false) {
@@ -978,6 +1004,17 @@ async function runLegacyAudit({
       recoverable('DYNAMIC_PROBES_FAILED', 'As verificações dinâmicas não puderam ser concluídas.');
     }
 
+    // Conteúdo interativo revelado apenas por hover (5.1.13 / WCAG 2.1.1). Roda em modo descartável e
+    // também na página atual: `CSS.forcePseudoState` não dispara eventos nem executa JS do site, e o
+    // estado forçado é sempre desfeito antes da auditoria seguir — a página permanece como estava.
+    try {
+      state.snapshot = await awaitStep(() => applyHoverOnlyProbe(state.snapshot, cdp, { signal }));
+      throwIfAborted(signal);
+    } catch (error) {
+      rethrowAbort(error, signal);
+      recoverable('DYNAMIC_PROBES_FAILED', 'As verificações dinâmicas não puderam ser concluídas.');
+    }
+
     await progress('testing', 'Verificando acessibilidade', 50);
     try {
       const core = await awaitStep(() => runCoreAudit(state.snapshot));
@@ -1065,11 +1102,35 @@ async function runLegacyAudit({
         if (canCaptureElements && !furtherPixelCaptureSuppressed && !thumbnailBudget.reached) {
           thumbnailBudget.attempted += 1;
           try {
+            // Remedição do alvo no instante da captura. O rect do snapshot é medido muito antes desta
+            // fase; entre uma coisa e outra a página rola e troca de layout, e o inline multilinha vem
+            // como caixa envolvente. `DOM.getContentQuads` devolve um quadrilátero por fragmento de
+            // linha, em coordenadas da viewport, convertidas para o documento com as métricas tomadas
+            // no mesmo momento. Falhou? O rect do snapshot continua valendo, e a limitação é declarada.
+            let measurement = null;
+            if (!evidenceBudgetSpent) {
+              try {
+                measurement = await awaitStep(() => measureElementTarget(cdp, node));
+              } catch (error) {
+                rethrowAbort(error, signal);
+                measurement = null;
+              }
+            }
+            if (measurement === null) {
+              appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
+            } else if (measurement.status === 'frame-context') {
+              appendDiagnosticOnce('ELEMENT_CAPTURE_FRAME_CONTEXT', ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE, true);
+            } else if (measurement.status !== 'measured') {
+              appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
+            }
             thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
               ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
+              ...(measurement?.status === 'measured' ? measurement.metrics : {}),
+              ...(measurement?.status === 'measured' ? { measuredRects: measurement.rects } : {}),
+              ...(Array.isArray(node.framePath) && node.framePath.length > 0 ? { framePath: node.framePath } : {}),
               ...(state.fullPage ? { fullPageEvidenceId: state.fullPage.evidenceId } : {}),
             }));
-            if (thumbnail.status !== 'captured') {
+            if (thumbnail.status !== 'captured' && thumbnail.reason !== 'frame-context') {
               recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
             }
           } catch (error) {
@@ -1149,6 +1210,40 @@ async function runLegacyAudit({
         recoverable(code, 'O mapa visual derivado não pôde ser gerado localmente; a captura original foi preservada.');
       }
     }
+    // Mapa do teclado: deriva da mesma captura integral pristine do mapa de anúncios, mas é julgado
+    // pelas próprias regras. Sem captura integral (modos sem pixels) não há mapa — a lista numerada
+    // do relatório continua existindo a partir do instantâneo, sem pixels.
+    if (state.fullPage && typeof chromeAdapter.composeKeyboardMap === 'function') {
+      const pristineArtifact = state.artifacts.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
+      const sourceBefore = canonicalStringify(pristineArtifact);
+      try {
+        const map = await awaitStep(() => chromeAdapter.composeKeyboardMap({
+          pageId: 'page-1',
+          snapshot: state.snapshot,
+          occurrences: state.occurrences,
+          fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
+          layoutMetrics: state.snapshot.document?.layoutMetrics || raw.layoutMetrics || pristineMetrics,
+          signal,
+        }));
+        if (canonicalStringify(pristineArtifact) !== sourceBefore) {
+          throw Object.assign(new Error('A captura pristine foi alterada durante a derivação.'), { code: 'KEYBOARD_MAP_SOURCE_INVALID' });
+        }
+        const recomputedMapHash = await awaitStep(() => hashEvidenceArtifact(map, {
+          sourceArtifact: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
+        }));
+        if (map?.hash !== recomputedMapHash) {
+          throw Object.assign(new Error('O hash do mapa do teclado não corresponde ao conteúdo.'), { code: 'KEYBOARD_MAP_OUTPUT_INVALID' });
+        }
+        state.artifacts.push(structuredClone(map));
+        if (map.status === 'partial') {
+          recoverable('KEYBOARD_MAP_PARTIAL', 'O mapa do teclado foi gerado com cobertura parcial e limitações explícitas.');
+        }
+      } catch (error) {
+        rethrowAbort(error, signal);
+        const code = KEYBOARD_MAP_DIAGNOSTIC_CODES.has(error?.code) ? error.code : 'KEYBOARD_MAP_OUTPUT_INVALID';
+        recoverable(code, 'O mapa do teclado não pôde ser gerado localmente; a captura original foi preservada.');
+      }
+    }
     state.occurrences.push(...makeEditorialOccurrences(auditId, state.editorialRuleResults));
     allocateOccurrenceIds(state);
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
@@ -1182,6 +1277,19 @@ async function runLegacyAudit({
     if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
     if (!error?.auditHandled) fail('NAVIGATION_FAILED', signal?.aborted ? 'A auditoria foi cancelada.' : 'O site não pôde ser aberto de forma estável.', error);
   } finally {
+    // O congelamento morre ANTES do desanexo, em qualquer desfecho: `Fetch.disable` libera os pedidos
+    // eventualmente pausados, e o depurador só então é desanexado. Nenhuma interceptação sobrevive à
+    // auditoria — e o e2e prova isso medindo a recarga da página depois do fim.
+    if (navigationFreeze) {
+      const freeze = navigationFreeze;
+      navigationFreeze = null;
+      let blocked = 0;
+      try { blocked = freeze.blocked(); } catch { blocked = 0; }
+      try { await freeze.stop(); } catch { /* best-effort: o desanexo abaixo também desfaz o Fetch */ }
+      if (Number.isSafeInteger(blocked) && blocked > 0) {
+        appendDiagnosticOnce('PAGE_NAVIGATION_HELD', PAGE_NAVIGATION_HELD_MESSAGE, true);
+      }
+    }
     if (cdp) {
       try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
     }
@@ -1842,9 +1950,9 @@ function captureLegacyEffects(adapter) {
   const captured = { manifestVersion: typeof version === 'string' && /^\d{1,5}(?:\.\d{1,5}){0,3}$/u.test(version)
     ? version : 'não disponível' };
   for (const name of [
-    'connectCdp', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
+    'connectCdp', 'beginNavigationFreeze', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
     'emitProgress', 'handoffReport', 'executeScript', 'createProbeAdapter',
-    'captureFullPage', 'captureElement', 'composeAnnouncementMap',
+    'captureFullPage', 'captureElement', 'composeAnnouncementMap', 'composeKeyboardMap',
   ]) {
     const method = optionalAdapterMethod(adapter, name);
     if (method) captured[name] = method;

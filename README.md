@@ -4,6 +4,23 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.58 — teclado para leigos, páginas que recarregam e destaque em sites reais.** A extensão passa a
+apontar blocos cujos links só aparecem com o mouse (o Tab não chega até eles; ABNT 5.1.13). O relatório e a revisão
+guiada ganham o **mapa do teclado**: a página inteira com uma caixa azul numerada em cada parada do Tab e caixas
+laranja nos itens que parecem clicáveis mas o Tab não alcança; a pergunta “algum item que você usaria está sem caixa
+azul?” abre a descrição que entra no texto para citação. A página não consegue mais recarregar durante a auditoria,
+uma recarga logo após abrir o painel é explicada com “Tentar novamente”, e “Destacar elemento” volta a funcionar em
+sites reais. Veja as [notas da 1.1.58](docs/releases/1.1.58.md).
+
+**Versão 1.1.57 — sinais na página e caixas das capturas precisas.** Os sinais numerados passam a marcar quase
+todos os elementos com achado no documento principal (antes, só os que tinham `id` ou classe “estável”; num portal
+público, 69 de 69 ocorrências contra 3 de 63). Cada elemento ganha o próprio contorno, por fora dele, com a etiqueta colada
+como uma aba (“3 × (2)”: sinal 3, duas falhas); etiquetas não se sobrepõem, não saem da tela e não são desenhadas por
+cima de cabeçalho fixo ou banner de cookies; mudanças na página (carrossel, hover) não apagam mais os sinais. Nas
+capturas, o elemento é medido no instante da foto, um link de várias linhas recebe uma caixa por linha, o contorno
+fica por fora com o resto da imagem levemente escurecido, e as miniaturas saem nítidas. Veja as
+[notas da 1.1.57](docs/releases/1.1.57.md).
+
 **Versão 1.1.56 — auditoria em sites reais e revisão longa.** Páginas com dois títulos principais, busca com
 rótulo “só para leitor de tela” ou rótulo deslocado para fora da tela (padrões de quase toda loja e portal)
 voltaram a concluir: antes a auditoria terminava em “encerrada antes de concluir”. A revisão guiada deixou de

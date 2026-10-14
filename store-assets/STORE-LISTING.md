@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.56
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.58
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
@@ -32,6 +32,8 @@ Principais recursos:
 - percurso guiado pela sequência de Tab, com ou sem áudio: sem áudio é o padrão; com áudio, o anúncio estimado é lido por uma voz instalada no computador, sem vozes on-line;
 - exportação do relatório complementar em HTML, CSV e JSON, além de impressão para salvar PDF;
 - revisão humana guiada em linguagem simples, sem exigir conhecimento de HTML: cada pendência vira uma pergunta sobre o que se vê na página (Sim, Não, Não consegui verificar ou Não existe nesta página), com o elemento descrito em palavras, destaque na página e ajudas opcionais de ampliação a 200%, largura de celular e espaçamento de leitura, desfeitas com um clique;
+- mapa do teclado: imagem da página inteira com uma caixa numerada em cada parada do Tab e os itens que parecem clicáveis mas o Tab não alcança marcados à parte, para qualquer pessoa conferir se falta algum menu, botão ou link;
+- detecção de blocos cujos links só aparecem quando o mouse passa por cima, sem caminho pelo teclado;
 - registro da pessoa avaliadora, data e hora locais, nota e histórico das respostas revistas;
 - quadro de constatações com a situação de cada requisito da ABNT NBR 17225:2025 (não atendido, atendido, não aplicável ou sem conclusão) e frases prontas para citação em relatórios, com página, elemento, data e evidência;
 - relatórios locais em HTML, PDF, CSV e JSON-LD/EARL;

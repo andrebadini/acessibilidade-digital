@@ -59,7 +59,7 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
       artifact.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry);
     }
     artifact.hash = await hashEvidenceArtifact(artifact, {
-      sourceArtifact: artifact.kind === 'announcement-map'
+      sourceArtifact: ['announcement-map', 'keyboard-map'].includes(artifact.kind)
         ? evidenceById.get(artifact.fullPageEvidenceId)
         : undefined,
     });
@@ -188,6 +188,15 @@ function remapEvidenceArtifact(artifact, pageId, remapEvidence, remapNode) {
       ...segment, segmentId: `${output.evidenceId}-segment-${segment.index}`,
     }));
   }
+  // Mapa do teclado (1.1.58): mesma dependência da captura integral; paradas e suspeitos apontam nós.
+  if (output.kind === 'keyboard-map') {
+    output.derivation.sourceEvidenceId = remapEvidence(output.derivation.sourceEvidenceId);
+    output.stops = output.stops.map(entry => ({ ...entry, nodeId: remapNode(entry.nodeId) }));
+    output.suspects = output.suspects.map(entry => ({ ...entry, nodeId: remapNode(entry.nodeId) }));
+    output.segments = output.segments.map(segment => ({
+      ...segment, segmentId: `${output.evidenceId}-segment-${segment.index}`,
+    }));
+  }
   return output;
 }
 
@@ -250,6 +259,9 @@ function collectNodeIds(model) {
     add(artifact.nodeId);
     for (const annotation of artifact.derivation?.geometry?.annotations ?? []) add(annotation.nodeId);
     for (const legend of artifact.legend ?? []) add(legend.nodeId);
+    if (artifact.kind === 'keyboard-map') {
+      for (const entry of [...(artifact.stops ?? []), ...(artifact.suspects ?? [])]) add(entry.nodeId);
+    }
   }
   return ids;
 }

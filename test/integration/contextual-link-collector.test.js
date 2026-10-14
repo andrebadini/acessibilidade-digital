@@ -212,9 +212,9 @@ test('private links are excluded while hostile or truncated public adjacency sta
   }
 });
 
-test('all 130 rules ignore anchors without href but still evaluate genuine native and ARIA links', async () => {
+test('all 131 rules ignore anchors without href but still evaluate genuine native and ARIA links', async () => {
   const anchor = await collectNormalizeAndEvaluate('direct-text', { anchorWithoutHref: true });
-  assert.equal(anchor.audit.ruleResults.length, 130);
+  assert.equal(anchor.audit.ruleResults.length, 131);
   assert.equal(anchor.audit.itemResults.length, 146);
   const collectedAnchor = anchor.collected.nodes.find(node => node.tagName === 'a');
   const normalizedAnchor = anchor.normalized.nodes.find(node => node.tagName === 'a');
@@ -228,7 +228,7 @@ test('all 130 rules ignore anchors without href but still evaluate genuine nativ
 
   for (const options of [{}, { roleLink: true }]) {
     const legitimate = await collectNormalizeAndEvaluate('direct-text', options);
-    assert.equal(legitimate.audit.ruleResults.length, 130);
+    assert.equal(legitimate.audit.ruleResults.length, 131);
     assert.equal(legitimate.audit.ruleResults.find(rule => rule.ruleId === 'link-semantics').outcome, 'passed');
     assert.equal(legitimate.result.outcome, 'passed');
   }
@@ -241,7 +241,7 @@ test('private text does not create link failures or erase an independently obser
     { privateAncestor: true, hostile: true },
   ]) {
     const value = await collectNormalizeAndEvaluate('direct-text', options);
-    assert.equal(value.audit.ruleResults.length, 130);
+    assert.equal(value.audit.ruleResults.length, 131);
     assert.equal(value.audit.itemResults.length, 146);
     const collectedLink = value.collected.nodes.find(node => node.tagName === 'a');
     const normalizedLink = value.normalized.nodes.find(node => node.tagName === 'a');

@@ -104,10 +104,14 @@ button:hover, button:focus-visible, a:focus-visible, summary:focus-visible { bac
 code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; background: #eef1f3; }
 .evidence-media { display: block; width: 100%; max-width: 100%; height: auto; max-height: 28rem; object-fit: contain; border: 1px solid #65737e; background: #fff; }
 .evidence-media--marked { overflow: hidden; }
-.evidence-highlight { fill: none; vector-effect: non-scaling-stroke; pointer-events: none; stroke-width: 7; }
+.evidence-spotlight { fill: #000; fill-opacity: .38; stroke: none; pointer-events: none; }
+.evidence-highlight, .evidence-halo { fill: none; vector-effect: non-scaling-stroke; pointer-events: none; }
+.evidence-halo { stroke: #fff; stroke-width: 5; }
+.evidence-highlight { stroke-width: 2.5; }
 .evidence-highlight--failed { stroke: #8b1e1e; }
 .evidence-highlight--advisory { stroke: #986000; }
 .evidence-highlight--review { stroke: #6b4e00; stroke-dasharray: 14 9; }
+.evidence-highlight--passed { stroke: #003b71; }
 .answered { border-left: .4rem solid #287d3c; }
 #delete-audit { min-height: 2.75rem; }
 .danger-action { border-color: #7d2100; background: var(--danger); color: #fff; }
@@ -127,9 +131,14 @@ dialog:not([open]) { display: none; }
   [data-report-checklist] > [data-checklist-question] { display: none !important; }
   [data-review-history], [data-review-record], [data-review-record] dl, [data-review-record] dd { break-inside: auto; }
   [data-review-record] dt, [data-review-record] h3 { break-after: avoid; }
+  /* O resumo executivo impresso mantém sumário, matriz e metodologia. As seções do meio (cobertura,
+     revisão guiada, mapas de anúncios e mapa do teclado) saem — a lista tem de acompanhar a numeração
+     de `SECTION_TITLES`: o mapa do teclado entrou como seção 6 e, sem esta linha, a aba imprimia o
+     mapa inteiro em tamanho de resumo, enquanto o relatório entregue já o omitia. */
   .report-view[data-print-layout="summary"] > [data-report-section="2"],
   .report-view[data-print-layout="summary"] > [data-report-section="4"],
   .report-view[data-print-layout="summary"] > [data-report-section="5"],
+  .report-view[data-print-layout="summary"] > [data-report-section="6"],
   .report-view[data-print-layout="summary"] [data-report-annex] { display: none !important; }
   .report-view[data-print-layout="summary"] [data-report-summary-note] { display: block !important; padding: .75rem; border: 2px solid var(--brand); font-weight: 700; }
   .report-view[data-print-layout="summary"] { display: block; font-size: 10.5pt; line-height: 1.35; }
@@ -156,7 +165,7 @@ dialog:not([open]) { display: none; }
 .report-checklist > summary { font-weight: 700; cursor: pointer; min-height: 2.75rem; }
 .report-checklist [data-checklist-question] { margin-top: .75rem; padding: .7rem; border-top: 1px solid #b8c5cf; overflow-wrap: anywhere; }
 .report-checklist [data-checklist-question] > summary { cursor: pointer; min-height: 2.75rem; font-weight: 600; }
-@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } .evidence-highlight { stroke: CanvasText; } }
+@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } .evidence-highlight { stroke: CanvasText; } .evidence-halo { stroke: CanvasText; } .evidence-spotlight { fill: none; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
 [data-report-metrics] [data-report-metric="failed"]{background:#fff4f3;color:#8b1e1e}
 [data-report-metrics] [data-report-metric="alerts"],[data-report-metrics] [data-report-metric="humanReview"]{background:#fff9e9;color:#6b4e00}
@@ -225,6 +234,16 @@ dialog:not([open]) { display: none; }
 .lay-purposes button { display: grid; gap: .25rem; text-align: left; max-width: 16rem; font-size: 1rem; font-weight: 700; }
 .lay-purposes button small { font-weight: 400; font-size: .85rem; color: #4a5a68; }
 .lay-purposes button[aria-pressed="true"], .lay-image-plan button[aria-pressed="true"] { outline: 3px solid #003b71; outline-offset: 2px; background: #eef4f8; }
+.lay-keyboard-map { margin: .6rem 0; padding: .6rem .8rem; border: 1px solid #c8d0d6; border-left: .4rem solid #0b4fa8; border-radius: .4rem; background: #f7fafc; }
+.lay-keyboard-map figure { margin: .5rem 0; }
+.lay-keyboard-map figcaption { font-size: .9rem; color: #4a5a68; }
+.lay-keyboard-map-thumb { max-width: 100%; max-height: 22rem; }
+.lay-map-title { font-size: 1rem; margin: .2rem 0; }
+.lay-map-subtitle { font-weight: 700; margin: .5rem 0 .2rem; }
+.lay-keyboard-map-stops, .lay-keyboard-map-suspects { margin: .2rem 0; padding-left: 1.6rem; }
+.lay-keyboard-map-stops li { padding-left: .3rem; border-left: .2rem solid #0b4fa8; }
+.lay-keyboard-map-suspects li { padding-left: .3rem; border-left: .2rem dashed #b45309; }
+.lay-keyboard-map-answers button { min-height: 44px; }
 .lay-image-plan { margin: .6rem 0; padding: .6rem .8rem; border: 1px solid #c8d0d6; border-radius: .4rem; background: #f7fafc; }
 .lay-image-plan li { margin-block: .4rem; }
 .lay-image-plan li button { margin-left: .4rem; }

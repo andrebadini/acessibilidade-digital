@@ -1,0 +1,266 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  KEYBOARD_MAP_MV3_GATE,
+  KeyboardMapError,
+  buildKeyboardMapPlan,
+  composeKeyboardMap,
+  composeKeyboardMapForProduction,
+} from '../../src/browser/keyboard-map.js';
+import { KEYBOARD_MAP_LIMITS, hashKeyboardMapArtifact, validateKeyboardMapArtifact } from '../../src/core/keyboard/keyboard-map-artifact.js';
+import { pngDataUrlFromBytes } from '../../src/core/evidence/png.js';
+import { sha256Hex } from '../../src/core/report/hash.js';
+import { buildPng } from '../support/png-fixture.js';
+
+function snapshot(nodes) {
+  const normalized = nodes.map((node, index) => ({
+    nodeId: node.nodeId ?? `n-${index + 1}`,
+    parentId: node.parentId ?? null,
+    children: node.children ?? [],
+    tagName: node.tagName ?? 'button',
+    attributes: node.attributes ?? {},
+    framePath: node.framePath ?? [],
+    hidden: false,
+    hasRenderedBox: true,
+    ...node,
+  }));
+  const byId = new Map(normalized.map(node => [node.nodeId, node]));
+  for (const node of normalized) {
+    if (node.parentId && byId.has(node.parentId) && !byId.get(node.parentId).children.includes(node.nodeId)) {
+      byId.get(node.parentId).children.push(node.nodeId);
+    }
+  }
+  return {
+    schemaVersion: 1,
+    document: { nodeId: 'document', title: 'Fixture', url: 'https://example.test/' },
+    nodes: normalized,
+  };
+}
+
+async function pristineSource(width, height, overrides = {}) {
+  const bytes = buildPng({ width, height });
+  return {
+    evidenceId: 'full', pageId: 'page-1', kind: 'full-page', state: 'pristine',
+    dataUrl: pngDataUrlFromBytes(bytes), hash: await sha256Hex(bytes), metadata: {}, ...overrides,
+  };
+}
+
+function recordingLog() {
+  return { fills: [], strokeRects: [], drawImages: [], texts: [], strokes: [], dashes: [], paths: [], blobs: 0 };
+}
+
+function createContext(log) {
+  const context = {
+    fillStyle: '', strokeStyle: '', lineWidth: 0, font: '', textAlign: '', textBaseline: '', dash: [],
+    fillRect(...args) { log.fills.push({ args, fillStyle: context.fillStyle }); },
+    strokeRect(...args) { log.strokeRects.push({ args, strokeStyle: context.strokeStyle }); },
+    drawImage(...args) { log.drawImages.push(args); },
+    fillText(value, x, y) { log.texts.push({ value: String(value), x, y, fillStyle: context.fillStyle, font: context.font }); },
+    setLineDash(value) { context.dash = [...value]; log.dashes.push([...value]); },
+    beginPath() { log.paths.push([]); },
+    moveTo(x, y) { log.paths[log.paths.length - 1].push([x, y]); },
+    lineTo(x, y) { log.paths[log.paths.length - 1].push([x, y]); },
+    stroke() {
+      log.strokes.push({
+        strokeStyle: context.strokeStyle, lineWidth: context.lineWidth,
+        dash: [...context.dash], points: log.paths[log.paths.length - 1],
+      });
+    },
+  };
+  return context;
+}
+
+function canvasRuntime(log, overrides = {}) {
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() { return createContext(log); }
+    async convertToBlob() {
+      log.blobs += 1;
+      return new Blob([buildPng({ width: this.width, height: this.height })], { type: 'image/png' });
+    }
+  }
+  return {
+    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }), ...overrides },
+  };
+}
+
+const PAGE = [
+  { nodeId: 'action', tagName: 'button', accessibleName: 'Consultar', axRole: 'button', rect: { x: 10, y: 10, width: 60, height: 20 } },
+  { nodeId: 'menu', tagName: 'div', attributes: { role: 'button' }, accessibleName: 'Serviços', axRole: 'button', rect: { x: 10, y: 50, width: 60, height: 20 } },
+];
+const SOURCE = { cssContentSize: { width: 200, height: 100 } };
+
+test('planeja paradas, suspeitos e fatias sem tocar no navegador', () => {
+  const plan = buildKeyboardMapPlan({
+    snapshot: snapshot(PAGE), sourceMetadata: { width: 200, height: 100 }, layoutMetrics: SOURCE,
+  });
+
+  assert.deepEqual(plan.stops.map(stop => [stop.number, stop.nodeId, stop.bounds]), [
+    [1, 'action', { x: 10, y: 10, width: 60, height: 20 }],
+  ]);
+  assert.deepEqual(plan.suspects.map(entry => [entry.number, entry.nodeId, entry.reason]), [[1, 'menu', 'interactive-role']]);
+  assert.deepEqual(plan.geometry, {
+    cssWidth: 200, cssHeight: 100, scaleX: 1, scaleY: 1, deviceScaleFactor: null,
+  });
+  assert.equal(plan.segments.length, 1);
+  assert.deepEqual(plan.segments[0].sourceCssClip, { x: 0, y: 0, width: 200, height: 100 });
+  // A etiqueta fica FORA da caixa, encostada nela, para não cobrir o texto do item: sem espaço à esquerda
+  // (a caixa começa em x=10) nem acima (y=10), ela vai para a direita, centrada na altura.
+  assert.deepEqual(plan.segments[0].entries[0].placement, {
+    number: 1, label: '1', kind: 'stop', box: { x: 10, y: 10, width: 60, height: 20 }, badge: { x: 72, y: 10, size: 20 },
+  });
+});
+
+test('fatia páginas altas em segmentos imprimíveis e mantém cada item na sua fatia', () => {
+  const plan = buildKeyboardMapPlan({
+    snapshot: snapshot(PAGE), sourceMetadata: { width: 200, height: 1000 }, layoutMetrics: { cssContentSize: { width: 200, height: 1000 } },
+  });
+
+  assert.equal(plan.segments.length, 4);
+  assert.deepEqual(plan.segments.map(segment => segment.sourceCssClip), [
+    { x: 0, y: 0, width: 200, height: 260 },
+    { x: 0, y: 260, width: 200, height: 260 },
+    { x: 0, y: 520, width: 200, height: 260 },
+    { x: 0, y: 780, width: 200, height: 220 },
+  ]);
+  assert.deepEqual(plan.segments.map(segment => segment.sourcePixelClip.height), [260, 260, 260, 220]);
+  assert.equal(plan.stops[0].segmentIndex, 1);
+  assert.equal(plan.suspects[0].segmentIndex, 1);
+});
+
+test('compõe um artefato determinístico, verificável e com as caixas nas cores certas', async () => {
+  const log = recordingLog();
+  const { runtime } = canvasRuntime(log);
+  const fullPageEvidence = await pristineSource(200, 100);
+  const input = {
+    pageId: 'page-1', fullPageEvidence, snapshot: snapshot(PAGE), layoutMetrics: SOURCE, runtime,
+  };
+
+  const first = await composeKeyboardMap(input);
+  const second = await composeKeyboardMap({ ...input, runtime: canvasRuntime(recordingLog()).runtime });
+
+  assert.equal(first.kind, 'keyboard-map');
+  assert.equal(first.state, 'derived');
+  assert.equal(first.fullPageEvidenceId, 'full');
+  assert.equal(first.evidenceId, second.evidenceId);
+  assert.equal(first.hash, second.hash);
+  assert.equal(first.segments.length, 1);
+  assert.equal(first.segments[0].role, 'image');
+  assert.equal(first.segments[0].segmentId, `${first.evidenceId}-segment-1`);
+  assert.equal(first.segments[0].count, 1);
+  assert.deepEqual(validateKeyboardMapArtifact(first, { sourceArtifact: fullPageEvidence }), first);
+  assert.equal(await hashKeyboardMapArtifact(first, { sourceArtifact: fullPageEvidence }), first.hash);
+
+  // Caixa azul sólida da parada, caixa laranja tracejada do suspeito e as etiquetas.
+  const solid = log.strokes.filter(stroke => stroke.strokeStyle === '#0b4fa8' && stroke.dash.length === 0);
+  const dashed = log.strokes.filter(stroke => stroke.strokeStyle === '#b45309');
+  assert.equal(solid.length, 1);
+  assert.deepEqual(solid[0].points, [[10, 10], [70, 10], [70, 30], [10, 30], [10, 10]]);
+  assert.equal(dashed.length, 1);
+  assert.deepEqual(dashed[0].dash.length, 2);
+  assert.deepEqual(dashed[0].points, [[10, 50], [70, 50], [70, 70], [10, 70], [10, 50]]);
+  assert.deepEqual(log.texts.map(entry => entry.value), ['1', '?']);
+  assert.deepEqual(log.texts.map(entry => entry.fillStyle), ['#ffffff', '#ffffff']);
+  assert.equal(log.fills.filter(fill => fill.args[2] === 20 && fill.args[3] === 20).length, 2);
+  assert.deepEqual(log.drawImages.map(args => args.slice(1)), [[0, 0, 200, 100, 0, 0, 200, 100]]);
+});
+
+test('página sem nada alcançável gera artefato vazio sem desenhar nada', async () => {
+  const log = recordingLog();
+  const { runtime } = canvasRuntime(log);
+  const artifact = await composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
+    snapshot: snapshot([{ nodeId: 'text', tagName: 'p', rect: { x: 0, y: 0, width: 100, height: 10 } }]),
+    layoutMetrics: SOURCE, runtime,
+  });
+
+  assert.equal(artifact.status, 'empty');
+  assert.deepEqual(artifact.segments, []);
+  assert.deepEqual([artifact.stops, artifact.suspects], [[], []]);
+  assert.equal(log.blobs, 0);
+  assert.deepEqual(validateKeyboardMapArtifact(artifact), artifact);
+});
+
+test('declara parcialidade quando o instantâneo não traz o cursor e clampa caixa fora da captura', async () => {
+  const artifact = await composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
+    snapshot: snapshot([
+      { nodeId: 'below', tagName: 'button', accessibleName: 'Abaixo da captura', axRole: 'button', rect: { x: 10, y: 400, width: 60, height: 20 } },
+    ]),
+    layoutMetrics: SOURCE, ...canvasRuntime(recordingLog()),
+  });
+
+  assert.equal(artifact.status, 'partial');
+  assert.ok(artifact.limitations.includes('cursor-style-not-collected'));
+  assert.ok(artifact.limitations.includes('stops-outside-source-clamped'));
+  assert.deepEqual(artifact.stops[0].bounds, { x: 10, y: 99, width: 60, height: 1 });
+  assert.equal(artifact.counts.omittedNoRect, 1);
+  assert.deepEqual(validateKeyboardMapArtifact(artifact), artifact);
+});
+
+test('recusa origem que não é a captura integral pristine da mesma página', async () => {
+  const { runtime } = canvasRuntime(recordingLog());
+  const base = { snapshot: snapshot(PAGE), layoutMetrics: SOURCE, runtime };
+
+  for (const [overrides, code] of [
+    [{ kind: 'element' }, 'KEYBOARD_MAP_SOURCE_INVALID'],
+    [{ state: 'redacted' }, 'KEYBOARD_MAP_SOURCE_INVALID'],
+    [{ pageId: 'outra-pagina' }, 'KEYBOARD_MAP_SOURCE_INVALID'],
+    [{ dataUrl: 'data:image/png;base64,0000' }, 'KEYBOARD_MAP_SOURCE_INVALID'],
+    [{ hash: 'f'.repeat(64) }, 'KEYBOARD_MAP_SOURCE_HASH_MISMATCH'],
+  ]) {
+    const fullPageEvidence = await pristineSource(200, 100, overrides);
+    await assert.rejects(composeKeyboardMap({ ...base, pageId: 'page-1', fullPageEvidence }),
+      error => error instanceof KeyboardMapError && error.code === code);
+  }
+});
+
+test('respeita cancelamento, tempo limite e compositor ausente', async () => {
+  const fullPageEvidence = await pristineSource(200, 100);
+  const controller = new AbortController();
+  controller.abort(new DOMException('Operação cancelada.', 'AbortError'));
+  await assert.rejects(composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence, snapshot: snapshot(PAGE), layoutMetrics: SOURCE,
+    runtime: canvasRuntime(recordingLog()).runtime, signal: controller.signal,
+  }), error => error?.name === 'AbortError');
+
+  await assert.rejects(composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence, snapshot: snapshot(PAGE), layoutMetrics: SOURCE, timeoutMs: 5,
+    runtime: {
+      OffscreenCanvas: class { constructor(width, height) { this.width = width; this.height = height; } },
+      createImageBitmap: () => new Promise(() => {}),
+    },
+  }), error => error instanceof KeyboardMapError && error.code === 'KEYBOARD_MAP_TIMEOUT');
+
+  await assert.rejects(composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence, snapshot: snapshot(PAGE), layoutMetrics: SOURCE,
+    runtime: { OffscreenCanvas: undefined, createImageBitmap: undefined },
+  }), error => error instanceof KeyboardMapError && error.code === 'KEYBOARD_MAP_COMPOSITOR_UNAVAILABLE');
+});
+
+test('recusa PNG derivado que não corresponde ao segmento pedido', async () => {
+  const log = recordingLog();
+  await assert.rejects(composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
+    snapshot: snapshot(PAGE), layoutMetrics: SOURCE,
+    runtime: {
+      OffscreenCanvas: class {
+        constructor(width, height) { this.width = width; this.height = height; }
+        getContext() { return createContext(log); }
+        async convertToBlob() { return new Blob([buildPng({ width: 4, height: 4 })], { type: 'image/png' }); }
+      },
+      createImageBitmap: async () => ({ close() {} }),
+    },
+  }), error => error instanceof KeyboardMapError && error.code === 'KEYBOARD_MAP_OUTPUT_INVALID');
+});
+
+test('o ponto de produção falha fechado quando o portão MV3 está desligado', async () => {
+  assert.equal(KEYBOARD_MAP_MV3_GATE.enabled, true);
+  assert.ok(KEYBOARD_MAP_LIMITS.maxStops >= 400);
+  const artifact = await composeKeyboardMapForProduction({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
+    snapshot: snapshot(PAGE), layoutMetrics: SOURCE, ...canvasRuntime(recordingLog()),
+  });
+  assert.equal(artifact.kind, 'keyboard-map');
+});

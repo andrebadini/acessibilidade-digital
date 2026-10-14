@@ -58,7 +58,7 @@ const SOURCE_ITEMS = [
   ['5.1.10', 'Atalhos de teclado', RECOMMENDATION, ['2.1.4'], ASSISTED, ['single-key-shortcuts'], HUMAN_REASON.interaction],
   ['5.1.11', 'Atalhos de teclado sem tecla modificadora', REQUIREMENT, ['2.1.4'], ASSISTED, ['single-key-shortcut-control'], HUMAN_REASON.interaction],
   ['5.1.12', 'Acessibilidade por teclado total', RECOMMENDATION, ['2.1.1', '2.1.3'], ASSISTED, ['full-keyboard-access'], HUMAN_REASON.interaction],
-  ['5.1.13', 'Acessibilidade por teclado parcial', REQUIREMENT, ['2.1.1'], ASSISTED, ['partial-keyboard-access'], HUMAN_REASON.interaction],
+  ['5.1.13', 'Acessibilidade por teclado parcial', REQUIREMENT, ['2.1.1'], ASSISTED, ['partial-keyboard-access', 'hover-only-interactive-content'], HUMAN_REASON.interaction],
   ['5.1.14', 'Mecanismos de entrada simultâneos', RECOMMENDATION, ['2.5.6'], ASSISTED, ['concurrent-input-mechanisms'], HUMAN_REASON.interaction],
   ['5.1.15', 'Comportamento de componentes customizados', RECOMMENDATION, ['2.1.1', '2.1.3'], ASSISTED, ['custom-component-behavior'], HUMAN_REASON.interaction],
   ['5.1.16', 'Instruções para componentes customizados', REQUIREMENT, ['3.3.2'], ASSISTED, ['custom-component-instructions'], HUMAN_REASON.context],

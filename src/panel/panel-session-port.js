@@ -29,7 +29,7 @@ const RUNNING_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'captureMode'])
 // Único aviso aceito num bootstrap ocioso: a auditoria daquela aba foi interrompida porque a página
 // recarregou ou navegou (o painel foi recriado e não tem memória da tentativa).
 const INITIAL_NOTICE_BOOTSTRAP_KEYS = Object.freeze([...BOOTSTRAP_KEYS, 'notice']);
-const INITIAL_NOTICES = new Set(['page-reloaded']);
+const INITIAL_NOTICES = new Set(['page-reloaded', 'page-reloaded-before-start']);
 const ATTACHED_PRIVACY_PAUSED_KEYS = Object.freeze([
   'protocol', 'version', 'type', 'auditId', 'sessionCapabilityId',
   'consentId', 'mode', 'categories', 'message',
@@ -194,7 +194,7 @@ function parseHighlightState(value) {
   return null;
 }
 
-function validMarkerOrdinal(value, maximum = 64) {
+function validMarkerOrdinal(value, maximum = 500) {
   return Number.isSafeInteger(value) && value >= 0 && value < maximum;
 }
 
@@ -217,7 +217,7 @@ function copyPageMarkersIntent(intent, maximum) {
   if (copy.type === 'PANEL_SELECT_PAGE_MARKER' &&
     (!validMarkerOrdinal(copy.ordinal, maximum) || typeof copy.scroll !== 'boolean')) return null;
   if (copy.type === 'PANEL_FILTER_PAGE_MARKERS') {
-    if (typeof copy.visibleOrdinals !== 'string' || copy.visibleOrdinals.length > 181) return null;
+    if (typeof copy.visibleOrdinals !== 'string' || copy.visibleOrdinals.length > 2048) return null;
     if (copy.visibleOrdinals !== '') {
       const parts = copy.visibleOrdinals.split(',');
       if (!parts.every((part, index) => validMarkerOrdinal(Number(part), maximum) &&
@@ -405,7 +405,7 @@ export function createPanelSessionPortClient(raw) {
       sessionId = bootstrap.sessionCapabilityId;
       sessionState = bootstrap.state;
       markerRevision = bootstrap.result?.modelRevision ?? null;
-      markerDetailCount = Math.min(64, bootstrap.result?.details.length ?? 0);
+      markerDetailCount = Math.min(500, bootstrap.result?.details.length ?? 0);
       if (['result', 'view-only'].includes(bootstrap.state)) {
         if (reviewBudgetAuditId !== bootstrap.auditId) {
           reviewBudgetAuditId = bootstrap.auditId;

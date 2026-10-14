@@ -79,7 +79,7 @@ const GUIDES = {
   '5.1.10': { g: 'teclado', q: 'Os atalhos de teclado do site sempre usam uma tecla como Ctrl ou Alt junto com a letra?', s: ['Procure na página uma lista de atalhos de teclado.', 'Se não houver atalhos, responda “Não existe nesta página”.'] },
   '5.1.11': { g: 'teclado', q: 'Se o site tem atalhos de uma tecla só, é possível desligá-los ou trocá-los?', s: ['Procure atalhos de uma letra só (por exemplo, “S” para buscar).', 'Se existirem, procure uma opção para desativá-los. Se não houver atalhos assim, responda “Não existe nesta página”.'] },
   '5.1.12': { g: 'teclado', aid: 'tab', q: 'Todas as funções da página podem ser usadas só com o teclado?', s: ['Sem usar o mouse, tente usar cada função da página com Tab, Enter, Espaço e as setas.', 'Responda “Não” se alguma função só funcionar com o mouse.'] },
-  '5.1.13': { g: 'teclado', aid: 'tab', q: 'Dá para usar só com o teclado todas as funções que não exigem o mouse por natureza (como desenhar à mão livre)?', s: ['Sem usar o mouse, tente chegar a cada link, botão e campo com Tab.', 'Tente acionar cada um com Enter ou Espaço.', 'Responda “Não” se algo comum, como um botão “Enviar”, não puder ser alcançado ou acionado pelo teclado.'] },
+  '5.1.13': { g: 'teclado', aid: 'keyboard-map', q: 'Dá para usar só com o teclado todas as funções que não exigem o mouse por natureza (como desenhar à mão livre)?', s: ['Olhe o mapa do teclado desta auditoria: cada caixa azul numerada é um lugar onde a tecla Tab para.', 'Confira também na própria página: clique numa área vazia e use a tecla Tab até o fim.', 'Responda “Não” se algo comum, como um botão “Enviar” ou um cartão de serviços, não puder ser alcançado ou acionado pelo teclado.'] },
   '5.1.14': { g: 'teclado', q: 'A página deixa usar mouse, teclado e toque à vontade, sem bloquear nenhum deles?', s: ['Use a página com o mouse e depois com o teclado.', 'Responda “Não” se a página impedir um desses meios sem motivo de segurança.'] },
   '5.1.15': { g: 'teclado', t: ['componente customizado'], q: 'Os menus, abas e controles diferentes do comum funcionam de um jeito previsível?', s: ['Use os menus e abas com o mouse e com o teclado (setas, Enter, Esc).', 'Responda “Não” se algum se comportar de forma inesperada.'] },
   '5.1.16': { g: 'teclado', t: ['componente customizado'], q: 'Os controles complicados ou fora do comum têm instruções de uso na página?', s: ['Identifique controles que não sejam links, botões ou campos comuns.', 'Procure instruções de como operá-los. Se não houver controles assim, responda “Não existe nesta página”.'] },
@@ -217,6 +217,7 @@ const GUIDES = {
 
 const AID_LABELS = Object.freeze({
   tab: 'Percorrer com Tab',
+  'keyboard-map': 'Ver o mapa do teclado',
   zoom: 'Ampliar para 200%',
   reflow: 'Ver como celular (320 px)',
   spacing: 'Aplicar espaçamento de leitura',
@@ -431,7 +432,7 @@ export function draftFinding({ itemId, element, hint, aid, aids } = {}) {
     '5.13.1': 'o título da página não a identifica',
     '5.13.5': 'a página impede a ampliação (zoom)',
     '5.13.10': 'o controle não tem nome que o leitor de tela possa anunciar',
-    '5.1.13': 'há função que não pode ser usada só com o teclado',
+    '5.1.13': 'há item que eu usaria e que não recebe caixa azul numerada no mapa do teclado — ou seja, não dá para chegar nele usando só o teclado',
     '5.1.1': 'em algum ponto não é possível ver qual item está selecionado pelo teclado',
     '5.10.4': 'em largura de celular, houve perda de conteúdo ou necessidade de rolar para os lados',
   }[itemId];

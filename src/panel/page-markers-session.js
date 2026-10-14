@@ -3,7 +3,13 @@
 // cannot deliver and points at what still works: the recorded evidence in the report.
 const UNAVAILABLE = 'Não foi possível mostrar os sinais nesta página. Esta página não tem mais um canal ativo da extensão, então repetir a auditoria não resolve; consulte as evidências e as capturas no relatório.';
 const REMOVE_FAILED = 'Não foi possível confirmar a remoção dos sinais. Tente remover novamente.';
-const empty = () => ({ status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, message: null });
+// Picking an occurrence whose element has no signal on the page right now (not found, inside an
+// iframe, or no longer in the page) is an expected answer, not a failure of the signals.
+const SELECTION_UNAVAILABLE = 'Esta ocorrência não tem sinal na página neste momento. Consulte a evidência registrada ou o relatório.';
+// Matches the ceiling the worker, the controller, the projection and the page overlay share, so a
+// full inventory of 500 findings is never truncated by the panel.
+export const MAX_PAGE_MARKER_SIGNALS = 500;
+const empty = () => ({ status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, reasons: [], message: null });
 function freeze(value) {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
   return value;
@@ -40,7 +46,7 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
   }
   function setResult(bundle) {
     if (!bundle) { reset(); return; }
-    const ids = bundle.details.slice(0, 64).map(detail => detail.occurrenceId);
+    const ids = bundle.details.slice(0, MAX_PAGE_MARKER_SIGNALS).map(detail => detail.occurrenceId);
     if (context?.auditId === bundle.auditId && context.revision === bundle.modelRevision &&
       JSON.stringify(context.ids) === JSON.stringify(ids)) return;
     reset();
@@ -51,10 +57,11 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
     try {
       const response = exact(raw, ['ok', 'markers']);
       const markers = response?.ok === true && exact(response.markers,
-        ['state', 'modelRevision', 'groups', 'counts', 'selectedOrdinal']);
+        ['state', 'modelRevision', 'groups', 'counts', 'selectedOrdinal', 'reasons']);
       const counts = markers && exact(markers.counts, ['markers', 'located', 'general', 'unlocated', 'omitted']);
       if (!counts || markers.modelRevision !== captured.revision || !['active', 'clear'].includes(markers.state) ||
-        !Array.isArray(markers.groups) || markers.groups.length > 64 ||
+        !Array.isArray(markers.groups) || markers.groups.length > MAX_PAGE_MARKER_SIGNALS ||
+        !Array.isArray(markers.reasons) || markers.reasons.length > 32 ||
         Object.values(counts).some(value => !Number.isSafeInteger(value) || value < 0 || value > 25_000)) return null;
       if (markers.state === 'clear') return markers.groups.length === 0 && markers.selectedOrdinal === null &&
         Object.values(counts).every(value => value === 0) ? empty() : null;
@@ -62,7 +69,8 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
       for (const rawGroup of markers.groups) {
         const group = exact(rawGroup, ['number', 'ordinals']);
         if (!group || !Number.isSafeInteger(group.number) || group.number < 1 || group.number > 5000 ||
-          numbers.has(group.number) || !Array.isArray(group.ordinals) || group.ordinals.length < 1 || group.ordinals.length > 64) return null;
+          numbers.has(group.number) || !Array.isArray(group.ordinals) || group.ordinals.length < 1 ||
+          group.ordinals.length > MAX_PAGE_MARKER_SIGNALS) return null;
         numbers.add(group.number);
         const occurrenceIds = [];
         for (const value of group.ordinals) {
@@ -74,7 +82,16 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
       if (counts.markers !== groups.length || counts.located !== seen.size ||
         counts.located + counts.general + counts.unlocated !== captured.ids.length ||
         markers.selectedOrdinal !== null && !seen.has(markers.selectedOrdinal)) return null;
-      return { status: 'active', groups, counts,
+      // Reasons are counts of signals the page could not show, grouped by category. They carry no
+      // element identity, so they survive the strict copy into presentation state.
+      const reasons = [];
+      for (const raw of markers.reasons) {
+        const row = exact(raw, ['reason', 'count']);
+        if (!row || typeof row.reason !== 'string' || !/^[a-z][a-z0-9-]{0,47}$/u.test(row.reason) ||
+          !Number.isSafeInteger(row.count) || row.count < 1 || row.count > MAX_PAGE_MARKER_SIGNALS) return null;
+        reasons.push({ reason: row.reason, count: row.count });
+      }
+      return { status: 'active', groups, counts, reasons,
         selectedOccurrenceId: markers.selectedOrdinal === null ? null : captured.ids[markers.selectedOrdinal], message: null };
     } catch { return null; }
   }
@@ -140,6 +157,11 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
       if (context !== captured || generation !== version) return false;
       const next = responseState(response, captured);
       if (!next) {
+        const code = exact(response, ['ok', 'code'])?.code;
+        if (selectionRequest && (code === 'PAGE_MARKERS_SELECTION_UNAVAILABLE' || code === 'PAGE_MARKERS_INVALID')) {
+          publish({ ...state, selectedOccurrenceId: null, message: SELECTION_UNAVAILABLE });
+          return false;
+        }
         publish({ ...state, message: 'Não foi possível atualizar este sinal. Consulte a evidência ou tente novamente.' });
         return false;
       }

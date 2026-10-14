@@ -291,6 +291,33 @@ for (const [label, mutate] of [
   });
 }
 
+test('accepts the declared pixel scale of a doubled thumbnail and rejects one out of contract', () => {
+  const withScale = (pixelScale, clipScale = pixelScale) => {
+    const candidate = structuredClone(SAMPLE_AUDIT);
+    candidate.evidence[1].metadata = {
+      width: 128, height: 88, pixelScale,
+      clip: { x: 0, y: 0, width: 128, height: 88, scale: clipScale },
+      highlightBox: { x: 24, y: 24, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
+    };
+    return createAuditModel(candidate);
+  };
+  const artifact = withScale(2).evidence.find(item => item.evidenceId === 'ev-control');
+  // O quadro continua em CSS px; a escala vem ao lado, como campo opcional e estrito.
+  assert.equal(artifact.metadata.width, 128);
+  assert.equal(artifact.metadata.pixelScale, 2);
+  assert.deepEqual(Object.keys(artifact.metadata).sort(), ['clip', 'height', 'highlightBox', 'pixelScale', 'width']);
+  // Sem escala declarada, nada muda: auditorias anteriores continuam válidas e sem o campo novo.
+  const legacy = structuredClone(SAMPLE_AUDIT);
+  legacy.evidence[1].metadata = { width: 128, height: 88, clip: { x: 0, y: 0, width: 128, height: 88, scale: 1 } };
+  assert.equal(Object.hasOwn(createAuditModel(legacy).evidence.find(item => item.evidenceId === 'ev-control').metadata, 'pixelScale'), false);
+
+  for (const pixelScale of [0, -1, 1.5, 4, '2', null, Number.NaN]) {
+    assert.throws(() => withScale(pixelScale), assertFixedError);
+  }
+  // A escala é declarada uma vez só: um clip que discorda do campo é recusado.
+  assert.throws(() => withScale(2, 1), assertFixedError);
+});
+
 test('rejects object-valued equivalence identities instead of serializing private structures', async () => {
   for (const field of ['equivalenceKey', 'presentationTargetKey']) {
     const candidate = structuredClone(SAMPLE_AUDIT);

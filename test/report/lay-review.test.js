@@ -131,3 +131,47 @@ test('the findings board lists only requirements, with citable sentences for aut
   assert.equal(citationParagraph({ item: { id: '5.1.4', title: 'Ordem de foco previsível' }, finding: human.findings[0] }), human.findings[0].citation);
   assert.match(after.legalParagraph, /Lei nº 8\.078\/1990/u);
 });
+
+test('a nota do mapa do teclado entra no texto copiável e no resultado final do item 5.1.13', () => {
+  const guide = layGuideFor('5.1.13');
+  assert.equal(guide.aid, 'keyboard-map');
+  assert.match(guide.question, /teclado/iu);
+  assert.ok(guide.steps.some(step => /mapa do teclado/u.test(step)));
+
+  // O rascunho que a extensão oferece já cita o mapa; a pessoa ajusta com o que viu.
+  const draft = draftFinding({ itemId: '5.1.13', element: null, hint: 'Pista da extensão.' });
+  assert.match(draft, /mapa do teclado/u);
+  assert.match(draft, /caixa azul numerada/u);
+
+  // O item 5.1.13 só existe como revisão humana: é ela que produz o texto copiável do relatório.
+  const note = 'Os cartões Consumidor, Fornecedor, Servidor e Ouvidoria, da seção Serviços, abrem menus só com o mouse e não recebem caixa azul numerada no mapa do teclado.';
+  const source = structuredClone(SAMPLE_AUDIT);
+  const review = structuredClone(source.occurrences.find(value => value.occurrenceId === 'occ-focus-review'));
+  const occurrence = Object.assign(review, {
+    occurrenceId: 'occ-keyboard-513', itemId: '5.1.13', nodeId: null, evidenceIds: ['ev-full'],
+    evidenceRefs: ['ev-full'], accessiblePreview: null, nbrItemRef: '5.1.13',
+    target: { nodeId: null, selector: null, framePath: [] },
+    justification: 'Requisito “Uso pelo teclado”: conclusão dependente de revisão humana.',
+  });
+  source.occurrences.push(occurrence);
+  source.manualReview.push({
+    occurrenceId: 'occ-keyboard-513', itemId: '5.1.13', ruleId: occurrence.ruleId, mode: 'assisted',
+    status: 'unanswered', question: guide.question, reason: occurrence.justification,
+  });
+  const reviewed = applyReviewDecisions(source, [createReviewDecision({
+    auditId: source.auditId, itemId: '5.1.13', occurrenceId: 'occ-keyboard-513', answer: 'não conforme',
+    note, evaluator: 'Fiscal Ana', decidedAt: '2026-08-27T12:00:00.000Z', mode: 'assisted',
+  })]);
+  const entry = buildFindingsBoard(reviewed).groups.notMet.find(value => value.itemId === '5.1.13');
+  assert.ok(entry, 'a resposta do mapa reprova o item 5.1.13 no quadro de constatações');
+  assert.equal(entry.outcome, 'failed');
+  assert.equal(entry.method, 'revisão humana');
+  assert.equal(entry.findings.length, 1);
+  assert.equal(entry.findings[0].text, note);
+  assert.match(entry.findings[0].citation, /revisão humana registrada por Fiscal Ana/u);
+  assert.ok(entry.findings[0].citation.includes(note));
+  assert.match(entry.findings[0].citation, /item 5\.1\.13 \([^)]+, requisito\) da ABNT NBR 17225:2025/u);
+  // Sem rascunho nem observação, nenhuma constatação é inventada para o item.
+  const silent = buildFindingsBoard(SAMPLE_AUDIT).groups.notMet.some(value => value.itemId === '5.1.13');
+  assert.equal(silent, false);
+});

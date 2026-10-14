@@ -180,6 +180,21 @@ function fixtureQuery(root, selector) {
     visit(root);
     return candidates;
   }
+  const attribute = /^([a-z][a-z0-9-]{0,62})\[([a-z][a-z0-9-]{0,31})="((?:[^"\\]|\\.)*)"\]$/u.exec(selector);
+  if (attribute) {
+    const value = attribute[3].replace(/\\(.)/gu, '$1');
+    const attributeResults = [];
+    const visitAttribute = node => {
+      for (const child of node.children ?? []) {
+        if (child.tagName.toLowerCase() === attribute[1] && child.getAttribute(attribute[2]) === value) {
+          attributeResults.push(child);
+        }
+        visitAttribute(child);
+      }
+    };
+    visitAttribute(root);
+    return attributeResults;
+  }
   const match = /^([a-z][a-z0-9-]{0,62})(?:#(-?[_A-Za-z][_A-Za-z0-9-]{0,22})|((?:\.-?[_A-Za-z][_A-Za-z0-9-]*){1,2}))$/u.exec(selector);
   if (!match) return [];
   const results = [];
@@ -227,19 +242,30 @@ export function createPageMarkersFixture() {
   let nextFrame = 1;
   let nextTimer = 1;
   let timerRegistrations = 0;
+  let virtualNow = 0;
 
   Object.assign(environment, {
     document,
+    innerWidth: 1024,
+    innerHeight: 768,
+    location: { pathname: '/', search: '' },
+    performance: { now: () => virtualNow },
     chrome: { runtime: { sendMessage(message) { messages.push(structuredClone(message)); return Promise.resolve(); } } },
     getComputedStyle(element) {
-      return { display: element.style.display ?? 'block', visibility: element.style.visibility ?? 'visible' };
+      return {
+        display: element.style.display ?? 'block',
+        visibility: element.style.visibility ?? 'visible',
+        overflowX: element.style.overflowX ?? element.style.overflow ?? 'visible',
+        overflowY: element.style.overflowY ?? element.style.overflow ?? 'visible',
+        position: element.style.position ?? 'static',
+      };
     },
     requestAnimationFrame(callback) { const id = nextFrame++; frames.set(id, callback); return id; },
     cancelAnimationFrame(id) { frames.delete(id); },
     setTimeout(callback, delay) {
       timerRegistrations += 1;
       const id = nextTimer++;
-      timers.set(id, { callback, delay });
+      timers.set(id, { callback, delay, dueAt: virtualNow + Math.max(0, Number(delay) || 0) });
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
@@ -251,15 +277,38 @@ export function createPageMarkersFixture() {
   });
 
   environment.dispatch = (type, init = {}) => environment.dispatchEvent(new FixtureEvent(type, init));
+  environment.now = () => virtualNow;
   environment.flushFrames = () => {
     const pending = [...frames.values()];
     frames.clear();
-    for (const callback of pending) callback(16);
+    virtualNow += 16;
+    for (const callback of pending) callback(virtualNow);
+    return virtualNow;
   };
   environment.fireTimers = () => {
     const pending = [...timers.values()];
     timers.clear();
     for (const { callback } of pending) callback();
+  };
+  // Advances the virtual clock and runs only the timers that became due, so a mutation-driven
+  // re-check can be exercised without firing the lifetime timer.
+  environment.advanceTime = milliseconds => {
+    virtualNow += Math.max(0, Number(milliseconds) || 0);
+    for (let guard = 0; guard < 64; guard += 1) {
+      const due = [...timers.entries()].filter(([, entry]) => entry.dueAt <= virtualNow);
+      if (due.length === 0) break;
+      for (const [id, entry] of due) {
+        timers.delete(id);
+        entry.callback();
+      }
+    }
+    return virtualNow;
+  };
+  environment.settle = () => {
+    environment.advanceTime(120);
+    environment.flushFrames();
+    environment.advanceTime(0);
+    return virtualNow;
   };
   environment.triggerMutations = records => {
     for (const observer of [...observers]) {
@@ -305,16 +354,29 @@ export function install(overrides = {}) {
     installationId: 'A'.repeat(22),
     ttlMs: 60_000,
     targets: [
-      { markerId: 'm1', number: 1, match: { tag: 'button', id: 'continue' }, signals: [
+      { markerId: 'm1', number: 1, match: idMatch('button', 'continue'), signals: [
         { selectionId: 's1', classification: 'failed' },
         { selectionId: 's2', classification: 'manual-review' },
       ] },
-      { markerId: 'm2', number: 2, match: { tag: 'a', id: 'help' }, signals: [
+      { markerId: 'm2', number: 2, match: idMatch('a', 'help'), signals: [
         { selectionId: 's3', classification: 'passed' },
       ] },
     ],
     ...overrides,
   };
+}
+
+export function idMatch(tag, id) {
+  return { tag, id };
+}
+
+export function semanticMatch(tag, name, value) {
+  return { tag, attribute: { name, value } };
+}
+
+export function structuralMatch(tag, path, extras = {}) {
+  return { tag, classes: extras.classes ?? [], path, id: extras.id ?? null,
+    role: extras.role ?? null, type: extras.type ?? null };
 }
 
 export function select(selectionId, scroll = false, installationId = 'A'.repeat(22)) {

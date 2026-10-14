@@ -1657,6 +1657,36 @@ test('a navigation notice is bounded in time, scoped to its tab and closed in sh
   assert.equal(Object.hasOwn(late.messages[0], 'notice'), false, 'um aviso vencido não é entregue');
 });
 
+test('a start denied during a self-reload tells the recreated panel why the audit did not begin (1.1.58)', async () => {
+  // Loja que recarrega ~1 s depois que o painel abre: o clique em "Auditar" cai na janela da recarga, a
+  // preparação é negada e o painel novo voltava ao início em silêncio.
+  const { coordinator } = fixture();
+  for (const hostile of [{ tabId: 17, beforeStart: false }, { tabId: 17, beforeStart: 'yes' },
+    { tabId: 17, beforeStart: true, auditId: 'a' }, { tabId: -1, beforeStart: true }]) {
+    assert.equal(coordinator.noteNavigationInterruption(hostile), false);
+  }
+  assert.equal(coordinator.noteNavigationInterruption({ tabId: 17, beforeStart: true }), true);
+  const first = port();
+  coordinator.attachPanelPort(first);
+  first.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.deepEqual(first.messages, [{
+    protocol: 'audita-panel', version: 1, type: 'bootstrap-result', state: 'initial',
+    auditId: null, sessionCapabilityId: null, result: null, notice: 'page-reloaded-before-start',
+  }]);
+  first.onDisconnect.emit();
+  await tick();
+
+  // Uma auditoria interrompida na mesma janela tem precedência sobre o início negado.
+  assert.equal(coordinator.noteNavigationInterruption({ tabId: 17, auditId: 'audit-reloaded' }), true);
+  assert.equal(coordinator.noteNavigationInterruption({ tabId: 17, beforeStart: true }), true);
+  const second = port({ documentId: 'panel-document-2' });
+  coordinator.attachPanelPort(second);
+  second.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(second.messages[0].notice, 'page-reloaded');
+});
+
 test('native SIDE_PANEL port without sender documentId reaches a proved idle bootstrap', async () => {
   const env = fixture();
   const connected = port({ nativeSender: true });

@@ -121,12 +121,20 @@ test('executive print keeps the complete ABNT matrix and reduces actual PDFs in 
         historyHidden:!visible(document.querySelector('[data-review-history]')),
         historyNotice:document.querySelector('[data-report-summary-note]').textContent.includes('conclusões humanas detalhadas'),
         note:visible(document.querySelector('[data-report-summary-note]')),
-        essentials:[1,6,7].every(index=>visible(document.getElementById('report-section-'+index))),
+        essentials:['Sumário executivo', 'Matriz completa', 'Metodologia'].map(prefix=>{
+          const heading=[...document.querySelectorAll('h2')].find(node=>node.textContent.startsWith(prefix));
+          return [prefix, Boolean(heading) && visible(heading.closest('section') ?? heading.parentElement)];
+        }),
         identity:document.body.innerText.includes(${JSON.stringify(view.modelHash)})&&document.body.innerText.includes(${JSON.stringify(view.auditId)}),
         producer:document.body.innerText.includes('Versão da extensão que realizou a auditoria: 0.1.0')};
     })()`);
     assert.deepEqual(retained.items, view.matrix.map(row => row.id));
-    for (const key of ['annexHidden', 'detailsHidden', 'historyHidden', 'historyNotice', 'note', 'essentials', 'identity', 'producer']) assert.equal(retained[key], true, `${mode}: ${key}`);
+    // Por título, não por número: uma seção nova no meio desloca as seguintes, e o resumo executivo
+    // tem de manter sumário, matriz e metodologia em qualquer numeração.
+    for (const key of ['annexHidden', 'detailsHidden', 'historyHidden', 'historyNotice', 'note', 'identity', 'producer']) {
+      assert.equal(retained[key], true, `${mode}: ${key}`);
+    }
+    for (const [title, kept] of retained.essentials) assert.equal(kept, true, `${mode}: o resumo executivo precisa manter "${title}"`);
     const summaryPages = await print(`${mode}-summary`);
     assert.ok(summaryPages > 1 && summaryPages < fullPages, `${mode}: full=${fullPages}, summary=${summaryPages}`);
     t.diagnostic(`${mode}: full=${fullPages} pages; summary=${summaryPages} pages; all146ABNTitems; noindividualevidence`);

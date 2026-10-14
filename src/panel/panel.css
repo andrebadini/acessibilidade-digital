@@ -773,6 +773,13 @@ code {
 
 .page-marker-legend li { display: flex; align-items: center; gap: 5px; min-inline-size: 0; }
 .page-marker-legend li p { font-size: 12px; font-weight: 700; }
+.page-marker-legend ul.page-marker-reading {
+  display: block;
+  padding-inline-start: 1.1rem;
+  list-style: disc;
+}
+.page-marker-legend ul.page-marker-reading li { display: list-item; margin-block: 3px; }
+.page-marker-legend ul.page-marker-reading li p { font-size: 13px; font-weight: 400; line-height: 1.4; }
 .page-marker-symbol {
   display: inline-grid;
   place-items: center;
@@ -815,6 +822,17 @@ code {
 .page-marker-card-title { display: inline; }
 .page-marker-limit { flex: 1 0 100%; color: var(--review); font-weight: 650; }
 .marker-go-action { flex: 1 1 13rem; }
+
+.page-marker-reasons { display: grid; gap: 4px; }
+.page-marker-reasons-lead { font-size: 14px; line-height: 1.4; }
+.page-marker-reasons-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 20px;
+  font-size: 13px;
+  line-height: 1.4;
+}
 
 .visually-hidden {
   position: fixed !important;

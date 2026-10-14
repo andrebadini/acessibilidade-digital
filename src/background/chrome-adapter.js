@@ -1,11 +1,15 @@
 import { collectPage } from '../browser/collect-page.js';
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
 import { composeAnnouncementMapForProduction as composeAnnouncementMap } from '../browser/annotation-map.js';
+// O mapa do teclado deriva da mesma captura integral: não entra na CapturePolicyV1 fechada porque só
+// é composto quando existe captura pristine, que é exatamente o que `captureFullPage` já controla.
+import { composeKeyboardMapForProduction as composeKeyboardMap } from '../browser/keyboard-map.js';
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { runDynamicProbes } from '../collector/dynamic-probes.js';
 import { sanitizeEvidenceUrlV1 } from '../core/privacy.js';
 import { canonicalStringify } from '../core/report/canonical-json.js';
-import { parseCssSelectorV1 } from './highlight-locator.js';
+import { parseHighlightSelectorV1 } from './highlight-locator.js';
+import { createNavigationFreeze } from './navigation-freeze.js';
 import { runAuditaHighlightCommand } from '../browser/highlight-overlay.js';
 import { probeSensitiveContextInTab } from '../browser/sensitive-context-probe.js';
 
@@ -99,7 +103,7 @@ function highlightSelectorRecord(value) {
   const record = exactHighlightRecord(value, ['syntax', 'value', 'byteLength', 'complexity']);
   if (!record || record.syntax !== 'CSSSelectorV1') return null;
   try {
-    const parsed = parseCssSelectorV1(record.value);
+    const parsed = parseHighlightSelectorV1(record.value);
     if (parsed.byteLength !== record.byteLength || parsed.complexity !== record.complexity) return null;
     return Object.freeze({
       syntax: 'CSSSelectorV1',
@@ -351,7 +355,10 @@ async function collectHighlightStructuralProofs(rawCandidates, expectedElement =
     const seen = new Set();
     let current = element;
     while (true) {
-      if (!current || seen.has(current) || ancestry.length >= 16) throw new TypeError();
+      // Mesmo teto do caminho dos sinais e do anel do destaque (`MAX_HIGHLIGHT_ANCESTRY`,
+      // `MAX_SIGNATURE_ANCESTRY`): uma página real aninha controles bem abaixo de 16 níveis e o
+      // limite antigo derrubava a prova do quadro inteiro, não só do candidato profundo.
+      if (!current || seen.has(current) || ancestry.length >= 64) throw new TypeError();
       seen.add(current);
       const attributes = [];
       for (const [name, maximum] of [['role', 512], ['type', 128]]) {
@@ -398,7 +405,18 @@ async function collectHighlightStructuralProofs(rawCandidates, expectedElement =
         if (expectedElement !== null) return failure('shadow-root');
         continue;
       }
-      entries.push({ occurrenceId: candidate.occurrenceId, structuralInput: await structuralInput(selected) });
+      // Um elemento que não pode ser provado é apenas descartado — nunca derruba o quadro inteiro.
+      // Antes, um único candidato profundo demais (ou com ancestral fora da gramática) fazia o
+      // `catch` externo transformar TODOS os candidatos da página em `inaccessible`, e a pessoa
+      // ficava sem destaque nenhum. A garantia continua a mesma: sem prova, sem alvo.
+      let structuralInputValue;
+      try {
+        structuralInputValue = await structuralInput(selected);
+      } catch {
+        if (expectedElement !== null) return failure('inaccessible');
+        continue;
+      }
+      entries.push({ occurrenceId: candidate.occurrenceId, structuralInput: structuralInputValue });
     }
     return { version: 1, entries, reason: null };
   } catch {
@@ -408,7 +426,7 @@ async function collectHighlightStructuralProofs(rawCandidates, expectedElement =
 
 function structuralInputRecord(value) {
   const record = exactHighlightRecord(value, ['version', 'tag', 'computedRole', 'ancestry']);
-  const ancestry = record && denseHighlightArray(record.ancestry, 16);
+  const ancestry = record && denseHighlightArray(record.ancestry, 64);
   if (!record || record.version !== 'StructuralSignatureInputV1' ||
     typeof record.tag !== 'string' || !/^[a-z][a-z0-9-]{0,62}$/u.test(record.tag) ||
     (record.computedRole !== null && (typeof record.computedRole !== 'string' || record.computedRole.length > 32)) ||
@@ -838,16 +856,23 @@ function captureChromeDebugger(value) {
   const sendCommand = ownChromeApiValue(value, 'sendCommand');
   const detach = ownChromeApiValue(value, 'detach');
   const attach = ownChromeApiValue(value, 'attach');
+  // `onEvent` é a única porta de entrada de eventos CDP do projeto (1.1.58). Sem ela não há como reagir a
+  // `Fetch.requestPaused` e o congelamento de navegação não existe; por isso ela é capturada com o mesmo
+  // rigor das demais — leitura dupla, estabilidade verificada e objeto congelado.
+  const onEvent = ownChromeApiValue(value, 'onEvent');
   const confirmedSendCommand = ownChromeApiValue(value, 'sendCommand');
   const confirmedDetach = ownChromeApiValue(value, 'detach');
   const confirmedAttach = ownChromeApiValue(value, 'attach');
-  if (sendCommand !== confirmedSendCommand || detach !== confirmedDetach || attach !== confirmedAttach) {
+  const confirmedOnEvent = ownChromeApiValue(value, 'onEvent');
+  if (sendCommand !== confirmedSendCommand || detach !== confirmedDetach || attach !== confirmedAttach ||
+    onEvent !== confirmedOnEvent) {
     throw chromeApiDenied();
   }
   if (typeof attach !== 'function' || typeof sendCommand !== 'function' || typeof detach !== 'function') {
     throw chromeApiDenied();
   }
   const captured = ObjectCreate(null);
+  defineDataProperty(captured, 'onEvent', captureChromeEvent(onEvent), true, false, false);
   defineDataProperty(captured, 'attach', ReflectApply(FunctionPrototypeBind, attach, [captured]), true, false, false);
   defineDataProperty(
     captured,
@@ -1728,10 +1753,18 @@ export function createChromeAdapter(chromeAuthority, rawOptions = {}) {
       await cdp.connect(tabId);
       return cdp;
     },
+    // Congelamento de navegação (1.1.58): ver src/background/navigation-freeze.js. Recebe a sessão já
+    // anexada porque o congelamento vive e morre junto com ela.
+    async beginNavigationFreeze(cdp, tabId) {
+      const freeze = createNavigationFreeze({ chromeApi, cdp, tabId });
+      await freeze.start();
+      return freeze;
+    },
     collectPage(cdp, tabId) { return collectPage(cdp, tabId, { executeScript }); },
     captureFullPage,
     captureElement,
     composeAnnouncementMap,
+    composeKeyboardMap,
     runDynamicProbes(tabId, cdp, options = {}) { return runDynamicProbes({ adapter: createProbeAdapter(tabId, cdp), signal: options.signal }); },
     async getEnvironment(tabId, cdp) {
       const [version, viewport] = await Promise.allSettled([

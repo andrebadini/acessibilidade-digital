@@ -67,6 +67,37 @@ test('rejects map extra fields, forged source metadata and duplicates per page',
   }
 });
 
+test('carries the clipped-omission count through the closed schema and rejects an invented count', async () => {
+  const input = await modelWithMap();
+  const map = input.evidence.at(-1);
+  map.status = 'partial';
+  map.counts = { ...map.counts, eligible: 3, omittedClipped: 2 };
+  map.limitations = [...map.limitations, 'ancestor-clipped-elements-omitted'];
+  map.hash = await hashAnnotationMapArtifact(map);
+  const diagnostic = {
+    code: 'ANNOTATION_MAP_PARTIAL',
+    message: 'O mapa visual foi gerado com cobertura parcial e limitações explícitas.',
+    at: '2026-08-26T14:00:31.000Z', recoverable: true,
+  };
+  input.pages[0].diagnostics.push(structuredClone(diagnostic));
+  input.session.diagnostics.push(diagnostic);
+
+  const model = createAuditModel(input);
+  const canonical = model.evidence.find(artifact => artifact.kind === 'announcement-map');
+  assert.equal(canonical.counts.omittedClipped, 2);
+  assert.equal(canonical.counts.eligible, 3);
+  assert.equal(canonical.status, 'partial');
+
+  for (const mutate of [
+    value => { value.evidence.at(-1).counts = { ...value.evidence.at(-1).counts, omittedHidden: 1 }; },
+    value => { value.evidence.at(-1).counts = { ...value.evidence.at(-1).counts, omittedClipped: 2.5 }; },
+  ]) {
+    const forged = structuredClone(input);
+    mutate(forged);
+    assert.throws(() => createAuditModel(forged), /entrada|mapa|contagens|esquema/iu);
+  }
+});
+
 test('migrates a V1 page map to page-1 without inventing another page or occurrence link', async () => {
   const input = reportInput();
   const source = createPristineMapSource();

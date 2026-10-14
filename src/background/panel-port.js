@@ -332,7 +332,7 @@ function pageMarkersEvent(value) {
     typeof record.sessionCapabilityId !== 'string' || !CAPABILITY.test(record.sessionCapabilityId) ||
     !Number.isSafeInteger(record.modelRevision) || record.modelRevision < 1 ||
     !['active', 'clear'].includes(record.state) ||
-    (record.selectedOrdinal !== null && (!Number.isSafeInteger(record.selectedOrdinal) || record.selectedOrdinal < 0 || record.selectedOrdinal >= 64)) ||
+    (record.selectedOrdinal !== null && (!Number.isSafeInteger(record.selectedOrdinal) || record.selectedOrdinal < 0 || record.selectedOrdinal >= 500)) ||
     (record.state === 'clear' && record.selectedOrdinal !== null)) return null;
   return record;
 }
@@ -373,6 +373,12 @@ function packet(state, auditId, sessionCapabilityId, result, captureMode = null)
 // começar e, um segundo depois, a tela inicial, sem explicação. O aviso não carrega capacidade nem dado da
 // página: só diz ao primeiro painel ocioso daquela aba, por pouco tempo, que a tentativa foi interrompida.
 const NAVIGATION_NOTICE = 'page-reloaded';
+// A página recarregou sozinha ENTRE o clique em "Auditar" e a preparação: a auditoria nem começou (o pedido
+// foi negado porque a aba tinha navegação pendente) e o painel é recriado pela navegação. Medido na 1.1.58
+// numa loja que recarrega ~1 s depois que o painel abre: o clique caía na janela da recarga e o painel novo
+// voltava ao início em silêncio.
+const NAVIGATION_NOTICE_BEFORE_START = 'page-reloaded-before-start';
+const NAVIGATION_NOTICES = new Set([NAVIGATION_NOTICE, NAVIGATION_NOTICE_BEFORE_START]);
 const NAVIGATION_NOTICE_TTL_MS = 30_000;
 const MAX_NAVIGATION_NOTICES = 64;
 
@@ -381,7 +387,7 @@ function initialPacket(notice) {
     protocol: 'audita-panel', version: 1, type: 'bootstrap-result',
     state: 'initial', auditId: null, sessionCapabilityId: null, result: null,
   };
-  if (notice === NAVIGATION_NOTICE) output.notice = NAVIGATION_NOTICE;
+  if (NAVIGATION_NOTICES.has(notice)) output.notice = notice;
   return freeze(output);
 }
 
@@ -756,7 +762,7 @@ export function createPanelPortCoordinator(raw) {
         invalidateMarkerReceipt(binding);
         nextReceipt = result ? Object.freeze({ windowId: binding.windowId, auditId: value.auditId,
           sessionCapabilityId: value.sessionCapabilityId, modelRevision: result.modelRevision,
-          detailCount: Math.min(64, result.details.length) }) : null;
+          detailCount: Math.min(500, result.details.length) }) : null;
       }
     }
     binding.port.postMessage(value);
@@ -960,14 +966,25 @@ export function createPanelPortCoordinator(raw) {
   }
 
   function noteNavigationInterruption(raw) {
-    const args = exact(raw, ['tabId', 'auditId']);
-    if (!args || !safeChromeId(args.tabId) || typeof args.auditId !== 'string' || !AUDIT_ID.test(args.auditId)) return false;
+    const interrupted = exact(raw, ['tabId', 'auditId']);
+    const beforeStart = interrupted ? null : exact(raw, ['tabId', 'beforeStart']);
+    const args = interrupted ?? beforeStart;
+    if (!args || !safeChromeId(args.tabId)) return false;
+    if (interrupted && (typeof args.auditId !== 'string' || !AUDIT_ID.test(args.auditId))) return false;
+    if (beforeStart && args.beforeStart !== true) return false;
     let now;
     try { now = input.epochNow(); } catch { return false; }
     if (!safeEpoch(now)) return false;
+    // Uma auditoria interrompida tem precedência sobre um início negado na mesma janela de tempo.
+    const prior = navigationNotices.get(args.tabId);
+    if (beforeStart && prior?.kind === NAVIGATION_NOTICE && prior.expiresAt > now) return true;
     navigationNotices.delete(args.tabId);
     while (navigationNotices.size >= MAX_NAVIGATION_NOTICES) navigationNotices.delete(navigationNotices.keys().next().value);
-    navigationNotices.set(args.tabId, freeze({ auditId: args.auditId, expiresAt: now + NAVIGATION_NOTICE_TTL_MS }));
+    navigationNotices.set(args.tabId, freeze({
+      kind: interrupted ? NAVIGATION_NOTICE : NAVIGATION_NOTICE_BEFORE_START,
+      auditId: interrupted ? args.auditId : null,
+      expiresAt: now + NAVIGATION_NOTICE_TTL_MS,
+    }));
     return true;
   }
 
@@ -978,7 +995,7 @@ export function createPanelPortCoordinator(raw) {
     const notice = navigationNotices.get(tabId);
     if (!notice) return null;
     navigationNotices.delete(tabId);
-    return notice.expiresAt > now ? NAVIGATION_NOTICE : null;
+    return notice.expiresAt > now ? notice.kind : null;
   }
 
   async function handleHello(binding) {

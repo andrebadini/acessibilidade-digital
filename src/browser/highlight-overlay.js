@@ -1,4 +1,38 @@
 export async function runAuditaHighlightCommand(command, environment = globalThis) {
+  // Contour and tab vocabulary, shared with the page signals: a rectangle drawn OUTSIDE the element
+  // with a gap, a white halo on both sides of the border and a tab glued to its top-left corner.
+  const GAP = 3;
+  const BORDER = 3;
+  const LABEL_HEIGHT = 24;
+  const MIN_ABOVE = 22;
+  const MAX_LABEL_WIDTH = 320;
+  const MIN_LABEL_WIDTH = 28;
+  const MAX_HIGHLIGHT_SEGMENTS = 64;
+  const MAX_HIGHLIGHT_COMPLEXITY = 320;
+  const MAX_HIGHLIGHT_ANCESTRY = 64;
+  // Vocabulário do seletor, copiado do caminho dos sinais: o destaque individual aceita os mesmos
+  // `tag[atributo-semântico="valor"]` que `buildStableSelector` produz e que `parseHighlightSelectorV1`
+  // valida no worker. A validação aqui é independente de propósito — nada do worker é autoridade.
+  const SIGNAL_ATTRIBUTES = Object.freeze(['name', 'alt', 'title', 'aria-label', 'data-testid', 'role']);
+  const MAX_ATTRIBUTE_VALUE = 256;
+  const ATTRIBUTE_SEGMENT_PATTERN = new RegExp(
+    '^([a-z][a-z0-9-]{0,62})'
+    + '(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?'
+    + '((?:\\.-?[_A-Za-z][_A-Za-z0-9-]*){0,2})'
+    + '(?:\\[([a-z][a-z0-9-]{0,31})="((?:[^"\\\\]|\\\\.)*)"\\])?'
+    + '(?::nth-of-type\\(([1-9][0-9]*)\\))?$', 'u');
+
+  function rgba(color, alpha) {
+    const match = /^rgb\((\d{1,3}), (\d{1,3}), (\d{1,3})\)$/u.exec(String(color));
+    if (!match) return `rgba(0, 0, 0, ${alpha})`;
+    return `rgba(${Number(match[1])}, ${Number(match[2])}, ${Number(match[3])}, ${alpha})`;
+  }
+
+  // Inner halo, outer halo, then the coloured glow — the contour never covers the element's content.
+  function ringShadow(color) {
+    return `inset 0 0 0 1px #ffffff, 0 0 0 1px #ffffff, 0 0 0 4px ${rgba(color, 0.35)}`;
+  }
+
   function exactKeys(value, expectedKeys) {
     try {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -41,22 +75,25 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
       if (!selector || selector.syntax !== 'CSSSelectorV1' || typeof selector.value !== 'string' ||
         selector.value.length < 1 || selector.value.length > 2_048 ||
         !Number.isSafeInteger(selector.byteLength) || selector.byteLength < 1 || selector.byteLength > 2_048 ||
-        !Number.isSafeInteger(selector.complexity) || selector.complexity < 1 || selector.complexity > 64) return null;
+        !Number.isSafeInteger(selector.complexity) || selector.complexity < 1 ||
+        selector.complexity > MAX_HIGHLIGHT_COMPLEXITY) return null;
 
       const bytes = new TextEncoder().encode(selector.value);
       if (bytes.byteLength !== selector.byteLength || bytes.byteLength > 2_048) return null;
+      // Ids and classes that merely carry digits (post-1234, card-2024, 1f2e3d4c) are part of the
+      // page the person is already reading: they are accepted here just like the page signals accept
+      // them. Only credential-shaped names, URLs and UUIDs stay refused.
       const sensitive = /(?:pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_]?time|api[-_]?key)/iu;
       const urlLike = /@|:\/\/|www\./iu;
       const uuid = /[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/iu;
+      const sensitiveToken = value => sensitive.test(value) || urlLike.test(value) || uuid.test(value);
       const rawToken = /[#.]([^#.\[\]:()>\t\n\f\r ,\\*]+)/gu;
       for (const match of selector.value.matchAll(rawToken)) {
-        if (sensitive.test(match[1]) || urlLike.test(match[1]) || /[0-9]{4}/u.test(match[1]) ||
-          /[0-9a-f]{8}/iu.test(match[1]) || uuid.test(match[1])) return null;
+        if (sensitiveToken(match[1])) return null;
       }
 
       const segments = selector.value.split(' > ');
-      if (segments.length < 1 || segments.length > 16) return null;
-      const segmentPattern = /^([a-z][a-z0-9-]{0,62})(?:#(-?[_A-Za-z][_A-Za-z0-9-]*))?((?:\.-?[_A-Za-z][_A-Za-z0-9-]*){0,2})(?:\[(role|type)="([a-z]+)"\])?(?::nth-of-type\(([1-9][0-9]*)\))?$/u;
+      if (segments.length < 1 || segments.length > MAX_HIGHLIGHT_SEGMENTS) return null;
       const classPattern = /\.(-?[_A-Za-z][_A-Za-z0-9-]*)/gu;
       const allowedRoles = new Set([
         'alert', 'button', 'checkbox', 'dialog', 'heading', 'img', 'link', 'list', 'listitem',
@@ -68,21 +105,53 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
         'search', 'submit', 'tel', 'text', 'url',
       ]);
       const safeToken = token => typeof token === 'string' && token.length >= 1 && token.length <= 23 &&
-        /^-?[_A-Za-z][_A-Za-z0-9-]*$/u.test(token) && !sensitive.test(token) && !urlLike.test(token) &&
-        !/[0-9]{4}/u.test(token) && !/[0-9a-f]{8}/iu.test(token) && !uuid.test(token);
+        /^-?[_A-Za-z][_A-Za-z0-9-]*$/u.test(token) && !sensitiveToken(token);
+      // Mesmo teste de valor que os sinais fazem dentro da página e que `isSafeSignalAttributeValue`
+      // repete no worker: texto não vazio, sem caractere de controle e sem cara de credencial.
+      const controlCharacter = /[\u0000-\u001f\u007f]/u;
+      const safeAttributeValue = value => typeof value === 'string' && value.length >= 1 &&
+        value.length <= MAX_ATTRIBUTE_VALUE && !controlCharacter.test(value) && !sensitiveToken(value);
+      // `escapeCssString` dos sinais escapa o valor dentro do seletor; a leitura de volta tem de ser
+      // a mesma nos dois lados, senão o valor comparado aqui não é o valor que o worker validou.
+      const unescapeCss = value => {
+        let output = '';
+        for (let index = 0; index < value.length; index += 1) {
+          if (value[index] !== '\\') { output += value[index]; continue; }
+          index += 1;
+          if (index >= value.length) break;
+          const hex = /^[0-9a-fA-F]{1,6}/u.exec(value.slice(index));
+          if (hex) {
+            const code = Number.parseInt(hex[0], 16);
+            if (code > 0 && code <= 0x10ffff) output += String.fromCodePoint(code);
+            index += hex[0].length - 1;
+            if (value[index + 1] === ' ') index += 1;
+            continue;
+          }
+          output += value[index];
+        }
+        return output;
+      };
       let complexity = Math.max(0, segments.length - 1);
       for (const segment of segments) {
-        const match = segmentPattern.exec(segment);
+        const match = ATTRIBUTE_SEGMENT_PATTERN.exec(segment);
         if (!match) return null;
-        const [, , id, rawClasses = '', attributeName, attributeValue, rawNth] = match;
+        const [, , id, rawClasses = '', attributeName, rawAttributeValue, rawNth] = match;
         if (id !== undefined && !safeToken(id)) return null;
         const classes = [...rawClasses.matchAll(classPattern)].map(entry => entry[1]);
         if (classes.some(className => !safeToken(className))) return null;
-        if (attributeName !== undefined && !(attributeName === 'role' ? allowedRoles : allowedTypes).has(attributeValue)) return null;
+        if (attributeName !== undefined) {
+          // Duas leituras do mesmo campo, como no worker: as enumerações de role/type exportadas no
+          // modelo e o atributo semântico do próprio elemento (`tag[atributo="valor"]`), que é a
+          // forma que `buildStableSelector` dá a um controle sem classe.
+          const attributeValue = unescapeCss(rawAttributeValue);
+          const enumerated = (attributeName === 'role' ? allowedRoles : allowedTypes).has(attributeValue);
+          const semantic = SIGNAL_ATTRIBUTES.includes(attributeName) && safeAttributeValue(attributeValue);
+          if (!enumerated && !semantic) return null;
+        }
         if (rawNth !== undefined && (!Number.isSafeInteger(Number(rawNth)) || Number(rawNth) < 1)) return null;
         complexity += 1 + (id === undefined ? 0 : 1) + classes.length +
           (attributeName === undefined ? 0 : 2) + (rawNth === undefined ? 0 : 3);
-        if (complexity > 64) return null;
+        if (complexity > MAX_HIGHLIGHT_COMPLEXITY) return null;
       }
       if (complexity !== selector.complexity) return null;
 
@@ -297,7 +366,7 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
     const seen = new Set();
     let current = element;
     let reachedDocument = false;
-    for (let depth = 1; depth <= 16; depth += 1) {
+    for (let depth = 1; depth <= MAX_HIGHLIGHT_ANCESTRY; depth += 1) {
       if (!current || seen.has(current)) throw new TypeError('invalid ancestry');
       seen.add(current);
       nodes.push({
@@ -434,6 +503,8 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
       configurable: false,
       writable: false,
     });
+    const color = install.kind === 'failed' ? 'rgb(139, 30, 30)' : 'rgb(107, 78, 0)';
+    const shadow = ringShadow(color);
     root.style.all = 'initial';
     root.style.position = 'fixed';
     root.style.display = 'block';
@@ -445,47 +516,41 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
     root.style.background = 'transparent';
     root.style.outline = '2px solid CanvasText';
     root.style.outlineOffset = '2px';
-    root.style.borderWidth = install.kind === 'failed' ? '6px' : '5px';
+    root.style.borderWidth = `${BORDER}px`;
+    // Dashed keeps a non-colour cue for the manual-review kind; both are solid at the core because
+    // the contour is now a rectangle outside the element, not a heavy inner frame.
     root.style.borderStyle = install.kind === 'failed' ? 'solid' : 'dashed';
-    root.style.borderColor = install.kind === 'failed' ? 'rgb(139, 30, 30)' : 'rgb(107, 78, 0)';
+    root.style.borderColor = color;
+    root.style.borderRadius = '3px';
+    root.style.boxShadow = shadow;
 
+    // The tab is the marker chip ("17×") glued to the descriptor: one visual piece, two spans, so
+    // the number and the plain-language meaning stay separate for the runtime integrity check.
+    const chip = (element, padding, lineHeight) => {
+      element.tabIndex = -1;
+      element.style.all = 'initial';
+      element.style.position = 'absolute';
+      element.style.display = 'flex';
+      element.style.alignItems = 'center';
+      element.style.justifyContent = 'center';
+      element.style.boxSizing = 'border-box';
+      element.style.visibility = 'visible';
+      element.style.opacity = '1';
+      element.style.pointerEvents = 'none';
+      element.style.height = `${LABEL_HEIGHT}px`;
+      element.style.padding = padding;
+      element.style.border = '1px solid #ffffff';
+      element.style.background = color;
+      element.style.color = '#ffffff';
+      element.style.font = `700 14px/${lineHeight} system-ui, sans-serif`;
+      element.style.whiteSpace = 'nowrap';
+    };
+    // Only the symbol: the occurrence ordinal used here is not the number of the page signal for
+    // the same element, and two different numbers on one element read as two different findings.
     marker.textContent = install.kind === 'failed' ? '×' : '?';
-    marker.tabIndex = -1;
-    marker.style.all = 'initial';
-    marker.style.position = 'absolute';
-    marker.style.left = install.kind === 'failed' ? '-6px' : '-5px';
-    marker.style.top = install.kind === 'failed' ? '-42px' : '-41px';
-    marker.style.width = '34px';
-    marker.style.height = '34px';
-    marker.style.display = 'flex';
-    marker.style.visibility = 'visible';
-    marker.style.opacity = '1';
-    marker.style.alignItems = 'center';
-    marker.style.justifyContent = 'center';
-    marker.style.boxSizing = 'border-box';
-    marker.style.borderRadius = '999px';
-    marker.style.background = install.kind === 'failed' ? '#8b1e1e' : '#6b4e00';
-    marker.style.color = '#ffffff';
-    marker.style.font = '700 24px/1 system-ui, sans-serif';
-    marker.style.pointerEvents = 'none';
-
-    label.textContent = `${install.markerNumber} — ${install.kind === 'failed' ? 'Falha confirmada' : 'Revisão humana necessária'}`;
-    label.tabIndex = -1;
-    label.style.all = 'initial';
-    label.style.position = 'absolute';
-    label.style.left = '34px';
-    label.style.top = install.kind === 'failed' ? '-40px' : '-39px';
-    label.style.display = 'block';
-    label.style.visibility = 'visible';
-    label.style.opacity = '1';
-    label.style.boxSizing = 'border-box';
-    label.style.padding = '7px 10px';
-    label.style.borderRadius = '6px';
-    label.style.background = install.kind === 'failed' ? '#8b1e1e' : '#6b4e00';
-    label.style.color = '#ffffff';
-    label.style.font = '700 14px/1.25 system-ui, sans-serif';
-    label.style.whiteSpace = 'nowrap';
-    label.style.pointerEvents = 'none';
+    chip(marker, '0 8px', '1');
+    label.textContent = install.kind === 'failed' ? 'Falha confirmada' : 'Revisão humana necessária';
+    chip(label, '0 10px', '1.25');
 
     root.appendChild(marker);
     root.appendChild(label);
@@ -498,9 +563,57 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
       borderWidth: root.style.borderWidth,
       borderStyle: root.style.borderStyle,
       borderColor: root.style.borderColor,
-      markerStyleFingerprint: inlineStyleFingerprint(marker),
-      labelStyleFingerprint: inlineStyleFingerprint(label),
+      // Read back like every other property: Chrome rewrites a shadow into its own order and
+      // serialization, and the runtime integrity check compares against what the DOM returns.
+      boxShadow: root.style.boxShadow,
+      chipBackground: color,
+      // Read back from the DOM: Chrome rewrites `#ffffff` as `rgb(255, 255, 255)` in both
+      // `style.color` and `style.border`, and the runtime check compares against the DOM.
+      chipColor: marker.style.color,
+      chipBorder: marker.style.border,
+      markerFont: marker.style.font,
+      labelFont: label.style.font,
     };
+  }
+
+  // The tab is never measured from the page unless the browser reports a usable inline size.
+  function tabWidth(element) {
+    try {
+      const measured = Number(element.offsetWidth);
+      if (Number.isFinite(measured) && measured >= 16 && measured <= MAX_LABEL_WIDTH) return measured;
+    } catch { /* fall through to the character estimate */ }
+    const text = typeof element.textContent === 'string' ? element.textContent : '';
+    return Math.min(MAX_LABEL_WIDTH, Math.max(MIN_LABEL_WIDTH, 12 + (text.length * 8)));
+  }
+
+  function viewportBounds() {
+    const width = environment.innerWidth;
+    const height = environment.innerHeight;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+      return { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
+    }
+    return { left: 0, top: 0, right: width, bottom: height };
+  }
+
+  // Candidates in order: glued above the contour, hanging below it when there is no room (the
+  // 22px rule), riding the top of the viewport when the element starts above the screen, and always
+  // clamped inside the viewport so the tab can never leave the screen.
+  function placeTab(ring, width, height, bounds) {
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), Math.max(min, max));
+    const maxLeft = Math.max(bounds.left, bounds.right - width);
+    const minTop = bounds.top;
+    const maxTop = Math.max(bounds.top, bounds.bottom - height);
+    const aboveTop = ring.top - height;
+    if (ring.top - bounds.top >= MIN_ABOVE && aboveTop >= bounds.top) {
+      return { left: clamp(ring.left, bounds.left, maxLeft), top: clamp(aboveTop, minTop, maxTop), side: 'above' };
+    }
+    if (ring.top < bounds.top) {
+      const bandLeft = clamp(ring.left, bounds.left, maxLeft);
+      const bandRight = clamp(ring.left + ring.width - width, bandLeft, maxLeft);
+      return { left: clamp(ring.left, bandLeft, bandRight), top: minTop, side: 'above' };
+    }
+    return { left: clamp(ring.left, bounds.left, maxLeft),
+      top: clamp(ring.top + ring.height, minTop, maxTop), side: 'below' };
   }
 
   function renderedRect(target) {
@@ -513,17 +626,59 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
 
   function positionRoot(state, rect) {
     if (state.disposed || !rect) return false;
-    state.root.style.left = `${rect.left}px`;
-    state.root.style.top = `${rect.top}px`;
-    state.root.style.width = `${rect.width}px`;
-    state.root.style.height = `${rect.height}px`;
+    const root = state.root;
+    const left = rect.left - GAP - BORDER;
+    const top = rect.top - GAP - BORDER;
+    const width = rect.width + (2 * (GAP + BORDER));
+    const height = rect.height + (2 * (GAP + BORDER));
+    root.style.left = `${left}px`;
+    root.style.top = `${top}px`;
+    root.style.width = `${width}px`;
+    root.style.height = `${height}px`;
+    root.style.borderWidth = `${BORDER}px`;
+
+    // Children are positioned against the padding box, so the border offset is added back here.
+    const markerWidth = tabWidth(state.marker);
+    const labelWidth = tabWidth(state.label);
+    const spot = placeTab({ left, top, width, height }, markerWidth + labelWidth - 1,
+      LABEL_HEIGHT, viewportBounds());
+    const originX = left + BORDER;
+    const originY = top + BORDER;
+    const markerLeft = `${spot.left - originX}px`;
+    const markerTop = `${spot.top - originY}px`;
+    state.marker.style.width = `${markerWidth}px`;
+    state.marker.style.height = `${LABEL_HEIGHT}px`;
+    state.marker.style.left = markerLeft;
+    state.marker.style.top = markerTop;
+    state.marker.style.borderRadius = spot.side === 'below' ? '0 0 0 4px' : '4px 0 0 0';
+    state.label.style.width = `${labelWidth}px`;
+    state.label.style.height = `${LABEL_HEIGHT}px`;
+    state.label.style.left = `${spot.left - originX + markerWidth - 1}px`;
+    state.label.style.top = markerTop;
+    state.label.style.borderRadius = spot.side === 'below' ? '0 0 4px 0' : '0 4px 0 0';
+
     state.geometry = {
-      left: state.root.style.left,
-      top: state.root.style.top,
-      width: state.root.style.width,
-      height: state.root.style.height,
+      left: root.style.left,
+      top: root.style.top,
+      width: root.style.width,
+      height: root.style.height,
+      // Read back from the DOM like the root rectangle: the browser may normalize the serialization
+      // of a fractional offset, and the runtime integrity check compares against what it reads.
+      markerLeft: state.marker.style.left,
+      markerTop: state.marker.style.top,
+      markerWidth: state.marker.style.width,
+      markerHeight: state.marker.style.height,
+      markerRadius: state.marker.style.borderRadius,
+      labelLeft: state.label.style.left,
+      labelTop: state.label.style.top,
+      labelWidth: state.label.style.width,
+      labelHeight: state.label.style.height,
+      labelRadius: state.label.style.borderRadius,
+      side: spot.side,
     };
-    state.rootStyleFingerprint = inlineStyleFingerprint(state.root);
+    state.rootStyleFingerprint = inlineStyleFingerprint(root);
+    state.markerStyleFingerprint = inlineStyleFingerprint(state.marker);
+    state.labelStyleFingerprint = inlineStyleFingerprint(state.label);
     return true;
   }
 
@@ -539,16 +694,30 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
         root.getAttribute('inert') !== null ||
         root.tabIndex !== -1 || root.style.pointerEvents !== 'none' || root.style.position !== 'fixed' ||
         root.style.borderWidth !== state.borderWidth || root.style.borderStyle !== state.borderStyle ||
-        root.style.borderColor !== state.borderColor || root.style.left !== state.geometry.left ||
+        root.style.borderColor !== state.borderColor || root.style.borderRadius !== '3px' ||
+        root.style.boxShadow !== state.boxShadow || root.style.left !== state.geometry.left ||
         root.style.top !== state.geometry.top || root.style.width !== state.geometry.width ||
         root.style.height !== state.geometry.height || inlineStyleFingerprint(root) !== state.rootStyleFingerprint ||
         inlineStyleFingerprint(marker) !== state.markerStyleFingerprint ||
         inlineStyleFingerprint(label) !== state.labelStyleFingerprint) return false;
       const children = childSnapshot(root);
       if (children.length !== 2 || children[0] !== marker || children[1] !== label) return false;
-      for (const [child, expectedText] of [[marker, state.markerText], [label, state.labelText]]) {
+      for (const [child, expectedText, geometry, prefix] of [
+        [marker, state.markerText, { left: state.geometry.markerLeft, top: state.geometry.markerTop,
+          width: state.geometry.markerWidth, height: state.geometry.markerHeight,
+          radius: state.geometry.markerRadius }, 'marker'],
+        [label, state.labelText, { left: state.geometry.labelLeft, top: state.geometry.labelTop,
+          width: state.geometry.labelWidth, height: state.geometry.labelHeight,
+          radius: state.geometry.labelRadius }, 'label'],
+      ]) {
         if (child.parentNode !== root || child.isConnected !== true || elementTag(child) !== 'span' ||
           child.tabIndex !== -1 || child.style.pointerEvents !== 'none' || child.textContent !== expectedText ||
+          child.style.left !== geometry.left || child.style.top !== geometry.top ||
+          child.style.width !== geometry.width || child.style.height !== geometry.height ||
+          child.style.borderRadius !== geometry.radius || child.style.background !== state.chipBackground ||
+          child.style.color !== state.chipColor || child.style.border !== state.chipBorder ||
+          child.style.font !== (prefix === 'marker' ? state.markerFont : state.labelFont) ||
+          child.style.opacity !== '1' || child.style.visibility !== 'visible' ||
           childSnapshot(child).length !== 0 || child.getAttribute('role') !== null ||
           child.getAttribute('href') !== null || child.getAttribute('contenteditable') !== null ||
           child.getAttribute('id') !== null || child.getAttribute('class') !== null ||
@@ -561,7 +730,7 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
         for (const [computed, display, position] of [
           [computedRoot, 'block', 'fixed'],
           [computedMarker, 'flex', 'absolute'],
-          [computedLabel, 'block', 'absolute'],
+          [computedLabel, 'flex', 'absolute'],
         ]) {
           if (!computed || computed.display !== display || computed.visibility !== 'visible' ||
             Number(computed.opacity) !== 1 || computed.pointerEvents !== 'none' ||
@@ -572,8 +741,12 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
           !['transparent', 'rgba(0,0,0,0)'].includes(transparent) ||
           computedRoot.outlineStyle !== 'solid' || computedRoot.outlineWidth !== '2px' ||
           computedRoot.outlineOffset !== '2px' || computedRoot.borderWidth !== state.borderWidth ||
-          computedRoot.borderStyle !== state.borderStyle || computedMarker.width !== '34px' ||
-          computedMarker.height !== '34px') return false;
+          computedRoot.borderStyle !== state.borderStyle ||
+          String(computedRoot.boxShadow) !== state.boxShadow ||
+          computedMarker.width !== state.geometry.markerWidth ||
+          computedMarker.height !== state.geometry.markerHeight ||
+          computedLabel.width !== state.geometry.labelWidth ||
+          computedLabel.height !== state.geometry.labelHeight) return false;
         let forcedColors = false;
         if (typeof environment.matchMedia === 'function') {
           const query = environment.matchMedia('(forced-colors: active)');
@@ -734,10 +907,6 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
 
     const visual = makeRoot(install);
     const { root } = visual;
-    root.style.left = `${rect.left}px`;
-    root.style.top = `${rect.top}px`;
-    root.style.width = `${rect.width}px`;
-    root.style.height = `${rect.height}px`;
 
     const state = {
       version: 1,
@@ -754,15 +923,16 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
       borderWidth: visual.borderWidth,
       borderStyle: visual.borderStyle,
       borderColor: visual.borderColor,
-      rootStyleFingerprint: inlineStyleFingerprint(root),
-      markerStyleFingerprint: visual.markerStyleFingerprint,
-      labelStyleFingerprint: visual.labelStyleFingerprint,
-      geometry: {
-        left: root.style.left,
-        top: root.style.top,
-        width: root.style.width,
-        height: root.style.height,
-      },
+      boxShadow: visual.boxShadow,
+      chipBackground: visual.chipBackground,
+      chipColor: visual.chipColor,
+      chipBorder: visual.chipBorder,
+      markerFont: visual.markerFont,
+      labelFont: visual.labelFont,
+      rootStyleFingerprint: '',
+      markerStyleFingerprint: '',
+      labelStyleFingerprint: '',
+      geometry: null,
       observer: null,
       listeners: [],
       animationFrame: null,
@@ -772,6 +942,9 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
     };
     state.dispose = autonomous => dispose(state, autonomous === true);
     provisionalState = state;
+    // The first placement fixes the contour, the tab side and the style fingerprints the runtime
+    // integrity check compares against on every later validation.
+    positionRoot(state, rect);
     if (!claimOwned(ownedInstallClaim)) {
       state.dispose(false);
       return { ok: false, reason: 'runtime-error' };

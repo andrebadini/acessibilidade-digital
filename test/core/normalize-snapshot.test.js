@@ -18,7 +18,7 @@ const COMPUTED_STYLES = [
       'letter-spacing', 'word-spacing', 'text-align', 'direction', 'outline-color', 'outline-style',
   'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
   'overflow-y', 'animation-duration', 'animation-iteration-count',
-  'transition-duration'
+  'transition-duration', 'cursor'
 ];
 
 function columnarRaw() {
@@ -257,7 +257,7 @@ test('merges AX and runtime data while redacting sensitive values and resource U
 
   const audit = await runCoreAudit(snapshot);
   assert.equal(audit.composition.valid, true);
-  assert.equal(audit.ruleResults.length, 130);
+  assert.equal(audit.ruleResults.length, 131);
 
   const selector = buildStableSelector(button, buildSnapshotIndexes(snapshot));
   const snippet = sanitizeHtmlSnippet('<button id="send" onclick="bad()" data-token="fixture">Enviar</button>');

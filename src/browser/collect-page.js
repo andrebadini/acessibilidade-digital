@@ -7,7 +7,10 @@ export const COMPUTED_STYLE_PROPERTIES = Object.freeze([
   'letter-spacing', 'word-spacing', 'text-align', 'direction', 'outline-color', 'outline-style',
   'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
   'overflow-y', 'animation-duration', 'animation-iteration-count',
-  'transition-duration'
+  'transition-duration',
+  // `cursor` é o que permite ao mapa do teclado reconhecer um item que *parece* clicável sem ser
+  // alcançável pelo Tab. Sem ele o mapa declara a limitação e cala sobre essa pista.
+  'cursor'
 ]);
 
 const STRUCTURAL_COMMAND_OPTIONS = Object.freeze({ timeoutMs: 45_000 });

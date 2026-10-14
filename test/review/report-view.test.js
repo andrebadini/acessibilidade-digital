@@ -16,6 +16,7 @@ import { readerMapPresentation } from '../../src/core/report/reader-map-presenta
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
+import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 
 const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
 const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_PAGE_CAPTURE_OMITTED_MESSAGE}`;
@@ -265,7 +266,7 @@ test('summary print is explicit, restores presentation on error and never trigge
 });
 
 test('reused report captures have one marked preview and an annex link instead of another image', async () => {
-  const { model, summary } = await fixture();
+  const { model, summary } = await fixture({ mutateDraft: withElementFrame });
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
   const html = renderHtmlReport(model, { reportView: view });
   const previewFigures = [...html.matchAll(/<figure[^>]+data-report-preview-evidence="([^"]+)"[\s\S]*?<\/figure>/g)];
@@ -477,6 +478,20 @@ function matches(node, selector) {
   return true;
 }
 
+// O quadro do elemento vem da captura (`metadata`), nunca do tamanho do PNG decodificado. A amostra
+// antiga não traz esse quadro, então os testes que verificam a marcação o injetam explicitamente; os
+// que verificam a ausência de quadro usam a amostra como está.
+const ELEMENT_FRAME_METADATA = Object.freeze({
+  width: 128,
+  height: 88,
+  highlightBox: { x: 24, y: 12, width: 80, height: 40, coordinateSpace: 'capture-css-px' },
+});
+
+function withElementFrame(draft) {
+  draft.evidence.find(evidence => evidence.kind === 'element').metadata = structuredClone(ELEMENT_FRAME_METADATA);
+  return draft;
+}
+
 async function fixture({ mutateDraft } = {}) {
   const inventory = await createInstalledCoreRuleInventory();
   const draft = structuredClone(SAMPLE_AUDIT);
@@ -625,6 +640,88 @@ test('the interactive and exported map legends expose bidi controls without chan
   assert.equal(JSON.stringify(model), before);
 });
 
+async function keyboardMapFixture(status = 'complete') {
+  const map = await createKeyboardMapFixture({ status });
+  return fixture({ mutateDraft(draft) {
+    draft.evidence[0] = createPristineMapSource();
+    draft.evidence.push(map);
+    if (status === 'partial') {
+      const diagnostic = {
+        code: 'KEYBOARD_MAP_PARTIAL', message: 'O mapa do teclado foi gerado com cobertura parcial e limitações explícitas.',
+        at: draft.pages[0].timestamps.endedAt, recoverable: true,
+      };
+      draft.pages[0].diagnostics.push(diagnostic);
+      draft.session.diagnostics.push({ ...diagnostic });
+    }
+    return draft;
+  } });
+}
+
+test('the keyboard map section shows the numbered Tab stops with the legend promised to lay reviewers', async () => {
+  const { model, summary } = await keyboardMapFixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const before = JSON.stringify(model);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-keyboard-map-page="page-1"]');
+  assert.ok(card, 'the keyboard map must render as a page visual, not just an artifact ID');
+  assert.equal(card.getAttribute('data-map-status'), 'complete');
+  assert.ok(root.textContent.includes('Cada caixa azul numerada é um lugar onde a tecla Tab para, na ordem dos números. Caixas laranja tracejadas: itens que parecem clicáveis, mas o Tab não chega até eles.'));
+  assert.ok(card.textContent.includes('1 lugar onde o Tab para; 0 itens que parecem clicáveis e o Tab não alcança.'));
+  const image = card.querySelector('img[data-map-segment-image]');
+  assert.equal(image?.getAttribute('src'), TEST_PNG);
+  assert.match(image?.getAttribute('alt') ?? '', /Trecho 1 de 1/u);
+  const stop = card.querySelector('li[data-keyboard-map-stop="1"]');
+  assert.equal(stop?.getAttribute('value'), '1');
+  assert.ok(stop.textContent.includes('Consultar, botão — botão'));
+  assert.match(stop.textContent, /Trecho 1 da imagem/u);
+  assert.ok(card.querySelector('[data-keyboard-map-provenance]').textContent.includes(view.keyboardMaps[0].hash));
+  assert.equal(JSON.stringify(model), before, 'presenting the keyboard map must not change original evidence');
+});
+
+test('the exported report carries the keyboard map legend, pixels and counts in both render paths', async () => {
+  const { model, summary } = await keyboardMapFixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const html = renderHtmlReport(model, { reportView: view });
+  for (const marker of ['data-keyboard-map-page="page-1"', 'data-map-segment-image', 'data-keyboard-map-stop="1"']) {
+    assert.ok(html.includes(marker), `the delivered report must keep ${marker}`);
+  }
+  assert.ok(html.includes(TEST_PNG));
+  assert.ok(html.includes(view.keyboardMaps[0].derivation.sourceHash));
+  assert.equal((html.match(/Cada caixa azul numerada é um lugar onde a tecla Tab para/gu) ?? []).length, 1);
+
+  // A rota estática (sem ReportView) preserva a mesma âncora e a mesma legenda.
+  const legacy = renderHtmlReport(model);
+  assert.ok(legacy.includes('id="mapa-teclado"'));
+  assert.ok(legacy.includes('href="#mapa-teclado"'));
+  assert.ok(legacy.includes('Cada caixa azul numerada é um lugar onde a tecla Tab para'));
+  assert.ok(legacy.includes('1 lugar onde o Tab para; 0 itens que parecem clicáveis e o Tab não alcança.'));
+  assert.ok(legacy.includes('data-keyboard-map-stop="1"'));
+});
+
+test('keyboard map absence and partial coverage are explicit without inventing boxes or approval', async () => {
+  const absent = await fixture();
+  const absentView = buildReportView({
+    model: absent.model, summary: absent.summary, modelRevision: 1, modelHash: absent.model.integrity.canonicalModelHash,
+  });
+  const absentRoot = renderReportView({ view: absentView, document: new Document(), onExport() {} });
+  const absentCard = absentRoot.querySelector('[data-keyboard-map-page="page-1"]');
+  assert.equal(absentCard?.getAttribute('data-map-status'), 'absent');
+  assert.equal(absentCard.querySelectorAll('img').length, 0);
+  assert.match(absentCard.textContent, /Mapa do teclado não coletado/u);
+  assert.equal(absentView.keyboardMaps.length, 0);
+
+  const partial = await keyboardMapFixture('partial');
+  const view = buildReportView({
+    model: partial.model, summary: partial.summary, modelRevision: 1, modelHash: partial.model.integrity.canonicalModelHash,
+  });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-keyboard-map-page="page-1"]');
+  assert.equal(card.getAttribute('data-map-status'), 'partial');
+  assert.match(card.textContent, /cobertura parcial/u);
+  assert.match(card.textContent, /frames internos não entra na lista/u);
+  assert.ok(renderHtmlReport(partial.model, { reportView: view }).includes('data-map-status="partial"'));
+});
+
 test('reader map absence and empty selection are explicit without inventing an image or conformity', async () => {
   for (const [setup, status] of [[fixture, 'absent'], [() => readerMapFixture('empty'), 'empty']]) {
     const { model, summary } = await setup();
@@ -714,7 +811,8 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   });
   assert.deepEqual(Object.keys(view), [
     'version', 'auditId', 'modelRevision', 'modelHash', 'filters', 'executive', 'issues',
-    'checklist', 'technicalEvidence', 'readerMaps', 'methodology', 'exports', 'matrix', 'reviewHistory', 'findingsBoard',
+    'checklist', 'technicalEvidence', 'readerMaps', 'keyboardMaps', 'methodology', 'exports', 'matrix',
+    'reviewHistory', 'findingsBoard',
   ]);
   assert.deepEqual(Object.keys(view.filters), ['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
   assert.deepEqual(Object.keys(view.issues), ['failed', 'alerts', 'humanReview', 'passed']);
@@ -921,13 +1019,14 @@ test('live report puts the decision summary before compact navigation and expose
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
   let exportCalls = 0;
   const root = renderReportView({ view, document: new Document(), onExport() { exportCalls += 1; } });
-  assert.equal(root.querySelectorAll('h2').length, 7);
+  assert.equal(root.querySelectorAll('h2').length, 8);
   assert.deepEqual(root.querySelectorAll('h2').map(node => node.textContent), [
     'Sumário executivo e limitações críticas',
     'Cobertura e quatro grupos de resultado',
     'Quadro de constatações (requisitos da ABNT NBR 17225:2025)',
     'Revisão humana guiada e conclusões registradas',
     'Mapas de anúncios',
+    'Mapa do teclado',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
   ]);
@@ -952,11 +1051,11 @@ test('live report puts the decision summary before compact navigation and expose
   assert.equal(root.children.indexOf(navigation) < root.children.indexOf(secondSection), true);
   assert.deepEqual(navigation.querySelectorAll('a').map(link => link.getAttribute('href')), [
     '#report-section-1', '#report-section-2', '#report-section-3', '#report-section-4',
-    '#report-section-5', '#report-section-6', '#report-section-7',
+    '#report-section-5', '#report-section-6', '#report-section-7', '#report-section-8',
   ]);
   assert.deepEqual(navigation.querySelectorAll('a').map(link => link.textContent), [
     'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
-    'Matriz ABNT', 'Metodologia e evidências',
+    'Teclado', 'Matriz ABNT', 'Metodologia e evidências',
   ]);
   assert.ok(firstSection.querySelector('[data-report-outcome]'));
   assert.match(firstSection.querySelector('[data-report-outcome]').textContent, /Estado|conclu/iu);
@@ -1197,7 +1296,7 @@ test('missing ABNT association is explicit in the live report and HTML/PDF sourc
 });
 
 test('live report renders decision-first cards, evidence previews and honest evidence-only navigation', async () => {
-  const { model, summary } = await fixture();
+  const { model, summary } = await fixture({ mutateDraft: withElementFrame });
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
   const root = renderReportView({ view, document: new Document(), onExport() {} });
   const firstIssue = root.querySelector('[data-report-issue][data-result="failed"]');
@@ -1326,11 +1425,20 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   const failedFigure = failed.querySelector('[data-evidence-kind="element"]');
   const failedVisual = failedFigure.querySelector('svg[data-evidence-treatment="failed"]');
   assert.ok(failedVisual);
-  assert.equal(failedVisual.getAttribute('aria-label'), 'Elemento local da evidência ev-control com falha confirmada destacada por moldura vermelha sólida.');
+  assert.equal(failedVisual.getAttribute('aria-label'),
+    'Elemento local da evidência ev-control captura do elemento com falha, contornado em vermelho por fora do elemento.');
   assert.equal(failedVisual.querySelector('image').getAttribute('href'), original.dataUrl);
+  // O alvo e a folga até o contorno ficam nítidos: o furo do escurecimento é o mesmo retângulo do
+  // contorno, desenhado 3 px por fora da borda — não a borda crua, que deixaria a folga escurecida.
+  assert.equal(failedVisual.querySelector('path.evidence-spotlight').getAttribute('d'), 'M0 0H128V88H0ZM21 9H107V55H21Z');
   const failedBox = failedVisual.querySelector('rect[data-evidence-highlight="failed"]');
-  assert.deepEqual(['x', 'y', 'width', 'height'].map(name => failedBox.getAttribute(name)), ['24', '12', '80', '40']);
-  assert.match(failedFigure.querySelector('figcaption').textContent, /✕ Falha confirmada.*moldura vermelha sólida/iu);
+  assert.deepEqual(['x', 'y', 'width', 'height', 'rx'].map(name => failedBox.getAttribute(name)), ['21', '9', '86', '46', '2']);
+  const failedHalo = failedVisual.querySelector('rect.evidence-halo');
+  assert.deepEqual(['x', 'y', 'width', 'height'].map(name => failedHalo.getAttribute(name)), ['21', '9', '86', '46']);
+  const failedCaption = failedFigure.querySelector('figcaption').textContent;
+  assert.match(failedCaption, /Contorno vermelho: elemento com falha\./u);
+  assert.match(failedCaption, /escurecido só como contexto/u);
+  assert.doesNotMatch(failedCaption, /moldura vermelha sólida/iu);
 
   assert.equal(root.querySelector('[data-report-issue][data-result="humanReview"]'), null);
   assert.ok(root.querySelector('[data-report-checklist]'));
@@ -1341,8 +1449,9 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   assert.deepEqual(model.evidence.find(evidence => evidence.kind === 'element'), originalSnapshot);
 
   const html = renderHtmlReport(model, { reportView: view });
-  assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="failed"[^>]*aria-label="Elemento local da evidência ev-control com falha confirmada destacada por moldura vermelha sólida\."/u);
-  assert.match(html, /<rect class="evidence-highlight evidence-highlight--failed" data-evidence-highlight="failed" x="24" y="12" width="80" height="40" aria-hidden="true"><\/rect>/u);
+  assert.match(html, /<svg class="evidence-media evidence-media--marked"[^>]*data-evidence-treatment="failed"[^>]*aria-label="Elemento local da evidência ev-control captura do elemento com falha, contornado em vermelho por fora do elemento\."/u);
+  assert.match(html, /<path class="evidence-spotlight" fill-rule="evenodd" d="M0 0H128V88H0ZM21 9H107V55H21Z" aria-hidden="true"><\/path>/u);
+  assert.match(html, /<rect class="evidence-highlight evidence-highlight--failed" data-evidence-highlight="failed" x="21" y="9" width="86" height="46" rx="2" aria-hidden="true"><\/rect>/u);
   assert.doesNotMatch(html, /data-evidence-treatment="review"/u);
   assert.match(html, /data-report-evidence="ev-control"[^]*?Consultar captura ev-control/u);
   assert.ok(html.includes(original.dataUrl), 'the original raster remains embedded under the derived SVG frame');
@@ -1353,6 +1462,7 @@ test('one consolidated issue marks every correlated element and keeps one full-p
   const { model, summary } = await fixture({
     mutateDraft(draft) {
       const originalEvidence = draft.evidence.find(evidence => evidence.evidenceId === 'ev-control');
+      originalEvidence.metadata = structuredClone(ELEMENT_FRAME_METADATA);
       draft.evidence.push({
         ...structuredClone(originalEvidence),
         evidenceId: 'ev-control-2', nodeId: 'n-2', backendNodeId: 42,
@@ -1431,6 +1541,7 @@ test('human-confirmed failures leave unanswered checks separate without inventin
   const { model, summary } = await fixture({
     mutateDraft(draft) {
       const originalEvidence = draft.evidence.find(evidence => evidence.evidenceId === 'ev-control');
+      originalEvidence.metadata = structuredClone(ELEMENT_FRAME_METADATA);
       draft.evidence.push({
         ...structuredClone(originalEvidence),
         evidenceId: 'ev-control-2', nodeId: 'n-2', backendNodeId: 42,

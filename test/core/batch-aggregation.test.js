@@ -10,6 +10,7 @@ import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
 import { applyBatchEvidenceBudget } from '../../src/core/batch/evidence-budget.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { createAnnotationMapFixture, createPristineMapSource } from '../report/annotation-map-fixture.js';
+import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 import { reportInput } from '../report/helpers.js';
 import { normalizeAxeResults } from '../../src/core/axe/normalize-axe-results.js';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
@@ -37,7 +38,7 @@ const CHILD_OPTIONS = Object.freeze({
   now: () => '2026-08-28T11:00:45.000Z',
 });
 
-async function childModel(auditId, url, { axe = false, occurrenceDiagnostic = false } = {}) {
+async function childModel(auditId, url, { axe = false, occurrenceDiagnostic = false, keyboardMap = false } = {}) {
   const map = await createAnnotationMapFixture();
   const raw = reportInput({
     auditId,
@@ -69,6 +70,7 @@ async function childModel(auditId, url, { axe = false, occurrenceDiagnostic = fa
       raw.evidence.artifacts.find(artifact => artifact.evidenceId === 'ev-1'),
       createPristineMapSource(),
       map,
+      ...(keyboardMap ? [await createKeyboardMapFixture({ sourceEvidenceId: createPristineMapSource().evidenceId })] : []),
     ],
   };
   if (axe === 'target-size') {
@@ -327,6 +329,34 @@ test('keeps a valid cross-reference graph when the pixel budget omits a full-pag
   assert.ok(final.occurrences.every(occurrence => occurrence.evidenceRefs.every(id => final.evidence.some(value => value.evidenceId === id))));
 });
 
+test('remaps and budgets the keyboard map of a full-evidence batch page (1.1.58)', async () => {
+  // Medido no e2e de lote com pixels: as paradas do mapa do teclado apontam nós que nenhuma ocorrência
+  // usa, e o remapeamento recusava a página inteira ("Referência de nó desconhecida").
+  const remapped = await remapAuditPage(
+    await childModel('child-keyboard', 'https://keyboard.example.test/', { keyboardMap: true }),
+    { batchAuditId: 'batch-keyboard', pageId: 'page-1' },
+  );
+  const keyboard = remapped.evidence.find(artifact => artifact.kind === 'keyboard-map');
+  const source = remapped.evidence.find(artifact => artifact.kind === 'full-page');
+  assert.ok(keyboard, 'o mapa do teclado sobrevive ao remapeamento');
+  assert.equal(keyboard.fullPageEvidenceId, source.evidenceId);
+  assert.equal(keyboard.derivation.sourceEvidenceId, source.evidenceId);
+  assert.match(keyboard.stops[0].nodeId, /^node-[0-9a-f]{32}$/u);
+  assert.ok(keyboard.segments.every(segment => segment.segmentId.startsWith(`${keyboard.evidenceId}-segment-`)));
+
+  const budgeted = await applyBatchEvidenceBudget(remapped, { usedBytes: 0, limitBytes: 1 });
+  const omittedKeyboard = budgeted.result.evidence.find(artifact => artifact.kind === 'keyboard-map');
+  assert.equal(omittedKeyboard.pixelState, 'omitted-budget');
+  assert.ok(omittedKeyboard.segments.every(segment => !Object.hasOwn(segment, 'dataUrl')));
+  const aggregate = aggregateBatchAudits({
+    batchAuditId: 'batch-keyboard', pageResults: [budgeted.result],
+    startedAt: '2026-08-28T11:00:00.000Z', endedAt: '2026-08-28T11:01:00.000Z',
+    status: 'partial', template: createBatchReportTemplate(OPTIONS),
+  });
+  const final = await enrichAuditForReport(aggregate, OPTIONS);
+  assert.equal(final.evidence.filter(artifact => artifact.kind === 'keyboard-map').length, 1);
+});
+
 test('validates each batch axe envelope against its exact page and rejects tampering', async () => {
   let first = await remapAuditPage(
     await childModel('child-axe-1', 'https://axe-one.example.test/'),
@@ -446,7 +476,7 @@ test('aggregates pages in requested order with unique rules, 146 items and conse
     'uma página falha impede aprovação global automática');
   assert.equal(raw.itemResults.length, 146);
   assert.equal(raw.itemResults.find(item => item.id === '5.1.1').outcome, 'cantTell');
-  assert.equal(raw.methodology.coreRuleCount, 130);
+  assert.equal(raw.methodology.coreRuleCount, 131);
   assert.equal(raw.methodology.itemCount, 146);
   assert.equal(Object.hasOwn(raw, 'presentation'), false);
   assert.doesNotMatch(JSON.stringify(raw), /SECRET_A|token=/u);

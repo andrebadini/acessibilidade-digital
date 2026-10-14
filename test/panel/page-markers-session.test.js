@@ -6,10 +6,10 @@ const bundle = (auditId = 'audit-1', modelRevision = 1) => ({ auditId, modelRevi
   details: ['one', 'two', 'three'].map(occurrenceId => ({ occurrenceId })) });
 const active = (selectedOrdinal = null) => ({ ok: true, markers: {
   state: 'active', modelRevision: 1, groups: [{ number: 4, ordinals: [0, 1] }],
-  counts: { markers: 1, located: 2, general: 1, unlocated: 0, omitted: 2 }, selectedOrdinal,
+  counts: { markers: 1, located: 2, general: 1, unlocated: 0, omitted: 2 }, selectedOrdinal, reasons: [],
 } });
 const cleared = () => ({ ok: true, markers: { state: 'clear', modelRevision: 1, groups: [],
-  counts: { markers: 0, located: 0, general: 0, unlocated: 0, omitted: 0 }, selectedOrdinal: null } });
+  counts: { markers: 0, located: 0, general: 0, unlocated: 0, omitted: 0 }, selectedOrdinal: null, reasons: [] } });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture() {
   const requests = [], changes = [], selections = [];
@@ -67,6 +67,10 @@ test('malformed groups, partition, extras and arbitrary errors cannot become vis
     r => { r.markers.counts.located = 3; },
     r => { r.markers.modelRevision = 2; },
     r => { r.markers.groups[0].ordinals = [0, 63]; },
+    r => { r.markers.groups[0].ordinals = [0, 500]; },
+    r => { r.markers.reasons = [{ reason: 'not-rendered', count: 0 }]; },
+    r => { r.markers.reasons = [{ reason: 'Not Rendered', count: 1 }]; },
+    r => { r.markers.reasons = [{ reason: 'unsupported-context', count: 1, installationId: 'PRIVATE_TEXT' }]; },
     r => { r.markers.installationId = 'PRIVATE_TEXT'; },
   ]) {
     const f = fixture(), pending = f.session.show(); await tick();
@@ -74,6 +78,44 @@ test('malformed groups, partition, extras and arbitrary errors cannot become vis
     assert.equal(f.session.read().status, 'unavailable');
     assert.doesNotMatch(JSON.stringify(f.session.read()), /PRIVATE_TEXT/u);
   }
+});
+
+test('reasons reach the panel as bounded categories ready for plain language', async () => {
+  const f = fixture(), pending = f.session.show(); await tick();
+  const response = active();
+  response.markers.reasons = [{ reason: 'unsupported-context', count: 3 }, { reason: 'not-rendered', count: 1 }];
+  f.requests[0].resolve(response); await pending;
+  const state = f.session.read();
+  assert.deepEqual(state.reasons, [{ reason: 'unsupported-context', count: 3 }, { reason: 'not-rendered', count: 1 }]);
+  assert.ok(Object.isFrozen(state.reasons));
+  assert.deepEqual(f.changes.at(-1).reasons, state.reasons);
+});
+
+test('the signal ceiling is 500 for groups, filters and the offered result', async () => {
+  const details = Array.from({ length: 501 }, (_, index) => ({ occurrenceId: `occ-${index}` }));
+  const full = Array.from({ length: 500 }, (_, index) => index);
+  const inflated = ordinals => {
+    const response = active();
+    response.markers.groups = [{ number: 1, ordinals }];
+    response.markers.counts = { markers: 1, located: ordinals.length, general: 0, unlocated: 0,
+      omitted: 501 - ordinals.length };
+    return response;
+  };
+  // 500 signals is the documented ceiling, and the panel keeps every one of them.
+  const f = fixture();
+  f.session.setResult({ auditId: 'audit-1', modelRevision: 1, details });
+  const shown = f.session.show(); await tick();
+  f.requests[0].resolve(inflated(full)); assert.equal(await shown, true);
+  assert.equal(f.session.read().groups[0].occurrenceIds.length, 500);
+  const filtered = f.session.filter(details.slice(0, 500).map(detail => detail.occurrenceId)); await tick();
+  assert.equal(f.requests[1].intent.visibleOrdinals.split(',').length, 500);
+  f.requests[1].resolve(inflated(full)); assert.equal(await filtered, true);
+  // Beyond the ceiling the whole answer is refused, never partially trusted.
+  const over = fixture();
+  over.session.setResult({ auditId: 'audit-1', modelRevision: 1, details });
+  const pending = over.session.show(); await tick();
+  over.requests[0].resolve(inflated([...full, 500])); await pending;
+  assert.equal(over.session.read().status, 'unavailable');
 });
 
 test('clear packet wins a pending SHOW and no late active state is published', async () => {
@@ -194,4 +236,22 @@ test('the unavailable notice does not promise a recovery that cannot work', asyn
   assert.doesNotMatch(state.message, /refaça a auditoria|tente novamente|repita/iu);
   assert.match(state.message, /relatório/u);
   assert.match(state.message, /sinais/u);
+});
+
+test('picking an occurrence without a signal on the page explains it instead of reporting a failure', async () => {
+  const f = fixture();
+  await shown(f);
+  const pending = f.session.select('three'); await tick();
+  f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_SELECTION_UNAVAILABLE' });
+  assert.equal(await pending, false);
+  const state = f.session.read();
+  assert.equal(state.status, 'active');
+  assert.equal(state.selectedOccurrenceId, null);
+  assert.match(state.message, /não tem sinal na página neste momento/u);
+  assert.doesNotMatch(state.message, /Não foi possível/u);
+
+  const failing = f.session.select('two'); await tick();
+  f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
+  assert.equal(await failing, false);
+  assert.match(f.session.read().message, /Não foi possível atualizar este sinal/u);
 });

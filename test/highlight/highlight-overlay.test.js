@@ -6,6 +6,7 @@ import {
   canonicalPath,
   createStructuralSignatureV1,
   parseCssSelectorV1,
+  parseHighlightSelectorV1,
   roleForStructuralSignature,
 } from '../../src/background/highlight-locator.js';
 import { runAuditaHighlightCommand } from '../../src/browser/highlight-overlay.js';
@@ -249,6 +250,8 @@ function createEnvironment({ tag = 'button', attributes = { id: 'action', class:
 
   const environment = {
     document,
+    innerWidth: 1024,
+    innerHeight: 768,
     crypto: webcrypto,
     chrome: {
       runtime: {
@@ -314,8 +317,10 @@ function createEnvironment({ tag = 'button', attributes = { id: 'action', class:
   return { environment, document, html, body, main, target, priorFocus };
 }
 
-async function installCommand(fixture, overrides = {}) {
-  const located = canonicalPath(fixture.target, { scopeRoot: fixture.document, maxSegments: 16 });
+async function installCommand(fixture, overrides = {}, selectorValue = null) {
+  const located = selectorValue === null
+    ? canonicalPath(fixture.target, { scopeRoot: fixture.document, maxSegments: 16 })
+    : parseHighlightSelectorV1(selectorValue);
   const selector = {
     syntax: located.syntax,
     value: located.value,
@@ -409,6 +414,9 @@ function installComputedStyleModel(fixture) {
     outlineOffset: element.style.outlineOffset ?? '0px',
     borderWidth: element.style.borderWidth ?? '0px',
     borderStyle: element.style.borderStyle ?? 'none',
+    borderColor: color(element.style.borderColor ?? ''),
+    borderRadius: element.style.borderRadius ?? '0px',
+    boxShadow: element.style.boxShadow ?? 'none',
     width: element.style.width,
     height: element.style.height,
     ...(overrides.get(element) ?? {}),
@@ -451,15 +459,18 @@ test('creates the required failure treatment without mutating or focusing the ta
   assert.equal(root.style.visibility, 'visible');
   assert.equal(root.style.opacity, '1');
   assert.equal(root.style.pointerEvents, 'none');
-  assert.equal(root.style.borderWidth, '6px');
+  assert.equal(root.style.borderWidth, '3px');
   assert.equal(root.style.borderStyle, 'solid');
   assert.equal(root.style.borderColor, 'rgb(139, 30, 30)');
+  assert.equal(root.style.borderRadius, '3px');
+  assert.equal(root.style.boxShadow,
+    'inset 0 0 0 1px #ffffff, 0 0 0 1px #ffffff, 0 0 0 4px rgba(139, 30, 30, 0.35)');
   assert.match(root.style.outline, /CanvasText/u);
   assert.equal(root.getAttribute('aria-hidden'), 'true');
   assert.equal(root.tabIndex, -1);
   assert.equal(root.children.length, 2);
   assert.deepEqual(root.children.map(child => child.tagName), ['SPAN', 'SPAN']);
-  assert.match(root.textContent, /^×.*17.*Falha confirmada$/u);
+  assert.match(root.textContent, /^×Falha confirmada$/u);
   assert.deepEqual(fixture.target.scrollCalls, [{ block: 'center', inline: 'nearest' }]);
   assert.equal(fixture.target.focusCalls, 0);
   assert.deepEqual(authorSnapshot(fixture.target), before);
@@ -481,10 +492,10 @@ test('creates the distinct manual-review treatment with only fixed local text', 
     nonce: MANUAL_NONCE,
   });
   const root = fixture.document.querySelector('[data-audita-highlight-root]');
-  assert.equal(root.style.borderWidth, '5px');
+  assert.equal(root.style.borderWidth, '3px');
   assert.equal(root.style.borderStyle, 'dashed');
   assert.equal(root.style.borderColor, 'rgb(107, 78, 0)');
-  assert.match(root.textContent, /^\?.*5000.*Revisão humana necessária$/u);
+  assert.match(root.textContent, /^\?Revisão humana necessária$/u);
   assert.doesNotMatch(root.textContent, /action|primary|doc-main/iu);
 });
 
@@ -514,6 +525,57 @@ test('rejects extra, inherited and malformed install data before querying or tou
   }
   assert.equal(fixture.document.selectorQueryCalls, 0);
   assert.equal(fixture.document.querySelector('[data-audita-highlight-root]'), null);
+});
+
+test('accepts a signal-shaped semantic attribute selector and still refuses a forged one', async () => {
+  // `input[name="q"]` é a forma que os sinais dão a um controle sem id único. O destaque individual
+  // passou a aceitá-la; a revalidação aqui é independente da do worker de propósito.
+  const fixture = createEnvironment({ tag: 'input', attributes: { name: 'q' } });
+  const command = await installCommand(fixture, {}, 'input[name="q"]');
+
+  assert.deepEqual(await runAuditaHighlightCommand(command, fixture.environment), {
+    ok: true,
+    nonce: FAILED_NONCE,
+  });
+  const root = fixture.document.querySelector('[data-audita-highlight-root]');
+  assert.ok(root);
+  assert.equal(root.parentNode, fixture.document.documentElement);
+  assert.deepEqual(fixture.target.scrollCalls, [{ block: 'center', inline: 'nearest' }]);
+  assert.equal(fixture.document.selectorQueryCalls, 2);
+
+  // Um atributo fora do vocabulário dos sinais, um valor com cara de credencial ou um valor
+  // escapado que não volta à forma original continuam sendo recusados antes de tocar no DOM.
+  const escaped = createEnvironment({ tag: 'input', attributes: { name: 'q' } });
+  const forged = (value) => ({
+    version: 1,
+    op: 'install',
+    nonce: FAILED_NONCE,
+    documentId: 'doc-main',
+    frameId: 0,
+    selector: {
+      syntax: 'CSSSelectorV1',
+      value,
+      byteLength: new TextEncoder().encode(value).byteLength,
+      complexity: value.split(' > ').length === 1 ? 3 : 5,
+    },
+    structuralSignature: { version: 'StructuralSignatureV1', sha256: 'a'.repeat(64) },
+    kind: 'failed',
+    markerNumber: 17,
+  });
+  for (const value of [
+    'input[data-test="q"]',
+    'input[href="/sair"]',
+    'input[name="access_token"]',
+    'input[name="Cliente 550e8400-e29b-41d4-a716-446655440000"]',
+    `input[name="${'x'.repeat(257)}"]`,
+  ]) {
+    assert.deepEqual(await runAuditaHighlightCommand(forged(value), escaped.environment), {
+      ok: false,
+      reason: 'invalid-command',
+    });
+  }
+  assert.equal(escaped.document.selectorQueryCalls, 0);
+  assert.equal(escaped.document.querySelector('[data-audita-highlight-root]'), null);
 });
 
 test('snapshots command descriptors without invoking value getters', async () => {
@@ -668,9 +730,10 @@ test('updates fixed geometry through one scheduled frame on captured scroll and 
   const command = await installCommand(fixture);
   await runAuditaHighlightCommand(command, fixture.environment);
   const root = fixture.document.querySelector('[data-audita-highlight-root]');
+  // The contour wraps the element from the outside: 3px border + 3px gap on each side.
   assert.deepEqual(
     { left: root.style.left, top: root.style.top, width: root.style.width, height: root.style.height },
-    { left: '40px', top: '70px', width: '180px', height: '36px' },
+    { left: '34px', top: '64px', width: '192px', height: '48px' },
   );
 
   fixture.target.setRect({ left: 11.5, top: 22.25, width: 205.75, height: 44.5 });
@@ -680,8 +743,149 @@ test('updates fixed geometry through one scheduled frame on captured scroll and 
   fixture.environment.flushAnimationFrames();
   assert.deepEqual(
     { left: root.style.left, top: root.style.top, width: root.style.width, height: root.style.height },
-    { left: '11.5px', top: '22.25px', width: '205.75px', height: '44.5px' },
+    { left: '5.5px', top: '16.25px', width: '217.75px', height: '56.5px' },
   );
+});
+
+test('the tab rides the contour top-left, flips under it at the viewport edge and never leaves the screen', async () => {
+  // Room above: the tab's bottom edge sits on the contour's top edge.
+  const above = createEnvironment();
+  const aboveCommand = await installCommand(above);
+  assert.deepEqual(await runAuditaHighlightCommand(aboveCommand, above.environment), { ok: true, nonce: FAILED_NONCE });
+  const aboveRoot = above.document.querySelector('[data-audita-highlight-root]');
+  const [aboveMarker, aboveLabel] = aboveRoot.children;
+  assert.deepEqual({ left: aboveMarker.style.left, top: aboveMarker.style.top },
+    { left: '-3px', top: '-27px' });
+  assert.deepEqual({ left: aboveLabel.style.left, top: aboveLabel.style.top },
+    { left: '24px', top: '-27px' });
+  assert.equal(aboveMarker.style.borderRadius, '4px 0 0 0');
+  assert.equal(aboveLabel.style.borderRadius, '0 4px 0 0');
+  assert.equal(aboveMarker.style.height, '24px');
+  assert.equal(aboveLabel.style.height, '24px');
+  assert.equal(aboveMarker.style.border, '1px solid #ffffff');
+  assert.equal(aboveMarker.style.background, 'rgb(139, 30, 30)');
+  assert.equal(aboveMarker.style.color, '#ffffff');
+  assert.equal(aboveMarker.textContent, '×');
+  assert.equal(aboveLabel.textContent, 'Falha confirmada');
+
+  // Less than 22px of room above: the tab hangs below the contour with the corners flipped.
+  const below = createEnvironment();
+  const belowCommand = await installCommand(below);
+  below.target.setRect({ left: 40, top: 10, width: 180, height: 36 });
+  assert.deepEqual(await runAuditaHighlightCommand(belowCommand, below.environment), { ok: true, nonce: FAILED_NONCE });
+  const belowRoot = below.document.querySelector('[data-audita-highlight-root]');
+  const [belowMarker, belowLabel] = belowRoot.children;
+  assert.equal(belowRoot.style.top, '4px');
+  // Contour top 4 + height 48 = 52, minus the padding-box origin at 4 + 3.
+  assert.equal(belowMarker.style.top, '45px');
+  assert.equal(belowMarker.style.borderRadius, '0 0 0 4px');
+  assert.equal(belowLabel.style.borderRadius, '0 0 4px 0');
+
+  // Off to the right: the tab is clamped inside the viewport instead of disappearing.
+  const right = createEnvironment();
+  const rightCommand = await installCommand(right);
+  right.target.setRect({ left: 4_000, top: 700, width: 100, height: 40 });
+  assert.deepEqual(await runAuditaHighlightCommand(rightCommand, right.environment), { ok: true, nonce: FAILED_NONCE });
+  const rightRoot = right.document.querySelector('[data-audita-highlight-root]');
+  const [rightMarker] = rightRoot.children;
+  assert.equal(rightRoot.style.left, '3994px');
+  assert.equal(Number.parseFloat(rightRoot.style.left) + 3 + Number.parseFloat(rightMarker.style.left),
+    1024 - (28 + 140 - 1));
+  assert.equal(rightMarker.style.top, '-27px');
+
+  // Taller than the viewport and starting above the screen: the tab pins to the viewport top.
+  const tall = createEnvironment();
+  const tallCommand = await installCommand(tall);
+  tall.target.setRect({ left: 100, top: -500, width: 200, height: 2_000 });
+  assert.deepEqual(await runAuditaHighlightCommand(tallCommand, tall.environment), { ok: true, nonce: FAILED_NONCE });
+  const tallRoot = tall.document.querySelector('[data-audita-highlight-root]');
+  const [tallMarker] = tallRoot.children;
+  assert.equal(tallRoot.style.top, '-506px');
+  // The contour starts 506px above the viewport; the tab is pinned to viewport y=0 instead.
+  assert.equal(tallMarker.style.top, '503px');
+  assert.equal(tallMarker.style.left, '-3px');
+  assert.equal(tallMarker.style.borderRadius, '4px 0 0 0');
+});
+
+// The strict grammar never emits these selectors, so the command is assembled by hand: the page has
+// to accept what the eased grammar allows even though the exporter keeps refusing to produce it.
+async function rawSelectorCommand(fixture, value, complexity) {
+  fixture.document.selection = [fixture.target];
+  return {
+    version: 1,
+    op: 'install',
+    nonce: FAILED_NONCE,
+    documentId: 'doc-main',
+    frameId: 0,
+    selector: {
+      syntax: 'CSSSelectorV1',
+      value,
+      byteLength: new TextEncoder().encode(value).byteLength,
+      complexity,
+    },
+    structuralSignature: await createStructuralSignatureV1({
+      documentId: 'doc-main',
+      frameId: 0,
+      element: fixture.target,
+      scopeRoot: fixture.document,
+      subtle: webcrypto.subtle,
+    }),
+    kind: 'failed',
+    markerNumber: 17,
+  };
+}
+
+// Wraps the target in `depth` extra divs so the real ancestry — and therefore the signature the page
+// recomputes — is as deep as the selector claims.
+function deepen(fixture, depth) {
+  fixture.main.removeChild(fixture.target);
+  let parent = fixture.main;
+  for (let index = 0; index < depth; index += 1) parent = parent.append(new FixtureElement('div', {}, fixture.document));
+  parent.appendChild(fixture.target);
+}
+
+test('accepts the eased selector vocabulary the individual highlight shares with the signals', async () => {
+  // Ids and classes carrying four digits or eight hex characters are page furniture, not secrets.
+  for (const [selector, complexity, attributes] of [
+    ['button#post-1234', 2, { id: 'post-1234' }],
+    ['button.card-2024', 2, { class: 'card-2024' }],
+    ['button.hex-9f8e7d6c', 2, { class: 'hex-9f8e7d6c' }],
+    ['main > button#post-1234', 4, { id: 'post-1234' }],
+  ]) {
+    const fixture = createEnvironment({ attributes });
+    const command = await rawSelectorCommand(fixture, selector, complexity);
+    assert.deepEqual(await runAuditaHighlightCommand(command, fixture.environment), { ok: true, nonce: FAILED_NONCE }, selector);
+    assert.ok(fixture.document.querySelector('[data-audita-highlight-root]'), selector);
+  }
+
+  // Deep ancestries: 40 segments (complexity 79) and the 64-segment ceiling (complexity 127).
+  for (const [wrappers, segments, complexity] of [[36, 40, 79], [60, 64, 127]]) {
+    const fixture = createEnvironment();
+    deepen(fixture, wrappers);
+    const value = `html > body > main > ${'div > '.repeat(wrappers)}button`;
+    assert.equal(value.split(' > ').length, segments);
+    const command = await rawSelectorCommand(fixture, value, complexity);
+    assert.deepEqual(await runAuditaHighlightCommand(command, fixture.environment), { ok: true, nonce: FAILED_NONCE }, value);
+    assert.ok(fixture.document.querySelector('[data-audita-highlight-root]'), value);
+  }
+});
+
+test('still refuses credential-shaped names and past-ceiling selectors on the highlight path', async () => {
+  for (const [selector, complexity] of [
+    ['button#password', 2],
+    ['button.token-value', 2],
+    ['button.session-id', 2],
+    ['button.csrf-token', 2],
+    ['button#api-key', 2],
+    ['div.user@example.com', 2],
+    [`html > body > main > ${'div > '.repeat(61)}button`, 129],
+  ]) {
+    const fixture = createEnvironment();
+    const command = await rawSelectorCommand(fixture, selector, complexity);
+    assert.deepEqual(await runAuditaHighlightCommand(command, fixture.environment),
+      { ok: false, reason: 'invalid-command' }, selector);
+    assert.equal(fixture.document.querySelector('[data-audita-highlight-root]'), null, selector);
+  }
 });
 
 test('same nonce is idempotent while replacement disposes the old root without invalidation', async () => {

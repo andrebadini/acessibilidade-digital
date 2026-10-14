@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" role="img" aria-label="Cadastro">
+<rect width="320" height="200" fill="#e8eef8"/>
+<rect x="24" y="56" width="180" height="12" rx="6" fill="rgba(255,255,255,0.55)"/><rect x="24" y="80" width="130" height="12" rx="6" fill="rgba(255,255,255,0.55)"/>
+<text x="16" y="184" font-family="system-ui, sans-serif" font-size="16" fill="#0b2f6b">Cadastro</text>
+</svg>

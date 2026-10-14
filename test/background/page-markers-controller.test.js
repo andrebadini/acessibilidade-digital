@@ -3,6 +3,15 @@ import test from 'node:test';
 
 import { DIGEST, INSTALLATION_ID, SESSION_ID, createControllerFixture, deferred } from './page-markers-controller-fixture.js';
 
+async function waitForNativePort(fixture) {
+  for (let attempt = 0; attempt < 5_000; attempt += 1) {
+    const port = fixture.latestPort();
+    if (port) return port;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  throw new Error('a porta nativa não apareceu dentro do limite de turnos do teste');
+}
+
 test('idless evidence flows through the authorized controller into a real marker and selection', async () => {
   const fixture = await createControllerFixture({ omitNullArguments: true, changeDraft(draft) {
     draft.evidence[1].selector.css = 'main > button';
@@ -80,7 +89,7 @@ test('show authorizes the private panel window and returns only located physical
     state: 'active', modelRevision: 7,
     groups: [{ number: 1, ordinals: [1, 2] }],
     counts: { markers: 1, located: 2, unlocated: 0, general: 1, omitted: 0 },
-    selectedOrdinal: null,
+    selectedOrdinal: null, reasons: [],
   } });
   assert.equal(fixture.model.integrity.canonicalModelHash, originalHash);
   assert.deepEqual(fixture.calls.authorize[0], {
@@ -190,8 +199,9 @@ test('native selected event uses singular W2 name and rejects foreign senders an
 test('hello is resolved directly by the native Port and a foreign sender cannot attach', async () => {
   const fixture = await createControllerFixture({ autoHello: false });
   const pending = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
-  for (let attempt = 0; attempt < 20 && !fixture.latestPort(); attempt += 1)
-    await new Promise(resolve => setImmediate(resolve));
+  // The native port appears only after several awaited authorization, probe and script steps; the
+  // turn budget is generous so a loaded machine cannot exhaust it before the port is bound.
+  await waitForNativePort(fixture);
   const owned = fixture.latestPort();
   assert.ok(fixture.timerDelays().includes(5_000));
   assert.equal(fixture.controller.attachPort(fixture.nativePort(INSTALLATION_ID, { frameId: 1 })), false);
@@ -251,8 +261,9 @@ test('document A changing during the final authorization await is rejected befor
 test('hello timeout cancels while SHOW owns the lock and compensates the real W2 installation', async () => {
   const fixture = await createControllerFixture({ autoHello: false });
   const pending = fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
-  for (let attempt = 0; attempt < 20 && !fixture.latestPort(); attempt += 1)
-    await new Promise(resolve => setImmediate(resolve));
+  // The native port appears only after several awaited authorization, probe and script steps; the
+  // turn budget is generous so a loaded machine cannot exhaust it before the port is bound.
+  await waitForNativePort(fixture);
   fixture.fireTimer(5_000);
   assert.deepEqual(await pending, { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' });
   assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
@@ -352,6 +363,7 @@ test('hide clears real W2 state and returns the closed clear projection', async 
   assert.deepEqual(await fixture.dispatch('PANEL_HIDE_PAGE_MARKERS'), { ok: true, markers: {
     state: 'clear', modelRevision: 7, groups: [],
     counts: { markers: 0, located: 0, unlocated: 0, general: 0, omitted: 0 }, selectedOrdinal: null,
+    reasons: [],
   } });
   assert.equal(Object.hasOwn(fixture.page.environment, '__auditaPageMarkersOverlayV1'), false);
 });

@@ -756,6 +756,10 @@ function renderPageMarkerReview(document, markers, emit) {
   if (markers.counts?.omitted > 0) wrapper.append(paragraph(document,
     `${markers.counts.omitted} ${markers.counts.omitted === 1 ? 'ocorrência omitida' : 'ocorrências omitidas'} dos sinais — consulte o relatório.`,
     'page-marker-limit'));
+  // Only while signals are on the page is it worth explaining which ones are missing and why.
+  const reasons = markers.status === 'active' && Array.isArray(markers.reasons)
+    ? renderMarkerReasons(document, markers.reasons) : null;
+  if (reasons) wrapper.append(reasons);
   const help = document.createElement('details');
   help.className = 'page-marker-help';
   help.dataset.markerHelp = '';
@@ -797,7 +801,66 @@ function renderMarkerLegend(document) {
     list.append(item);
   }
   legend.append(list);
+  // How to read a signal on the page, for someone who never saw one: the contour, the number, the
+  // count in parentheses, the dashed edge and the leader line.
+  const reading = document.createElement('ul');
+  reading.className = 'page-marker-reading';
+  for (const text of [
+    'O contorno colorido envolve o elemento; a etiqueta colada nele traz o número do sinal e o símbolo do resultado.',
+    'O número entre parênteses é a quantidade de ocorrências no mesmo elemento. Exemplo: “3 × (2)” é o sinal 3, com 2 falhas.',
+    'Lado tracejado: o elemento continua além do que está visível (fora da tela, atrás de um cabeçalho fixo ou de uma área com rolagem).',
+    'Quando não há espaço junto ao elemento, a etiqueta fica um pouco afastada e uma linha a liga ao contorno.',
+    'Um elemento oculto no momento (por exemplo, um slide de carrossel) ganha o sinal quando aparecer.',
+  ]) {
+    const item = document.createElement('li');
+    item.append(paragraph(document, text));
+    reading.append(item);
+  }
+  legend.append(reading);
   return legend;
+}
+
+// Why a signal did not appear, in words a lay person can act on. The keys are the categories the
+// projection, the controller and the page overlay already agree on; anything unknown falls back to
+// the honest "não foi reencontrado" sentence instead of leaking a technical token into the panel.
+const MARKER_REASONS = Object.freeze({
+  'not-found': ['não foi reencontrado na página', 'não foram reencontrados na página'],
+  'not-rendered': ['estava oculto no momento', 'estavam ocultos no momento'],
+  'ambiguous': ['corresponde a mais de um elemento na página', 'correspondem a mais de um elemento na página'],
+  'unsupported-context': ['está dentro de um quadro incorporado (iframe)',
+    'estão dentro de um quadro incorporado (iframe)'],
+  'unsupported-selector': ['não tem registro suficiente para ser localizado com segurança',
+    'não têm registro suficiente para ser localizado com segurança'],
+  'insufficient-correspondence': ['não confere com o elemento que está na página agora',
+    'não conferem com o elemento que está na página agora'],
+  'conflicting-evidence': ['tem evidências que apontam para elementos diferentes',
+    'têm evidências que apontam para elementos diferentes'],
+  'missing-evidence': ['não guarda a referência do elemento',
+    'não guardam a referência do elemento'],
+  'not-displayed': ['não aparece na revisão desta auditoria', 'não aparecem na revisão desta auditoria'],
+});
+const MARKER_REASON_FALLBACK = ['a página mudou e o elemento não foi reencontrado',
+  'a página mudou e os elementos não foram reencontrados'];
+
+function renderMarkerReasons(document, reasons) {
+  const rows = reasons.filter(row => Number.isSafeInteger(row.count) && row.count > 0);
+  if (rows.length === 0) return null;
+  const wrapper = section(document, 'page-marker-reasons');
+  wrapper.dataset.markerReasons = '';
+  wrapper.setAttribute('aria-label', 'Sinais que não apareceram na página');
+  wrapper.append(paragraph(document,
+    'Algumas ocorrências não receberam sinal na página. Isso não muda o resultado da auditoria:', 'page-marker-reasons-lead'));
+  const list = document.createElement('ul');
+  list.className = 'page-marker-reasons-list';
+  for (const row of rows) {
+    const [one, many] = MARKER_REASONS[row.reason] ?? MARKER_REASON_FALLBACK;
+    const item = document.createElement('li');
+    item.dataset.markerReason = MARKER_REASONS[row.reason] ? row.reason : 'other';
+    item.textContent = `${row.count} ${row.count === 1 ? one : many}`;
+    list.append(item);
+  }
+  wrapper.append(list);
+  return wrapper;
 }
 
 function renderMarkerCounts(document, counts) {
@@ -1083,6 +1146,16 @@ function renderDetail(document, detail, expanded, highlight, markers, emit, onEv
     button.textContent = action.label;
     actions.append(button);
   } else {
+    // The live proof of the single highlight is stricter than the page signals. When it is not
+    // available and the signals are not on the page yet, the signals are still the way to see the
+    // element: the same path as the card's "Destacar elemento na página".
+    if (markerNumber === null && !['active', 'showing', 'hiding'].includes(markers.status) &&
+      ['top-document', 'mixed'].includes(detail.heading?.context)) {
+      const show = actionButton(document, 'Destacar elemento na página', 'HIGHLIGHT_PAGE_OCCURRENCE',
+        'detail-page-highlight', emit, 'primary-action', { occurrenceId: detail.occurrenceId });
+      show.dataset.action = 'page-highlight';
+      actions.append(show);
+    }
     const button = actionButton(document, action.label, 'CONSULT_EVIDENCE', 'consult-evidence', emit, 'secondary-action', {
       occurrenceId: detail.occurrenceId,
       reason: action.reason,
@@ -1212,9 +1285,13 @@ function labeledCode(document, label, value) {
 function renderUnavailable(document, view, emit) {
   const root = section(document, 'panel-screen panel-unavailable');
   root.dataset.screen = 'unavailable';
+  // A recarga da própria página não é falha do painel: o rótulo e o título dizem o que houve com a auditoria.
+  const reloaded = typeof view.reason === 'string' && view.reason.startsWith('A página recarregou');
+  const notStarted = reloaded && view.reason.includes('não começou');
   root.append(
-    paragraph(document, 'Painel indisponível', 'status-label status-unavailable'),
-    heading(document, 2, 'Não foi possível mostrar a auditoria'),
+    paragraph(document, reloaded ? 'Página recarregada' : 'Painel indisponível', 'status-label status-unavailable'),
+    heading(document, 2, notStarted ? 'A auditoria não começou'
+      : reloaded ? 'A auditoria foi interrompida' : 'Não foi possível mostrar a auditoria'),
     paragraph(document, view.reason ?? 'Não foi possível concluir a operação local.', 'unavailable-reason'),
     actionButton(document, 'Tentar novamente', 'RETRY', 'retry', emit, 'primary-action'),
     // N-1 da re-verificação da 1.1.47: a mensagem desta tela sugere outro modo de evidência, e "Iniciar nova
@@ -1539,9 +1616,15 @@ function copyPageMarkers(value) {
     return Number.isSafeInteger(count) && count >= 0;
   }) ? Object.fromEntries(countNames.map(name => [name, dataProperty(countsValue, name)])) : null;
   const selectedOccurrenceId = dataProperty(value, 'selectedOccurrenceId');
+  const reasonsValue = dataProperty(value, 'reasons');
+  const reasons = Array.isArray(reasonsValue) ? reasonsValue.flatMap(row => {
+    const reason = dataProperty(row, 'reason');
+    const count = dataProperty(row, 'count');
+    return typeof reason === 'string' && Number.isSafeInteger(count) && count > 0 ? [{ reason, count }] : [];
+  }) : [];
   const message = dataProperty(value, 'message');
   return {
-    status, groups, counts,
+    status, groups, counts, reasons,
     selectedOccurrenceId: typeof selectedOccurrenceId === 'string' ? selectedOccurrenceId : null,
     message: typeof message === 'string' ? message : null,
   };

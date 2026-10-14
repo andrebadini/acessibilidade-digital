@@ -1,16 +1,21 @@
 import { projectElementAccessibility, isEditableAccessibilityNode } from '../core/accessibility/element-accessibility.js';
+import { ancestorState, privacyTaintedNodeIds, privateMarker } from '../core/evidence/privacy-taint.js';
+import { captureContentSize, usefulRect, visibleRect } from '../core/evidence/visible-geometry.js';
 import { buildSnapshotIndexes } from '../core/snapshot-schema.js';
 import {
   ANNOTATION_MAP_ALGORITHM,
+  ANNOTATION_MAP_LEADER_MIN_PX,
   ANNOTATION_MAP_LIMITATIONS,
   ANNOTATION_MAP_LIMITS,
   ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO,
   ANNOTATION_MAP_VERSION,
+  annotationLeaderPoint,
   hashAnnotationMapArtifact,
   hashAnnotationMapGeometry,
 } from '../core/evidence/annotation-map-artifact.js';
 import { decodePngDataUrl, pngDataUrlFromBytes, validatePngRasterData } from '../core/evidence/png.js';
 import { sha256Hex } from '../core/report/hash.js';
+import { compositionSupport } from './canvas-runtime.js';
 
 export { ANNOTATION_MAP_ALGORITHM, ANNOTATION_MAP_LIMITS, ANNOTATION_MAP_VERSION };
 
@@ -27,7 +32,12 @@ const SIGNIFICANT_ROLES = new Set([
   'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'region', 'slider', 'spinbutton',
   'switch', 'tab', 'table', 'textbox', 'treeitem',
 ]);
-const PRIVATE_ATTRIBUTE = /(?:^(?:data-(?:audita-)?private|data-nosnippet)$|pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
+/**
+ * Contêineres: quando já existe descendente anotado, uma anotação do contêiner englobaria vários
+ * elementos e o número deixaria de apontar para um alvo único.
+ */
+const CONTAINER_TAGS = new Set(['details', 'li', 'table']);
+const CONTAINER_ROLES = new Set(['list', 'listitem', 'region', 'table']);
 const BASE_LIMITATIONS = Object.freeze([
   'observed-dom-ax-order-not-literal-assistive-technology',
   'non-atomic-source-geometry',
@@ -37,6 +47,10 @@ const BASE_LIMITATIONS = Object.freeze([
 ]);
 const MARKER_RADIUS = 14;
 const MARKER_CLEARANCE = MARKER_RADIUS * 2 + 4;
+const MARKER_STROKE = '#8b1e1e';
+const MARKER_OVERLAP_STROKE = '#6b4e00';
+/** Peso de uma colisão no custo do marcador: proximidade nunca vale mais que uma sobreposição. */
+const MARKER_COLLISION_COST = 1e6;
 const LEGEND_LINE_HEIGHT = 22;
 const LEGEND_PADDING = 16;
 const LEGEND_HEADING_HEIGHT = 34;
@@ -52,6 +66,13 @@ export class AnnotationMapError extends Error {
   }
 }
 
+const { throwIfAborted, operationWaiter, featureRuntime, waitForRasterValidation, canvasPng } = compositionSupport({
+  createError: (code, message) => new AnnotationMapError(code, message),
+  unavailableCode: 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE',
+  timeoutCode: 'ANNOTATION_MAP_TIMEOUT',
+  outputInvalidCode: 'ANNOTATION_MAP_OUTPUT_INVALID',
+});
+
 function text(value) {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
 }
@@ -65,33 +86,21 @@ function hasBooleanAttribute(node, name) {
   return Object.hasOwn(node?.attributes || {}, name);
 }
 
-function privateMarker(node) {
-  if (node?.privacyReferenceStatus === 'omitted-privacy') return true;
-  for (const [name, value] of Object.entries(node?.attributes || {})) {
-    if (PRIVATE_ATTRIBUTE.test(name) || String(value ?? '') === '[redacted]') return true;
-  }
-  return node?.valueStatus === 'omitted-privacy' && !['input', 'select', 'textarea'].includes(safeTag(node));
-}
-
-function ancestorState(node, indexes, predicate) {
+/** Registra todos os ancestrais de um nó anotável, para saber quais contêineres já têm descendente. */
+function markAncestorsOf(node, indexes, target) {
   const visited = new Set();
-  let current = node;
+  let current = node?.parentId === null || node?.parentId === undefined ? null : indexes.byNodeId.get(String(node.parentId));
   while (current && !visited.has(String(current.nodeId))) {
     visited.add(String(current.nodeId));
-    if (predicate(current)) return true;
+    target.add(String(current.nodeId));
     current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
   }
-  return false;
 }
 
 function closedShadow(node, indexes) {
   const rootId = typeof node?.shadowRootId === 'string' ? node.shadowRootId : null;
   const root = rootId ? indexes.byNodeId.get(rootId) : null;
   return root?.shadowRootType === 'closed' || ancestorState(node, indexes, current => current.shadowRootType === 'closed');
-}
-
-function usefulRect(rect) {
-  return rect && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0;
 }
 
 function significant(node, projection) {
@@ -139,87 +148,6 @@ function canonicalLimitations(values) {
   return ANNOTATION_MAP_LIMITATIONS.filter(value => requested.has(value));
 }
 
-function privacyTaintedNodeIds(snapshot, indexes) {
-  const dependents = new Map();
-  const addDependency = (source, consumer) => {
-    const sourceId = String(source.nodeId);
-    const values = dependents.get(sourceId) ?? new Set();
-    values.add(String(consumer.nodeId));
-    dependents.set(sourceId, values);
-  };
-  for (const node of snapshot.nodes) {
-    for (const attribute of ['aria-labelledby', 'aria-describedby']) {
-      const references = text(node.attributes?.[attribute]).split(' ').filter(Boolean);
-      for (const reference of references) {
-        const matches = indexes.byDomId.get(reference);
-        for (const match of matches ?? []) addDependency(match, node);
-      }
-    }
-    for (const labelId of Array.isArray(node.labels) ? node.labels : []) {
-      const label = indexes.byNodeId.get(String(labelId));
-      if (label) addDependency(label, node);
-    }
-    if (['button', 'input', 'meter', 'output', 'progress', 'select', 'textarea'].includes(safeTag(node))) {
-      const visited = new Set();
-      let ancestor = node.parentId === null || node.parentId === undefined
-        ? null
-        : indexes.byNodeId.get(String(node.parentId));
-      while (ancestor && !visited.has(String(ancestor.nodeId))) {
-        visited.add(String(ancestor.nodeId));
-        if (safeTag(ancestor) === 'label') addDependency(ancestor, node);
-        ancestor = ancestor.parentId === null || ancestor.parentId === undefined
-          ? null
-          : indexes.byNodeId.get(String(ancestor.parentId));
-      }
-    }
-  }
-  for (const label of snapshot.nodes.filter(node => safeTag(node) === 'label')) {
-    const targetId = text(label.attributes?.for);
-    const matches = targetId ? indexes.byDomId.get(targetId) : null;
-    for (const match of matches ?? []) addDependency(label, match);
-  }
-
-  const tainted = new Set();
-  const queue = [];
-  const taintWithAncestors = node => {
-    const visited = new Set();
-    let current = node;
-    while (current && !visited.has(String(current.nodeId))) {
-      const nodeId = String(current.nodeId);
-      visited.add(nodeId);
-      if (!tainted.has(nodeId)) {
-        tainted.add(nodeId);
-        queue.push(nodeId);
-      }
-      current = current.parentId === null || current.parentId === undefined
-        ? null
-        : indexes.byNodeId.get(String(current.parentId));
-    }
-  };
-  const taintSensitiveSubtree = root => {
-    const pending = [root];
-    const visited = new Set();
-    for (let offset = 0; offset < pending.length; offset += 1) {
-      const node = pending[offset];
-      if (!node || visited.has(String(node.nodeId))) continue;
-      visited.add(String(node.nodeId));
-      taintWithAncestors(node);
-      for (const childId of Array.isArray(node.children) ? node.children : []) {
-        pending.push(indexes.byNodeId.get(String(childId)));
-      }
-    }
-  };
-  for (const node of snapshot.nodes) {
-    if (isEditableAccessibilityNode(node) || privateMarker(node)) taintSensitiveSubtree(node);
-  }
-  for (let offset = 0; offset < queue.length; offset += 1) {
-    for (const dependentId of dependents.get(queue[offset]) ?? []) {
-      taintWithAncestors(indexes.byNodeId.get(dependentId));
-    }
-  }
-  return tainted;
-}
-
 function omittedFrameContextCount(snapshot, observedPaths) {
   const topLevelHosts = snapshot.nodes.filter(node => safeTag(node) === 'iframe' &&
     (!Array.isArray(node.framePath) || node.framePath.length === 0)).length;
@@ -244,10 +172,12 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     ? Math.min(options.maxNodes, ANNOTATION_MAP_LIMITS.maxNodes)
     : ANNOTATION_MAP_LIMITS.maxNodes;
   const entries = [];
-  const counts = { eligible: 0, annotated: 0, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0 };
+  const counts = { eligible: 0, annotated: 0, omittedNoRect: 0, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0, omittedClipped: 0 };
   const limitations = new Set(['observed-dom-ax-order-not-literal-assistive-technology', 'top-document-open-shadow-only']);
   const dedupe = new Set();
   const omittedFrames = new Set();
+  const candidates = [];
+  const annotatedAncestorIds = new Set();
   let legendCodePoints = 0;
   let closedShadowOmitted = false;
   for (const node of snapshot.nodes) {
@@ -269,15 +199,32 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     const key = String(node.nodeId);
     if (dedupe.has(key)) continue;
     dedupe.add(key);
-    counts.eligible += 1;
     if (!usefulRect(node.rect)) {
       counts.omittedNoRect += 1;
       continue;
     }
-    const preview = text(projection.announcementPreview);
-    const selectorSummary = structuralSelector(node, indexes);
-    const nameSource = text(projection.nameSource) || 'none';
-    const previewLength = [...`${selectorSummary}\n${preview}\n${nameSource}`].length;
+    if (!visibleRect(node, indexes)) {
+      counts.omittedClipped += 1;
+      limitations.add('ancestor-clipped-elements-omitted');
+      continue;
+    }
+    candidates.push({
+      nodeId: key,
+      selectorSummary: structuralSelector(node, indexes),
+      announcementPreview: text(projection.announcementPreview),
+      nameSource: text(projection.nameSource) || 'none',
+      bounds: { x: node.rect.x, y: node.rect.y, width: node.rect.width, height: node.rect.height },
+      container: CONTAINER_TAGS.has(safeTag(node)) || CONTAINER_ROLES.has(projection.role),
+    });
+    markAncestorsOf(node, indexes, annotatedAncestorIds);
+  }
+  // Contêineres com descendentes anotados saem antes de qualquer numeração: a caixa de um `<li>`,
+  // `<table>`, `<details>` ou `role="region"` que já tem filhos anotados englobaria vários elementos
+  // e o número deixaria de dizer qual deles está marcado.
+  const kept = candidates.filter(candidate => !(candidate.container && annotatedAncestorIds.has(candidate.nodeId)));
+  if (kept.length !== candidates.length) limitations.add('container-replaced-by-annotated-descendant');
+  for (const candidate of kept) {
+    const previewLength = [...`${candidate.selectorSummary}\n${candidate.announcementPreview}\n${candidate.nameSource}`].length;
     if (entries.length >= maxNodes || previewLength > MAX_PREVIEW_CODE_POINTS ||
       legendCodePoints + previewLength > ANNOTATION_MAP_LIMITS.maxLegendCodePoints) {
       counts.omittedLimit += 1;
@@ -289,28 +236,19 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
     legendCodePoints += previewLength;
     entries.push({
       number: entries.length + 1,
-      nodeId: key,
-      selectorSummary,
-      announcementPreview: preview,
-      nameSource,
-      bounds: { x: node.rect.x, y: node.rect.y, width: node.rect.width, height: node.rect.height },
+      nodeId: candidate.nodeId,
+      selectorSummary: candidate.selectorSummary,
+      announcementPreview: candidate.announcementPreview,
+      nameSource: candidate.nameSource,
+      bounds: candidate.bounds,
     });
   }
   counts.omittedFrame = omittedFrameContextCount(snapshot, omittedFrames);
   if (counts.omittedFrame > 0) limitations.add('frame-content-omitted');
   if (closedShadowOmitted) limitations.add('closed-shadow-root-omitted');
   counts.annotated = entries.length;
+  counts.eligible = kept.length + counts.omittedNoRect + counts.omittedClipped;
   return { entries, legend: entries.map(({ bounds, ...entry }) => entry), counts, limitations: canonicalLimitations(limitations) };
-}
-
-function observedContentSize(layoutMetrics, sourceMetadata) {
-  const size = layoutMetrics?.cssContentSize || layoutMetrics?.contentSize || {};
-  const cssWidth = Number.isFinite(size.width) && size.width > 0 ? size.width : sourceMetadata.width;
-  const cssHeight = Number.isFinite(size.height) && size.height > 0 ? size.height : sourceMetadata.height;
-  const deviceScaleFactor = Number.isFinite(layoutMetrics?.deviceScaleFactor) && layoutMetrics.deviceScaleFactor > 0
-    ? layoutMetrics.deviceScaleFactor
-    : null;
-  return { cssWidth, cssHeight, deviceScaleFactor };
 }
 
 function clamp(value, minimum, maximum) {
@@ -388,14 +326,28 @@ function placeMarkers(entries, width, height) {
   const placements = [];
   let unresolved = 0;
   for (const entry of entries) {
+    // Custo = colisões (peso dominante, para a anticolisão continuar mandando) + distância até o canto
+    // superior-esquerdo exterior do próprio elemento, que é a primeira candidata de `markerCandidates`.
+    const anchor = { x: entry.bounds.x, y: entry.bounds.y };
     const candidates = markerCandidates(entry.bounds, MARKER_RADIUS, width, height);
-    const scored = candidates.map((candidate, index) => ({
-      ...candidate, index,
-      score: placements.reduce((total, placed) => total + (distanceSquared(candidate, placed) < MARKER_CLEARANCE ** 2 ? 1 : 0), 0),
-    })).sort((left, right) => left.score - right.score || left.index - right.index);
+    const scored = candidates.map((candidate, index) => {
+      const collisions = placements.reduce((total, placed) => total + (distanceSquared(candidate, placed) < MARKER_CLEARANCE ** 2 ? 1 : 0), 0);
+      return {
+        ...candidate, index, collisions,
+        score: collisions * MARKER_COLLISION_COST + Math.sqrt(distanceSquared(candidate, anchor)),
+      };
+    }).sort((left, right) => left.score - right.score || left.index - right.index);
     const selected = scored[0];
-    if (selected.score > 0) unresolved += 1;
-    placements.push({ number: entry.number, x: selected.x, y: selected.y, targetX: entry.bounds.x + entry.bounds.width / 2, targetY: entry.bounds.y + entry.bounds.height / 2, overlapped: selected.score > 0 });
+    if (selected.collisions > 0) unresolved += 1;
+    // Ponta da linha-guia: a borda do contorno mais próxima do marcador, e não o centro do elemento —
+    // a linha pelo centro riscava o conteúdo do alvo na diagonal. Se o marcador já encosta no contorno,
+    // a ponta é o próprio marcador e o desenho não traça linha nenhuma.
+    const leader = annotationLeaderPoint(entry.bounds, selected.x, selected.y);
+    placements.push({
+      number: entry.number, x: selected.x, y: selected.y,
+      leaderX: leader.x, leaderY: leader.y,
+      bounds: entry.bounds, overlapped: selected.collisions > 0,
+    });
   }
   return { placements, unresolved };
 }
@@ -541,7 +493,7 @@ export function buildAnnotationMapPlan({
     throw new AnnotationMapError('ANNOTATION_MAP_SOURCE_LIMIT', 'A captura original excede os limites do mapa visual.');
   }
   const selected = selectAnnouncementMapEntries(snapshot);
-  const size = observedContentSize(layoutMetrics, sourceMetadata);
+  const size = captureContentSize(layoutMetrics, sourceMetadata);
   const geometry = {
     cssWidth: size.cssWidth,
     cssHeight: size.cssHeight,
@@ -559,7 +511,7 @@ export function buildAnnotationMapPlan({
     entries.push({ ...entry, number: entries.length + 1, bounds });
   }
   const counts = { ...selected.counts, annotated: entries.length, omittedNoRect: selected.counts.omittedNoRect + outside };
-  counts.eligible = counts.annotated + counts.omittedNoRect + counts.omittedLimit;
+  counts.eligible = counts.annotated + counts.omittedNoRect + counts.omittedLimit + counts.omittedClipped;
   if (measureLegendText !== undefined && typeof measureLegendText !== 'function') {
     throw new TypeError('A função de medição da legenda é inválida.');
   }
@@ -589,74 +541,68 @@ export function buildAnnotationMapPlan({
   return { geometry, entries, legend, counts, limits: ANNOTATION_MAP_LIMITS, limitations: canonicalLimitations(limitations), segments };
 }
 
-function throwIfAborted(signal) {
-  if (!signal?.aborted) return;
-  throw signal.reason?.name === 'AbortError' ? signal.reason : new DOMException('Operação cancelada.', 'AbortError');
-}
-
-function operationWaiter(signal, timeoutMs) {
-  const duration = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(Math.floor(timeoutMs), 60_000) : 15_000;
-  const deadline = Date.now() + duration;
-  return (operation, { onLateValue, onCancel } = {}) => new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      try { onCancel?.(signal.reason); } catch { /* Cancellation remains best-effort. */ }
-      throwIfAborted(signal);
-    }
-    let settled = false;
-    const remaining = deadline - Date.now();
-    const cleanup = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener?.('abort', onAbort);
-    };
-    const finish = (handler, value) => {
-      if (settled) {
-        if (handler === resolve) onLateValue?.(value);
-        return;
-      }
-      settled = true;
-      cleanup();
-      handler(value);
-    };
-    const cancel = reason => {
-      if (settled) return;
-      try { onCancel?.(reason); } catch { /* Cancellation remains best-effort. */ }
-      finish(reject, reason);
-    };
-    const onAbort = () => cancel(signal?.reason?.name === 'AbortError'
-      ? signal.reason
-      : new DOMException('Operação cancelada.', 'AbortError'));
-    const timer = setTimeout(() => cancel(new AnnotationMapError(
-      'ANNOTATION_MAP_TIMEOUT', 'O compositor local excedeu o tempo limite do mapa visual.',
-    )), Math.max(0, remaining));
-    signal?.addEventListener?.('abort', onAbort, { once: true });
-    Promise.resolve(operation).then(value => finish(resolve, value), error => finish(reject, error));
-  });
-}
-
-function featureRuntime(runtime) {
-  const selected = runtime || globalThis;
-  if (typeof selected.OffscreenCanvas !== 'function' || typeof selected.createImageBitmap !== 'function') {
-    throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'O compositor local OffscreenCanvas não está disponível neste worker.');
-  }
-  if (typeof globalThis.DecompressionStream !== 'function' || typeof globalThis.ReadableStream !== 'function') {
-    throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'A validação raster local não está disponível neste worker.');
-  }
-  return selected;
-}
-
-function waitForRasterValidation(waitForOperation, bytes, limits) {
-  const controller = new AbortController();
-  return waitForOperation(validatePngRasterData(bytes, { ...limits, signal: controller.signal }), {
-    onCancel: reason => controller.abort(reason),
-  });
-}
-
 function canvasHeightFor(segment, geometry, sourceWidth) {
   const imageHeight = segment.sourcePixelClip?.height ?? 0;
   const legendHeight = segment.legendLines.length
     ? LEGEND_HEADING_HEIGHT + LEGEND_PADDING * 2 + segment.legendLines.length * LEGEND_LINE_HEIGHT
     : 0;
   return { imageHeight, legendHeight, height: imageHeight + legendHeight, width: sourceWidth };
+}
+
+function segmentOutlineRect(marker, geometry, dimensions) {
+  const bounds = marker.bounds;
+  if (!usefulRect(bounds)) return null;
+  const imageHeight = Math.max(0, dimensions.imageHeight);
+  const x = clamp(bounds.x * geometry.scaleX, 0, dimensions.width);
+  const y = clamp(bounds.y * geometry.scaleY, 0, imageHeight);
+  const right = clamp((bounds.x + bounds.width) * geometry.scaleX, x, dimensions.width);
+  const bottom = clamp((bounds.y + bounds.height) * geometry.scaleY, y, imageHeight);
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
+/**
+ * Ponta da linha-guia no próprio contorno desenhado, em px de imagem do segmento. O contorno aqui é o
+ * retângulo recortado pelo segmento (`segmentOutlineRect`), e não a caixa do elemento no documento: a
+ * linha termina exatamente sobre o traço que aparece na imagem. O mínimo de `annotationLeaderPoint` é
+ * multiplicado pela escala para continuar valendo em px de documento, como na geometria canônica.
+ */
+function segmentLeaderPoint(marker, geometry, dimensions) {
+  const rect = segmentOutlineRect(marker, geometry, dimensions);
+  if (!rect) return null;
+  const scale = Math.min(geometry.scaleX, geometry.scaleY);
+  return annotationLeaderPoint(rect, marker.x * geometry.scaleX, marker.y * geometry.scaleY,
+    ANNOTATION_MAP_LEADER_MIN_PX * scale);
+}
+
+function strokeRectPath(context, rect) {
+  context.beginPath();
+  context.moveTo(rect.x, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y);
+  context.lineTo(rect.x + rect.width, rect.y + rect.height);
+  context.lineTo(rect.x, rect.y + rect.height);
+  context.lineTo(rect.x, rect.y);
+  context.stroke();
+}
+
+/**
+ * Contorno fino do elemento anotado, na mesma cor do marcador e com halo branco: liga visualmente o
+ * número ao alvo sem depender só da linha-guia. Como no relatório, os halos de todos os contornos
+ * saem antes dos traços coloridos, para um contorno colorido vizinho nunca ficar coberto.
+ */
+function drawElementOutlines(context, segment, plan, dimensions) {
+  const outlines = segment.placements
+    .map(marker => ({ marker, rect: segmentOutlineRect(marker, plan.geometry, dimensions) }))
+    .filter(entry => entry.rect);
+  if (!outlines.length) return;
+  const strokeWidth = Math.max(2, Math.round(2 * Math.min(plan.geometry.scaleX, plan.geometry.scaleY)));
+  context.strokeStyle = '#fff';
+  context.lineWidth = strokeWidth + 4;
+  for (const { rect } of outlines) strokeRectPath(context, rect);
+  context.lineWidth = strokeWidth;
+  for (const { marker, rect } of outlines) {
+    context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
+    strokeRectPath(context, rect);
+  }
 }
 
 function drawSegment(context, bitmap, segment, plan, dimensions) {
@@ -669,15 +615,20 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.font = '700 16px system-ui';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
+  const scale = Math.min(plan.geometry.scaleX, plan.geometry.scaleY);
+  drawElementOutlines(context, segment, plan, dimensions);
   for (const marker of segment.placements) {
-    const markerRadius = MARKER_RADIUS * Math.min(plan.geometry.scaleX, plan.geometry.scaleY);
+    const markerRadius = MARKER_RADIUS * scale;
     const x = marker.x * plan.geometry.scaleX;
     const y = marker.y * plan.geometry.scaleY;
-    const targetX = marker.targetX * plan.geometry.scaleX;
-    const targetY = marker.targetY * plan.geometry.scaleY;
-    context.strokeStyle = marker.overlapped ? '#6b4e00' : '#8b1e1e';
-    context.lineWidth = Math.max(2, Math.round(3 * Math.min(plan.geometry.scaleX, plan.geometry.scaleY)));
-    context.beginPath(); context.moveTo(x, y); context.lineTo(targetX, targetY); context.stroke();
+    context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
+    context.lineWidth = Math.max(2, Math.round(3 * scale));
+    // Sem contorno (ou já encostando nele) a linha-guia não é traçada: a ponta devolvida é o próprio
+    // marcador, que só cobriria o alvo.
+    const leader = segmentLeaderPoint(marker, plan.geometry, dimensions);
+    if (leader && (leader.x !== x || leader.y !== y)) {
+      context.beginPath(); context.moveTo(x, y); context.lineTo(leader.x, leader.y); context.stroke();
+    }
     context.fillStyle = '#fff';
     context.beginPath(); context.arc(x, y, markerRadius, 0, Math.PI * 2); context.fill(); context.stroke();
     context.fillStyle = '#14212b';
@@ -695,13 +646,6 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.fillStyle = '#14212b';
   context.font = '15px system-ui';
   segment.legendLines.forEach((line, index) => context.fillText(line.text, LEGEND_PADDING, legendTop + LEGEND_HEADING_HEIGHT + LEGEND_PADDING + index * LEGEND_LINE_HEIGHT));
-}
-
-async function canvasPng(canvas, waitForOperation) {
-  if (typeof canvas.convertToBlob !== 'function') throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'O compositor local não oferece exportação PNG.');
-  const blob = await waitForOperation(canvas.convertToBlob({ type: 'image/png' }));
-  if (!(blob instanceof Blob) || blob.type !== 'image/png') throw new AnnotationMapError('ANNOTATION_MAP_OUTPUT_INVALID', 'O compositor não retornou PNG local válido.');
-  return new Uint8Array(await waitForOperation(blob.arrayBuffer()));
 }
 
 /** Composes one page map locally. It never mutates the page or the pristine source artifact. */
@@ -784,8 +728,8 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
           x: placed.marker.x,
           y: placed.marker.y + placed.clipY,
           size: MARKER_RADIUS * 2,
-          leaderX: placed.marker.targetX,
-          leaderY: placed.marker.targetY + placed.clipY,
+          leaderX: placed.marker.leaderX,
+          leaderY: placed.marker.leaderY + placed.clipY,
         },
         segmentIndex: placed.segmentIndex,
       };
@@ -799,7 +743,7 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
     sourceEvidenceId: fullPageEvidence.evidenceId, sourceHash, geometrySnapshotHash, geometry,
   };
   if (!plan.entries.length) {
-    const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 ||
+    const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 || plan.counts.omittedClipped > 0 ||
       plan.counts.omittedLimit > 0 || plan.counts.unresolvedOverlap > 0 || plan.limitations.includes('closed-shadow-root-omitted');
     const empty = {
       evidenceId, pageId, kind: 'announcement-map', state: 'derived', fullPageEvidenceId: fullPageEvidence.evidenceId,
@@ -866,7 +810,7 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
   const segments = rendered.map((segment, offset) => ({
     segmentId: `${evidenceId}-segment-${offset + 1}`, index: offset + 1, count: rendered.length, ...segment,
   }));
-  const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 ||
+  const materiallyPartial = plan.counts.omittedNoRect > 0 || plan.counts.omittedFrame > 0 || plan.counts.omittedClipped > 0 ||
     plan.counts.omittedLimit > 0 || plan.counts.unresolvedOverlap > 0 || plan.limitations.includes('closed-shadow-root-omitted');
   const artifact = {
     evidenceId, pageId, kind: 'announcement-map', state: 'derived', fullPageEvidenceId: fullPageEvidence.evidenceId,

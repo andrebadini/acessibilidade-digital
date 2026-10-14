@@ -22,6 +22,7 @@ import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
+import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 import { captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
 import { createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
@@ -990,6 +991,11 @@ function fakeAdapter(options = {}) {
     if (options.mapFailure) throw options.mapFailure;
     return options.composeMap(input);
   };
+  if (options.composeKeyboardMap || options.keyboardMapFailure) adapter.composeKeyboardMap = async input => {
+    events.push('keyboard-map');
+    if (options.keyboardMapFailure) throw options.keyboardMapFailure;
+    return options.composeKeyboardMap(input);
+  };
   return adapter;
 }
 
@@ -1211,15 +1217,15 @@ test('keeps diagnostics and evidence correlated when two new findings have the s
   }
 });
 
-test('runs the 130→146 pipeline through the canonical no-pixels boundary before collection, probes and rules', async () => {
+test('runs the 131→146 pipeline through the canonical no-pixels boundary before collection, probes and rules', async () => {
   const adapter = fakeAdapter();
   const model = await runAudit({
     url: ' example.test/start?password=REMOVE&view=public ', chromeAdapter: adapter,
     now: clock, idFactory: () => 'audit-1', closeAuditTab: true,
   });
   assert.equal(model.auditId, 'audit-1');
-  assert.equal(model.ruleResults.length, 131);
-  assert.equal(model.methodology.coreRuleCount, 130);
+  assert.equal(model.ruleResults.length, 132);
+  assert.equal(model.methodology.coreRuleCount, 131);
   assert.equal(model.methodology.supplementalRuleCount, 1);
   assert.equal(model.ruleResults.find(rule => rule.ruleId === 'editorial.placeholder-text').outcome, 'inapplicable');
   assert.equal(model.itemResults.length, 146);
@@ -1469,6 +1475,65 @@ test('attached full-evidence derives one map from the authorized pristine source
   const raster = adapter.events.indexOf('full-page');
   assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
   assert.deepEqual(gateCalls, ['after']);
+});
+
+test('attached full-evidence derives the keyboard map from the same authorized pristine source', async () => {
+  const auditId = 'audit-attached-keyboard-map';
+  const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+  const adapter = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+    composeKeyboardMap: async input => createKeyboardMapFixture({
+      sourceEvidenceId: input.fullPageEvidence.evidenceId,
+      pageId: input.fullPageEvidence.pageId ?? 'page-1',
+      name: 'Buscar, botão',
+    }),
+  });
+  const result = await runAttachedAuditExecution({
+    auditId, sessionCapabilityId: 'S'.repeat(22),
+    target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+    capturePolicy: policy, privacyGate: attachedPixelGate(policy, [], { auditId }),
+    chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+    onCheckpoint: async () => {}, persistAuditModel: async () => {},
+  });
+  assert.equal(result.state, 'model');
+  assert.equal(adapter.events.filter(event => event === 'keyboard-map').length, 1);
+  const original = result.model.evidence.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
+  const map = result.model.evidence.find(artifact => artifact.kind === 'keyboard-map');
+  assert.equal(map?.fullPageEvidenceId, original.evidenceId);
+  assert.equal(map?.derivation.sourceHash, original.hash);
+  assert.ok(result.model.evidence.some(artifact => artifact.kind === 'announcement-map'), 'as duas derivações coexistem');
+  assert.equal(result.model.session.diagnostics.some(entry => entry.code === 'KEYBOARD_MAP_PARTIAL'), false);
+});
+
+test('a rejected keyboard map preserves the pristine capture and records an explicit derivation failure', async () => {
+  for (const corrupt of ['source-id', 'page-id', 'source-hash', 'segment-hash']) {
+    const auditId = `audit-keyboard-map-rejected-${corrupt}`;
+    const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
+    const adapter = fakeAdapter({
+      trackCaptureCalls: true,
+      composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+      composeKeyboardMap: async input => {
+        const map = await createKeyboardMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+        if (corrupt === 'source-id') map.fullPageEvidenceId = 'foreign-source';
+        if (corrupt === 'page-id') map.pageId = 'foreign-page';
+        if (corrupt === 'source-hash') map.derivation.sourceHash = 'e'.repeat(64);
+        if (corrupt === 'segment-hash') map.segments[0].contentHash = 'e'.repeat(64);
+        return map;
+      },
+    });
+    const result = await runAttachedAuditExecution({
+      auditId, sessionCapabilityId: 'S'.repeat(22),
+      target: { kind: 'attached', tabId: 42, windowId: 9, documentId: 'document-a', initialUrlEvidence: TEST_EVIDENCE_URL, initialUrlSessionDigest: TEST_DIGEST },
+      capturePolicy: policy, privacyGate: attachedPixelGate(policy, [], { auditId }),
+      chromeAdapter: adapter, modelNow: clock, expectedExtensionId: TEST_EXTENSION_ID,
+      onCheckpoint: async () => {}, persistAuditModel: async () => {},
+    });
+    assert.equal(result.state, 'model', corrupt);
+    assert.equal(result.model.evidence.some(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine'), true, corrupt);
+    assert.equal(result.model.evidence.some(artifact => artifact.kind === 'keyboard-map'), false, corrupt);
+    assert.ok(result.model.session.diagnostics.some(entry => entry.code === 'KEYBOARD_MAP_OUTPUT_INVALID'), corrupt);
+  }
 });
 
 test('navigation during map composition denies the terminal commit and exposes no derived model', async () => {
@@ -3311,7 +3376,7 @@ test('integrates the recommendation failure, editorial occurrence and informatio
     now: clock, idFactory: () => 'audit-complementary',
   });
 
-  assert.equal(model.methodology.coreRuleCount, 130);
+  assert.equal(model.methodology.coreRuleCount, 131);
   assert.equal(model.itemResults.length, 146);
   assert.equal(model.itemResults.find(item => item.id === '5.7.6').outcome, 'failed');
   assert.deepEqual(model.accessibilityWidgets, {
@@ -3402,7 +3467,7 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   const axeOccurrence = model.occurrences.find(occurrence => occurrence.source?.engine === 'axe-core');
   const coreOccurrence = model.occurrences.find(occurrence => occurrence.ruleId === 'page-language');
 
-  assert.equal(model.ruleResults.length, 132);
+  assert.equal(model.ruleResults.length, 133);
   assert.equal(model.itemResults.find(item => item.id === '5.13.2').outcome, 'failed');
   assert.equal(axeOccurrence.outcome, 'failed');
   assert.equal(axeOccurrence.itemId, '5.13.2');
@@ -3616,7 +3681,7 @@ test('keeps the Audita core running when axe throws and records a bounded partia
 
   assert.equal(model.session.status, 'partial');
   assert.equal(model.axe.status, 'partial', 'partial supplemental coverage deterministically marks the audit recoverable/partial');
-  assert.equal(model.ruleResults.length, 131);
+  assert.equal(model.ruleResults.length, 132);
   assert.equal(model.itemResults.length, 146);
   assert.ok(model.session.diagnostics.some(entry => entry.code === 'AXE_EXECUTION_FAILED'));
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE axe failure details/iu);
