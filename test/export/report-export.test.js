@@ -279,7 +279,7 @@ test('v1 review-ready pending revision persists four exact artifacts and rejects
   await assert.rejects(persistExportSuccess(wrongRevision, store), /identidade|revisão|proveniência/i);
   assert.deepEqual([await store.getAuditSnapshot(model.auditId), await store.getLatest(), await store.getExportReceipt(model.auditId)], durableAfterControl);
   result.exportDeliveryIdentity = originalIdentity;
-  assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 7);
+  assert.equal((result.html.match(/<h2\b/gu) ?? []).length, 8, 'sete seções originais + Mapa do teclado (1.1.58)');
   assert.equal((result.html.match(/Câmara dos Deputados/gu) ?? []).length, 2);
   const identity = {
     auditId: model.auditId,
