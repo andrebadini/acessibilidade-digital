@@ -1,4 +1,4 @@
-import { hashEvidenceArtifact } from '../evidence/artifact-hash.js';
+import { hashEvidenceArtifact, isDerivedEvidenceKind } from '../evidence/artifact-hash.js';
 import { canonicalStringify } from './canonical-json.js';
 import { sha256Hex } from './hash.js';
 
@@ -60,7 +60,7 @@ export async function verifyIntegrityLinks(model) {
   const artifactById = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
   for (const artifact of model.evidence) {
     if (!SHA256.test(artifact.hash ?? '') || await hashEvidenceArtifact(artifact, {
-      sourceArtifact: artifact.kind === 'announcement-map'
+      sourceArtifact: isDerivedEvidenceKind(artifact.kind)
         ? artifactById.get(artifact.fullPageEvidenceId)
         : undefined,
     }) !== artifact.hash) {

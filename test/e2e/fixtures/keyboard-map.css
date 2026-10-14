@@ -1,0 +1,10 @@
+html { color: #14212b; background: #fff; font-family: system-ui, sans-serif; }
+body { margin: 16px; }
+.service-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-block: 12px; padding: 0; list-style: none; }
+/* O cartão só parece clicável: quem abre o menu é o mouse. Sem foco, sem Tab, sem teclado. */
+.service-card { box-sizing: border-box; padding: 12px; border: 1px solid #14212b; cursor: pointer; }
+.service-card .service-menu { display: none; margin-top: 8px; }
+.service-card:hover .service-menu { display: block; }
+.service-card a { display: block; padding-block: 4px; }
+.counter { display: inline-block; padding: 11px 16px; border: 1px solid #14212b; }
+summary { cursor: pointer; }

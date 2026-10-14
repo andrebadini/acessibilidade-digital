@@ -1,4 +1,6 @@
 import { projectElementAccessibility, isEditableAccessibilityNode } from '../core/accessibility/element-accessibility.js';
+import { ancestorState, privacyTaintedNodeIds, privateMarker } from '../core/evidence/privacy-taint.js';
+import { captureContentSize, usefulRect, visibleRect } from '../core/evidence/visible-geometry.js';
 import { buildSnapshotIndexes } from '../core/snapshot-schema.js';
 import {
   ANNOTATION_MAP_ALGORITHM,
@@ -13,6 +15,7 @@ import {
 } from '../core/evidence/annotation-map-artifact.js';
 import { decodePngDataUrl, pngDataUrlFromBytes, validatePngRasterData } from '../core/evidence/png.js';
 import { sha256Hex } from '../core/report/hash.js';
+import { compositionSupport } from './canvas-runtime.js';
 
 export { ANNOTATION_MAP_ALGORITHM, ANNOTATION_MAP_LIMITS, ANNOTATION_MAP_VERSION };
 
@@ -35,7 +38,6 @@ const SIGNIFICANT_ROLES = new Set([
  */
 const CONTAINER_TAGS = new Set(['details', 'li', 'table']);
 const CONTAINER_ROLES = new Set(['list', 'listitem', 'region', 'table']);
-const PRIVATE_ATTRIBUTE = /(?:^(?:data-(?:audita-)?private|data-nosnippet)$|pass(?:word|wd)?|token|secret|auth(?:orization)?|session|cookie|csrf|xsrf|otp|one[-_ ]?time|api[-_ ]?key)/iu;
 const BASE_LIMITATIONS = Object.freeze([
   'observed-dom-ax-order-not-literal-assistive-technology',
   'non-atomic-source-geometry',
@@ -64,6 +66,13 @@ export class AnnotationMapError extends Error {
   }
 }
 
+const { throwIfAborted, operationWaiter, featureRuntime, waitForRasterValidation, canvasPng } = compositionSupport({
+  createError: (code, message) => new AnnotationMapError(code, message),
+  unavailableCode: 'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE',
+  timeoutCode: 'ANNOTATION_MAP_TIMEOUT',
+  outputInvalidCode: 'ANNOTATION_MAP_OUTPUT_INVALID',
+});
+
 function text(value) {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
 }
@@ -75,25 +84,6 @@ function safeTag(node) {
 
 function hasBooleanAttribute(node, name) {
   return Object.hasOwn(node?.attributes || {}, name);
-}
-
-function privateMarker(node) {
-  if (node?.privacyReferenceStatus === 'omitted-privacy') return true;
-  for (const [name, value] of Object.entries(node?.attributes || {})) {
-    if (PRIVATE_ATTRIBUTE.test(name) || String(value ?? '') === '[redacted]') return true;
-  }
-  return node?.valueStatus === 'omitted-privacy' && !['input', 'select', 'textarea'].includes(safeTag(node));
-}
-
-function ancestorState(node, indexes, predicate) {
-  const visited = new Set();
-  let current = node;
-  while (current && !visited.has(String(current.nodeId))) {
-    visited.add(String(current.nodeId));
-    if (predicate(current)) return true;
-    current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
-  }
-  return false;
 }
 
 /** Registra todos os ancestrais de um nó anotável, para saber quais contêineres já têm descendente. */
@@ -111,71 +101,6 @@ function closedShadow(node, indexes) {
   const rootId = typeof node?.shadowRootId === 'string' ? node.shadowRootId : null;
   const root = rootId ? indexes.byNodeId.get(rootId) : null;
   return root?.shadowRootType === 'closed' || ancestorState(node, indexes, current => current.shadowRootType === 'closed');
-}
-
-function usefulRect(rect) {
-  return rect && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) && rect.width > 0 && rect.height > 0;
-}
-
-const CLIPPING_OVERFLOW = new Set(['auto', 'clip', 'hidden', 'scroll']);
-/** Raízes de rolagem da página: a captura integral cobre o documento todo, então elas não escondem nada. */
-const DOCUMENT_ROOT_TAGS = new Set(['body', 'html']);
-/** Faixa mínima visível para valer uma anotação: menos que isto é o vinco do recorte, não o elemento. */
-const CLIPPED_VISIBLE_MIN_PX = 1;
-
-function styleValue(node, name) {
-  const styles = node?.styles;
-  if (!styles || typeof styles !== 'object') return '';
-  const camel = name.replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase());
-  return text(styles[name] ?? styles[camel]).toLowerCase();
-}
-
-/**
- * Ancestrais que recortam o próprio conteúdo — `overflow` diferente de `visible`.
- *
- * O instantâneo já traz o `overflow` computado de cada nó, então o recorte é deduzido do que foi
- * coletado: nenhuma ida extra ao navegador e nenhuma mudança na geometria declarada. A caixa usada é a
- * de borda, um pouco maior que a área realmente visível; erra para o lado de anotar demais, nunca para
- * o de esconder um elemento que aparece na imagem.
- *
- * Limitação conhecida: um descendente posicionado que escapa do recorte (por exemplo `position: fixed`
- * dentro de um contêiner com `overflow: hidden`) é tratado como recortado. O resultado é uma omissão a
- * mais, registrada na limitação do mapa, nunca uma marcação sobre o vazio.
- */
-function clippingAncestorRects(node, indexes) {
-  const rects = [];
-  const visited = new Set();
-  let current = node?.parentId === null || node?.parentId === undefined ? null : indexes.byNodeId.get(String(node.parentId));
-  while (current && !visited.has(String(current.nodeId))) {
-    visited.add(String(current.nodeId));
-    if (!DOCUMENT_ROOT_TAGS.has(safeTag(current)) && usefulRect(current.rect) &&
-      (CLIPPING_OVERFLOW.has(styleValue(current, 'overflow-x')) || CLIPPING_OVERFLOW.has(styleValue(current, 'overflow-y')))) {
-      rects.push(current.rect);
-    }
-    current = current.parentId === null || current.parentId === undefined ? null : indexes.byNodeId.get(String(current.parentId));
-  }
-  return rects;
-}
-
-/**
- * Recorta o retângulo pelos ancestrais com rolagem. Retorna `null` quando nada de útil sobra: um
- * elemento guardado dentro do rolador aparece na captura integral, e marcar o lugar onde ele estaria
- * poria o número sobre outro conteúdo.
- */
-function visibleRect(node, indexes) {
-  let left = node.rect.x;
-  let top = node.rect.y;
-  let right = left + node.rect.width;
-  let bottom = top + node.rect.height;
-  for (const clip of clippingAncestorRects(node, indexes)) {
-    left = Math.max(left, clip.x);
-    top = Math.max(top, clip.y);
-    right = Math.min(right, clip.x + clip.width);
-    bottom = Math.min(bottom, clip.y + clip.height);
-  }
-  return right - left >= CLIPPED_VISIBLE_MIN_PX && bottom - top >= CLIPPED_VISIBLE_MIN_PX
-    ? { x: left, y: top, width: right - left, height: bottom - top }
-    : null;
 }
 
 function significant(node, projection) {
@@ -221,87 +146,6 @@ function structuralSelector(node, indexes) {
 function canonicalLimitations(values) {
   const requested = new Set(values);
   return ANNOTATION_MAP_LIMITATIONS.filter(value => requested.has(value));
-}
-
-function privacyTaintedNodeIds(snapshot, indexes) {
-  const dependents = new Map();
-  const addDependency = (source, consumer) => {
-    const sourceId = String(source.nodeId);
-    const values = dependents.get(sourceId) ?? new Set();
-    values.add(String(consumer.nodeId));
-    dependents.set(sourceId, values);
-  };
-  for (const node of snapshot.nodes) {
-    for (const attribute of ['aria-labelledby', 'aria-describedby']) {
-      const references = text(node.attributes?.[attribute]).split(' ').filter(Boolean);
-      for (const reference of references) {
-        const matches = indexes.byDomId.get(reference);
-        for (const match of matches ?? []) addDependency(match, node);
-      }
-    }
-    for (const labelId of Array.isArray(node.labels) ? node.labels : []) {
-      const label = indexes.byNodeId.get(String(labelId));
-      if (label) addDependency(label, node);
-    }
-    if (['button', 'input', 'meter', 'output', 'progress', 'select', 'textarea'].includes(safeTag(node))) {
-      const visited = new Set();
-      let ancestor = node.parentId === null || node.parentId === undefined
-        ? null
-        : indexes.byNodeId.get(String(node.parentId));
-      while (ancestor && !visited.has(String(ancestor.nodeId))) {
-        visited.add(String(ancestor.nodeId));
-        if (safeTag(ancestor) === 'label') addDependency(ancestor, node);
-        ancestor = ancestor.parentId === null || ancestor.parentId === undefined
-          ? null
-          : indexes.byNodeId.get(String(ancestor.parentId));
-      }
-    }
-  }
-  for (const label of snapshot.nodes.filter(node => safeTag(node) === 'label')) {
-    const targetId = text(label.attributes?.for);
-    const matches = targetId ? indexes.byDomId.get(targetId) : null;
-    for (const match of matches ?? []) addDependency(label, match);
-  }
-
-  const tainted = new Set();
-  const queue = [];
-  const taintWithAncestors = node => {
-    const visited = new Set();
-    let current = node;
-    while (current && !visited.has(String(current.nodeId))) {
-      const nodeId = String(current.nodeId);
-      visited.add(nodeId);
-      if (!tainted.has(nodeId)) {
-        tainted.add(nodeId);
-        queue.push(nodeId);
-      }
-      current = current.parentId === null || current.parentId === undefined
-        ? null
-        : indexes.byNodeId.get(String(current.parentId));
-    }
-  };
-  const taintSensitiveSubtree = root => {
-    const pending = [root];
-    const visited = new Set();
-    for (let offset = 0; offset < pending.length; offset += 1) {
-      const node = pending[offset];
-      if (!node || visited.has(String(node.nodeId))) continue;
-      visited.add(String(node.nodeId));
-      taintWithAncestors(node);
-      for (const childId of Array.isArray(node.children) ? node.children : []) {
-        pending.push(indexes.byNodeId.get(String(childId)));
-      }
-    }
-  };
-  for (const node of snapshot.nodes) {
-    if (isEditableAccessibilityNode(node) || privateMarker(node)) taintSensitiveSubtree(node);
-  }
-  for (let offset = 0; offset < queue.length; offset += 1) {
-    for (const dependentId of dependents.get(queue[offset]) ?? []) {
-      taintWithAncestors(indexes.byNodeId.get(dependentId));
-    }
-  }
-  return tainted;
 }
 
 function omittedFrameContextCount(snapshot, observedPaths) {
@@ -405,16 +249,6 @@ export function selectAnnouncementMapEntries(snapshot, options = {}) {
   counts.annotated = entries.length;
   counts.eligible = kept.length + counts.omittedNoRect + counts.omittedClipped;
   return { entries, legend: entries.map(({ bounds, ...entry }) => entry), counts, limitations: canonicalLimitations(limitations) };
-}
-
-function observedContentSize(layoutMetrics, sourceMetadata) {
-  const size = layoutMetrics?.cssContentSize || layoutMetrics?.contentSize || {};
-  const cssWidth = Number.isFinite(size.width) && size.width > 0 ? size.width : sourceMetadata.width;
-  const cssHeight = Number.isFinite(size.height) && size.height > 0 ? size.height : sourceMetadata.height;
-  const deviceScaleFactor = Number.isFinite(layoutMetrics?.deviceScaleFactor) && layoutMetrics.deviceScaleFactor > 0
-    ? layoutMetrics.deviceScaleFactor
-    : null;
-  return { cssWidth, cssHeight, deviceScaleFactor };
 }
 
 function clamp(value, minimum, maximum) {
@@ -659,7 +493,7 @@ export function buildAnnotationMapPlan({
     throw new AnnotationMapError('ANNOTATION_MAP_SOURCE_LIMIT', 'A captura original excede os limites do mapa visual.');
   }
   const selected = selectAnnouncementMapEntries(snapshot);
-  const size = observedContentSize(layoutMetrics, sourceMetadata);
+  const size = captureContentSize(layoutMetrics, sourceMetadata);
   const geometry = {
     cssWidth: size.cssWidth,
     cssHeight: size.cssHeight,
@@ -705,68 +539,6 @@ export function buildAnnotationMapPlan({
   });
   const legend = entries.map(({ bounds, ...entry }) => ({ ...entry, segmentIndex: segmentByNumber.get(entry.number) }));
   return { geometry, entries, legend, counts, limits: ANNOTATION_MAP_LIMITS, limitations: canonicalLimitations(limitations), segments };
-}
-
-function throwIfAborted(signal) {
-  if (!signal?.aborted) return;
-  throw signal.reason?.name === 'AbortError' ? signal.reason : new DOMException('Operação cancelada.', 'AbortError');
-}
-
-function operationWaiter(signal, timeoutMs) {
-  const duration = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(Math.floor(timeoutMs), 60_000) : 15_000;
-  const deadline = Date.now() + duration;
-  return (operation, { onLateValue, onCancel } = {}) => new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      try { onCancel?.(signal.reason); } catch { /* Cancellation remains best-effort. */ }
-      throwIfAborted(signal);
-    }
-    let settled = false;
-    const remaining = deadline - Date.now();
-    const cleanup = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener?.('abort', onAbort);
-    };
-    const finish = (handler, value) => {
-      if (settled) {
-        if (handler === resolve) onLateValue?.(value);
-        return;
-      }
-      settled = true;
-      cleanup();
-      handler(value);
-    };
-    const cancel = reason => {
-      if (settled) return;
-      try { onCancel?.(reason); } catch { /* Cancellation remains best-effort. */ }
-      finish(reject, reason);
-    };
-    const onAbort = () => cancel(signal?.reason?.name === 'AbortError'
-      ? signal.reason
-      : new DOMException('Operação cancelada.', 'AbortError'));
-    const timer = setTimeout(() => cancel(new AnnotationMapError(
-      'ANNOTATION_MAP_TIMEOUT', 'O compositor local excedeu o tempo limite do mapa visual.',
-    )), Math.max(0, remaining));
-    signal?.addEventListener?.('abort', onAbort, { once: true });
-    Promise.resolve(operation).then(value => finish(resolve, value), error => finish(reject, error));
-  });
-}
-
-function featureRuntime(runtime) {
-  const selected = runtime || globalThis;
-  if (typeof selected.OffscreenCanvas !== 'function' || typeof selected.createImageBitmap !== 'function') {
-    throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'O compositor local OffscreenCanvas não está disponível neste worker.');
-  }
-  if (typeof globalThis.DecompressionStream !== 'function' || typeof globalThis.ReadableStream !== 'function') {
-    throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'A validação raster local não está disponível neste worker.');
-  }
-  return selected;
-}
-
-function waitForRasterValidation(waitForOperation, bytes, limits) {
-  const controller = new AbortController();
-  return waitForOperation(validatePngRasterData(bytes, { ...limits, signal: controller.signal }), {
-    onCancel: reason => controller.abort(reason),
-  });
 }
 
 function canvasHeightFor(segment, geometry, sourceWidth) {
@@ -874,13 +646,6 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.fillStyle = '#14212b';
   context.font = '15px system-ui';
   segment.legendLines.forEach((line, index) => context.fillText(line.text, LEGEND_PADDING, legendTop + LEGEND_HEADING_HEIGHT + LEGEND_PADDING + index * LEGEND_LINE_HEIGHT));
-}
-
-async function canvasPng(canvas, waitForOperation) {
-  if (typeof canvas.convertToBlob !== 'function') throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'O compositor local não oferece exportação PNG.');
-  const blob = await waitForOperation(canvas.convertToBlob({ type: 'image/png' }));
-  if (!(blob instanceof Blob) || blob.type !== 'image/png') throw new AnnotationMapError('ANNOTATION_MAP_OUTPUT_INVALID', 'O compositor não retornou PNG local válido.');
-  return new Uint8Array(await waitForOperation(blob.arrayBuffer()));
 }
 
 /** Composes one page map locally. It never mutates the page or the pristine source artifact. */

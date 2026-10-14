@@ -75,6 +75,19 @@ const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_OUTPUT_INVALID',
   'ANNOTATION_MAP_TIMEOUT',
 ]);
+// Mesmos códigos fechados do compositor do mapa do teclado. A lista fica aqui, e não derivada do erro,
+// porque o diagnóstico persistido só aceita código que a política de diagnóstico já conhece.
+const KEYBOARD_MAP_DIAGNOSTIC_CODES = new Set([
+  'KEYBOARD_MAP_COMPOSITOR_UNAVAILABLE',
+  'KEYBOARD_MAP_SOURCE_INVALID',
+  'KEYBOARD_MAP_SOURCE_HASH_MISMATCH',
+  'KEYBOARD_MAP_SOURCE_LIMIT',
+  'KEYBOARD_MAP_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_PRINT_SEGMENT_LIMIT',
+  'KEYBOARD_MAP_DERIVED_BYTES_LIMIT',
+  'KEYBOARD_MAP_OUTPUT_INVALID',
+  'KEYBOARD_MAP_TIMEOUT',
+]);
 // Orçamento de miniaturas por página (1.1.53). Cada miniatura passa pela porta de privacidade (várias
 // injeções) e custa ~150 ms; uma vitrine com 1.800 ocorrências levava mais de 2 min só nisso e ainda mais para
 // finalizar. As ocorrências excedentes mantêm seletor, trecho e descrição; o limite vira limitação declarada.
@@ -1197,6 +1210,40 @@ async function runLegacyAudit({
         recoverable(code, 'O mapa visual derivado não pôde ser gerado localmente; a captura original foi preservada.');
       }
     }
+    // Mapa do teclado: deriva da mesma captura integral pristine do mapa de anúncios, mas é julgado
+    // pelas próprias regras. Sem captura integral (modos sem pixels) não há mapa — a lista numerada
+    // do relatório continua existindo a partir do instantâneo, sem pixels.
+    if (state.fullPage && typeof chromeAdapter.composeKeyboardMap === 'function') {
+      const pristineArtifact = state.artifacts.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
+      const sourceBefore = canonicalStringify(pristineArtifact);
+      try {
+        const map = await awaitStep(() => chromeAdapter.composeKeyboardMap({
+          pageId: 'page-1',
+          snapshot: state.snapshot,
+          occurrences: state.occurrences,
+          fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
+          layoutMetrics: state.snapshot.document?.layoutMetrics || raw.layoutMetrics || pristineMetrics,
+          signal,
+        }));
+        if (canonicalStringify(pristineArtifact) !== sourceBefore) {
+          throw Object.assign(new Error('A captura pristine foi alterada durante a derivação.'), { code: 'KEYBOARD_MAP_SOURCE_INVALID' });
+        }
+        const recomputedMapHash = await awaitStep(() => hashEvidenceArtifact(map, {
+          sourceArtifact: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
+        }));
+        if (map?.hash !== recomputedMapHash) {
+          throw Object.assign(new Error('O hash do mapa do teclado não corresponde ao conteúdo.'), { code: 'KEYBOARD_MAP_OUTPUT_INVALID' });
+        }
+        state.artifacts.push(structuredClone(map));
+        if (map.status === 'partial') {
+          recoverable('KEYBOARD_MAP_PARTIAL', 'O mapa do teclado foi gerado com cobertura parcial e limitações explícitas.');
+        }
+      } catch (error) {
+        rethrowAbort(error, signal);
+        const code = KEYBOARD_MAP_DIAGNOSTIC_CODES.has(error?.code) ? error.code : 'KEYBOARD_MAP_OUTPUT_INVALID';
+        recoverable(code, 'O mapa do teclado não pôde ser gerado localmente; a captura original foi preservada.');
+      }
+    }
     state.occurrences.push(...makeEditorialOccurrences(auditId, state.editorialRuleResults));
     allocateOccurrenceIds(state);
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
@@ -1905,7 +1952,7 @@ function captureLegacyEffects(adapter) {
   for (const name of [
     'connectCdp', 'beginNavigationFreeze', 'runAxeInTab', 'collectPage', 'runDynamicProbes', 'getEnvironment',
     'emitProgress', 'handoffReport', 'executeScript', 'createProbeAdapter',
-    'captureFullPage', 'captureElement', 'composeAnnouncementMap',
+    'captureFullPage', 'captureElement', 'composeAnnouncementMap', 'composeKeyboardMap',
   ]) {
     const method = optionalAdapterMethod(adapter, name);
     if (method) captured[name] = method;

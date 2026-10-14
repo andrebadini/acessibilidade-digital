@@ -40,6 +40,10 @@ const knownOccurrence = Object.freeze({
   selectors: Object.freeze(['button#missing-name', 'html > body > main > button']),
 });
 const canonicalReportTitle = 'Relatório de auditoria — Audita Acessibilidade';
+// A seção "Mapa do teclado" entrou antes de matriz e metodologia, então a posição da metodologia
+// deixou de ser fixa. Localizar pelo título mantém o roteiro válido quando outra seção é somada.
+const methodologySection = "([...document.querySelectorAll('[data-report-section]')]"
+  + ".find(node => /^Metodologia/u.test(node.querySelector('h2')?.textContent ?? '')))";
 const exportMime = Object.freeze({
   html: 'text/html;charset=utf-8', pdf: 'application/pdf',
   csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
@@ -552,7 +556,7 @@ for (const scenario of [
           cards:document.querySelectorAll('#review-list details.lay-card').length,
           target:Boolean(document.querySelector('[data-review-controls-target]')),
           evaluator:Boolean(document.querySelector('#review-evaluator')),
-          identity:/Revisão do modelo: [0-9]+/.test(document.querySelector('[data-report-section="7"]')?.textContent??'')
+          identity:/Revisão do modelo: [0-9]+/.test(${methodologySection}?.textContent??'')
         }))()`);
         assert.ok(prerequisites.cards >= 2 && prerequisites.target && prerequisites.evaluator && prerequisites.identity,
           JSON.stringify(prerequisites));
@@ -571,7 +575,7 @@ for (const scenario of [
           next.querySelector('.lay-note textarea').value='Nota ainda não salva';
           window.__reviewPreserved={list:document.querySelector('#review-list'),evaluator:document.querySelector('#review-evaluator'),next,
             key:first.getAttribute('data-lay-card')};
-          const methodology=document.querySelector('[data-report-section="7"]').textContent;
+          const methodology=${methodologySection}.textContent;
           const before=Number(methodology.match(/Revisão do modelo: ([0-9]+)/)[1]);
           first.querySelector('[data-lay-answer="não conforme"]').click();
           first.querySelector('.lay-finding textarea').value='Barreira confirmada no teste local';
@@ -583,7 +587,7 @@ for (const scenario of [
         assert.match(savedStatus, /Resposta salva/u);
         const refreshed = await extension.evaluate(report, `(() => {
           const kept=window.__reviewPreserved;
-          const text=document.querySelector('[data-report-section="7"]').textContent;
+          const text=${methodologySection}.textContent;
           const answeredCard=[...kept.list.querySelectorAll('details.lay-card')].find(card=>card.getAttribute('data-lay-card')===kept.key);
           return {revision:Number(text.match(/Revisão do modelo: ([0-9]+)/)[1]),
             sameForms:document.querySelector('#review-list')===kept.list&&document.querySelector('#review-evaluator')===kept.evaluator,

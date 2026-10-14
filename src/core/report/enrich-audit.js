@@ -1,5 +1,5 @@
 import { sanitizeResourceUrl } from '../normalize-snapshot.js';
-import { hashEvidenceArtifact } from '../evidence/artifact-hash.js';
+import { hashEvidenceArtifact, isDerivedEvidenceKind } from '../evidence/artifact-hash.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import {
@@ -73,7 +73,7 @@ async function enrichCapturedAudit(captured, options) {
     evidenceArtifacts.push({
       ...artifact,
       hash: await hashEvidenceArtifact(artifact, {
-        sourceArtifact: artifact.kind === 'announcement-map'
+        sourceArtifact: isDerivedEvidenceKind(artifact.kind)
           ? sanitizedArtifactById.get(artifact.fullPageEvidenceId)
           : undefined,
       }),
@@ -146,7 +146,7 @@ async function enrichCapturedAudit(captured, options) {
     evidence.push({
       ...artifact,
       hash: await hashEvidenceArtifact(artifact, {
-        sourceArtifact: artifact.kind === 'announcement-map'
+        sourceArtifact: isDerivedEvidenceKind(artifact.kind)
           ? normalizedArtifactById.get(artifact.fullPageEvidenceId)
           : undefined,
       }),

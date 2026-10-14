@@ -17,6 +17,9 @@ import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { listedLimitations, viewportSummary } from '../core/report/text-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
+import {
+  keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO, KEYBOARD_MAP_TAB_HELP,
+} from '../core/report/keyboard-map-presentation.js';
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
 import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/plain-language-guidance.js';
 import { projectReviewHistory, humanReviewMetadata, humanReviewHeading, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from '../core/report/human-review-presentation.js';
@@ -39,7 +42,10 @@ const CLASSIFICATION_LABELS = Object.freeze({
   requirement: 'Requisito ABNT', recommendation: 'Recomendação ABNT', 'best-practice': 'Boa prática suplementar', editorial: 'Alerta editorial',
 });
 const STATUS_LABELS = Object.freeze({ pending: 'Pendente', complete: 'Concluída', partial: 'Concluída com limitações', cancelled: 'Cancelada', failed: 'Falhou' });
-const EVIDENCE_KIND_LABELS = Object.freeze({ 'full-page': 'Página completa', element: 'Elemento', 'announcement-map': 'Mapa de anúncios' });
+const EVIDENCE_KIND_LABELS = Object.freeze({
+  'full-page': 'Página completa', element: 'Elemento', 'announcement-map': 'Mapa de anúncios',
+  'keyboard-map': 'Mapa do teclado',
+});
 const FILTERS = Object.freeze(['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
 const FILTER_PRESENTATION = Object.freeze({
   impact: Object.freeze({ visible: 'Impacto', aria: 'Filtrar por impacto' }),
@@ -59,12 +65,13 @@ const SECTION_TITLES = Object.freeze([
   FINDINGS_BOARD_TITLE,
   'Revisão humana guiada e conclusões registradas',
   'Mapas de anúncios',
+  'Mapa do teclado',
   'Matriz completa dos 146 itens',
   'Metodologia, fontes, integridade, evidências técnicas e anexos',
 ]);
 const SECTION_NAV_LABELS = Object.freeze([
   'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
-  'Matriz ABNT', 'Metodologia e evidências',
+  'Teclado', 'Matriz ABNT', 'Metodologia e evidências',
 ]);
 // Mesmo teto do modelo de auditoria (audit-input.js, 1.1.53).
 const MAX_GRAPH_NODES = 20_000_000;
@@ -433,6 +440,11 @@ export function projectReaderMaps(model) {
     .map(copyData).sort((left, right) => left.evidenceId.localeCompare(right.evidenceId)));
 }
 
+export function projectKeyboardMaps(model) {
+  return freeze(model.evidence.filter(evidence => evidence.kind === 'keyboard-map')
+    .map(copyData).sort((left, right) => left.evidenceId.localeCompare(right.evidenceId)));
+}
+
 export function projectMethodology(model) {
   const environmentViewport = model.environment?.viewport ?? {};
   return freeze({
@@ -486,6 +498,7 @@ export function buildReportView({ model: inputModel, summary: inputSummary, mode
         new Map(model.reviewDecisions.map(row => [row.occurrenceId, row])))),
       technicalEvidence,
       readerMaps: projectReaderMaps(model),
+      keyboardMaps: projectKeyboardMaps(model),
       methodology: projectMethodology(model),
       exports: projectExports(model),
       matrix: projectMatrix(model),
@@ -510,6 +523,19 @@ function appendTextList(document, parent, values, emptyText) {
   if (values.length === 0) list.append(element(document, 'li', emptyText));
   else for (const value of values) list.append(element(document, 'li', value));
   parent.append(list);
+}
+
+/** Lista numerada do mapa do teclado: o número repete o da caixa na imagem. */
+function keyboardEntryList(document, entries, kind, describe) {
+  const list = element(document, 'ol', undefined, `keyboard-map-${kind}s`);
+  for (const entry of entries) {
+    const item = element(document, 'li');
+    item.setAttribute('value', entry.number);
+    item.setAttribute(`data-keyboard-map-${kind}`, entry.number);
+    item.append(element(document, 'bdi', describe(entry)), element(document, 'p', entry.location));
+    list.append(item);
+  }
+  return list;
 }
 
 function section(document, index) {
@@ -1337,7 +1363,56 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   }
   root.append(maps);
 
-  const matrix = section(document, 5);
+  const keyboard = section(document, 5);
+  keyboard.append(element(document, 'p', KEYBOARD_MAP_INTRO));
+  keyboard.append(element(document, 'p', KEYBOARD_MAP_TAB_HELP));
+  for (const map of keyboardMapPresentation(view.executive.pages, view.keyboardMaps ?? [])) {
+    const card = element(document, 'article', undefined, 'map-card keyboard-map-card');
+    card.setAttribute('data-keyboard-map-page', map.pageId);
+    card.setAttribute('data-map-status', map.status);
+    card.append(element(document, 'h3', map.title), element(document, 'p', map.summary, `map-state map-state--${map.status}`));
+    if (map.counts) {
+      card.append(element(document, 'p', keyboardMapCountsText(map.counts), 'keyboard-map-counts'));
+    }
+    if (map.coverage) card.append(element(document, 'p', map.coverage));
+    if (map.limitations.length) appendTextList(document, card, map.limitations);
+    for (const segment of map.segments) {
+      const figure = element(document, 'figure', undefined, 'announcement-map-segment keyboard-map-segment');
+      figure.setAttribute('data-keyboard-map-segment', segment.id);
+      if (segment.dataUrl) {
+        const image = element(document, 'img', undefined, 'evidence-media');
+        image.setAttribute('data-map-segment-image', '');
+        image.setAttribute('src', segment.dataUrl);
+        image.setAttribute('alt', segment.caption);
+        image.setAttribute('width', segment.width);
+        image.setAttribute('height', segment.height);
+        figure.append(image);
+      } else figure.append(element(document, 'p', 'Imagem do mapa indisponível nesta auditoria. A lista numerada abaixo foi preservada.'));
+      figure.append(element(document, 'figcaption', segment.caption));
+      card.append(figure);
+    }
+    if (map.stops.length) {
+      card.append(element(document, 'h4', 'Onde o Tab para, na ordem'));
+      card.append(keyboardEntryList(document, map.stops, 'stop', entry => `${entry.name} — ${entry.kind}`));
+    }
+    if (map.suspects.length) {
+      card.append(element(document, 'h4', 'Itens que parecem clicáveis e o Tab não alcança'));
+      card.append(keyboardEntryList(document, map.suspects, 'suspect', entry => `${entry.name} — ${entry.reason}`));
+    }
+    if (map.provenance.length) {
+      const provenance = element(document, 'details');
+      provenance.setAttribute('data-keyboard-map-provenance', '');
+      provenance.append(element(document, 'summary', 'Consultar origem, integridade e limites do mapa do teclado'));
+      const metadata = element(document, 'dl', undefined, 'meta map-meta');
+      for (const [label, value] of map.provenance) metadata.append(element(document, 'dt', label), element(document, 'dd', value));
+      provenance.append(metadata);
+      card.append(provenance);
+    }
+    keyboard.append(card);
+  }
+  root.append(keyboard);
+
+  const matrix = section(document, 6);
   const table = document.createElement('table');
   const caption = element(document, 'caption', 'Matriz completa da ABNT NBR 17225'); table.append(caption);
   const head = document.createElement('thead'); const headRow = document.createElement('tr');
@@ -1362,7 +1437,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   matrixDetails.append(element(document, 'summary', 'Consultar a matriz completa dos 146 itens'));
   matrixScroll.append(table); matrixDetails.append(matrixScroll); matrix.append(matrixDetails); root.append(matrix);
 
-  const methodology = section(document, 6);
+  const methodology = section(document, 7);
   methodology.append(element(document, 'p', `Versão da extensão que realizou a auditoria: ${view.methodology.versions.extension}.`));
   const methodFacts = [`Método: ${view.methodology.methodology.name}.`,
     `Regras próprias: ${view.methodology.methodology.coreRuleCount}.`,

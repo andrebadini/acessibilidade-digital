@@ -10,7 +10,12 @@ export function collectRuntimePageData() {
     'letter-spacing', 'word-spacing', 'outline-color', 'outline-style',
     'outline-width', 'box-shadow', 'text-decoration-color', 'overflow-x',
     'overflow-y', 'clip', 'clip-path', 'animation-duration', 'animation-iteration-count',
-    'transition-duration'
+    'transition-duration',
+    // O mapa do teclado precisa da seta de clique: um cartão `cursor: pointer` sem foco é o caso real
+    // que a auditoria tem de mostrar. A projeção do nó usa `...record.layout, ...runtimeData`, então a
+    // coleta de runtime SUBSTITUI os estilos da captura estrutural — sem esta linha o `cursor` lido no
+    // DOMSnapshot era descartado, e o mapa só declarava a limitação em vez de mostrar os cartões.
+    'cursor'
   ];
   // Resource provenance keeps the origin and the path, which is what identifies the file, and
   // drops the query and the fragment structurally. A name-based filter only catches English

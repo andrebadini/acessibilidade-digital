@@ -11,6 +11,9 @@ import {
   ANSWER_LABELS, CLASSIFICATION_WORDS, GLOSSARY, IMAGE_PURPOSES, LAY_ANSWERS, LAY_GROUPS, PAGE_AID_DESCRIPTIONS, PAGE_AIDS,
   aidLabel, buildLayReviewPlan, draftFinding, formatLocalInstant, imageFindingText, imagePlan, layReviewProgress,
 } from '../core/report/lay-review.js';
+import {
+  keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO,
+} from '../core/report/keyboard-map-presentation.js';
 import { applyReportSourceControls, buildReportView, renderReportView, updateReportHighlightAction } from './report-view.js';
 import { REPORT_PORT_NAME } from '../background/report-port.js';
 import { createReportHighlightPolicy } from './report-highlight-policy.js';
@@ -31,6 +34,15 @@ const deleteAuditCancel = document.querySelector('#delete-audit-cancel');
 const deleteAuditConfirm = document.querySelector('#delete-audit-confirm');
 const deleteAuditDialogStatus = document.querySelector('#delete-audit-dialog-status');
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
+// Ajuda "keyboard-map" do item 5.1.13: a pergunta olha o mapa, não o código. As três respostas abaixo
+// são as mesmas respostas canônicas, com o rótulo que a pessoa entende sem conhecer ABNT nem WCAG.
+const KEYBOARD_MAP_QUESTION = 'Olhe o mapa. Algum menu, botão, link ou campo que você usaria está SEM caixa azul numerada?';
+const KEYBOARD_MAP_FINDING_PROMPT = 'Descreva qual item ficou sem caixa (por exemplo: os cartões Consumidor, Fornecedor, Servidor e Ouvidoria da seção Serviços abrem menus só com o mouse)';
+const KEYBOARD_MAP_ANSWERS = Object.freeze([
+  Object.freeze({ answer: 'não conforme', label: 'Sim, falta caixa em algum item' }),
+  Object.freeze({ answer: 'conforme', label: 'Não, todos os itens que uso têm caixa' }),
+  Object.freeze({ answer: 'não foi possível determinar', label: 'Não consegui verificar' }),
+]);
 const store = createAuditStore();
 const commitDecision = createAuthorizedReviewDecisionCommitter();
 const commitDecisionBatch = createAuthorizedReviewBatchCommitter();
@@ -828,10 +840,12 @@ function updateAidBar() {
 function aidControls(aid) {
   if (!aid) return null;
   const wrap = el('div', undefined, 'lay-aids');
-  if (aid === 'tab' || aid === 'grayscale') {
-    wrap.append(el('p', aid === 'tab'
-      ? 'Ajuda: vá para a página auditada, clique numa área vazia e use a tecla Tab. No painel lateral, “Conferir leitura por Tab” mostra a sequência com explicações.'
-      : 'Ajuda: no painel lateral, “Acromatopsia” mostra a página em tons de cinza, para ver o que depende só da cor.'));
+  if (aid === 'tab' || aid === 'grayscale' || aid === 'keyboard-map') {
+    wrap.append(el('p', aid === 'keyboard-map'
+      ? 'Ajuda: percorra a página auditada com a tecla Tab, do começo ao fim, e compare com o mapa (ou com a lista numerada) mostrado acima. Clique numa área vazia antes de começar.'
+      : aid === 'tab'
+        ? 'Ajuda: vá para a página auditada, clique numa área vazia e use a tecla Tab. No painel lateral, “Conferir leitura por Tab” mostra a sequência com explicações.'
+        : 'Ajuda: no painel lateral, “Acromatopsia” mostra a página em tons de cinza, para o que depende só da cor.'));
     wrap.append(button('Ir para a página auditada', 'lay-aid', () => { void returnToAuditedPage(); }));
     return wrap;
   }
@@ -938,12 +952,74 @@ function answeredLine(question, card) {
   return wrap;
 }
 
+/**
+ * Mapa do teclado no cartão do 5.1.13.
+ *
+ * Mostra a imagem quando a auditoria teve pixels e, sempre, a lista numerada — que é a única forma
+ * de responder no modo sem imagens. Nada aqui decide: a pessoa olha e responde.
+ */
+function keyboardMapBlock() {
+  const model = auditModel;
+  const maps = Array.isArray(model?.evidence)
+    ? model.evidence.filter(artifact => artifact.kind === 'keyboard-map')
+    : [];
+  if (maps.length === 0) return null;
+  const block = el('div', undefined, 'lay-keyboard-map');
+  block.append(el('p', KEYBOARD_MAP_QUESTION, 'lay-q'), el('p', KEYBOARD_MAP_INTRO, 'lay-meta'));
+  const pages = (model.pages ?? []).map(page => ({ pageId: page.pageId }));
+  for (const map of keyboardMapPresentation(pages, maps)) {
+    const page = el('div', undefined, 'lay-keyboard-map-page');
+    page.append(el('h3', map.title, 'lay-map-title'), el('p', map.summary, 'lay-meta'));
+    if (map.counts) page.append(el('p', keyboardMapCountsText(map.counts), 'lay-meta'));
+    for (const segment of map.segments) {
+      if (!isSafeEvidenceImageUrl(segment.dataUrl, chrome.runtime.getURL('/'))) continue;
+      const figure = document.createElement('figure');
+      const image = document.createElement('img');
+      image.className = 'lay-thumb lay-keyboard-map-thumb';
+      image.src = segment.dataUrl;
+      image.alt = segment.caption;
+      image.width = segment.width;
+      image.height = segment.height;
+      figure.append(image, el('figcaption', segment.caption));
+      page.append(figure);
+    }
+    if (map.stops.length) {
+      page.append(el('p', 'Onde o Tab para, na ordem:', 'lay-map-subtitle'));
+      const stops = el('ol', undefined, 'lay-keyboard-map-stops');
+      for (const entry of map.stops) {
+        const item = el('li', `${entry.number}. ${entry.name} (${entry.kind})`);
+        item.setAttribute('value', String(entry.number));
+        item.setAttribute('data-keyboard-map-stop', String(entry.number));
+        stops.append(item);
+      }
+      page.append(stops);
+    }
+    if (map.suspects.length) {
+      page.append(el('p', 'Itens que parecem clicáveis e o Tab não alcança:', 'lay-map-subtitle'));
+      const suspects = el('ol', undefined, 'lay-keyboard-map-suspects');
+      for (const entry of map.suspects) {
+        const item = el('li', `${entry.number}. ${entry.name} — ${entry.reason}`);
+        item.setAttribute('value', String(entry.number));
+        item.setAttribute('data-keyboard-map-suspect', String(entry.number));
+        suspects.append(item);
+      }
+      page.append(suspects);
+    }
+    for (const limitation of map.limitations) page.append(el('p', `Limite desta verificação: ${limitation}`, 'lay-hint'));
+    block.append(page);
+  }
+  return block;
+}
+
 function answerForm(card, question) {
   const form = el('div', undefined, 'lay-answer-form');
   const answers = el('div', undefined, 'lay-answers');
   const finding = el('div', undefined, 'lay-finding');
   finding.hidden = true;
-  const findingLabel = el('label', 'O que você constatou (obrigatório para “Não”). Esta frase vai para o quadro de constatações; ajuste o rascunho ao que você viu.');
+  const keyboardMap = question.guide?.aid === 'keyboard-map' ? keyboardMapBlock() : null;
+  const findingLabel = el('label', keyboardMap
+    ? `${KEYBOARD_MAP_FINDING_PROMPT} (obrigatório). Esta frase vai para o quadro de constatações; ajuste o rascunho ao que você viu.`
+    : 'O que você constatou (obrigatório para “Não”). Esta frase vai para o quadro de constatações; ajuste o rascunho ao que você viu.');
   const findingText = document.createElement('textarea');
   findingText.rows = 4;
   findingText.maxLength = 4000;
@@ -978,10 +1054,11 @@ function answerForm(card, question) {
     choice.title = option.meaning;
     answers.append(choice);
   }
-  answers.append(button('Pular revisão por enquanto', 'lay-skip', () => {
+  const skip = button('Pular revisão por enquanto', 'lay-skip', () => {
     status.textContent = 'Pergunta pulada; ela continua sem conclusão e pode ser respondida depois.';
     advanceFrom(card.key);
-  }));
+  });
+  answers.append(skip);
   const confirm = button('Registrar “não atende”', 'lay-confirm-fail', event => {
     void submit('não conforme', findingText.value, event.currentTarget, true);
   });
@@ -989,7 +1066,28 @@ function answerForm(card, question) {
   const findingActions = el('div', undefined, 'lay-finding-actions');
   findingActions.append(confirm, cancel);
   finding.append(findingLabel, findingActions);
-  form.append(answers, finding, noteBox);
+  if (keyboardMap) {
+    // Três respostas com o vocabulário do mapa, no lugar do grupo genérico: duas fileiras de botões
+    // com dois caminhos de "não conforme" confundiriam quem só quer conferir o mapa. "Sim" cai no
+    // mesmo caminho de "Não" e exige a descrição do item que ficou sem caixa antes de registrar.
+    const choices = el('div', undefined, 'lay-answers lay-keyboard-map-answers');
+    choices.setAttribute('role', 'group');
+    choices.setAttribute('aria-label', KEYBOARD_MAP_QUESTION);
+    for (const option of KEYBOARD_MAP_ANSWERS) {
+      const choice = button(option.label, `lay-answer lay-answer--${option.answer.replace(/\s+/gu, '-')}`, event => {
+        if (option.answer === 'não conforme') {
+          finding.hidden = false;
+          findingText.focus();
+          return;
+        }
+        void submit(option.answer, note.value, event.currentTarget);
+      });
+      choice.setAttribute('data-lay-answer', option.answer);
+      choices.append(choice);
+    }
+    choices.append(skip);
+    form.append(keyboardMap, choices, finding, noteBox);
+  } else form.append(answers, finding, noteBox);
   return form;
 }
 

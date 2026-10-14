@@ -1,3 +1,4 @@
+import { validateKeyboardMapArtifact } from '../keyboard/keyboard-map-artifact.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
 import { canonicalStringify } from './canonical-json.js';
@@ -41,6 +42,7 @@ const MAP_COUNT_KEYS = set('eligible annotated omittedNoRect omittedFrame omitte
 /** Contagem opcional acrescentada depois da 1.1.0: mapas guardados antes dela continuam aceitos. */
 const MAP_OPTIONAL_COUNT_KEYS = set('omittedClipped');
 const MAP_LIMIT_KEYS = set('maxNodes maxSourcePixels maxDimension maxCanvasPixels maxSegments maxDerivedBytes maxLegendCodePoints');
+const EVIDENCE_KINDS = Object.freeze(['full-page', 'element', 'announcement-map', 'keyboard-map']);
 const SHA256 = /^[a-f0-9]{64}$/u;
 
 /** Validates every retained V2 field. Unknown data is rejected, never stripped. */
@@ -177,7 +179,7 @@ function assertPage(page) {
     for (const omitted of page.omittedEvidence) {
       assertExact(omitted, set('evidenceId kind contentHash reason'));
       assertString(omitted.evidenceId);
-      if (!['full-page', 'element', 'announcement-map'].includes(omitted.kind) ||
+      if (!EVIDENCE_KINDS.includes(omitted.kind) ||
         !SHA256.test(omitted.contentHash ?? '') || omitted.reason !== 'budget') throw new TypeError();
     }
   }
@@ -360,6 +362,7 @@ function assertEvidence(artifact) {
   if (artifact.kind === 'full-page') assertAllowed(artifact, FULL_PAGE_EVIDENCE_KEYS);
   else if (artifact.kind === 'element') assertAllowed(artifact, ELEMENT_EVIDENCE_KEYS);
   else if (artifact.kind === 'announcement-map') return assertAnnotationMap(artifact);
+  else if (artifact.kind === 'keyboard-map') return assertKeyboardMap(artifact);
   else throw new TypeError();
   for (const key of ['evidenceId', 'pageId', 'kind']) requireOwn(artifact, key);
   for (const key of ['evidenceId', 'pageId', 'kind']) assertString(artifact[key]);
@@ -441,6 +444,13 @@ function assertEvidenceMetadata(metadata) {
   // O alvo não cabe inteiro na captura (recorte nos limites da página). Só o valor `true` é aceito:
   // o campo é declarativo e um `false` explícito significaria "afirmo que não houve recorte".
   if (metadata.highlightClipped !== undefined && metadata.highlightClipped !== true) throw new TypeError();
+}
+
+// O mapa do teclado tem um validador próprio, fechado por chave em todos os níveis e ligado à versão
+// que o artefato declara. Repetir aqui as listas de chaves criaria uma segunda verdade que pode
+// divergir da primeira; a conferência estrutural é delegada e continua rejeitando campo inventado.
+function assertKeyboardMap(artifact) {
+  validateKeyboardMapArtifact(artifact);
 }
 
 function assertAnnotationMap(artifact) {

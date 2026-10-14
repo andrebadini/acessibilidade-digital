@@ -19,6 +19,7 @@
 //   06-relatorio-N.png     seções do relatório com as miniaturas de evidência
 //   07-evidencia-N.png     cada miniatura marcada isolada (o <figure> com o svg)
 //   08-mapa.png            mapa de anúncios, quando existe
+//   09-mapa-teclado.png    mapa do teclado, quando existe (caixas azuis numeradas e tracejadas)
 //   summary.json           o que foi medido: localizados, não localizados com motivo,
 //                          retângulo do alvo vs. retângulo do anel/botão, persistência
 //
@@ -978,8 +979,11 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
   }
 
   // (g) mapa anotado (mapa de anúncios) ---------------------------------------------------------
+  // O cartão do mapa do teclado usa as mesmas classes de cartão e de estado: sem excluí-lo aqui,
+  // `article.map-card` casaria com dois cartões e a captura do mapa de anúncios poderia sair errada.
+  const mapCard = 'article.map-card:not(.keyboard-map-card)';
   const map = await attempt('ler-mapa', () => evaluate(target, `(() => {
-    const cards = [...document.querySelectorAll('article.map-card')];
+    const cards = [...document.querySelectorAll('${mapCard}')];
     return { present: cards.length > 0,
       statuses: cards.map(card => card.dataset.mapStatus),
       segments: document.querySelectorAll('figure.announcement-map-segment').length };
@@ -987,7 +991,24 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
   report.map = map.value ?? null;
   if (map.value?.present && (map.value.statuses ?? []).some(status => status !== 'absent')) {
     const saved = await attempt('captura:08-mapa.png', () => captureElementClip(target, directory, '08-mapa.png',
-      'article.map-card', 0, { maxHeight: 1_400 }));
+      mapCard, 0, { maxHeight: 1_400 }));
+    if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
+  }
+
+  // (h) mapa do teclado -------------------------------------------------------------------------
+  // É a única prova visual do item 5.1.13: só aqui se vê se um item que a pessoa usaria ficou sem
+  // caixa azul numerada. Sem esta captura, a revisão humana do item confere apenas o mapa de
+  // anúncios — que responde outra pergunta.
+  const keyboard = await attempt('ler-mapa-teclado', () => evaluate(target, `(() => {
+    const card = document.querySelector('article.keyboard-map-card[data-keyboard-map-page]');
+    return { present: Boolean(card), status: card?.dataset.mapStatus ?? null,
+      stops: document.querySelectorAll('[data-keyboard-map-stop]').length,
+      suspects: document.querySelectorAll('[data-keyboard-map-suspect]').length };
+  })()`));
+  report.keyboardMap = keyboard.value ?? null;
+  if (keyboard.value?.present) {
+    const saved = await attempt('captura:09-mapa-teclado.png', () => captureElementClip(target, directory, '09-mapa-teclado.png',
+      'article.keyboard-map-card', 0, { maxHeight: 1_400 }));
     if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
   }
   return report;
