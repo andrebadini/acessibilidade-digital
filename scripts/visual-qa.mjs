@@ -233,11 +233,44 @@ const OVERLAY_STATE = `(() => {
   });
   const pageElements = [...document.querySelectorAll('body *')]
     .filter(element => !element.closest('[data-audita-page-markers-root="v1"]'));
+  // O texto visível da página, uma linha por fragmento, medido com Range — a mesma conta que o
+  // produto faz para não pousar a etiqueta em cima de palavras. Só a viewport é varrida, com teto de
+  // elementos e de linhas, para o roteiro não pesar numa página longa.
+  const textLines = (() => {
+    const lines = [];
+    const range = typeof document.createRange === 'function' ? document.createRange() : null;
+    if (!range || !document.body) return lines;
+    const stack = [document.body];
+    let visited = 0;
+    while (stack.length > 0 && lines.length < 1500) {
+      const node = stack.pop();
+      visited += 1;
+      if (visited > 2000) break;
+      if (node.closest?.('[data-audita-page-markers-root="v1"],[data-audita-highlight-root]')) continue;
+      const box = node.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0 &&
+        !(box.left < innerWidth && box.right > 0 && box.top < innerHeight && box.bottom > 0)) continue;
+      for (const child of node.childNodes) {
+        if (child.nodeType !== 3 || !/\\S/u.test(child.nodeValue ?? '')) continue;
+        range.selectNodeContents(child);
+        for (const rect of range.getClientRects()) {
+          if (!(rect.width > 0) || !(rect.height > 0)) continue;
+          if (!(rect.left < innerWidth && rect.right > 0 && rect.top < innerHeight && rect.bottom > 0)) continue;
+          lines.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, node: child });
+          if (lines.length >= 1500) break;
+        }
+      }
+      for (const child of node.children) stack.push(child);
+    }
+    return lines;
+  })();
   const groups = [...shadow.querySelectorAll('.audita-group')].map(group => {
     const ring = group.querySelector('.audita-ring');
     const button = group.querySelector('.audita-marker');
     const label = button?.getAttribute('aria-label') ?? '';
     const match = /^Sinal (\\d+)/u.exec(label);
+    const drawn = element => element.style.display !== 'none' &&
+      element.getBoundingClientRect().width > 0;
     const ringBox = { x: number(ring.style.left), y: number(ring.style.top),
       width: number(ring.style.width), height: number(ring.style.height) };
     const rect = button.getBoundingClientRect();
@@ -256,14 +289,23 @@ const OVERLAY_STATE = `(() => {
       ? document.elementsFromPoint(x, y)
         .filter(element => !element.closest('[data-audita-page-markers-root="v1"]')).slice(0, 3).map(describe)
       : [];
+    // Quem é o dono do texto que a etiqueta pode cobrir: o elemento marcado. Ele é procurado pelo
+    // retângulo do contorno e, quando a folga não casa exatamente, pelo elemento mais fundo sob o
+    // centro do anel — assim o texto do próprio alvo não entra na conta.
+    const owners = [...matching];
+    const deep = located ? (document.elementsFromPoint(ringBox.x + ringBox.width / 2, ringBox.y + ringBox.height / 2)
+      .filter(element => !element.closest('[data-audita-page-markers-root="v1"]'))[0] ?? null) : null;
+    if (deep && !owners.includes(deep)) owners.push(deep);
+    const labelOnText = drawn(button) ? textLines.filter(line =>
+      !owners.some(owner => owner.contains?.(line.node) === true) &&
+      Math.min(buttonBox.x + buttonBox.width, line.right) - Math.max(buttonBox.x, line.left) > 1 &&
+      Math.min(buttonBox.y + buttonBox.height, line.bottom) - Math.max(buttonBox.y, line.top) > 1) : [];
     const overlapWidth = located ? Math.max(0, Math.min(ringBox.x + ringBox.width, buttonBox.x + buttonBox.width) - Math.max(ringBox.x, buttonBox.x)) : 0;
     const overlapHeight = located ? Math.max(0, Math.min(ringBox.y + ringBox.height, buttonBox.y + buttonBox.height) - Math.max(ringBox.y, buttonBox.y)) : 0;
     // O anel só é exibido na ocorrência selecionada; fora disso o produto o deixa em display:none
     // e o retângulo medido abaixo passa a ser zero. A caixa em ringBox continua sendo o alvo que
     // o overlay resolveu (ela vem dos estilos em linha), e é com ela que se mede a precisão.
     const ringRect = ring.getBoundingClientRect();
-    const drawn = element => element.style.display !== 'none' &&
-      element.getBoundingClientRect().width > 0;
     return {
       number: match ? Number.parseInt(match[1], 10) : null,
       label,
@@ -280,6 +322,14 @@ const OVERLAY_STATE = `(() => {
       buttonOverlapArea: Math.round(overlapWidth * overlapHeight),
       targetCandidates: matching.slice(0, 4).map(describe),
       targetCandidateCount: matching.length,
+      labelOnTextCount: labelOnText.length,
+      labelOnText: labelOnText.slice(0, 3).map(line => ({
+        text: (line.node.nodeValue ?? '').replace(/\\s+/gu, ' ').trim().slice(0, 60),
+        owner: line.node.parentElement ? describe(line.node.parentElement) : null,
+        coveredPx: Math.round((Math.min(buttonBox.x + buttonBox.width, line.right) - Math.max(buttonBox.x, line.left)) *
+          (Math.min(buttonBox.y + buttonBox.height, line.bottom) - Math.max(buttonBox.y, line.top))),
+      })),
+      labelOnTextLines: textLines.length,
       paintedUnderRing: located ? painted(ringBox.x + ringBox.width / 2, ringBox.y + ringBox.height / 2) : [],
       paintedUnderButton: painted(buttonBox.x + buttonBox.width / 2, buttonBox.y + buttonBox.height / 2),
     };
@@ -784,6 +834,10 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
       summary.signals.onScreen = summary.signals.groups.filter(group => group.onScreen).length;
       summary.signals.withRing = summary.signals.groups.filter(group => group.ringVisible).length;
       summary.signals.numbers = summary.signals.groups.map(group => group.number);
+      // A métrica do rótulo: quantas etiquetas caem em cima de uma linha de texto de OUTRO elemento.
+      summary.signals.labelsOverText = summary.signals.groups.filter(group => (group.labelOnTextCount ?? 0) > 0).length;
+      summary.signals.textLinesCovered = summary.signals.groups.reduce((total, group) => total + (group.labelOnTextCount ?? 0), 0);
+      summary.signals.textLinesInViewport = summary.signals.groups[0]?.labelOnTextLines ?? 0;
     }
 
     // (e) selecionar achados na página e medir persistência -------------------------------------
@@ -1126,6 +1180,12 @@ function printPageSummary(summary) {
     const sobreOutros = (summary.signals.groups ?? []).filter(group => group.labelOverOtherRing?.length);
     lines.push(`  etiquetas sobrepostas: ${colisoes.length}; etiquetas sobre outro elemento marcado: ${sobreOutros.length}` +
       (colisoes.length ? ` (${colisoes.map(group => `${group.number}↔${group.labelOverLabel.join('/')}`).join(', ')})` : ''));
+    const sobreTexto = (summary.signals.groups ?? []).filter(group => (group.labelOnTextCount ?? 0) > 0);
+    lines.push(`  etiquetas sobre TEXTO de outro elemento: ${sobreTexto.length}` +
+      ` (${summary.signals.textLinesCovered ?? 0} linha(s) de texto coberta(s) de ` +
+      `${summary.signals.textLinesInViewport ?? 0} medidas na viewport)` +
+      (sobreTexto.length ? ` — ${sobreTexto.slice(0, 4).map(group =>
+        `Sinal ${group.number} cobre ${group.labelOnTextCount}× "${(group.labelOnText?.[0]?.text ?? '').slice(0, 28)}"`).join('; ')}` : ''));
   }
   if (summary.unlocated?.length) {
     lines.push(`  não localizados: ${summary.unlocated.length}` +

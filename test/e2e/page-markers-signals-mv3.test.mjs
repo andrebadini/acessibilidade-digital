@@ -14,10 +14,21 @@ import { startFixtureServer, launchUnpackedExtension, resolveRealChromeTestBinar
 // back to "the button exists but nothing happens" fails here.
 // Measured on this fixture: the audit settles in about 0.4 s and the signals become active in
 // about 0.1 s, so the timeouts below are generous rather than tight.
-const DOCUMENT = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Sinais numerados</title></head>
+const DOCUMENT = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Sinais numerados</title>
+<style>
+  /* News card: a long title with the link right under it and no room in between. The link's label,
+     glued above the contour, landed on the title's last line and covered words. */
+  .noticia { width: 420px; border: 1px solid #dddddd; padding: 12px; }
+  .noticia h2 { font-size: 18px; line-height: 1.3; margin: 0; }
+  .noticia a { display: inline-block; color: #b6b6b6; }
+</style></head>
 <body><main id="alvo"><h1>Página avaliada</h1>
 <img id="missing-alt" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
-<button id="missing-name">Botão sem nome</button><input id="missing-label" type="text"></main></body></html>`;
+<button id="missing-name">Botão sem nome</button><input id="missing-label" type="text">
+<article class="noticia">
+  <h2 id="noticia-titulo">Título da notícia que ocupa duas linhas inteiras neste cartão de largura fixa</h2>
+  <a id="leia-mais" href="#alvo">Leia mais</a>
+</article></main></body></html>`;
 
 // The overlay lives in a closed shadow root attached to documentElement, so every read goes
 // through the host element and its shadowRoot, never through body's children. Every located signal
@@ -30,17 +41,61 @@ const markerSurface = `(() => {
   const shadow = host.shadowRoot;
   const buttonBox = group => { const box = group.querySelector('.audita-marker').getBoundingClientRect();
     return [Math.round(box.x), Math.round(box.y), Math.round(box.width), Math.round(box.height)]; };
-  const groups = [...shadow.querySelectorAll('.audita-group')].map(group => ({
-    label: group.querySelector('.audita-marker').getAttribute('aria-label'),
-    text: group.querySelector('.audita-marker').textContent,
-    marked: group.querySelector('.audita-ring').style.display !== 'none',
-    selected: group.querySelector('.audita-marker').style.height === '24px',
-    box: buttonBox(group),
-  }));
+  // The deepest element under a point, ignoring the overlay itself: it says what the marking rests
+  // on. That is how this test knows the signal's contour landed on the "Leia mais" link.
+  const ownerAt = (x, y) => (x >= 0 && y >= 0 && x < innerWidth && y < innerHeight)
+    ? document.elementsFromPoint(x, y).filter(node => !node.closest('[data-audita-page-markers-root="v1"]'))[0] ?? null
+    : null;
+  const nameOf = node => (node ? (node.id || node.tagName.toLowerCase()) : null);
+  // The news card title's text lines, one per fragment: this is the text the link's label used to
+  // cover. No label may rest on them.
+  const titleLines = (() => {
+    const range = document.createRange();
+    const lines = [];
+    for (const child of document.querySelector('#noticia-titulo')?.childNodes ?? []) {
+      if (child.nodeType !== 3 || !/\\S/u.test(child.nodeValue ?? '')) continue;
+      range.selectNodeContents(child);
+      for (const rect of range.getClientRects()) {
+        if (rect.width > 0 && rect.height > 0) {
+          lines.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+        }
+      }
+    }
+    return lines;
+  })();
+  const groups = [...shadow.querySelectorAll('.audita-group')].map(group => {
+    const button = group.querySelector('.audita-marker');
+    const ringStyle = group.querySelector('.audita-ring').style;
+    const ring = { x: Number.parseFloat(ringStyle.left) || 0, y: Number.parseFloat(ringStyle.top) || 0,
+      width: Number.parseFloat(ringStyle.width) || 0, height: Number.parseFloat(ringStyle.height) || 0 };
+    const box = button.getBoundingClientRect();
+    const leader = group.querySelector('.audita-leader');
+    return {
+      label: button.getAttribute('aria-label'),
+      text: button.textContent,
+      marked: group.querySelector('.audita-ring').style.display !== 'none',
+      selected: button.style.height === '24px',
+      box: buttonBox(group),
+      ringOwner: nameOf(ownerAt(ring.x + (ring.width / 2), ring.y + (ring.height / 2))),
+      buttonOwner: nameOf(ownerAt(box.left + (box.width / 2), box.top + (box.height / 2))),
+      // Distance between the label and its own contour: a label too far away does not tie the
+      // number to the finding, not even with a leader line.
+      gap: Math.round(Math.hypot(
+        Math.max(0, Math.max(ring.x - (box.left + box.width), box.left - (ring.x + ring.width))),
+        Math.max(0, Math.max(ring.y - (box.top + box.height), box.top - (ring.y + ring.height))))),
+      leaderWidth: leader.style.display === 'none' ? 0 : Math.round(Number.parseFloat(leader.style.width) || 0),
+      overTitleText: box.width > 0 && titleLines.some(line =>
+        Math.min(box.right, line.right) - Math.max(box.left, line.left) > 1 &&
+        Math.min(box.bottom, line.bottom) - Math.max(box.top, line.top) > 1),
+      titleLines: titleLines.length,
+    };
+  });
   const selectedGroup = [...shadow.querySelectorAll('.audita-group')]
     .find(group => group.querySelector('.audita-marker').style.height === '24px') ?? null;
   return { roots: document.querySelectorAll('[data-audita-page-markers-root="v1"]').length,
     buttons: groups,
+    titleRects: titleLines.map(line => [Math.round(line.left), Math.round(line.top),
+      Math.round(line.right), Math.round(line.bottom)]),
     ring: selectedGroup ? (() => {
       const box = selectedGroup.querySelector('.audita-ring').getBoundingClientRect();
       const covered = [...document.querySelectorAll('main *')].filter(element => {
@@ -120,6 +175,8 @@ test('the panel draws numbered signals over the audited page', { timeout: 300_00
   const surface = await waitForValue(extension.startPage.page, markerSurface,
     value => value?.roots === 1 && value.buttons.length >= 2,
     { timeoutMs: 15_000, intervalMs: 100 });
+  t.diagnostic(`sinais: ${JSON.stringify(surface.buttons.map(b => ({ t: b.text, box: b.box, ring: b.ringOwner,
+    gap: b.gap, leader: b.leaderWidth, sobreTexto: b.overTitleText })))} · título: ${JSON.stringify(surface.titleRects)}`);
   assert.equal(surface.roots, 1, 'exactly one signals overlay belongs on the page');
   assert.ok(surface.buttons.length >= 2, `the fixture has at least two locatable occurrences: ${JSON.stringify(surface)}`);
   for (const button of surface.buttons) {
@@ -146,6 +203,28 @@ test('the panel draws numbered signals over the audited page', { timeout: 300_00
     value => (value?.selected ?? []).includes(number), { timeoutMs: 15_000, intervalMs: 100 });
   assert.ok(selected.selected.includes(number), `the page and the panel must agree on the number: ${JSON.stringify(selected)}`);
   assert.ok((selected.counts ?? []).length > 0, `the panel must summarise what it marked: ${JSON.stringify(selected)}`);
+
+  // The news card is the hard case: the title fills its two lines and the link sits right below it,
+  // with no free space between the two. The link carries the low-contrast failure, so it is marked,
+  // and its label used to be glued above the contour — that is, on the last line of the title. The
+  // label has to move to a text-free spot instead of covering the words of another element.
+  assert.ok(surface.buttons.some(button => button.titleLines > 0),
+    `the fixture draws the news card title in the viewport: ${JSON.stringify(surface.buttons)}`);
+  const overText = surface.buttons.filter(button => button.overTitleText);
+  assert.deepEqual(overText, [],
+    `no label may cover the title's words: ${JSON.stringify(overText)}`);
+  const onLink = surface.buttons.filter(button => button.ringOwner === 'leia-mais');
+  assert.ok(onLink.length > 0,
+    `the numbered signal must sit on the link it is about: ${JSON.stringify(surface.buttons.map(button => button.ringOwner))}`);
+  for (const button of onLink) {
+    // Dropping the label somewhere else must not turn into a label too far from its own contour:
+    // a reader has to see that the number and the contour are the same signal.
+    assert.ok(button.gap <= 120, `the label stays next to its contour: ${JSON.stringify(button)}`);
+    // Glued to its own contour, or detached with a leader line back to it — never floating alone.
+    assert.ok(button.gap === 0 || button.leaderWidth > 0,
+      `a detached label points back at the element it marks: ${JSON.stringify(button)}`);
+  }
+
   assert.deepEqual(await evaluate(extension.startPage.page, `(() => ({
     x: scrollX, y: scrollY, focus: document.activeElement?.tagName ?? null,
   }))()`), intact, 'showing the signals must not move, focus or edit the page');
