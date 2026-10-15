@@ -29,3 +29,23 @@ test('a 1.1.56 full-evidence audit (map 1.0.0, thumbnails without highlightParts
   assert.ok(projectTechnicalEvidence(model));
   assert.ok(projectReaderMaps(model));
 });
+
+test('a stored audit keeps its recorded impact and only changes the displayed word', () => {
+  const stored = legacy();
+  // A graduação por regra (impact-policy) vale para ocorrências NOVAS: o registro guardado não é
+  // reescrito nem reinterpretado. Ele traz o padrão de migração 'minor' em todas as 88 ocorrências.
+  assert.ok(stored.occurrences.length > 0);
+  assert.equal(new Set(stored.occurrences.map(occurrence => occurrence.impact)).size, 1);
+  assert.equal(stored.occurrences[0].impact, 'minor');
+
+  const model = createAuditModel(stored);
+  assert.deepEqual(model.occurrences.map(occurrence => occurrence.impact),
+    stored.occurrences.map(occurrence => occurrence.impact));
+
+  const html = renderHtmlReport(model);
+  assert.match(html, /data-impact="minor"/u);
+  assert.match(html, /<span>Impacto Baixo<\/span>/u);
+  assert.match(html, /<span>Impacto se confirmado: Baixo<\/span>/u);
+  // 'minor' deixou de ser "Menor" em toda a interface; o token gravado continua sendo o mesmo.
+  assert.doesNotMatch(html, /Menor/u);
+});

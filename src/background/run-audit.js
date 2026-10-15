@@ -36,6 +36,7 @@ import { readObservedAuditInterruption, runObservedTabAudit } from './observed-t
 import { createObservedPipelineRunner } from './audit-pipeline.js';
 import { createPageCheckpointRecorder } from './execution-checkpoint.js';
 import { createInstalledCoreRuleInventory } from '../core/rules/core-rule-inventory.js';
+import { coreRuleImpact } from '../core/rules/impact-policy.js';
 import { createCapturePolicyV1, isCapturePolicyV1 } from '../core/privacy/capture-policy.js';
 import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { createAuditModel } from '../core/report/audit-model.js';
@@ -596,9 +597,10 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
             } },
         } : {}),
         justification: typeof target?.message === 'string' && target.message.trim() ? target.message.trim() : result.summary || 'A ocorrência exige verificação humana.',
-        // Links que só aparecem com o mouse tiram de quem usa teclado o acesso a funções inteiras da página:
-        // a falha confirmada é de impacto alto, não o "menor" padrão das regras sem graduação própria.
-        ...(result.ruleId === 'hover-only-interactive-content' && result.outcome === 'failed' ? { impact: 'serious' } : {}),
+        // Graduação fechada por regra (src/core/rules/impact-policy.js): a mesma ocorrência vale
+        // para falha confirmada e para suspeita ('cantTell'), que a interface apresenta como
+        // "Impacto se confirmado".
+        impact: coreRuleImpact(result.ruleId),
       });
     }
   }

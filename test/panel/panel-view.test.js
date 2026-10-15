@@ -551,6 +551,40 @@ test('renders closed result metadata with impact/WCAG filters and ABNT disclosur
   assert.equal(root.querySelector('button[data-filter-dimension="impact"][data-filter-value="critical"]').getAttribute('aria-pressed'), 'false');
 });
 
+test('impact wording is one closed vocabulary on the card and on the finding detail', () => {
+  const input = fixture();
+  // 'minor' deixou de ser "Menor"; 'serious' deixou de ser "Sério".
+  const root = renderPanelView({
+    view: buildPanelView(input), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  const failedCard = root.querySelector('[data-result-card][data-check-key="check-1"]');
+  // O DOM de teste não resolve classe em seletor: o rótulo é procurado pelo próprio texto.
+  assert.ok(failedCard.querySelectorAll('p').map(node => node.textContent).includes('Impacto Crítico'),
+    'a carta precisa dizer "Impacto Crítico", não "Sério"');
+  assert.doesNotMatch(root.textContent, /Menor|Sério/u);
+
+  // O filtro de impacto usa os mesmos quatro rótulos das cartas.
+  const impactFilters = root.querySelectorAll('button[data-filter-dimension="impact"]')
+    .map(button => [button.dataset.filterValue, button.textContent]);
+  for (const [value, text] of impactFilters) {
+    const expected = { critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Baixo' }[value];
+    if (expected === undefined) continue;
+    assert.match(text, new RegExp(`^${expected} \\d+$`, 'u'));
+  }
+
+  // Suspeita ('cantTell'): o mesmo impacto, anunciado como condicional na carta e no detalhe.
+  const review = fixture();
+  review.summary.groups.failed[0].originalOutcome = 'cantTell';
+  review.summary.groups.failed[0].displayOutcome = 'cantTell';
+  const reviewRoot = renderPanelView({
+    view: buildPanelView(review), document: new TestDocument(), onIntent() {}, onEvent() {},
+  });
+  assert.ok(reviewRoot.querySelector('[data-result-card][data-check-key="check-1"]')
+    .querySelectorAll('p').map(node => node.textContent).includes('Impacto se confirmado: Crítico'),
+  'a suspeita precisa anunciar o impacto como condicional');
+  assert.match(reviewRoot.querySelector('[data-result-detail]').textContent, /Impacto se confirmado: Crítico/u);
+});
+
 test('filter listeners read currentTarget data and emit a closed reducer event', () => {
   const input = fixture();
   const events = [];

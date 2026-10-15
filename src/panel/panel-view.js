@@ -2,6 +2,7 @@ import { highlightActionForOccurrence } from './highlight-action.js';
 import { checklistElement } from '../core/report/checklist-presentation.js';
 import { decodePngDataUrl } from '../core/evidence/png.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
+import { impactLabel, impactText } from '../core/report/impact-labels.js';
 
 const SCREEN_NAMES = Object.freeze(['initial', 'running', 'result', 'unavailable']);
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -980,7 +981,7 @@ function renderGroup(document, name, cards, view, emit, onEvent, detail) {
     wrapper.append(renderCard(document, card, view, emit));
     if (detail && card.occurrenceIds.includes(detail.occurrenceId)) {
       wrapper.append(renderDetail(document, detail, view.evidenceExpanded, view.highlight, view.markers,
-        emit, onEvent, view.captureMode));
+        emit, onEvent, view.captureMode, card.displayOutcome === 'cantTell'));
     }
   }
   return wrapper;
@@ -1034,7 +1035,8 @@ function renderCard(document, card, view, emit) {
   }
   root.append(
     paragraph(document, classificationLabel(card.classification), 'card-classification'),
-    paragraph(document, card.impact ? `Impacto ${impactLabel(card.impact)}` : 'Sem impacto associado', 'card-impact'),
+    paragraph(document, impactText(card.impact, card.displayOutcome === 'cantTell',
+      { positive: card.classification === 'passed' || card.displayOutcome === 'passed' }) ?? 'Sem impacto associado', 'card-impact'),
     paragraph(document, card.abntItemIds.length ? `ABNT ${card.abntItemIds.join(', ')}` : 'Sem item ABNT associado', 'card-normative'),
     paragraph(document, card.wcag.length ? `WCAG ${card.wcag.join(', ')}` : 'Sem critério WCAG associado', 'card-normative'),
     paragraph(document, occurrenceText(card.occurrenceIds.length), 'card-occurrences'),
@@ -1072,15 +1074,17 @@ function pageMarkerButtonTitle(document, text) {
   return title;
 }
 
-function renderDetail(document, detail, expanded, highlight, markers, emit, onEvent, captureMode) {
+function renderDetail(document, detail, expanded, highlight, markers, emit, onEvent, captureMode, pendingConfirmation = false) {
   const root = section(document, 'result-detail');
   root.dataset.resultDetail = '';
   root.dataset.classification = detail.heading.classification;
   root.dataset.context = detail.heading.context;
+  const headingImpact = impactText(detail.heading.impact, pendingConfirmation,
+    { positive: detail.heading.classification === 'passed' });
   root.append(
     detailBlock(document, 'heading', 'Questão selecionada', [
       detail.heading.title,
-      `${classificationLabel(detail.heading.classification)}${detail.heading.impact ? ` · Impacto ${impactLabel(detail.heading.impact)}` : ''}`,
+      `${classificationLabel(detail.heading.classification)}${headingImpact ? ` · ${headingImpact}` : ''}`,
     ]),
     detailBlock(document, 'affected', 'Quem é afetado', [detail.affected.audience, detail.affected.reason]),
     detailBlock(document, 'observed', 'O que foi observado', [detail.observed]),
@@ -1729,9 +1733,6 @@ function filterHeading(dimension) {
   return 'Distribuição por ABNT';
 }
 function filterLabel(dimension, value) { return dimension === 'impact' ? impactLabel(value) : value; }
-function impactLabel(value) {
-  return ({ critical: 'Crítico', serious: 'Sério', moderate: 'Moderado', minor: 'Menor' })[value] ?? value;
-}
 function groupHeading(name) {
   return ({ failed: 'Falhas confirmadas', alerts: 'Recomendações e alertas', humanReview: 'Suspeitas a confirmar', passed: 'Resultados positivos' })[name];
 }

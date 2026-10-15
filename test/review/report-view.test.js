@@ -1268,6 +1268,48 @@ test('live filters expose visible Portuguese labels and apply WCAG levels', asyn
   assert.equal(visible.every(issue => issue.getAttribute('data-wcag').split(' ').includes('AA')), true);
 });
 
+const IMPACT_WORDS = Object.freeze({ critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Baixo' });
+
+test('impact wording is one closed vocabulary in the live report, including the suspicion caveat', async () => {
+  async function headingsOf(options) {
+    const { model, summary } = await fixture(options);
+    const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+    const root = renderReportView({ view, document: new Document(), onExport() {} });
+    // 'minor' passou a ser "Baixo": nenhum ponto do relatório vivo pode dizer "Menor".
+    assert.doesNotMatch(root.textContent, /Menor/u);
+    const impactGroup = [...root.querySelector('[role="group"]').children]
+      .filter(child => child.getAttribute('role') === 'group')[0];
+    for (const button of impactGroup.querySelectorAll('button')) {
+      const word = IMPACT_WORDS[button.getAttribute('data-filter-value')];
+      if (word === undefined) continue; // níveis sem graduação própria mantêm o próprio rótulo
+      assert.match(button.textContent, new RegExp(`^${word} \\(\\d+\\)$`, 'u'));
+    }
+    return root.querySelectorAll('[data-report-issue]')
+      .map(issue => [issue.getAttribute('data-result'), issue.getAttribute('data-impact'),
+        issue.querySelector('[data-report-issue-heading]').textContent]);
+  }
+
+  const confirmed = await headingsOf();
+  assert.ok(confirmed.length > 0, 'a amostra precisa de constatações para fixar o texto');
+  for (const [_result, impact, heading] of confirmed) {
+    const word = IMPACT_WORDS[impact];
+    if (word === undefined) { assert.match(heading, /Impacto não aplicável\./u); continue; }
+    assert.match(heading, new RegExp(`Impacto ${word}\\.`, 'u'));
+  }
+  // Falha confirmada afirma o impacto, sem a condicional.
+  const failed = confirmed.filter(([result]) => result === 'failed');
+  assert.ok(failed.length > 0, 'a amostra precisa de uma falha confirmada');
+  for (const [_result, _impact, heading] of failed) assert.doesNotMatch(heading, /se confirmado/u);
+
+  // A suspeita ('cantTell') troca só o anúncio, nunca o impacto gravado; o texto condicional
+  // é o mesmo de `impactText` e está fixado nos testes do painel e do relatório autônomo.
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  assert.deepEqual(root.querySelectorAll('[data-report-issue]').map(issue => issue.getAttribute('data-impact')),
+    ['moderate', 'none'], 'o impacto projetado é o gravado, sem reclassificação pelo resultado');
+});
+
 test('missing ABNT association is explicit in the live report and HTML/PDF source', async () => {
   const { model, summary } = await fixture({ mutateDraft: addEditorialOccurrenceWithoutAbnt });
   const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });

@@ -4,6 +4,7 @@ import { checklistElement } from '../core/report/checklist-presentation.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
+import { IMPACT_LABELS, impactText } from '../core/report/impact-labels.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import {
   EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
@@ -36,7 +37,6 @@ const OUTCOME_LABELS = Object.freeze({
   failed: 'Não atendido neste teste', passed: 'Atendido no escopo observado', cantTell: 'Requer revisão humana',
   inapplicable: 'Não aplicável', untested: 'Não testado',
 });
-const IMPACT_LABELS = Object.freeze({ critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Menor' });
 const CLASSIFICATION_LABELS = Object.freeze({
   failed: 'Não conformidade identificada', alerts: 'Alerta', 'manual-review': 'Revisão humana necessária', passed: 'Resultado positivo',
   requirement: 'Requisito ABNT', recommendation: 'Recomendação ABNT', 'best-practice': 'Boa prática suplementar', editorial: 'Alerta editorial',
@@ -839,7 +839,7 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
   heading.append(
     element(document, 'h3', issue.title),
     element(document, 'p', `Resultado neste item: ${outcomeLabel(presentation.outcome)}.`),
-    element(document, 'p', `Classificação: ${presentation.classifications.map(classificationLabel).join(', ')}. Impacto: ${impactLabel(issue.impact)}.`),
+    element(document, 'p', `Classificação: ${presentation.classifications.map(classificationLabel).join(', ')}. ${impactText(issue.impact, presentation.outcome === 'cantTell', { positive: presentation.outcome === 'passed' }) ?? 'Impacto não aplicável'}.`),
   );
   const content = document.createElement('details');
   content.setAttribute('data-report-issue-details', '');
