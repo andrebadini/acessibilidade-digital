@@ -55,7 +55,7 @@ const PAGE_STATUS = Object.freeze({
 
 const ANNOTATION_MAP_LIMITATION_LABELS = Object.freeze({
   'observed-dom-ax-order-not-literal-assistive-technology': 'ordem DOM/AX observada; não representa fala literal nem ordem de foco',
-  'non-atomic-source-geometry': 'captura e geometria foram coletadas em instantes distintos',
+  'non-atomic-source-geometry': 'captura e geometria são lidas em passos separados; a diferença é medida e o mapa não marca quando passa da tolerância',
   'top-document-open-shadow-only': 'somente o documento superior e Shadow DOM aberto foram compostos',
   'rasterization-browser-dependent': 'a rasterização pode variar conforme navegador e sistema operacional',
   'source-capture-may-contain-personal-data': 'a captura original pode conter dados pessoais visíveis',
@@ -67,6 +67,7 @@ const ANNOTATION_MAP_LIMITATION_LABELS = Object.freeze({
   'unresolved-marker-overlap': 'uma ou mais sobreposições de marcadores permaneceram',
   'non-uniform-pixel-scale': 'as escalas horizontal e vertical da captura não são uniformes',
   'ancestor-clipped-elements-omitted': 'elementos escondidos por uma área com rolagem própria foram omitidos',
+  'source-layout-changed': 'a página mudou de tamanho enquanto era verificada; para não marcar o lugar errado, o mapa não foi desenhado',
 });
 
 const OUTCOME_PRIORITY = Object.freeze({ failed: 0, cantTell: 1, passed: 2, untested: 3, inapplicable: 4 });

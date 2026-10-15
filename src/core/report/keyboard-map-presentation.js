@@ -37,6 +37,7 @@ const LIMITATIONS = Object.freeze({
   'stop-limit-reached': 'O limite de posições de Tab foi atingido.',
   'suspect-limit-reached': 'O limite de itens suspeitos foi atingido.',
   'badge-overlap-unresolved': 'Algumas etiquetas numéricas permaneceram sobrepostas.',
+  'source-layout-changed': 'A página mudou de tamanho enquanto era verificada. Para não apontar o lugar errado, nenhuma caixa foi desenhada na imagem; a lista abaixo continua completa.',
 });
 
 /** Frase única para as duas rotas de relatório: leigos leem "1 lugar", não "1 lugares". */
@@ -75,7 +76,8 @@ export function keyboardMapEntryName(entry) {
   return entryName(entry ?? {});
 }
 
-function entryLocation(entry) {
+function entryLocation(entry, imageMarked) {
+  if (!imageMarked) return 'Sem marca na imagem; posição estimada no documento.';
   return entry.segmentIndex > 0
     ? `Trecho ${entry.segmentIndex} da imagem.`
     : 'Sem imagem nesta auditoria; posição estimada no documento.';
@@ -92,26 +94,35 @@ export function keyboardMapPresentation(pages, maps) {
       counts: null, stops: [], suspects: [], limitations: [], segments: [], provenance: [],
     };
     const counts = map.counts;
+    // Sem caixas confiáveis a imagem vai sem marca nenhuma: a localização passa a ser texto, não número na imagem.
+    const imageMarked = !map.limitations.includes('source-layout-changed');
     const stops = map.stops.map(entry => ({
       number: entry.number, name: entryName(entry),
       kind: KIND_LABELS[entry.kind] ?? entry.kind,
-      location: entryLocation(entry), nodeId: entry.nodeId,
+      location: entryLocation(entry, imageMarked), nodeId: entry.nodeId,
     }));
     const suspects = map.suspects.map(entry => ({
       number: entry.number, name: entryName(entry),
       reason: (entry.ruleId === 'hover-only-interactive-content' ? HOVER_ONLY_REASON : null) ??
         REASON_LABELS[entry.reason] ?? entry.reason,
-      location: entryLocation(entry), nodeId: entry.nodeId,
+      location: entryLocation(entry, imageMarked), nodeId: entry.nodeId,
     }));
     return {
       ...identity, status: map.status,
-      summary: map.status === 'empty'
-        ? 'Nada alcançável pelo Tab foi encontrado nesta página. Isso não significa conformidade: confira na própria página.'
-        : map.status === 'partial'
-          ? 'Mapa gerado com cobertura parcial. Leia as limitações antes de concluir.'
-          : 'Mapa gerado. Procure cada número na imagem e leia o item correspondente na lista.',
+      summary: !imageMarked
+        ? 'A imagem vai sem marcações porque a página mudou de tamanho durante a verificação. A lista abaixo continua completa: procure o item pelo nome.'
+        : map.status === 'empty'
+          ? 'Nada alcançável pelo Tab foi encontrado nesta página. Isso não significa conformidade: confira na própria página.'
+          : map.status === 'partial'
+            ? 'Mapa gerado com cobertura parcial. Leia as limitações antes de concluir.'
+            : 'Mapa gerado. Procure cada número na imagem e leia o item correspondente na lista.',
       counts: { eligible: counts.eligible, stops: counts.stops, suspects: counts.suspects },
-      coverage: `${counts.stops} de ${counts.eligible} itens que o Tab alcança foram marcados; ${counts.suspects} itens parecem clicáveis sem receber o Tab; ${counts.omittedNotVisible} ficaram fora por não estarem visíveis; ${counts.omittedNoRect} por não terem posição medida; ${counts.omittedClipped} por estarem escondidos por rolagem interna; ${counts.omittedFrame} por estarem em frames; ${counts.omittedLimit} pelo limite da lista.`,
+      coverage: !imageMarked
+        ? `${counts.stops} ${counts.stops === 1 ? 'lugar onde o Tab para' : 'lugares onde o Tab para'} e ${counts.suspects} ${counts.suspects === 1 ? 'item que parece clicável' : 'itens que parecem clicáveis'} entraram na lista, mas nenhum número foi desenhado na imagem.`
+        // A contagem de elementos não visíveis vira frase própria: colada na contagem de itens que o Tab
+        // alcança, ela lia como "465 lugares de Tab foram perdidos" numa página que tinha 71 (medido no
+        // portal público). São elementos que a página não mostra — menus fechados, conteúdo escondido.
+        : `${counts.stops} de ${counts.eligible} itens que o Tab alcança foram marcados; ${counts.suspects} itens parecem clicáveis sem receber o Tab; ${counts.omittedNoRect} ficaram sem posição medida; ${counts.omittedClipped} estavam escondidos por rolagem interna; ${counts.omittedFrame} estavam em frames; ${counts.omittedLimit} ficaram fora pelo limite da lista. Também ficam fora da lista ${counts.omittedNotVisible} elementos da página que não estão visíveis (menu fechado ou conteúdo escondido).`,
       limitations: map.limitations.map(code => LIMITATIONS[code] ?? code),
       segments: map.segments.map(segment => ({
         id: segment.segmentId, index: segment.index, width: segment.width, height: segment.height,

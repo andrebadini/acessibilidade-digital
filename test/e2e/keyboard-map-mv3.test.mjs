@@ -402,6 +402,18 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.ok(html.includes('data-keyboard-map-stop="1"'));
   assert.ok(html.includes('Cada caixa azul numerada é um lugar onde a tecla Tab para'));
   assert.ok(html.includes(map.hash));
+
+  // Alinhamento (1.1.60): nesta página estável a captura e a leitura da estrutura descrevem o mesmo
+  // leiaute, então a escala é uniforme, nenhuma caixa foi omitida por mudança de leiaute, e as caixas
+  // estão de fato pintadas na imagem.
+  assert.ok(Math.abs(map.derivation.geometry.scaleX - map.derivation.geometry.scaleY) <= 0.01,
+    `escalas divergentes: ${JSON.stringify(map.derivation.geometry)}`);
+  assert.equal(map.limitations.includes('non-uniform-pixel-scale'), false);
+  assert.equal(map.limitations.includes('source-layout-changed'), false);
+  assert.equal(map.counts.stops, map.stops.length);
+  const drawn = await countBoxPixels(extension, report);
+  assert.ok(drawn.blue > 0, `as caixas azuis precisam estar pintadas na imagem: ${JSON.stringify(drawn)}`);
+  t.diagnostic(`keyboard-map pixels: ${JSON.stringify(drawn)}`);
   for (const label of CARD_LABELS) assert.ok(html.includes(label), `a lista de itens sem caixa precisa nomear "${label}"`);
   for (const output of [jsonBytes, html, ...loopback.cspReports]) {
     assert.equal(output.includes(privateMarker), false, 'uma saída pública textual contém o valor privado do campo');
@@ -409,6 +421,253 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.equal(loopback.cspReports.length, 0, `violações CSP: ${loopback.cspReports.join(' ')}`);
   assert.doesNotMatch(`${html}\n${loopback.cspReports.join('\n')}`, /unsafe-eval|EvalError/iu);
 });
+
+test('uma página que cresce sem parar sai sem caixa nenhuma, com a lista inteira e a explicação', { timeout: 300_000 }, async t => {
+  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do mapa do teclado.');
+  await access(chromeBinary, fsConstants.X_OK);
+  const loopback = await startLazyLoopback();
+  t.after(() => loopback.close());
+
+  // A lista cresce por carga sob demanda em TODO resize provocado por captura (a captura integral encolhe a
+  // janela para 1×1 e devolve o tamanho depois — medido). Cada captura, inclusive a de aquecimento e a de
+  // verdade, acrescenta um bloco de 300 px: a altura no instante em que os retângulos são medidos e a altura
+  // no instante da captura nunca coincidem. Sem acordo de leiaute o mapa não desenha caixa (e diz isso no
+  // relatório), em vez de espalhar caixas no lugar errado.
+  const fixtureUrl = `${loopback.origin}/keyboard-map-lazy.html`;
+  const response = await fetch(fixtureUrl);
+  assert.equal(response.status, 200);
+  await response.arrayBuffer();
+
+  const extension = await launchUnpackedExtension(t, {
+    extensionPath: await realpath(root), startUrl: fixtureUrl, chromeBinary, expectedMajor: 152,
+    downloadMode: 'profile',
+    ...(process.env.AUDITA_E2E_ARTIFACT_ROOT ? {
+      qaDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'qa'),
+      downloadDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'downloads'),
+    } : {}),
+    viewport: { width: 1280, height: 800 },
+  });
+  assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
+
+  const panel = await extension.openSidePanelFromAction();
+  await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
+  await extension.click(panel, 'button[data-focus-id="open-url-form"][data-intent="OPEN_URL_FORM"]');
+  await extension.click(panel, '[name="capture-mode"][value="full-evidence"]');
+  await extension.evaluate(panel, `(() => {
+    const input=document.querySelector('#audit-url, input[name="audit-url"]');
+    input.value=${JSON.stringify(fixtureUrl)};
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+    return true;
+  })()`);
+  await extension.click(panel, '[data-action="start-url-audit"]');
+  const terminal = await extension.waitForValue(panel, `(() => ({
+    screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+    confirm:Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')),
+  }))()`, value => ['result', 'unavailable'].includes(value?.screen) || value?.confirm === true, {
+    timeoutMs: 180_000, intervalMs: 50,
+  });
+  assert.equal(terminal.confirm, false, `a auditoria por URL não pode pedir confirmação: ${JSON.stringify(terminal)}`);
+  assert.equal(terminal.screen, 'result', `a auditoria por URL precisa concluir: ${JSON.stringify(terminal)}`);
+  const auditId = await extension.evaluate(panel, `document.querySelector('[data-screen="result"]')?.dataset.auditId`);
+
+  await extension.click(panel, '[data-action="open-report"], button[data-focus-id="open-report"]');
+  const report = await extension.waitForReport({ auditId });
+  await command(report, 'Page.bringToFront');
+  await extension.waitForValue(report, `Boolean(document.querySelector('[data-keyboard-map-page="page-1"]'))`, Boolean, {
+    timeoutMs: 30_000, intervalMs: 50,
+  });
+
+  const live = await extension.evaluate(report, `(() => {
+    const card=document.querySelector('[data-keyboard-map-page="page-1"]');
+    return {
+      status: card.dataset.mapStatus,
+      sectionText: card.closest('section')?.textContent ?? '',
+      images: [...card.querySelectorAll('img[data-map-segment-image]')].length,
+      stops: [...card.querySelectorAll('[data-keyboard-map-stop]')].map(entry => entry.textContent),
+      suspects: [...card.querySelectorAll('[data-keyboard-map-suspect]')].map(entry => entry.textContent),
+      horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+    };
+  })()`);
+  // A imagem continua no relatório; o que não existe é caixa desenhada nela.
+  assert.ok(live.images > 0, 'a imagem da página precisa continuar no relatório');
+  assert.match(live.sectionText, /A página mudou de tamanho enquanto era verificada/iu);
+  assert.match(live.sectionText, /nenhuma caixa foi desenhada na imagem; a lista abaixo continua completa/iu);
+  assert.ok(live.stops.length > 0, 'a lista do que o Tab alcança precisa continuar completa');
+  assert.ok(live.stops.some(entry => /Buscar/u.test(entry)), `faltou uma parada conhecida: ${JSON.stringify(live.stops)}`);
+  assert.ok(live.suspects.some(entry => /Abre as opções só com o mouse/u.test(entry)),
+    `faltou o item que só o mouse alcança: ${JSON.stringify(live.suspects)}`);
+  assert.equal(live.horizontalOverflow, false);
+  const pixels = await countBoxPixels(extension, report);
+  // Uma caixa de verdade pinta muito mais do que isto: no teste da página estável, 7 paradas deram 9.669
+  // pixels azuis (cerca de 1.380 por caixa). O teto tolera alguns pixels azulados isolados de qualquer
+  // detalhe da própria página, e continua muito abaixo de uma única caixa desenhada.
+  assert.ok(pixels.blue < 200, `nenhuma caixa azul pode ser pintada: ${JSON.stringify(pixels)}`);
+  assert.ok(pixels.orange < 200, `nenhuma caixa laranja pode ser pintada: ${JSON.stringify(pixels)}`);
+  t.diagnostic(`keyboard-map página que cresce: stops=${live.stops.length}; pixels=${JSON.stringify(pixels)}`);
+
+  await extension.click(report, 'button[data-report-export]');
+  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 50 });
+  const jsonBytes = await readFile(join(extension.downloadDirectory, downloads.find(value => value.format === 'json').filename), 'utf8');
+  const map = JSON.parse(jsonBytes.replace(/^﻿/u, '')).audit.evidence.find(artifact => artifact.kind === 'keyboard-map');
+  assert.ok(map, 'o mapa do teclado precisa chegar ao relatório técnico mesmo sem caixas');
+  assert.equal(map.status, 'partial');
+  assert.ok(map.limitations.includes('source-layout-changed'), `limitações: ${JSON.stringify(map.limitations)}`);
+  assert.equal(map.limitations.includes('non-uniform-pixel-scale'), false, 'a escala é uniforme: o que muda é o leiaute');
+  assert.ok(map.stops.length > 0 && map.suspects.length > 0, 'as duas listas continuam preenchidas');
+  assert.equal(map.counts.stops, map.stops.length);
+  assert.equal(map.counts.suspects, map.suspects.length);
+  assert.ok(map.segments.length > 0);
+  assert.ok(Math.abs(map.derivation.geometry.scaleX - map.derivation.geometry.scaleY) <= 0.01,
+    `escalas divergentes: ${JSON.stringify(map.derivation.geometry)}`);
+});
+
+test('uma página que cresce por causa da própria captura volta a ter caixas alinhadas', { timeout: 300_000 }, async t => {
+  assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do mapa do teclado.');
+  await access(chromeBinary, fsConstants.X_OK);
+  const loopback = await startLazyLoopback();
+  t.after(() => loopback.close());
+
+  // Esta página só cresce quando a auditoria captura: o primeiro `resize` que a captura provoca monta três
+  // blocos de 300 px e depois a lista fica parada (medido: 1.315 px → 2.325 px logo depois do aquecimento, e
+  // deriva zero nas capturas seguintes). É o caso que o mapa perdia: sem aquecimento, a estrutura é lida
+  // antes da carga e a captura acontece depois dela, então os retângulos e os pixels são de estados
+  // diferentes e nenhuma caixa é desenhada. Com o aquecimento da 1.1.60 a carga acontece ANTES da leitura, a
+  // página assenta, e as caixas voltam alinhadas.
+  const fixtureUrl = `${loopback.origin}/keyboard-map-lazy.html?modo=captura`;
+  const response = await fetch(fixtureUrl);
+  assert.equal(response.status, 200);
+  await response.arrayBuffer();
+
+  const extension = await launchUnpackedExtension(t, {
+    extensionPath: await realpath(root), startUrl: fixtureUrl, chromeBinary, expectedMajor: 152,
+    downloadMode: 'profile',
+    ...(process.env.AUDITA_E2E_ARTIFACT_ROOT ? {
+      qaDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'qa'),
+      downloadDirectory: join(process.env.AUDITA_E2E_ARTIFACT_ROOT, 'downloads'),
+    } : {}),
+    viewport: { width: 1280, height: 800 },
+  });
+  assert.equal(extension.chromeProduct, CANONICAL_CHROME_PRODUCT);
+
+  const panel = await extension.openSidePanelFromAction();
+  await extension.waitForValue(panel, `document.querySelector('[data-screen]')?.dataset.screen`, value => value === 'initial');
+  await extension.click(panel, 'button[data-focus-id="open-url-form"][data-intent="OPEN_URL_FORM"]');
+  await extension.click(panel, '[name="capture-mode"][value="full-evidence"]');
+  await extension.evaluate(panel, `(() => {
+    const input=document.querySelector('#audit-url, input[name="audit-url"]');
+    input.value=${JSON.stringify(fixtureUrl)};
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+    return true;
+  })()`);
+  await extension.click(panel, '[data-action="start-url-audit"]');
+  const terminal = await extension.waitForValue(panel, `(() => ({
+    screen:document.querySelector('[data-screen]')?.dataset.screen??null,
+    confirm:Boolean(document.querySelector('[data-action="confirm-pixel-capture"]')),
+  }))()`, value => ['result', 'unavailable'].includes(value?.screen) || value?.confirm === true, {
+    timeoutMs: 180_000, intervalMs: 50,
+  });
+  assert.equal(terminal.confirm, false, `a auditoria por URL não pode pedir confirmação: ${JSON.stringify(terminal)}`);
+  assert.equal(terminal.screen, 'result', `a auditoria por URL precisa concluir: ${JSON.stringify(terminal)}`);
+  const auditId = await extension.evaluate(panel, `document.querySelector('[data-screen="result"]')?.dataset.auditId`);
+
+  await extension.click(panel, '[data-action="open-report"], button[data-focus-id="open-report"]');
+  const report = await extension.waitForReport({ auditId });
+  await command(report, 'Page.bringToFront');
+  await extension.waitForValue(report, `Boolean(document.querySelector('[data-keyboard-map-page="page-1"]'))`, Boolean, {
+    timeoutMs: 30_000, intervalMs: 50,
+  });
+
+  const live = await extension.evaluate(report, `(() => {
+    const card=document.querySelector('[data-keyboard-map-page="page-1"]');
+    return {
+      status: card.dataset.mapStatus,
+      sectionText: card.closest('section')?.textContent ?? '',
+      images: [...card.querySelectorAll('img[data-map-segment-image]')].length,
+      stops: [...card.querySelectorAll('[data-keyboard-map-stop]')].map(entry => entry.textContent),
+      suspects: [...card.querySelectorAll('[data-keyboard-map-suspect]')].map(entry => entry.textContent),
+      horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+    };
+  })()`);
+  assert.ok(live.images > 0, 'a imagem da página precisa continuar no relatório');
+  // A explicação de leiaute mudado não pode aparecer: aqui a página assentou antes da leitura.
+  assert.doesNotMatch(live.sectionText, /A página mudou de tamanho enquanto era verificada/iu);
+  // As três paradas que só existem depois da carga disparada pela captura. Se o aquecimento não tivesse
+  // montado os blocos antes da leitura, elas não estariam na lista — é o que prova que o aquecimento agiu.
+  for (const numero of [1, 2, 3]) {
+    assert.ok(live.stops.some(entry => entry.includes(`Protocolo ${numero}`)),
+      `a parada "Protocolo ${numero}" precisa estar na lista: ${JSON.stringify(live.stops)}`);
+  }
+  assert.ok(live.suspects.some(entry => /Abre as opções só com o mouse/u.test(entry)),
+    `faltou o item que só o mouse alcança: ${JSON.stringify(live.suspects)}`);
+  assert.equal(live.horizontalOverflow, false);
+  const pixels = await countBoxPixels(extension, report);
+  // Uma caixa de verdade pinta centenas de pixels de contorno; "nenhuma caixa" fica abaixo dos 200 usados
+  // pelo teste da página que cresce sem parar. As duas listas deste caso são grandes de propósito.
+  assert.ok(pixels.blue > 400, `as caixas azuis precisam estar pintadas na imagem: ${JSON.stringify(pixels)}`);
+  assert.ok(pixels.orange > 400, `a caixa laranja precisa estar pintada na imagem: ${JSON.stringify(pixels)}`);
+  t.diagnostic(`keyboard-map aquecimento: stops=${live.stops.length}; pixels=${JSON.stringify(pixels)}`);
+
+  await extension.click(report, 'button[data-report-export]');
+  const downloads = await extension.waitForFourDownloads({ auditId, timeoutMs: 300_000, intervalMs: 50 });
+  const jsonBytes = await readFile(join(extension.downloadDirectory, downloads.find(value => value.format === 'json').filename), 'utf8');
+  const map = JSON.parse(jsonBytes.replace(/^﻿/u, '')).audit.evidence.find(artifact => artifact.kind === 'keyboard-map');
+  assert.ok(map, 'o mapa do teclado precisa chegar ao relatório técnico');
+  assert.equal(map.limitations.includes('source-layout-changed'), false,
+    `o leiaute não mudou depois do aquecimento: ${JSON.stringify(map.limitations)}`);
+  assert.equal(map.limitations.includes('non-uniform-pixel-scale'), false, 'a escala é uniforme');
+  assert.equal(map.status, 'complete', `status do mapa: ${map.status}`);
+  assert.equal(map.counts.stops, map.stops.length);
+  assert.equal(map.counts.suspects, map.suspects.length);
+  assert.ok(map.stops.some(stop => /Protocolo 3/u.test(stop.name ?? '')), 'a carga disparada pela captura entra no mapa');
+  assert.ok(map.segments.length > 0);
+  assert.ok(Math.abs(map.derivation.geometry.scaleX - map.derivation.geometry.scaleY) <= 0.01,
+    `escalas divergentes: ${JSON.stringify(map.derivation.geometry)}`);
+});
+
+/**
+ * Quantos pixels de caixa azul (parada do Tab) e laranja (item que só o mouse alcança) existem nas
+ * imagens do mapa do teclado do relatório. É a verificação que separa "o relatório promete caixas" de
+ * "as caixas estão pintadas na imagem" — e, no caso da página que cresce, de "nenhuma caixa pintada".
+ */
+async function countBoxPixels(extension, report) {
+  // `awaitPromise`: sem isso o CDP devolve o objeto vazio da promessa, e a contagem nunca chega.
+  return extension.evaluate(report, `(async () => {
+    const images=[...document.querySelectorAll('[data-keyboard-map-page="page-1"] img[data-map-segment-image]')];
+    let blue=0, orange=0;
+    for (const image of images) {
+      const canvas=new OffscreenCanvas(image.naturalWidth,image.naturalHeight);
+      const context=canvas.getContext('2d');
+      context.drawImage(image,0,0);
+      const {data}=context.getImageData(0,0,canvas.width,canvas.height);
+      for (let index=0;index<data.length;index+=4) {
+        const red=data[index], green=data[index+1], channel=data[index+2];
+        if (red<60 && green>50 && green<120 && channel>120) blue+=1;
+        if (red>140 && red<210 && green>50 && green<120 && channel<60) orange+=1;
+      }
+    }
+    return { blue, orange, images: images.length };
+  })()`, { awaitPromise: true });
+}
+
+async function startLazyLoopback() {
+  const files = new Map([
+    ['/keyboard-map-lazy.html', ['keyboard-map-lazy.html', 'text/html; charset=utf-8']],
+    ['/keyboard-map-lazy.js', ['keyboard-map-lazy.js', 'text/javascript; charset=utf-8']],
+  ]);
+  const server = createServer(async (request, response) => {
+    const fixture = files.get(new URL(request.url, 'http://127.0.0.1').pathname);
+    if (!fixture) { response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }); response.end('not found'); return; }
+    const [name, contentType] = fixture;
+    response.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    response.end(await readFile(join(fixtureRoot, name)));
+  });
+  await new Promise((resolveListen, rejectListen) => server.listen(0, '127.0.0.1', error =>
+    error ? rejectListen(error) : resolveListen()));
+  return {
+    origin: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise(resolveClose => server.close(resolveClose)),
+  };
+}
 
 async function startLoopback() {
   const cspReports = [];

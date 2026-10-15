@@ -4,7 +4,7 @@ export const READER_MAP_INTRO = 'Mapa visual da prévia de anúncios: os número
 
 const LIMITATIONS = Object.freeze({
   'observed-dom-ax-order-not-literal-assistive-technology': 'A ordem e os anúncios são estimativas do estado observado, não uma reprodução de um leitor de tela.',
-  'non-atomic-source-geometry': 'A captura e a geometria foram coletadas em instantes distintos.',
+  'non-atomic-source-geometry': 'A captura e a geometria são lidas em passos separados. A diferença entre elas é medida, e o mapa não marca quando passa da tolerância.',
   'top-document-open-shadow-only': 'O mapa cobre o documento principal e Shadow DOM aberto.',
   'rasterization-browser-dependent': 'A aparência pode variar conforme o navegador e o sistema operacional.',
   'source-capture-may-contain-personal-data': 'A captura original pode conter dados pessoais visíveis.',
@@ -16,6 +16,7 @@ const LIMITATIONS = Object.freeze({
   'unresolved-marker-overlap': 'Alguns marcadores permaneceram sobrepostos.',
   'ancestor-clipped-elements-omitted': 'Elementos escondidos por uma área com rolagem própria não foram anotados.',
   'non-uniform-pixel-scale': 'As escalas horizontal e vertical da captura não são uniformes.',
+  'source-layout-changed': 'A página mudou de tamanho enquanto era verificada. Para não apontar o lugar errado, nenhum número foi desenhado na imagem.',
 });
 
 function localSegmentImage(segment) {
@@ -41,13 +42,21 @@ export function readerMapPresentation(pages, maps) {
       coverage: null, limitations: [], segments: [], legend: [], provenance: [],
     };
     const counts = map.counts;
+    // Sem geometria confiável este mapa não tem o que mostrar. Aqui a legenda é a própria lista de
+    // marcadores: sem marca confiável não há número para ligar a um texto, e o mapa fica sem segmento e
+    // sem legenda. O relatório diz exatamente isso, em vez de prometer uma imagem marcada que não existe.
+    const imageAnnotated = !map.limitations.includes('source-layout-changed');
     return {
       ...identity, status: map.status,
-      summary: map.status === 'empty'
-        ? 'Nenhum elemento elegível foi encontrado. Isso não significa conformidade da página.'
-        : map.status === 'partial' ? 'Mapa gerado com cobertura parcial. Consulte as omissões registradas.'
-          : 'Mapa gerado. Localize o número na imagem e leia o anúncio correspondente na legenda.',
-      coverage: `${counts.annotated} de ${counts.eligible} elementos elegíveis anotados; ${counts.omittedFrame} contextos de frame omitidos; ${counts.omittedNoRect} elementos sem geometria; ${counts.omittedClipped ?? 0} escondidos por rolagem interna; ${counts.omittedLimit} omitidos por limite; ${counts.unresolvedOverlap} sobreposições não resolvidas.`,
+      summary: !imageAnnotated
+        ? 'A página mudou de tamanho enquanto era verificada. Para não apontar o lugar errado, nenhum anúncio foi marcado nesta página.'
+        : map.status === 'empty'
+          ? 'Nenhum elemento elegível foi encontrado. Isso não significa conformidade da página.'
+          : map.status === 'partial' ? 'Mapa gerado com cobertura parcial. Consulte as omissões registradas.'
+            : 'Mapa gerado. Localize o número na imagem e leia o anúncio correspondente na legenda.',
+      coverage: !imageAnnotated
+        ? `${counts.eligible} ${counts.eligible === 1 ? 'elemento era elegível' : 'elementos eram elegíveis'}, mas nenhum foi marcado: a página mudou de tamanho durante a verificação.`
+        : `${counts.annotated} de ${counts.eligible} elementos elegíveis anotados; ${counts.omittedFrame} contextos de frame omitidos; ${counts.omittedNoRect} elementos sem geometria; ${counts.omittedClipped ?? 0} escondidos por rolagem interna; ${counts.omittedLimit} omitidos por limite; ${counts.unresolvedOverlap} sobreposições não resolvidas.`,
       limitations: map.limitations.map(code => LIMITATIONS[code] ?? code),
       segments: map.segments.map(segment => {
         const markers = map.legend.filter(entry => entry.segmentIndex === segment.index).map(entry => entry.number);

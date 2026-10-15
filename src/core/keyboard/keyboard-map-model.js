@@ -57,6 +57,9 @@ export const KEYBOARD_MAP_LIMITATIONS = Object.freeze([
   'stop-limit-reached',
   'suspect-limit-reached',
   'badge-overlap-unresolved',
+  // Acrescentada depois da 1.1.0, sempre no fim: a ordem canônica é a da lista, então anexar mantém
+  // válidos os mapas já guardados.
+  'source-layout-changed',
 ]);
 
 export const KEYBOARD_MAP_REQUIRED_LIMITATIONS = Object.freeze([

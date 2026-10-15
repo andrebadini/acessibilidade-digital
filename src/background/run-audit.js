@@ -1,4 +1,6 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
+import { warmUpFullPageLayout } from './full-page-warm-up.js';
+import { mapSourceGeometry } from '../core/evidence/map-source-geometry.js';
 import { measureElementTarget } from '../browser/measure-element.js';
 import { collectPage } from '../browser/collect-page.js';
 import { AXE_PROVENANCE, runAxeInTab } from '../browser/axe-adapter.js';
@@ -764,11 +766,22 @@ async function draftModel(state) {
   return output;
 }
 
+/** Devolve a sessão (congelamento + depurador) que a leitura da página entregou a quem chamou. */
+async function releaseNavigationHold(hold) {
+  if (!hold || typeof hold.release !== 'function') return;
+  const release = hold.release;
+  hold.release = null;
+  try { await release(); } catch { /* limpeza best-effort: o desanexo desfaz o que sobrar */ }
+}
+
 /** Runs one local audit in one disposable tab using only injected Chrome effects. */
 async function runLegacyAudit({
   url, chromeAdapter, now = () => new Date().toISOString(), idFactory = () => crypto.randomUUID(), signal,
-  closeAuditTab = true, expectedExtensionId, startedAt: suppliedStartedAt,
+  closeAuditTab = true, expectedExtensionId, startedAt: suppliedStartedAt, navigationHold = null,
 }) {
+  if (navigationHold !== null && (typeof navigationHold !== 'object' || Array.isArray(navigationHold))) {
+    throw new TypeError('A posse da navegação é inválida.');
+  }
   if (!chromeAdapter || typeof chromeAdapter !== 'object') throw new TypeError('O adapter Chrome é obrigatório.');
   const navigationUrl = normalizeAuditUrl(url);
   const generatedId = idFactory('audit');
@@ -892,6 +905,8 @@ async function runLegacyAudit({
     }
 
     let pristineMetrics = {};
+    // Métricas do viewport lidas agora, ainda antes do axe, só para o ambiente. A captura integral saiu
+    // daqui em 1.1.60 e passou a sair colada na leitura da estrutura (ver `capturePristineFullPage`).
     if (chromeAdapter.captureFullPageEnabled === false) {
       appendDiagnosticOnce(
         chromeAdapter.captureElementsEnabled === false ? 'PIXEL_CAPTURE_OMITTED' : 'FULL_PAGE_CAPTURE_OMITTED',
@@ -903,8 +918,22 @@ async function runLegacyAudit({
     }
     try {
       pristineMetrics = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
-      if (chromeAdapter.captureFullPageEnabled !== false) {
-        state.fullPage = await awaitStep(() => (chromeAdapter.captureFullPage || captureFullPage)(cdp, pristineMetrics));
+    } catch (error) {
+      rethrowAbort(error, signal);
+      pristineMetrics = {};
+    }
+    // `mapSource` carrega a decisão "a imagem e os retângulos são do mesmo estado?" usada pelos dois mapas.
+    let mapSource = null;
+    // Captura integral com as métricas do próprio instante da captura. Antes (até 1.1.59) a imagem era
+    // tirada logo depois da navegação e a estrutura era lida segundos depois, após o axe: em páginas que
+    // crescem sozinhas (carregamento sob demanda, listas que se completam) a imagem ficava de um estado e os
+    // retângulos de outro. O resultado eram caixas de mapa deslocadas — pior, para quem não programa, do que
+    // caixa nenhuma. Agora a captura acontece no mesmo instante da leitura da estrutura e `mapSourceGeometry`
+    // confere se as duas concordam; quando não concordam, o mapa vai sem caixas.
+    async function capturePristineFullPage() {
+      try {
+        const captureMetrics = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
+        state.fullPage = await awaitStep(() => (chromeAdapter.captureFullPage || captureFullPage)(cdp, captureMetrics));
         const artifact = {
           evidenceId: state.fullPage.evidenceId,
           kind: 'full-page',
@@ -914,20 +943,36 @@ async function runLegacyAudit({
           hash: state.fullPage.hash,
         };
         state.artifacts.push(artifact);
-        const observedHeight = (pristineMetrics?.cssContentSize || pristineMetrics?.contentSize)?.height;
+        const observedHeight = (captureMetrics?.cssContentSize || captureMetrics?.contentSize)?.height;
         const capturedHeight = state.fullPage?.metadata?.height;
         if (Number.isFinite(observedHeight) && Number.isFinite(capturedHeight) && capturedHeight + 1 < observedHeight) {
           state.fullPageCapturedHeight = capturedHeight;
           recoverable('FULL_PAGE_CAPTURE_TRUNCATED', FULL_PAGE_CAPTURE_TRUNCATED_MESSAGE);
         }
-      }
-    } catch (error) {
-      if (isPixelBoundaryInterruption(error, chromeAdapter)) {
-        if (!canContinueWithoutFurtherPixels(error, chromeAdapter, signal)) throw error;
-        furtherPixelCaptureSuppressed = true;
-      }
-      rethrowAbort(error, signal);
-      if (chromeAdapter.captureFullPageEnabled !== false) {
+        // Métricas depois da captura: se a própria captura mexeu no leiaute (por exemplo, ao sair da
+        // viewport), a imagem já não serve de base para desenhar caixas.
+        let captureMetricsAfter = null;
+        try {
+          captureMetricsAfter = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
+        } catch (error) {
+          rethrowAbort(error, signal);
+        }
+        mapSource = mapSourceGeometry({
+          captureMetrics,
+          captureMetricsAfter,
+          // Os retângulos vêm do instantâneo lido pela coleta, então o estado a comparar é o do instantâneo
+          // (`layoutMetricsAtSnapshot`), não o do fim da coleta: numa página que cresce sozinha, o fim da
+          // coleta já é outro leiaute e a comparação passaria batido.
+          observedMetrics: raw?.layoutMetricsAtSnapshot || state.snapshot?.document?.layoutMetrics,
+          capturedHeight: state.fullPageCapturedHeight,
+          deviceScaleFactor: state.environment?.viewport?.deviceScaleFactor,
+        });
+      } catch (error) {
+        if (isPixelBoundaryInterruption(error, chromeAdapter)) {
+          if (!canContinueWithoutFurtherPixels(error, chromeAdapter, signal)) throw error;
+          furtherPixelCaptureSuppressed = true;
+        }
+        rethrowAbort(error, signal);
         recoverable('FULL_PAGE_CAPTURE_FAILED', 'Não foi possível capturar a página completa no estado original.');
       }
     }
@@ -975,6 +1020,25 @@ async function runLegacyAudit({
       recoverable('ENVIRONMENT_UNAVAILABLE', 'Os metadados públicos do ambiente não puderam ser lidos.');
     }
 
+    // Aquecimento descartável (1.1.60), imediatamente antes da coleta: ver src/background/full-page-warm-up.js.
+    // Em páginas que montam conteúdo sob demanda, é a captura integral que acorda o resto da página. Sem
+    // isso, o crescimento cai entre a captura e a leitura, o acordo de leiaute falha e o mapa sai sem caixa
+    // nenhuma. A condição é a da captura integral: `captureFullPageEnabled === false` significa que não há
+    // captura de página inteira para alinhar (nos modos `element-only` e `no-pixels` o aquecimento não roda),
+    // e uma pausa de privacidade pendente significa que a auditoria nem chegou aqui — a execução observada só
+    // acontece depois da porta de pixels, e o pedido de captura de quem está auditando a própria página é o
+    // mesmo do modo `full-evidence`, onde a captura integral já acontece logo depois. Falha aqui é silenciosa
+    // — a auditoria segue como em 1.1.59 —, mas cancelamento atravessa. Nada do resultado entra no modelo: o
+    // catálogo de diagnósticos é fechado e não carrega números internos; a medida serve aos testes e à QA
+    // (docs/qa/mapa-alinhado-1.1.60.md).
+    if (chromeAdapter.captureFullPageEnabled !== false) {
+      try {
+        state.fullPageWarmUp = await warmUpFullPageLayout({ cdp, step: awaitStep, signal });
+      } catch (error) {
+        rethrowAbort(error, signal);
+      }
+    }
+
     await progress('collecting', 'Lendo a estrutura', 25);
     let raw;
     try {
@@ -988,6 +1052,11 @@ async function runLegacyAudit({
       rethrowAbort(error, signal);
       fail('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.', error);
     }
+
+    // Colada na leitura da estrutura: os retângulos lidos acima e os pixels da imagem passam a ser do mesmo
+    // estado da página. Nada interativo aconteceu entre uma coisa e outra (o axe e o ambiente vêm antes da
+    // coleta; as verificações dinâmicas, depois).
+    if (chromeAdapter.captureFullPageEnabled !== false) await capturePristineFullPage();
 
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
@@ -1180,29 +1249,18 @@ async function runLegacyAudit({
       }
       throwIfAborted(signal);
     }
-    if (state.fullPage && typeof chromeAdapter.composeAnnouncementMap === 'function') {
+    if (state.fullPage && mapSource && typeof chromeAdapter.composeAnnouncementMap === 'function') {
       const pristineArtifact = state.artifacts.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
       const sourceBefore = canonicalStringify(pristineArtifact);
-      const observedMapMetrics = state.snapshot.document?.layoutMetrics || raw.layoutMetrics || pristineMetrics;
       try {
         const map = await awaitStep(() => chromeAdapter.composeAnnouncementMap({
           pageId: 'page-1',
           snapshot: state.snapshot,
           fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
-          layoutMetrics: {
-            ...observedMapMetrics,
-            // Captura integral truncada pelo teto de segurança: o mapa usa só a área capturada; o que ficou
-            // abaixo dela sai do mapa como ocorrência fora da imagem (mapa parcial), sem distorcer a escala.
-            ...(Number.isFinite(state.fullPageCapturedHeight) ? {
-              cssContentSize: {
-                ...(observedMapMetrics?.cssContentSize || observedMapMetrics?.contentSize || {}),
-                height: state.fullPageCapturedHeight,
-              },
-            } : {}),
-            deviceScaleFactor: Number.isFinite(observedMapMetrics?.deviceScaleFactor)
-              ? observedMapMetrics.deviceScaleFactor
-              : state.environment.viewport.deviceScaleFactor,
-          },
+          // Geometria do instante da captura: inclui o teto de segurança (`mapSource.truncated`) e o fator de
+          // escala do dispositivo. Os dois mapas usam exatamente os mesmos números.
+          layoutMetrics: mapSource.layoutMetrics,
+          sourceAligned: mapSource.aligned,
           signal,
         }));
         if (canonicalStringify(pristineArtifact) !== sourceBefore) {
@@ -1227,7 +1285,7 @@ async function runLegacyAudit({
     // Mapa do teclado: deriva da mesma captura integral pristine do mapa de anúncios, mas é julgado
     // pelas próprias regras. Sem captura integral (modos sem pixels) não há mapa — a lista numerada
     // do relatório continua existindo a partir do instantâneo, sem pixels.
-    if (state.fullPage && typeof chromeAdapter.composeKeyboardMap === 'function') {
+    if (state.fullPage && mapSource && typeof chromeAdapter.composeKeyboardMap === 'function') {
       const pristineArtifact = state.artifacts.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
       const sourceBefore = canonicalStringify(pristineArtifact);
       try {
@@ -1236,7 +1294,8 @@ async function runLegacyAudit({
           snapshot: state.snapshot,
           occurrences: state.occurrences,
           fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
-          layoutMetrics: state.snapshot.document?.layoutMetrics || raw.layoutMetrics || pristineMetrics,
+          layoutMetrics: mapSource.layoutMetrics,
+          sourceAligned: mapSource.aligned,
           signal,
         }));
         if (canonicalStringify(pristineArtifact) !== sourceBefore) {
@@ -1294,18 +1353,34 @@ async function runLegacyAudit({
     // O congelamento morre ANTES do desanexo, em qualquer desfecho: `Fetch.disable` libera os pedidos
     // eventualmente pausados, e o depurador só então é desanexado. Nenhuma interceptação sobrevive à
     // auditoria — e o e2e prova isso medindo a recarga da página depois do fim.
-    if (navigationFreeze) {
+    //
+    // Quem chama pode pedir a POSSE dessa sessão (`navigationHold`, usado pela auditoria anexada): a leitura
+    // da página termina aqui, mas o relatório ainda leva segundos, e é sobre a página lida que ele fala. Com
+    // a posse, o congelamento e o depurador continuam vivos até a hora em que o resultado estiver decidido —
+    // a navegação da própria página não derruba, no meio do relatório, uma auditoria que já observou tudo.
+    if (navigationFreeze || cdp) {
       const freeze = navigationFreeze;
       navigationFreeze = null;
       let blocked = 0;
-      try { blocked = freeze.blocked(); } catch { blocked = 0; }
-      try { await freeze.stop(); } catch { /* best-effort: o desanexo abaixo também desfaz o Fetch */ }
+      try { blocked = freeze ? freeze.blocked() : 0; } catch { blocked = 0; }
       if (Number.isSafeInteger(blocked) && blocked > 0) {
         appendDiagnosticOnce('PAGE_NAVIGATION_HELD', PAGE_NAVIGATION_HELD_MESSAGE, true);
       }
-    }
-    if (cdp) {
-      try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
+      const retained = navigationHold && typeof navigationHold === 'object';
+      const stopFreeze = async () => {
+        if (!freeze) return;
+        try { await freeze.stop(); } catch { /* best-effort: o desanexo também desfaz o Fetch */ }
+      };
+      const disconnect = async () => {
+        if (!cdp) return;
+        try { await cdp.disconnect(); } catch { state.diagnostics.push(diagnostic('CDP_DISCONNECT_FAILED', 'A sessão de depuração não pôde ser encerrada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
+      };
+      if (retained) {
+        navigationHold.release = async () => { await stopFreeze(); await disconnect(); };
+      } else {
+        await stopFreeze();
+        await disconnect();
+      }
     }
     if (tab && closeAuditTab !== false) {
       try { await chromeAdapter.removeTab(tab.id); } catch { state.diagnostics.push(diagnostic('TAB_CLOSE_FAILED', 'A aba descartável não pôde ser fechada automaticamente.', canonicalTime(now()), true)); if (state.status === 'complete') state.status = 'partial'; }
@@ -1482,6 +1557,7 @@ function captureAttachedFacadeArgs(value) {
   const allowed = [
     'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow', 'signal',
     'expectedExtensionId', 'pageId', 'onCheckpoint', 'persistAuditModel', 'privacyGate', 'resumeCheckpoint',
+    'onObservationComplete',
   ];
   const required = [
     'auditId', 'sessionCapabilityId', 'target', 'capturePolicy', 'chromeAdapter', 'modelNow',
@@ -1657,7 +1733,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   const {
     auditId, sessionCapabilityId, target: inputTarget, capturePolicy, chromeAdapter, modelNow,
     signal, expectedExtensionId, pageId = 'page-1', onCheckpoint, persistAuditModel, privacyGate = null,
-    resumeCheckpoint: inputResumeCheckpoint = null,
+    resumeCheckpoint: inputResumeCheckpoint = null, onObservationComplete = null,
   } = args;
   const target = attachedTarget(inputTarget);
   const policyRecord = captureExactRecord(capturePolicy, [
@@ -1670,6 +1746,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     (safeCapturePolicy.mode === 'no-pixels' ? privacyGate !== null : !isPixelPrivacyGateV1(privacyGate)) ||
     pageId !== 'page-1' ||
     typeof modelNow !== 'function' || typeof onCheckpoint !== 'function' || typeof persistAuditModel !== 'function' ||
+    !(onObservationComplete === null || typeof onObservationComplete === 'function') ||
     !chromeAdapter || typeof chromeAdapter !== 'object') {
     throw new TypeError('ATTACHED_AUDIT_EXECUTION_DENIED');
   }
@@ -1724,6 +1801,9 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
   let pixelStarted = false;
   let pixelTargetChanged = false;
   let pixelRasterBoundary = null;
+  // Posse da sessão entregue pela leitura da página: fica viva até o resultado estar decidido, para que a
+  // navegação da própria página não caia no meio de um relatório já calculado sobre ela.
+  const navigationHold = {};
   const services = Object.freeze({
     async collectObservedPage({ observedTarget }) {
       if (safeCapturePolicy.mode !== 'no-pixels') pixelCollectionStarted = true;
@@ -1754,10 +1834,18 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
         closeAuditTab: false,
         expectedExtensionId,
         startedAt,
+        navigationHold,
       });
       if (safeCapturePolicy.mode === 'element-only' &&
         !['failed', 'cancelled'].includes(legacyDraft.session.status)) {
         await observedAdapter.settlePixelBoundary();
+      }
+      // A observação acabou — inclusive a última fronteira de pixels do modo `element-only`: daqui para a frente
+      // nada mais lê nem fotografa o documento vivo, o que falta é montar o relatório. Só uma observação que
+      // terminou de verdade avisa; falha ou cancelamento seguem o caminho de sempre. A identidade do documento
+      // continua provada em `persistAuditModel` antes de gravar. O aviso é best-effort e nunca derruba a auditoria.
+      if (onObservationComplete !== null && !['failed', 'cancelled'].includes(legacyDraft.session.status)) {
+        try { onObservationComplete(); } catch { /* aviso interno; a auditoria segue */ }
       }
       legacyDraft = alignLegacyDraftWithObservedEvidence(
         legacyDraft,
@@ -1868,6 +1956,8 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
     if (pixelCollectionStarted && observed?.status !== 'privacy-paused') {
       await privacyGate.afterPixels({ auditId, pixelStarted });
     }
+    // O relatório já foi decidido (ou já falhou): a página volta a navegar como quiser.
+    await releaseNavigationHold(navigationHold);
   }
   let lastCheckpoint = null;
   try {

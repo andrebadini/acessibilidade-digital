@@ -780,7 +780,7 @@ test('renders absent, empty, partial, complete and legend-continuation map state
   assert.match(complete, /data-map-status="complete"[\s\S]*audita\.annotation-map[\s\S]*1\.0\.0/u);
   assert.match(complete, /200 nós[\s\S]*32.000.000 pixels[\s\S]*64 segmentos/u);
   assert.match(complete, /proporção raster imprimível[^.]*1,3:1/iu);
-  assert.match(complete, /non-atomic-source-geometry — captura e geometria foram coletadas/iu);
+  assert.match(complete, /non-atomic-source-geometry — captura e geometria são lidas em passos separados/iu);
   assert.match(complete, /com marcador 1/iu);
   assert.doesNotMatch(complete, /marcadores 1 a 1/iu);
   assert.match(complete, /Ordem observada DOM\/AX[\s\S]*não é ordem de foco/iu);

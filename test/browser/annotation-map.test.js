@@ -11,11 +11,13 @@ import {
   composeAnnouncementMapForProduction,
   selectAnnouncementMapEntries,
 } from '../../src/browser/annotation-map.js';
+import { validateAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { normalizeSnapshot } from '../../src/core/normalize-snapshot.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
+import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
@@ -425,6 +427,57 @@ test('draws a thin haloed outline around each annotated element', async () => {
   // O marcador preferido é o canto superior-esquerdo do próprio elemento: encostado no contorno, ele
   // dispensa a linha-guia.
   assert.deepEqual(strokes.filter(stroke => stroke.points.length === 2), []);
+});
+
+test('sem geometria confiável o mapa de anúncios não desenha número nenhum e diz por quê', async () => {
+  const strokes = [];
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() {
+      const context = {
+        fillRect() {}, drawImage() {}, fill() {}, fillText() {},
+        measureText(value) { return { width: [...String(value)].length * 7 }; },
+        strokeStyle: '', lineWidth: 0,
+        points: [],
+        beginPath() { context.points = []; },
+        moveTo(x, y) { context.points.push([x, y]); },
+        lineTo(x, y) { context.points.push([x, y]); },
+        arc() {},
+        stroke() { strokes.push({ strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, points: context.points }); },
+      };
+      return context;
+    }
+    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+  }
+  const fullPageEvidence = await pristineSource(100, 100);
+  const artifact = await composeAnnouncementMap({
+    pageId: 'page-1', fullPageEvidence,
+    snapshot: snapshot([{
+      nodeId: 'action', tagName: 'button', accessibleName: 'Ação segura', axRole: 'button',
+      rect: { x: 10, y: 20, width: 30, height: 40 },
+    }]),
+    layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
+    sourceAligned: false,
+    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
+  });
+
+  // Sem contorno, sem marcador e sem legenda: a imagem sozinha não sugere lugar nenhum.
+  assert.deepEqual(strokes, []);
+  assert.deepEqual(artifact.segments, []);
+  assert.deepEqual(artifact.legend, []);
+  assert.deepEqual(artifact.derivation.geometry.annotations, []);
+  assert.equal(artifact.status, 'partial');
+  assert.ok(artifact.limitations.includes('source-layout-changed'));
+  assert.deepEqual(artifact.counts, {
+    eligible: 1, annotated: 0, omittedNoRect: 1, omittedFrame: 0, omittedLimit: 0, unresolvedOverlap: 0, omittedClipped: 0,
+  });
+  assert.deepEqual(validateAnnotationMapArtifact(artifact, { sourceArtifact: fullPageEvidence }), artifact);
+
+  // O relatório diz, em português claro, que nenhum anúncio foi marcado e por quê.
+  const [presented] = readerMapPresentation([{ pageId: 'page-1' }], [artifact]);
+  assert.match(presented.summary, /nenhum anúncio foi marcado/iu);
+  assert.match(presented.coverage, /nenhum foi marcado/iu);
+  assert.ok(presented.limitations.some(text => /mudou de tamanho/iu.test(text)));
 });
 
 test('ends the leader line on the outline and drops it when the badge already touches the outline', async () => {
