@@ -432,6 +432,19 @@ function handleEvent(event) {
   if (event.type === 'FILTER_SET') void pageMarkers.filter(visibleMarkerOccurrences());
 }
 
+// Mostrar sinais na página, na versão auditada ou — por gesto explícito — na versão recarregada.
+// Depois de mostrar, os filtros e a seleção da tela voltam a valer para o inventário novo.
+async function showPageMarkers(reloaded) {
+  const result = resultBundle;
+  const shown = reloaded ? await pageMarkers.showReloaded() : await pageMarkers.show();
+  if (state.screen !== 'result' || !shown || resultBundle !== result) return;
+  const interaction = pageMarkerInteractionRevision;
+  const selected = state.selectedOccurrenceId;
+  await pageMarkers.filter(visibleMarkerOccurrences());
+  if (resultBundle === result && state.screen === 'result' && interaction === pageMarkerInteractionRevision &&
+    state.selectedOccurrenceId === selected && selected) await pageMarkers.select(selected);
+}
+
 async function handleIntent(intent) {
   switch (intent.type) {
     case 'OPEN_TAB_READING':
@@ -483,17 +496,12 @@ async function handleIntent(intent) {
     case 'OPEN_REPORT':
       await requestSessionAction('PANEL_OPEN_REPORT');
       return;
-    case 'SHOW_PAGE_MARKERS': {
-      const result = resultBundle;
-      if (state.screen === 'result' && await pageMarkers.show() && resultBundle === result) {
-        const interaction = pageMarkerInteractionRevision;
-        const selected = state.selectedOccurrenceId;
-        await pageMarkers.filter(visibleMarkerOccurrences());
-        if (resultBundle === result && state.screen === 'result' && interaction === pageMarkerInteractionRevision &&
-          state.selectedOccurrenceId === selected && selected) await pageMarkers.select(selected);
-      }
+    case 'SHOW_PAGE_MARKERS':
+      await showPageMarkers(false);
       return;
-    }
+    case 'SHOW_PAGE_MARKERS_RELOADED':
+      await showPageMarkers(true);
+      return;
     case 'HIDE_PAGE_MARKERS':
       pageMarkerInteractionRevision++;
       await pageMarkers.hide();
@@ -549,6 +557,9 @@ async function handleIntent(intent) {
     case 'HIGHLIGHT_OCCURRENCE':
       await highlightOccurrence(intent.occurrenceId);
       return;
+    case 'HIGHLIGHT_OCCURRENCE_RELOADED':
+      await highlightOccurrence(intent.occurrenceId, { reloaded: true });
+      return;
     case 'CLEAR_HIGHLIGHT':
       await clearHighlight();
       return;
@@ -581,15 +592,20 @@ async function handleIntent(intent) {
   }
 }
 
-async function highlightOccurrence(occurrenceId) {
-  if (typeof occurrenceId !== 'string' || !occurrenceId || occurrenceId !== state.selectedOccurrenceId ||
-    state.highlight.bindingStatus?.state !== 'available') return;
+async function highlightOccurrence(occurrenceId, { reloaded = false } = {}) {
+  if (typeof occurrenceId !== 'string' || !occurrenceId || occurrenceId !== state.selectedOccurrenceId) return;
+  // O convite para destacar na versão recarregada só aparece depois que o painel já perguntou ao
+  // worker; os demais pedidos continuam exigindo o estado disponível de sempre.
+  const offered = reloaded && state.highlight.bindingStatus?.state === 'reload-offer';
+  if (!offered && state.highlight.bindingStatus?.state !== 'available') return;
   const interaction = currentInteraction('live-highlight-action');
-  transition({ type: 'HIGHLIGHT_BUSY', occurrenceId, ...interaction });
+  transition({ type: 'HIGHLIGHT_BUSY', occurrenceId, relocated: reloaded, ...interaction });
   let response = null;
   try {
     response = await runHighlightAction({
-      request: () => requestPanelIntent({ type: 'HIGHLIGHT_OCCURRENCE', occurrenceId }),
+      request: () => requestPanelIntent({
+        type: reloaded ? 'HIGHLIGHT_OCCURRENCE_RELOADED' : 'HIGHLIGHT_OCCURRENCE', occurrenceId,
+      }),
       onState() {},
     });
   } catch {
@@ -599,9 +615,17 @@ async function highlightOccurrence(occurrenceId) {
   const highlight = exactRecord(active?.highlight, ['state', 'occurrenceId']);
   if (active?.ok === true && highlight?.state === 'active' && highlight.occurrenceId === occurrenceId) {
     if (shouldApplyHighlightState(state.highlight, highlight)) {
-      transition({ type: 'HIGHLIGHT_ACTIVE', occurrenceId, ...interaction });
+      transition({ type: 'HIGHLIGHT_ACTIVE', occurrenceId, relocated: reloaded, ...interaction });
     }
-  } else transition({ type: 'HIGHLIGHT_UNAVAILABLE', occurrenceId, ...interaction });
+    return;
+  }
+  // Página recarregada com o mesmo endereço: em vez do erro, o convite para destacar na versão de
+  // agora, que só vale depois de um clique novo.
+  if (exactRecord(response, ['ok', 'code'])?.code === 'HIGHLIGHT_RELOADED_PAGE') {
+    transition({ type: 'HIGHLIGHT_RELOAD_OFFERED', occurrenceId, ...interaction });
+    return;
+  }
+  transition({ type: 'HIGHLIGHT_UNAVAILABLE', occurrenceId, ...interaction });
 }
 
 async function clearHighlight() {

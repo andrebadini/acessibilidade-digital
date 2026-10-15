@@ -88,3 +88,19 @@ test('deduplicates the correlated highlight response and publication without hid
     { state: 'active', occurrenceId: 'occ-2' },
   ), true);
 });
+
+// --- Página recarregada (1.1.60): o mesmo botão, dito para a versão de agora -----------------
+
+test('the reload invitation turns the denied action into the same explicit action', () => {
+  const action = highlightActionForOccurrence({
+    occurrence: { occurrenceId: 'occ-1' }, bindingStatus: { state: 'reload-offer' },
+  });
+  assert.deepEqual(action, { kind: 'highlight-reloaded', label: 'Destacar na versão atual', enabled: true, reason: null });
+  assert.equal(Object.isFrozen(action), true);
+  // Sem a ocorrência não existe convite: cai no caminho de evidências de sempre.
+  assert.equal(highlightActionForOccurrence({ bindingStatus: { state: 'reload-offer' } }).kind, 'evidence');
+  // Estados desconhecidos continuam caindo no mesmo lugar seguro.
+  assert.equal(highlightActionForOccurrence({
+    occurrence: { occurrenceId: 'occ-1' }, bindingStatus: { state: 'reload-offer-private' },
+  }).kind, 'evidence');
+});

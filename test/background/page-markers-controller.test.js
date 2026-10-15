@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { createPageRelocationOfferStore } from '../../src/background/page-relocation-offer.js';
 import { DIGEST, INSTALLATION_ID, SESSION_ID, createControllerFixture, deferred } from './page-markers-controller-fixture.js';
 
 async function waitForNativePort(fixture) {
@@ -420,4 +421,156 @@ test('selection-unavailable still proves the document, clears stale selection an
   assert.equal(fixture.calls.publish.at(-1).selectedOrdinal, null);
   const shown = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
   assert.equal(shown.markers.selectedOrdinal, null);
+});
+
+// --- Recarga da página (1.1.60): mesmo endereço, documento novo ------------------------------
+
+const installCommands = fixture => fixture.calls.scripts
+  .filter(call => call.func.name === 'runAuditaPageMarkersCommand' && call.args[0]?.op === 'install');
+
+test('a reloaded page offers the signals before relocating them, and the accepted offer installs them', async () => {
+  const fixture = await createControllerFixture({ liveDocumentId: 'document-b' });
+  // O texto registrado na auditoria continua no elemento: é o que permite desenhar o sinal.
+  fixture.page.first.textContent = 'Avançar';
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  assert.deepEqual(fixture.calls.scripts, []);
+  assert.deepEqual(fixture.calls.publish, []);
+  assert.equal(fixture.page.environment.markerButtons().length, 0);
+
+  const accepted = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED');
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.markers.counts.located, 2);
+  assert.equal(fixture.page.environment.markerButtons().length, 1);
+  const install = installCommands(fixture).at(-1);
+  assert.deepEqual(install.target.documentIds, ['document-b']);
+  assert.deepEqual(install.args[0].targets[0].corroboration, { name: 'Continuar', text: 'Avançar' });
+  // Remover os sinais alcança a instalação recolocada, que vive no documento novo.
+  assert.equal((await fixture.dispatch('PANEL_HIDE_PAGE_MARKERS')).ok, true);
+  assert.equal(fixture.page.environment.markerButtons().length, 0);
+  assert.equal(fixture.calls.scripts.some(call => call.args[0]?.op === 'clear'), true);
+});
+
+test('the normal document never carries corroboration and never relocates silently', async () => {
+  const fixture = await createControllerFixture();
+  assert.equal((await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS')).ok, true);
+  const install = installCommands(fixture).at(-1);
+  assert.equal(install.args[0].targets.every(target => !Object.hasOwn(target, 'corroboration')), true);
+  assert.deepEqual(install.target.documentIds, ['document-a']);
+});
+
+test('without the accepted offer the reloaded intent only offers again and installs nothing', async () => {
+  const fixture = await createControllerFixture({ liveDocumentId: 'document-b' });
+  fixture.page.first.textContent = 'Avançar';
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
+    { ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  assert.deepEqual(fixture.calls.scripts, []);
+  assert.equal(fixture.page.environment.markerButtons().length, 0);
+  // O convite fica registrado: a tentativa seguinte, também por gesto, é a que recoloca.
+  assert.equal((await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED')).ok, true);
+  assert.equal(fixture.page.environment.markerButtons().length, 1);
+});
+
+test('an offer minted for another live document is not accepted', async () => {
+  let clock = 10_000;
+  const offers = createPageRelocationOfferStore({ now: () => clock });
+  const fixture = await createControllerFixture({ liveDocumentId: 'document-b', relocationOffers: offers });
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  // A aba recarregou de novo antes do aceite: a oferta nomeia o documento que já não está vivo.
+  assert.equal(offers.register({ auditId: fixture.model.auditId, tabId: 17, windowId: 9,
+    documentId: 'document-c', urlSessionDigest: DIGEST, scope: 'page-markers', expiresAt: clock + 10_000 }), true);
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
+    { ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  assert.deepEqual(fixture.calls.scripts, []);
+});
+
+test('a navigation keeps the audit provenance and only a departed tab takes it away', async () => {
+  // A navegação da aba (o ciclo de vida em TAB_LOADING) não pode apagar a que página a auditoria
+  // pertence: é essa procedência que permite oferecer a versão recarregada em vez de um erro.
+  const offers = createPageRelocationOfferStore({ now: () => 10_000 });
+  const navigated = await createControllerFixture({ liveDocumentId: 'document-b', relocationOffers: offers });
+  navigated.page.first.textContent = 'Avançar';
+  assert.equal(await navigated.controller.invalidateTab(17, 'navigation'), true);
+  assert.deepEqual(await navigated.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  assert.deepEqual(navigated.calls.scripts, []);
+  const accepted = await navigated.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED');
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(installCommands(navigated).at(-1).target.documentIds, ['document-b']);
+
+  // Aba fechada ou descartada: a auditoria não tem mais página, então nada é oferecido.
+  for (const reason of ['tab-removed', 'discarded']) {
+    const gone = await createControllerFixture({ liveDocumentId: 'document-b' });
+    assert.equal(await gone.controller.invalidateTab(17, reason), true, reason);
+    assert.deepEqual(await gone.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+      { ok: false, code: 'PAGE_MARKERS_UNAVAILABLE' }, reason);
+    assert.deepEqual(gone.calls.scripts, [], reason);
+  }
+
+  // Motivo fora do conjunto fechado não é aceito e não muda nada.
+  const guarded = await createControllerFixture({ liveDocumentId: 'document-b' });
+  assert.equal(await guarded.controller.invalidateTab(17, 'porque-sim'), false);
+  assert.equal(await guarded.controller.invalidateTab(0, 'navigation'), false);
+  assert.equal(await guarded.controller.invalidateTab(17), true);
+});
+
+test('an expired offer is refused and offered again', async () => {
+  let clock = 10_000;
+  const offers = createPageRelocationOfferStore({ now: () => clock, ttlMs: 5_000 });
+  const fixture = await createControllerFixture({ liveDocumentId: 'document-b', relocationOffers: offers });
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  clock += 5_000;
+  fixture.setTime(15_000);
+  assert.deepEqual(await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
+    { ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  assert.deepEqual(fixture.calls.scripts, []);
+  assert.equal(offers.read({ auditId: fixture.model.auditId, tabId: 17, windowId: 9,
+    documentId: 'document-b', scope: 'page-markers' })?.documentId, 'document-b');
+});
+
+test('another address, tab or window is another page: the reload intent never relocates it', async () => {
+  const otherAddress = await createControllerFixture({
+    liveDocumentId: 'document-b', liveDigest: `hmac-sha256:${'B'.repeat(43)}`,
+  });
+  assert.deepEqual(await otherAddress.dispatch('PANEL_SHOW_PAGE_MARKERS'),
+    { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+  assert.deepEqual(await otherAddress.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
+    { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+  assert.deepEqual(otherAddress.calls.scripts, []);
+
+  for (const drift of [{ tabId: 18 }, { windowId: 10 }]) {
+    const moved = await createControllerFixture({ liveDocumentId: 'document-b' });
+    moved.queueProof({ tabId: 17, windowId: 9, documentId: 'document-b', urlSessionDigest: DIGEST, ...drift });
+    assert.deepEqual(await moved.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
+      { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+    moved.queueProof({ tabId: 17, windowId: 9, documentId: 'document-b', urlSessionDigest: DIGEST, ...drift });
+    assert.deepEqual(await moved.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
+      { ok: false, code: 'PAGE_MARKERS_DOCUMENT_CHANGED' });
+    assert.deepEqual(moved.calls.scripts, []);
+  }
+});
+
+test('a signal whose element no longer matches the recorded evidence is not drawn', async () => {
+  const fixture = await createControllerFixture({ liveDocumentId: 'document-b' });
+  // Nenhum sinal da auditoria confere com este elemento: a versão recarregada não recebe sinal.
+  fixture.page.first.textContent = 'Outro texto completamente diferente';
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  const accepted = await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS_RELOADED');
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.markers.counts.located, 0);
+  assert.equal(accepted.markers.counts.markers, 0);
+  assert.equal(fixture.page.environment.markerButtons().length, 0);
+  assert.deepEqual(accepted.markers.reasons.map(row => row.reason), ['evidence-mismatch']);
+});
+
+test('clearing the audit retires its pending invitation', async () => {
+  let clock = 10_000;
+  const offers = createPageRelocationOfferStore({ now: () => clock });
+  const fixture = await createControllerFixture({ liveDocumentId: 'document-b', relocationOffers: offers });
+  await fixture.dispatch('PANEL_SHOW_PAGE_MARKERS');
+  assert.equal(offers.size(), 1);
+  await fixture.controller.clearAudit(fixture.model.auditId, 'audit-deleted');
+  assert.equal(offers.size(), 0);
 });

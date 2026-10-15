@@ -1,6 +1,7 @@
 import { isAuditIntegrityVerified } from '../core/report/integrity.js';
 import { sanitizeHtmlSnippetSource } from '../core/evidence/snippet.js';
 import { classifySignalToken, parseSignalSelectorV1, MAX_SIGNAL_CLASSES } from './highlight-locator.js';
+import { locatorCorroboration } from '../core/evidence/locator-corroboration.js';
 import { classifyPanelResultV1, deriveResultContextV1 } from '../panel/panel-result-contract.js';
 
 const MAX_ROWS = 5_000;
@@ -134,13 +135,18 @@ function resolveCandidate(rows, evidenceById) {
   }
   if (artifacts.size === 0) return { reason: 'missing-evidence' };
   let locator = null;
+  let corroboration = null;
   for (const evidence of artifacts.values()) {
     const next = locatorFor(evidence);
     if (next.reason) return next;
     if (locator && JSON.stringify(locator) !== JSON.stringify(next)) return { reason: 'conflicting-evidence' };
     locator = next;
+    // Nome acessível e texto visível registrados, para o modo "página recarregada" conferir se o
+    // elemento reencontrado ainda é o mesmo. Evidências do mesmo nó concordam no locator; o primeiro
+    // texto utilizável serve de referência.
+    if (!corroboration) corroboration = locatorCorroboration(evidence.accessibility);
   }
-  return { ...locator, evidenceRefs: [...artifacts.keys()].sort() };
+  return { ...locator, corroboration, evidenceRefs: [...artifacts.keys()].sort() };
 }
 
 /**
@@ -212,7 +218,8 @@ export function projectPageMarkers(raw) {
       }
       const markerId = `m${markers.length + 1}`;
       candidates.push({ markerId, pageId: args.pageId, nodeId: rows[0].occurrence.nodeId,
-        selector: resolved.selector, match: resolved.match, evidenceRefs: resolved.evidenceRefs, selectionIds });
+        selector: resolved.selector, match: resolved.match, corroboration: resolved.corroboration,
+        evidenceRefs: resolved.evidenceRefs, selectionIds });
       const classification = rows.map(row => row.signal.classification)
         .reduce((best, value) => PRIORITY[value] > PRIORITY[best] ? value : best, 'passed');
       markers.push({ markerId, number: markers.length + 1, count: selectionIds.length, classification, selectionIds });

@@ -201,6 +201,7 @@ function fixture(overrides = {}) {
     async currentState(value) { calls.push(['highlight-state', value]); return { ok: true, highlight: { state: 'clear' } }; },
     async availability(value) { calls.push(['highlight-availability', value]); return { ok: true, bindingStatus: { state: 'available' } }; },
     async highlight(value) { calls.push(['highlight-install', value]); return { ok: true, highlight: { state: 'active', occurrenceId: value.occurrenceId } }; },
+    async highlightReloaded(value) { calls.push(['highlight-install-reloaded', value]); return { ok: true, highlight: { state: 'active', occurrenceId: value.occurrenceId } }; },
     async clear(value) { calls.push(['highlight-clear', value]); return { ok: true, highlight: { state: 'clear' } }; },
     async invalidateContent(value) {
       calls.push(['highlight-invalidate-content', value]);
