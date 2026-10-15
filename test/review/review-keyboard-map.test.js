@@ -138,11 +138,11 @@ test('o bloco do mapa mostra pergunta, legenda, contagens, imagem e listas numer
   const stop = find(block, node => node.attributes.get('data-keyboard-map-stop') === '1')[0];
   assert.ok(stop, 'a lista numerada identifica cada parada do Tab');
   assert.equal(stop.getAttribute('value'), '1');
-  assert.equal(stop.textContent, '1. Consultar, botão (botão)');
+  assert.equal(stop.textContent, 'Consultar, botão (botão)');
   const suspect = find(block, node => node.attributes.get('data-keyboard-map-suspect') === '1')[0];
   assert.ok(suspect, 'a lista de itens sem caixa identificável fica separada');
-  assert.equal(suspect.getAttribute('value'), '1');
-  assert.equal(suspect.textContent, '1. Consumidor — mostra a seta de clique e mesmo assim não recebe o Tab');
+  assert.equal(suspect.getAttribute('value'), null, 'suspeitos não levam número: no desenho eles têm "?"');
+  assert.equal(suspect.textContent, 'Consumidor — mostra a seta de clique e mesmo assim não recebe o Tab');
   // A estimativa é declarada: a lista não foi observada apertando Tab.
   assert.match(blockText, /não foi observada pressionando Tab/u);
 });

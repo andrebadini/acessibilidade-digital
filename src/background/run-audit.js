@@ -596,6 +596,9 @@ function makeOccurrences(auditId, ruleResults, itemResults) {
             } },
         } : {}),
         justification: typeof target?.message === 'string' && target.message.trim() ? target.message.trim() : result.summary || 'A ocorrência exige verificação humana.',
+        // Links que só aparecem com o mouse tiram de quem usa teclado o acesso a funções inteiras da página:
+        // a falha confirmada é de impacto alto, não o "menor" padrão das regras sem graduação própria.
+        ...(result.ruleId === 'hover-only-interactive-content' && result.outcome === 'failed' ? { impact: 'serious' } : {}),
       });
     }
   }

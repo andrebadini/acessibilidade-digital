@@ -35,11 +35,13 @@ test('ships every manifest icon as a valid PNG with the declared square size', a
   }
 });
 
-test('ships the three current Tab reading screenshots at 1280 by 800 without an alpha channel', async () => {
+test('ships the five current store screenshots at 1280 by 800 without an alpha channel', async () => {
   for (const path of [
-    'store-assets/screenshot-tab-report.png',
-    'store-assets/screenshot-tab-elements.png',
-    'store-assets/screenshot-tab-highlight.png',
+    'store-assets/screenshot-1-sinais.png',
+    'store-assets/screenshot-2-explicacao.png',
+    'store-assets/screenshot-3-mapa-teclado.png',
+    'store-assets/screenshot-4-constatacoes.png',
+    'store-assets/screenshot-5-relatorio.png',
   ]) {
     const bytes = await read(path);
     assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], path);

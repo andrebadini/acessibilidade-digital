@@ -987,7 +987,8 @@ function keyboardMapBlock() {
       page.append(el('p', 'Onde o Tab para, na ordem:', 'lay-map-subtitle'));
       const stops = el('ol', undefined, 'lay-keyboard-map-stops');
       for (const entry of map.stops) {
-        const item = el('li', `${entry.number}. ${entry.name} (${entry.kind})`);
+        // O número vem da própria lista ordenada (`value`): repeti-lo no texto aparecia como "1. 1. …".
+        const item = el('li', `${entry.name} (${entry.kind})`);
         item.setAttribute('value', String(entry.number));
         item.setAttribute('data-keyboard-map-stop', String(entry.number));
         stops.append(item);
@@ -996,10 +997,11 @@ function keyboardMapBlock() {
     }
     if (map.suspects.length) {
       page.append(el('p', 'Itens que parecem clicáveis e o Tab não alcança:', 'lay-map-subtitle'));
-      const suspects = el('ol', undefined, 'lay-keyboard-map-suspects');
+      // No desenho os suspeitos levam "?", não número: a lista é sem ordem, para não sugerir um número
+      // que a pessoa não vai achar na imagem.
+      const suspects = el('ul', undefined, 'lay-keyboard-map-suspects');
       for (const entry of map.suspects) {
-        const item = el('li', `${entry.number}. ${entry.name} — ${entry.reason}`);
-        item.setAttribute('value', String(entry.number));
+        const item = el('li', `${entry.name} — ${entry.reason}`);
         item.setAttribute('data-keyboard-map-suspect', String(entry.number));
         suspects.append(item);
       }

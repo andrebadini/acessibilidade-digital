@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prefeitura de Vila Aurora — Portal do cidadão</title>
+<!-- Página FICTÍCIA de demonstração para as capturas da loja. Os problemas de acessibilidade são
+     propositais: logotipo sem texto alternativo, busca sem rótulo, botão só com ícone, texto de baixo
+     contraste no destaque e cartões de serviço que só abrem com o mouse. -->
+<style>
+  :root { --verde: #0f6b4f; --verde-escuro: #0a4a37; --areia: #f6f3ec; --tinta: #1d2a2f; --cinza: #5b6770; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--tinta); background: #fff; }
+  a { color: var(--verde); }
+  .topo { background: #fff; border-bottom: 1px solid #e3e6e8; }
+  .faixa { background: var(--verde-escuro); color: #e7f2ee; font-size: 13px; }
+  .faixa .conteudo { display: flex; justify-content: space-between; padding: 6px 24px; }
+  .faixa a { color: #e7f2ee; text-decoration: none; margin-left: 16px; }
+  .conteudo { max-width: 1040px; margin: 0 auto; }
+  .marca { display: flex; align-items: center; gap: 16px; padding: 16px 24px; }
+  .marca .nome { font-weight: 700; font-size: 20px; line-height: 1.2; }
+  .marca .nome small { display: block; font-weight: 400; font-size: 13px; color: var(--cinza); }
+  .busca { margin-left: auto; display: flex; gap: 6px; }
+  .busca input { width: 230px; padding: 9px 12px; border: 1px solid #c9d0d4; border-radius: 8px; font: inherit; font-size: 14px; }
+  .busca button { width: 40px; border: 0; border-radius: 8px; background: var(--verde); color: #fff; display: grid; place-items: center; }
+  nav.menu { background: var(--verde); }
+  nav.menu ul { list-style: none; margin: 0 auto; padding: 0 12px; display: flex; max-width: 1040px; }
+  nav.menu a { display: block; padding: 12px 14px; color: #fff; text-decoration: none; font-weight: 600; font-size: 15px; }
+  .destaque { background: linear-gradient(120deg, #fdf6e3 0%, #e9f5ef 100%); }
+  .destaque .conteudo { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; padding: 36px 24px; align-items: center; }
+  .destaque h1 { font-size: 34px; line-height: 1.15; margin: 0 0 12px; color: var(--verde-escuro); }
+  .destaque p.aviso { color: #b9b3a6; font-size: 17px; margin: 0 0 20px; }
+  .botao { display: inline-block; background: var(--verde); color: #fff; padding: 12px 20px; border-radius: 10px; text-decoration: none; font-weight: 700; }
+  .ilustracao { height: 190px; border-radius: 18px; background:
+    radial-gradient(circle at 30% 35%, #f7c948 0 34px, transparent 35px),
+    linear-gradient(180deg, #bfe3d3 0 62%, #6fb08f 62% 100%); position: relative; overflow: hidden; }
+  .ilustracao::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: 22%; height: 46px; background:
+    repeating-linear-gradient(90deg, #0f6b4f 0 26px, #0a4a37 26px 30px); border-radius: 6px 6px 0 0; }
+  section.servicos { padding: 28px 24px 8px; }
+  h2 { font-size: 22px; margin: 0 0 16px; color: var(--verde-escuro); }
+  .servicos-grade { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .servico { position: relative; background: var(--areia); border-radius: 14px; padding: 18px 14px; text-align: center; cursor: pointer; min-height: 132px; }
+  .servico svg { width: 40px; height: 40px; color: var(--verde); }
+  .servico .titulo { display: block; font-weight: 700; margin-top: 8px; }
+  .servico .sub { display: block; font-size: 13px; color: var(--cinza); }
+  .servico ul { display: none; position: absolute; left: 0; right: 0; top: 100%; z-index: 2; margin: 6px 0 0; padding: 10px 14px; list-style: none; text-align: left;
+    background: #fff; border: 1px solid #d6dcdf; border-radius: 12px; box-shadow: 0 10px 24px rgba(0,0,0,.12); }
+  .servico:hover ul { display: block; }
+  .servico ul a { display: block; padding: 5px 0; font-size: 14px; }
+  section.noticias { padding: 24px 24px 32px; }
+  .lista { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .noticia { border: 1px solid #e3e6e8; border-radius: 14px; overflow: hidden; }
+  .noticia .faixa-cor { height: 76px; }
+  .noticia .texto { padding: 12px 14px 14px; }
+  .noticia time { font-size: 12px; color: var(--cinza); }
+  .noticia h3 { font-size: 16px; margin: 4px 0 8px; }
+  footer { background: var(--verde-escuro); color: #d8ebe3; font-size: 14px; }
+  footer .conteudo { padding: 22px 24px; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header class="topo">
+  <div class="faixa"><div class="conteudo"><span>Prefeitura de Vila Aurora</span><span><a href="#transparencia">Transparência</a><a href="#ouvidoria">Ouvidoria</a><a href="#acessibilidade">Acessibilidade</a></span></div></div>
+  <div class="conteudo marca">
+    <img src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='52' height='52' viewBox='0 0 52 52'%3E%3Ccircle cx='26' cy='26' r='25' fill='%230f6b4f'/%3E%3Cpath d='M10 34 L26 14 L42 34 Z' fill='%23f7c948'/%3E%3Crect x='18' y='30' width='16' height='10' fill='%23ffffff'/%3E%3C/svg%3E" width="52" height="52">
+    <div class="nome">Prefeitura de Vila Aurora<small>Portal do cidadão</small></div>
+    <form class="busca" role="search" onsubmit="return false">
+      <input type="search" placeholder="O que você procura?">
+      <button type="submit"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></button>
+    </form>
+  </div>
+  <nav class="menu" aria-label="Principal"><ul>
+    <li><a href="#inicio">Início</a></li><li><a href="#cidade">A cidade</a></li><li><a href="#servicos">Serviços</a></li>
+    <li><a href="#noticias">Notícias</a></li><li><a href="#contato">Fale conosco</a></li>
+  </ul></nav>
+</header>
+<main id="inicio">
+  <section class="destaque"><div class="conteudo">
+    <div>
+      <h1>Matrículas da rede municipal abertas até 30 de novembro</h1>
+      <p class="aviso">Faça a matrícula pela internet ou em qualquer escola municipal, das 8h às 17h.</p>
+      <a class="botao" href="#matricula">Fazer matrícula</a>
+    </div>
+    <div class="ilustracao"></div>
+  </div></section>
+  <section class="conteudo servicos" id="servicos">
+    <h2>Serviços</h2>
+    <div class="servicos-grade">
+      <div class="servico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 5.5-7 10-7 10z"/></svg>
+        <span class="titulo">Saúde</span><span class="sub">Consultas e vacinas</span>
+        <ul><li><a href="#agendar">Agendar consulta</a></li><li><a href="#vacinas">Calendário de vacinas</a></li><li><a href="#ubs">Unidades de saúde</a></li></ul></div>
+      <div class="servico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8l9-4 9 4-9 4-9-4z"/><path d="M7 10v5c3 2 7 2 10 0v-5"/></svg>
+        <span class="titulo">Educação</span><span class="sub">Matrículas e escolas</span>
+        <ul><li><a href="#matricula">Matrícula on-line</a></li><li><a href="#escolas">Lista de escolas</a></li><li><a href="#transporte">Transporte escolar</a></li></ul></div>
+      <div class="servico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+        <span class="titulo">Tributos</span><span class="sub">IPTU e certidões</span>
+        <ul><li><a href="#iptu">Segunda via do IPTU</a></li><li><a href="#certidao">Certidão negativa</a></li><li><a href="#nota">Nota fiscal de serviço</a></li></ul></div>
+      <div class="servico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>
+        <span class="titulo">Ouvidoria</span><span class="sub">Reclamações e sugestões</span>
+        <ul><li><a href="#manifestacao">Registrar manifestação</a></li><li><a href="#protocolo">Consultar protocolo</a></li></ul></div>
+    </div>
+  </section>
+  <section class="conteudo noticias" id="noticias">
+    <h2>Notícias</h2>
+    <div class="lista">
+      <article class="noticia"><div class="faixa-cor" style="background:#cfe8dc"></div><div class="texto"><time datetime="2026-10-12">12 out. 2026</time><h3>Nova unidade de saúde abre no bairro Jardim das Flores</h3><a href="#n1">Leia mais</a></div></article>
+      <article class="noticia"><div class="faixa-cor" style="background:#f6e3b4"></div><div class="texto"><time datetime="2026-10-09">9 out. 2026</time><h3>Feira do produtor volta à praça central aos sábados</h3><a href="#n2">Leia mais</a></div></article>
+      <article class="noticia"><div class="faixa-cor" style="background:#d9e4f2"></div><div class="texto"><time datetime="2026-10-05">5 out. 2026</time><h3>IPTU 2027: desconto de 10% para pagamento à vista</h3><a href="#n3">Leia mais</a></div></article>
+    </div>
+  </section>
+</main>
+<footer><div class="conteudo"><span>Prefeitura de Vila Aurora · Praça da Matriz, 100 · Centro</span><span>Atendimento: (00) 0000-0000</span></div></footer>
+</body>
+</html>

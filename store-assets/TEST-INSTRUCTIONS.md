@@ -1,4 +1,4 @@
-# Instruções de teste — Audita Acessibilidade 1.1.58
+# Instruções de teste — Audita Acessibilidade 1.1.59
 
 ## Acesso
 
@@ -6,7 +6,7 @@ A extensão não exige conta, login, credencial, assinatura ou serviço externo.
 
 ## Instalação
 
-1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.58.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
+1. Na primeira instalação, descompacte `audita-acessibilidade-1.1.59.zip` em uma pasta própria. Para atualizar, exporte o que deseja guardar, substitua os arquivos na mesma pasta da instalação anterior e use **Recarregar**; não remova a extensão, pois isso pode apagar dados locais. Na instalação pela loja, esse procedimento manual não é necessário.
 2. Abra `chrome://extensions` no Chrome.
 3. Ative **Modo do desenvolvedor**.
 4. Selecione **Carregar sem compactação** e escolha a pasta descompactada, que contém `manifest.json`.
@@ -57,7 +57,7 @@ Compare o percurso observado com os controles identificados fora da sequência d
 
 A prévia de anúncio é uma estimativa explicativa baseada nas propriedades de acessibilidade. Ela não é uma transcrição literal de NVDA, JAWS, VoiceOver ou outro leitor de tela, nem substitui um teste com tecnologia assistiva real. A ordem estimada é uma referência do estado inspecionado; conteúdo dinâmico pode mudar a sequência efetiva.
 
-As imagens de referência deste percurso são `screenshot-tab-report.png`, `screenshot-tab-elements.png` e `screenshot-tab-highlight.png`, em `store-assets/`, todas de 1280×800 pixels. Elas mostram a execução real sobre uma página demonstrativa local; os valores de formulário visíveis na captura de destaque são fictícios.
+As capturas da loja (`screenshot-1-sinais.png` a `screenshot-5-relatorio.png`, em `store-assets/`, 1280×800) mostram a execução real sobre o portal fictício `store-assets/demo/vila-aurora.html`.
 
 ## Limites declarados
 
