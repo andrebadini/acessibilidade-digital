@@ -59,6 +59,31 @@ class FakeCdp {
       return { nodeIds };
     }
     if (method === 'Runtime.releaseObject' || method === 'Runtime.releaseObjectGroup') return {};
+    if (method === 'Runtime.getProperties') {
+      const objectIds = this.chainArrays.get(params.objectId);
+      if (!objectIds) throw new Error('arranjo de cadeias desconhecido');
+      return { result: objectIds.map((objectId, index) => ({
+        name: String(index),
+        enumerable: true,
+        value: objectId === null
+          ? { type: 'object', subtype: 'null', value: null }
+          : { type: 'object', subtype: 'node', objectId },
+      })) };
+    }
+    if (method === 'DOMDebugger.getEventListeners') {
+      const node = this.listenerNodes.get(params.objectId);
+      if (!node) throw new Error('objeto sem ouvintes registrados');
+      if (node.group?.listenerFailure === true) throw new Error('falha simulada em DOMDebugger.getEventListeners');
+      return { listeners: node.types.map(type => ({ type, useCapture: false })) };
+    }
+    if (method === 'Input.dispatchMouseEvent') {
+      this.pointerMoves.push({ x: params.x, y: params.y, type: params.type });
+      this.pointer = { x: params.x, y: params.y };
+      for (const group of this.page) {
+        if (this.#pointerOver(group)) this.pointerTouched.add(group.anchorPath.join('.'));
+      }
+      return {};
+    }
     if (method === 'CSS.forcePseudoState') {
       const previous = new Map(this.forced);
       this.forced.set(params.nodeId, [...params.forcedPseudoClasses]);
@@ -91,6 +116,30 @@ class FakeCdp {
 
   #byObjectId = new Map();
 
+  // Modelo dos ouvintes e do ponteiro: a cadeia de cada bloco é uma lista por nível — o nível sem
+  // nó não existe (posição nula no arranjo, como no Chrome), e o nível com lista vazia existe sem
+  // ouvinte. O ponteiro só "pousa" no bloco quando o cliente o move para o ponto declarado.
+  listenerNodes = new Map();
+
+  chainArrays = new Map();
+
+  pointerMoves = [];
+
+  pointer = null;
+
+  pointerTouched = new Set();
+
+  #chains = 0;
+
+  #groupFor(path) {
+    return this.page.find(group => group.anchorPath.join('.') === path.join('.')) ?? null;
+  }
+
+  #pointerOver(group) {
+    const point = group.pointerPoint ?? { x: 100, y: 100 };
+    return !!this.pointer && this.pointer.x === point.x && this.pointer.y === point.y;
+  }
+
   #entryForPath(path) {
     for (const group of this.page) {
       const anchor = `${group.anchorPath.join('.')}`;
@@ -110,6 +159,12 @@ class FakeCdp {
   #revealed(group, forced = this.forced) {
     const stateOf = nodeId => forced.get(nodeId) ?? [];
     if (group.alwaysVisible === true) return group.targetCount;
+    // Menu que abre por script: quem revela é o ponteiro de verdade sobre o bloco. `pointerSticky`
+    // modela o menu que não fecha quando o ponteiro sai — o caso em que a página não volta ao estado.
+    if (group.pointerReveals === true &&
+      (this.#pointerOver(group) || (group.pointerSticky === true && this.pointerTouched.has(group.anchorPath.join('.'))))) {
+      return group.targetCount;
+    }
     if (group.hoverReveals === false) return 0;
     const anchorForced = stateOf(group.nodeId);
     if (anchorForced.includes('hover')) return group.targetCount;
@@ -163,6 +218,42 @@ class FakeCdp {
         settleMs: reading.settleMs
       } } };
     }
+    if (expression.includes('collectHoverScriptChains')) {
+      const payload = JSON.parse(expression.slice(expression.lastIndexOf('})({') + 3, -1));
+      const objectIds = [];
+      for (const path of payload.paths) {
+        const group = this.#groupFor(path);
+        const chain = group?.chain ?? [[], [], [], []];
+        for (let depth = 0; depth <= payload.levels; depth += 1) {
+          const types = depth < chain.length ? chain[depth] : null;
+          if (!Array.isArray(types)) {
+            objectIds.push(null);
+            continue;
+          }
+          const objectId = `listeners-${path.join('.')}-${depth}`;
+          this.listenerNodes.set(objectId, { group, depth, types });
+          objectIds.push(objectId);
+        }
+      }
+      const arrayObjectId = `chains-${this.#chains}`;
+      this.#chains += 1;
+      this.chainArrays.set(arrayObjectId, objectIds);
+      return { result: { objectId: arrayObjectId } };
+    }
+    if (expression.includes('anchorPointerTarget')) {
+      const path = JSON.parse(/\((\[[^\]]*\])\)$/u.exec(expression)[1]);
+      const group = this.#groupFor(path);
+      if (!group || group.pointerGeometry === false) return { result: { value: null } };
+      const point = group.pointerPoint ?? { x: 100, y: 100 };
+      return { result: { value: {
+        ...point,
+        onTarget: group.pointerOnTarget !== false,
+        scrolled: group.pointerScrolled === true,
+        scrollX: 0,
+        scrollY: 0,
+      } } };
+    }
+    if (expression.includes('window.scrollTo')) return { result: { value: null } };
     const match = /const path = (\[[^\]]*\]);/u.exec(expression);
     const path = match ? JSON.parse(match[1]) : [];
     const entry = this.#entryForPath(path);
@@ -363,8 +454,122 @@ test('the probe limits stay explicit and bounded', () => {
     maxTargetsPerGroup: 20,
     maxCandidates: 20_000,
     maxSettleMs: 600,
-    deadlineMs: 20_000
+    deadlineMs: 20_000,
+    maxScriptGroups: 60,
+    scriptDeadlineMs: 6_000,
+    maxPointerGroups: 5,
+    maxPointerScrollSettleMs: 250
   });
+});
+
+test('a menu that only a script opens, with no keyboard path, becomes a human review', async () => {
+  const cdp = new FakeCdp(page({ hoverReveals: false, chain: [['mouseenter', 'mouseleave']] }));
+  const observation = await runHoverOnlyProbe(cdp);
+
+  assert.equal(observation.groups[0].outcome, 'cantTell');
+  assert.equal(observation.groups[0].hoverScript, true);
+  assert.equal(observation.groups[0].keyboardPath, false);
+  assert.equal(observation.status, 'complete');
+  // A leitura dos ouvintes é consulta, não é interação: nada de evento de ponteiro no modo passivo.
+  assert.equal(cdp.calls.includes('Input.dispatchMouseEvent'), false);
+  assert.deepEqual(cdp.leftoverForcedStates(), []);
+
+  const normalized = normalizeHoverOnlyProbe(observation);
+  assert.equal(normalized.groups[0].hoverScript, true);
+  assert.equal(normalized.groups[0].keyboardPath, false);
+  assert.equal(normalized.outcome, 'cantTell');
+});
+
+test('a keyboard listener on the block or on an ancestor keeps the script menu out of the report', async () => {
+  const withKeydown = new FakeCdp(page({
+    hoverReveals: false,
+    chain: [['mouseenter'], ['keydown'], []],
+  }));
+  const withFocus = new FakeCdp(page({ hoverReveals: false, chain: [['pointerenter', 'focusin']] }));
+
+  for (const cdp of [withKeydown, withFocus]) {
+    const observation = await runHoverOnlyProbe(cdp);
+    assert.equal(observation.groups[0].outcome, 'passed');
+    assert.equal(observation.groups[0].keyboardPath, true);
+    assert.equal(observation.groups[0].hoverScript, true);
+    assert.equal(observation.status, 'complete');
+  }
+});
+
+test('a visible focusable control inside the block skips the listener reading entirely', async () => {
+  const cdp = new FakeCdp(page({
+    hoverReveals: false,
+    selfFocusable: false,
+    focusPath: [1],
+    focusNodeId: 12,
+    focusBackendNodeId: 102,
+    chain: [['mouseenter']],
+  }));
+  const observation = await runHoverOnlyProbe(cdp);
+
+  assert.equal(observation.groups[0].outcome, 'passed');
+  assert.equal(cdp.calls.includes('DOMDebugger.getEventListeners'), false,
+    `com caminho de teclado conhecido não há o que perguntar: ${cdp.calls.join(',')}`);
+});
+
+test('with pointer interaction allowed, the script menu is confirmed as a failure', async () => {
+  const cdp = new FakeCdp(page({ hoverReveals: false, pointerReveals: true, chain: [['mouseenter']] }));
+  const observation = await runHoverOnlyProbe(cdp, { allowPointerInteraction: true });
+
+  assert.equal(observation.groups[0].outcome, 'failed');
+  assert.equal(observation.groups[0].revealedByPointer, 4);
+  assert.equal(observation.groups[0].revealedOnHover, 4);
+  assert.equal(observation.status, 'complete');
+  // Dois movimentos: um para cima do bloco e outro para fora, para a página voltar como estava.
+  const moves = cdp.pointerMoves.filter(move => move.type === 'mouseMoved');
+  assert.equal(moves.length, 2, `o ponteiro precisa entrar e sair: ${JSON.stringify(cdp.pointerMoves)}`);
+  assert.deepEqual(moves[1], { x: 1, y: 1, type: 'mouseMoved' });
+  assert.deepEqual(cdp.leftoverForcedStates(), []);
+});
+
+test('a real pointer that finds nothing keeps the script block as a pass', async () => {
+  const cdp = new FakeCdp(page({ hoverReveals: false, pointerReveals: false, chain: [['mouseenter']] }));
+  const observation = await runHoverOnlyProbe(cdp, { allowPointerInteraction: true });
+
+  assert.equal(observation.groups[0].outcome, 'passed');
+  assert.equal(observation.groups[0].hoverScript, true);
+  assert.equal(observation.status, 'complete');
+});
+
+test('a pointer that cannot land on the block leaves the doubt instead of confirming it', async () => {
+  const cdp = new FakeCdp(page({
+    hoverReveals: false, pointerReveals: true, pointerOnTarget: false, chain: [['mouseenter']],
+  }));
+  const observation = await runHoverOnlyProbe(cdp, { allowPointerInteraction: true });
+
+  assert.equal(observation.groups[0].outcome, 'cantTell');
+  assert.equal(observation.groups[0].revealedByPointer, 0);
+  assert.equal(cdp.pointerMoves.length, 0, 'sem ponto confiável, o ponteiro não se move');
+});
+
+test('a script menu that stays open after the pointer leaves is withheld from the report', async () => {
+  const cdp = new FakeCdp(page({
+    hoverReveals: false, pointerReveals: true, pointerSticky: true, chain: [['mouseenter']],
+  }));
+  const observation = await runHoverOnlyProbe(cdp, { allowPointerInteraction: true });
+
+  assert.equal(observation.groups[0].outcome, 'failed');
+  assert.equal(observation.groups[0].restored, false);
+  assert.equal(observation.withheldGroups, 1);
+  assert.equal(observation.status, 'incomplete');
+  assert.equal(observation.warnings.some(warning => warning.code === 'PROBE_FAILED'), true);
+});
+
+test('an unreadable listener list is never reported as a pass', async () => {
+  const cdp = new FakeCdp(page({ hoverReveals: false, listenerFailure: true, chain: [['mouseenter']] }));
+  const observation = await runHoverOnlyProbe(cdp);
+
+  assert.equal(observation.status, 'incomplete');
+  assert.equal(observation.warnings.some(warning => warning.code === 'PROBE_FAILED'), true);
+  // Sem leitura não há indício: o bloco fica sem conclusão, e a observação incompleta é o que a
+  // regra transforma em dúvida em vez de "nada encontrado".
+  assert.equal(observation.groups[0].hoverScript, false);
+  assert.equal(normalizeHoverOnlyProbe(observation).outcome, 'cantTell');
 });
 
 test('normalization drops unusable groups and keeps a confirmed failure even when truncated', () => {
@@ -381,7 +586,8 @@ test('normalization drops unusable groups and keeps a confirmed failure even whe
   assert.equal(truncated.outcome, 'failed');
   assert.equal(truncated.truncated, true);
   assert.deepEqual(truncated.groups, [{
-    nodeId: 'n-101', targetCount: 4, revealedOnHover: 4, focusableInside: false, unsettled: false, outcome: 'failed'
+    nodeId: 'n-101', targetCount: 4, revealedOnHover: 4, focusableInside: false, unsettled: false,
+    hoverScript: false, keyboardPath: false, outcome: 'failed'
   }]);
 
   const hostile = normalizeHoverOnlyProbe({

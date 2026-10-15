@@ -21,6 +21,12 @@ const OBSERVATION_ABSENT_SUMMARY =
   'A sondagem de conteúdo revelado apenas por hover não acompanha este snapshot.';
 const OBSERVATION_INCOMPLETE_SUMMARY =
   'A sondagem de conteúdo revelado apenas por hover não foi concluída para toda a página.';
+const SCRIPT_HOVER_SUMMARY =
+  'Há bloco cujo conteúdo interativo parece abrir por script quando o mouse passa por cima.';
+// Texto único deste motivo: o mesmo que o catálogo fechado de remediação registra para
+// `hover-script-no-keyboard-path`, para que o cartão do relatório diga exatamente o que a regra diz.
+const SCRIPT_HOVER_MESSAGE =
+  'Os links deste bloco parecem abrir por um script quando o mouse passa por cima, e não encontramos jeito de abri-los pelo teclado. Use a tecla Tab para conferir.';
 
 function unavailableTarget(document) {
   return documentTarget(
@@ -66,8 +72,16 @@ function hoverOnlyInteractiveContent(snapshot) {
   // Duas dúvidas diferentes: o bloco tem controle focável e o foco não revelou o conteúdo, ou a
   // medição não terminou (a abertura é animada e a transição passou do tempo de espera da sondagem).
   // A segunda não fala de controle nenhum, e o texto do relatório precisa dizer isso.
+  // Terceira dúvida: o bloco não revelou nada ao `:hover` forçado, mas tem ouvinte de mouse no
+  // próprio bloco ou nos ancestrais e nenhum caminho de teclado. O conteúdo pode abrir por script, e
+  // o que a sonda viu não decide isso sozinho — quem decide é a revisão humana, com o teclado na mão.
+  const scriptReviews = resolveNodes(nodes, groups.filter(group =>
+    REVIEW_OUTCOMES.has(group?.outcome) && group.unsettled !== true &&
+    group.hoverScript === true && group.keyboardPath !== true), unresolved);
+  const scriptReviewNodeIds = new Set(scriptReviews.map(({ node }) => String(node?.nodeId)));
   const reviews = resolveNodes(nodes, groups.filter(group =>
-    REVIEW_OUTCOMES.has(group?.outcome) && group.unsettled !== true), unresolved);
+    REVIEW_OUTCOMES.has(group?.outcome) && group.unsettled !== true &&
+    !scriptReviewNodeIds.has(String(group?.nodeId))), unresolved);
   const unsampled = resolveNodes(nodes, groups.filter(group =>
     REVIEW_OUTCOMES.has(group?.outcome) && group.unsettled === true), unresolved);
   // Um grupo apontado pela sondagem que não existe no snapshot não vira conclusão nenhuma: sem o
@@ -86,7 +100,7 @@ function hoverOnlyInteractiveContent(snapshot) {
       limitations: [],
     };
   }
-  if (reviews.length > 0 || unsampled.length > 0) {
+  if (reviews.length > 0 || unsampled.length > 0 || scriptReviews.length > 0) {
     return {
       outcome: 'cantTell',
       targets: orderTargets([
@@ -100,8 +114,15 @@ function hoverOnlyInteractiveContent(snapshot) {
           'Há um controle focável neste bloco, mas o conteúdo oculto não apareceu ao forçar o foco. Use TAB e Enter sem tocar no mouse para confirmar se o conteúdo é alcançável.',
           { reason: 'hover-only-keyboard-path-unconfirmed' },
         )),
+        ...scriptReviews.map(({ node }) => target(node, SCRIPT_HOVER_MESSAGE, {
+          reason: 'hover-script-no-keyboard-path',
+        })),
       ], nodes),
-      summary: OBSERVATION_INCOMPLETE_SUMMARY,
+      // O resumo do bloco que abre por script não é "a sondagem não terminou": a dúvida tem outro
+      // motivo, e o relatório precisa dizer qual é.
+      summary: reviews.length + unsampled.length === 0 && scriptReviews.length > 0
+        ? SCRIPT_HOVER_SUMMARY
+        : OBSERVATION_INCOMPLETE_SUMMARY,
       limitations: [],
     };
   }

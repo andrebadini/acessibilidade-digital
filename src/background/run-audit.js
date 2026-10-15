@@ -989,8 +989,12 @@ async function runLegacyAudit({
 
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
+    // A página atual é observada sem interação (promessa publicada de leitura); a página descartável
+    // aceita sondas que mexem nela. Uma única leitura da política, usada pelas sondas dinâmicas e
+    // pela sondagem de hover.
+    const passive = PASSIVE_ATTACHED_ADAPTERS.has(chromeAdapter);
+
     try {
-      const passive = PASSIVE_ATTACHED_ADAPTERS.has(chromeAdapter);
       const rawProbes = passive ? { targetSizes: state.snapshot.nodes.flatMap(node => {
         const rect = node.targetSizeRect;
         return rect ? [{ nodeId: node.nodeId, width: rect.width, height: rect.height, exception: 'unknown' }] : [];
@@ -1009,9 +1013,14 @@ async function runLegacyAudit({
 
     // Conteúdo interativo revelado apenas por hover (5.1.13 / WCAG 2.1.1). Roda em modo descartável e
     // também na página atual: `CSS.forcePseudoState` não dispara eventos nem executa JS do site, e o
-    // estado forçado é sempre desfeito antes da auditoria seguir — a página permanece como estava.
+    // estado forçado é sempre desfeito antes da auditoria seguir — a página permanece como estava. A
+    // única exceção é a confirmação de menu que abre por script com o ponteiro de verdade
+    // (`Input.dispatchMouseEvent`), e por isso ela só é autorizada quando a página é descartável:
+    // na página atual a promessa é de leitura, e ali o indício segue como revisão humana.
     try {
-      state.snapshot = await awaitStep(() => applyHoverOnlyProbe(state.snapshot, cdp, { signal }));
+      state.snapshot = await awaitStep(() => applyHoverOnlyProbe(state.snapshot, cdp, {
+        signal, allowPointerInteraction: !passive,
+      }));
       throwIfAborted(signal);
     } catch (error) {
       rethrowAbort(error, signal);

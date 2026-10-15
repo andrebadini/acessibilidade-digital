@@ -126,6 +126,33 @@ test('a block whose animated opening was not measured out is a doubt about the c
   assert.doesNotMatch(value.targets[0].message, /controle focável/u);
 });
 
+test('a block that seems to open by script, with no keyboard path, is a review with its own reason', async () => {
+  const value = await evaluate(snapshot([node('n-10')], observation({
+    examinedGroups: 1,
+    groups: [group('n-10', 'cantTell', {
+      focusableInside: false, revealedOnHover: 0, hoverScript: true, keyboardPath: false
+    })]
+  })));
+
+  assert.equal(value.outcome, 'cantTell');
+  assert.equal(value.targets.length, 1);
+  assert.equal(value.targets[0].nodeId, 'n-10');
+  assert.equal(value.targets[0].data.reason, 'hover-script-no-keyboard-path');
+  assert.match(value.targets[0].message, /script.*mouse.*teclado|script.*teclado/iu, value.targets[0].message);
+  assert.match(value.targets[0].message, /Tab/u);
+  assert.match(value.summary, /script/u);
+  // O mesmo bloco com caminho de teclado não é achado nenhum: a leitura dos ouvintes só tira a
+  // conclusão de conformidade quando o teclado também abre o conteúdo.
+  const reachable = await evaluate(snapshot([node('n-10')], observation({
+    examinedGroups: 1,
+    groups: [group('n-10', 'passed', {
+      focusableInside: false, revealedOnHover: 0, hoverScript: true, keyboardPath: true
+    })]
+  })));
+  assert.equal(reachable.outcome, 'passed');
+  assert.deepEqual(reachable.targets, []);
+});
+
 test('a doubt about the measurement does not hide a confirmed failure in the same page', async () => {
   const value = await evaluate(snapshot([node('n-8'), node('n-9')], observation({
     examinedGroups: 2,
@@ -191,6 +218,9 @@ test('every produced target stays inside the closed remediation catalog', async 
   const scenarios = [
     await evaluate(snapshot([node('n-42')], observation({ groups: [group('n-42', 'failed')] }))),
     await evaluate(snapshot([node('n-7')], observation({ groups: [group('n-7', 'cantTell')] }))),
+    await evaluate(snapshot([node('n-13')], observation({
+      groups: [group('n-13', 'cantTell', { focusableInside: false, revealedOnHover: 0, hoverScript: true })]
+    }))),
     await evaluate(snapshot([node('n-5')]))
   ];
 
