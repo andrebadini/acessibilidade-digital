@@ -4,6 +4,10 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.61 — um texto para citação por item da norma.** No relatório aberto pelo painel, quando um item da
+ABNT NBR 17225 tem várias constatações, o quadro oferece um só texto para copiar, citando todos os elementos; os
+relatórios exportados continuam com uma citação por elemento. Veja as [notas da 1.1.61](docs/releases/1.1.61.md).
+
 **Versão 1.1.60 — pendências da 1.1.59 resolvidas.** Áreas marcadas sobre o mapa do teclado (com mouse ou só com o
 teclado), menus que abrem por script ao passar o mouse, sinais de volta depois que a página se recarrega, impacto
 graduado em cada achado (Crítico, Alto, Moderado, Baixo), menos itens falsos no mapa do teclado, números que não cobrem

@@ -197,6 +197,10 @@ dialog:not([open]) { display: none; }
 [data-findings-item] h4 { margin: 0 0 .3rem; }
 [data-findings-item] ol { padding-left: 1.4rem; }
 .findings-citation { padding: .55rem .7rem; border-left: .3rem solid #003b71; background: #f7fafc; font-family: Georgia, serif; }
+/* Texto único do item: fica alinhado com o recuo da lista e separado dela por espaço próprio. */
+.findings-item-citation { margin: 1.1rem 0 0 1.4rem; }
+.findings-item-citation .findings-citation { margin: 0 0 .5rem; }
+.findings-citation-title { margin: 0 0 .35rem; font-weight: 700; }
 [data-findings-copy] { min-height: 44px; }
 @media (min-width: 48rem) { .findings-score { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 

@@ -1923,3 +1923,122 @@ test('a check with thousands of occurrences keeps a bounded number of technical 
   assert.deepEqual(omitted.sort(), [String(total - REPORT_VIEW_ISSUE_DETAIL_LIMIT), String(total - REPORT_VIEW_ISSUE_DETAIL_LIMIT)]);
   assert.match(article.textContent, /exportações JSON-LD\/EARL e CSV/u);
 });
+
+// Um mesmo requisito pode ser constatado em vários elementos. Na tela do "Abrir relatório completo" a
+// lista continua mostrando cada elemento, mas o texto para copiar é UM só, nomeando todos eles — as
+// exportações (HTML, PDF, CSV, JSON) seguem com uma citação por elemento.
+function boardEntryWithFourFindings(view) {
+  const entry = structuredClone(view.findingsBoard.groups.notMet[0]);
+  const base = entry.findings[0];
+  entry.findings = ['Saúde', 'Educação', 'Tributos', 'Ouvidoria'].map((name, index) => ({
+    ...structuredClone(base),
+    occurrenceId: `occ-cartao-${index + 1}`,
+    element: `bloco com o texto “${name}”`,
+    subject: `ao bloco com o texto “${name}”`,
+  }));
+  return entry;
+}
+
+function deepFreeze(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value) || Object.isFrozen(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
+
+async function boardView({ findings }) {
+  const { model, summary } = await fixture();
+  const view = structuredClone(buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash }));
+  if (findings) view.findingsBoard.groups.notMet = [boardEntryWithFourFindings(view)];
+  // A exportação só aceita a ReportViewV1 congelada, como o próprio buildReportView entrega.
+  return { model, summary, view: deepFreeze(view) };
+}
+
+async function clickCopy(button) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const copied = [];
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { clipboard: { writeText: async value => { copied.push(value); } } }, configurable: true, writable: true,
+  });
+  try {
+    button.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else delete globalThis.navigator;
+  }
+  return copied;
+}
+
+test('item com quatro constatações: um único texto para citação, abrangendo os quatro elementos', async () => {
+  const { view } = await boardView({ findings: true });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const article = root.querySelector('[data-findings-item="5.1.1"]');
+  const rows = article.querySelectorAll('[data-findings-occurrence]');
+  assert.equal(rows.length, 4, 'a lista continua mostrando cada elemento');
+  for (const row of rows) {
+    assert.match(row.textContent, /Elemento: bloco com o texto/u);
+    assert.match(row.textContent, /Constatação \(verificação automática\)/u);
+    assert.equal(row.querySelectorAll('[data-findings-citation]').length, 0, 'o parágrafo por elemento sai de cena');
+    assert.equal(row.querySelectorAll('[data-findings-copy]').length, 0, 'o botão por elemento sai de cena');
+  }
+  const citations = article.querySelectorAll('[data-findings-citation]');
+  assert.equal(citations.length, 1);
+  assert.equal(citations[0].getAttribute('data-findings-citation-scope'), 'item');
+  const copyButtons = article.querySelectorAll('[data-findings-copy]');
+  assert.equal(copyButtons.length, 1);
+  const block = article.querySelector('[data-findings-citation-block="item"]');
+  assert.ok(block, 'o texto único vive num bloco próprio, depois da lista');
+  assert.equal(block.querySelector('[data-findings-citation]'), citations[0]);
+  assert.equal(block.querySelector('[data-findings-copy]'), copyButtons[0]);
+  assert.ok(article.textContent.includes('Texto para citação (abrange os 4 elementos acima)'));
+  for (const name of ['Saúde', 'Educação', 'Tributos', 'Ouvidoria']) assert.ok(citations[0].textContent.includes(`“${name}”`), name);
+  assert.match(citations[0].textContent, /foram constatadas 4 ocorrências em desacordo com o item 5\.1\.1 \(Indicador de foco visível, requisito\) da ABNT NBR 17225:2025/u);
+  assert.equal((citations[0].textContent.match(/verificação automática da ferramenta Audita Acessibilidade/gu) ?? []).length, 1);
+  // O botão único copia exatamente o texto consolidado que aparece na tela.
+  const copied = await clickCopy(copyButtons[0]);
+  assert.deepEqual(copied, [citations[0].textContent]);
+  assert.equal(copyButtons[0].textContent, 'Texto copiado');
+});
+
+test('item com uma constatação só: nada muda na tela do relatório', async () => {
+  const { view } = await boardView({ findings: false });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const article = root.querySelector('[data-findings-item="5.1.1"]');
+  assert.equal(article.querySelectorAll('[data-findings-occurrence]').length, 1);
+  const citations = article.querySelectorAll('[data-findings-citation]');
+  assert.equal(citations.length, 1);
+  assert.equal(citations[0].getAttribute('data-findings-citation-scope'), null, 'sem consolidação o parágrafo é o de sempre');
+  assert.equal(citations[0].getAttribute('data-findings-citation-block'), null);
+  const row = article.querySelector('[data-findings-occurrence]');
+  assert.equal(row.querySelectorAll('[data-findings-citation]').length, 1, 'a citação continua dentro do item da lista');
+  const copy = row.querySelectorAll('[data-findings-copy]');
+  assert.equal(copy.length, 1);
+  assert.equal(copy[0].textContent, 'Copiar texto para citação');
+  assert.equal(copy[0].getAttribute('data-findings-citation-block'), null);
+  assert.equal((article.textContent.match(/Texto para citação \(abrange/gu) ?? []).length, 0);
+  const copied = await clickCopy(copy[0]);
+  assert.deepEqual(copied, [citations[0].textContent]);
+});
+
+test('a exportação entregue mantém uma citação por elemento, sem o texto consolidado', async () => {
+  const { model, summary, view } = await boardView({ findings: true });
+  for (const forPrint of [false, true]) {
+    const html = renderHtmlReport(model, { reportView: view, forPrint });
+    assert.equal((html.match(/data-findings-occurrence=/gu) ?? []).length, 4, `forPrint=${forPrint}`);
+    assert.equal((html.match(/data-findings-citation[\s>]/gu) ?? []).length, 4, `forPrint=${forPrint}`);
+    assert.doesNotMatch(html, /data-findings-citation-scope/u);
+    assert.doesNotMatch(html, /Texto para citação \(abrange/u);
+    assert.doesNotMatch(html, /foram constatadas 4 ocorrências/u);
+  }
+  // Cada constatação exportada continua sendo o texto por elemento que o quadro já produzia.
+  const entry = view.findingsBoard.groups.notMet[0];
+  const html = renderHtmlReport(model, { reportView: view });
+  for (const finding of entry.findings) {
+    assert.ok(html.includes(escapeForAssertion(finding.citation)), finding.occurrenceId);
+  }
+});
+
+function escapeForAssertion(value) {
+  return value.replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;');
+}
