@@ -10,6 +10,7 @@ import { REPORT_CSS, REPORT_CSS_CSP_HASH } from './report.css.js';
 import { REPORT_SCRIPT, REPORT_SCRIPT_CSP_HASH } from './report.js.js';
 import { REPORT_VIEW_SCRIPT, REPORT_VIEW_SCRIPT_CSP_HASH } from './report-view-script.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from './evidence-treatment.js';
+import { IMPACT_LABELS, impactText } from './impact-labels.js';
 import {
   EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
   EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND,
@@ -46,9 +47,7 @@ const CLASSIFICATION = Object.freeze({
   editorial: 'Alerta editorial',
 });
 
-const IMPACT = Object.freeze({
-  critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Menor',
-});
+const IMPACT = IMPACT_LABELS;
 
 const PAGE_STATUS = Object.freeze({
   complete: 'Completa', partial: 'Parcial', failed: 'Falhou', cancelled: 'Cancelada',
@@ -189,7 +188,7 @@ function renderReportViewDocument(model, view, options = {}) {
   const evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) => [evidence.evidenceId, `report-evidence-${index + 1}`]));
   const groupLabels = Object.freeze({ failed: 'Não conformidades', alerts: 'Recomendações e alertas', humanReview: 'Suspeitas a confirmar', passed: 'Resultados positivos' });
   const outcomeLabels = Object.freeze({ failed: 'Não atendido neste teste', passed: 'Atendido no escopo observado', cantTell: 'Requer revisão humana', inapplicable: 'Não aplicável', untested: 'Não testado' });
-  const impactLabels = Object.freeze({ critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Menor' });
+  const impactLabels = IMPACT_LABELS;
   const statusLabels = Object.freeze({ pending: 'Pendente', complete: 'Concluída', partial: 'Concluída com limitações', cancelled: 'Cancelada', failed: 'Falhou' });
   const classificationLabels = Object.freeze({ failed: 'Não conformidade identificada', alerts: 'Alerta', 'manual-review': 'Revisão humana necessária', passed: 'Resultado positivo', requirement: 'Requisito ABNT', recommendation: 'Recomendação ABNT', 'best-practice': 'Boa prática suplementar', editorial: 'Alerta editorial' });
   const evidenceKindLabels = Object.freeze({
@@ -267,7 +266,7 @@ function renderReportViewDocument(model, view, options = {}) {
     const evidenceLink = firstAnchor
       ? `<a data-report-consult-evidence href="#${firstAnchor}">Consultar evidências registradas</a>`
       : '<p>Nenhuma evidência correlata foi registrada para esta verificação.</p>';
-    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(reportWcagLevels(issue.wcag).join(' '))}" data-abnt="${escapeHtml(reportAbntFilterToken(issue.abntItemIds))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Resultado neste item:</strong> ${escapeHtml(label(presentation.outcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(presentation.classifications.map(value => label(value, classificationLabels)).join(', '))}. <strong>Impacto:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header><details data-report-issue-details><summary>Entender o resultado, revisar e consultar evidências</summary>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(guidance.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<p>${escapeHtml(guidance.observed)}</p>${labelComparisons}`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(guidance.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(reportAbntItemsLabel(issue.abntItemIds))}.</p>`)}${evidencePreview(evidence, issue)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}<ol>${guidance.reviewSteps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><p>${escapeHtml(guidance.example)}</p>${technicalDetails(issue, evidence)}</details></article>`;
+    return `<article class="occurrence-card" data-report-issue data-result="${escapeHtml(group)}" data-classification="${escapeHtml(issue.classification)}" data-page="${escapeHtml(issue.pageId)}" data-engine="${escapeHtml(issue.engine)}" data-impact="${escapeHtml(issue.impact ?? 'none')}" data-wcag="${escapeHtml(reportWcagLevels(issue.wcag).join(' '))}" data-abnt="${escapeHtml(reportAbntFilterToken(issue.abntItemIds))}"><header data-report-issue-heading><h3>${escapeHtml(issue.title)}</h3><p><strong>Resultado neste item:</strong> ${escapeHtml(label(presentation.outcome, outcomeLabels))}.</p><p><strong>Classificação:</strong> ${escapeHtml(presentation.classifications.map(value => label(value, classificationLabels)).join(', '))}. <strong>${presentation.outcome === 'cantTell' ? 'Impacto se confirmado' : 'Impacto'}:</strong> ${escapeHtml(label(issue.impact, impactLabels, 'Não aplicável'))}.</p></header><details data-report-issue-details><summary>Entender o resultado, revisar e consultar evidências</summary>${plainBlock('impact', 'Impacto para a pessoa usuária', `<p>${escapeHtml(guidance.impact)}</p>`)}${plainBlock('observed', 'O que foi observado', `<p>${escapeHtml(guidance.observed)}</p>${labelComparisons}`)}${plainBlock('correction', correctionPresentation.title, `<p><strong>Correção:</strong> ${escapeHtml(guidance.correction)}</p><p><strong>Confirmação:</strong> ${escapeHtml(correctionPresentation.confirmation)}</p>`)}${plainBlock('announcement', 'Nome acessível e anúncio estimado', `<p><strong>Nome acessível:</strong> ${escapeHtml(issue.accessibleName ?? 'não disponível')}.</p><p><strong>Anúncio estimado:</strong> ${escapeHtml(issue.announcement ?? 'indisponível')}.</p><p>Esta prévia não é transcrição literal de tecnologia assistiva e pode variar conforme o leitor e as preferências.</p>`)}${plainBlock('normative', 'Fundamentação normativa', `<p><strong>WCAG 2.2:</strong> ${escapeHtml(issue.wcag.join(', ') || 'sem referência')}. <strong>ABNT NBR 17225:</strong> ${escapeHtml(reportAbntItemsLabel(issue.abntItemIds))}.</p>`)}${evidencePreview(evidence, issue)}<p data-report-live-action="evidence-only">O destaque ao vivo não está disponível neste relatório. Consulte as capturas registradas no momento da auditoria.</p>${evidenceLink}<ol>${guidance.reviewSteps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol><p>${escapeHtml(guidance.example)}</p>${technicalDetails(issue, evidence)}</details></article>`;
   };
   const groupedChecks = new Map();
   for (const group of ['failed', 'alerts', 'humanReview', 'passed']) {
@@ -564,7 +563,7 @@ function occurrenceCard(occurrence, index, context) {
 
   return `<article id="${anchor}" class="occurrence-card" data-occurrence-card data-occurrence-id="${escapeHtml(occurrence.occurrenceId)}" data-impact="${escapeHtml(occurrence.impact)}" data-wcag-levels="${escapeHtml(wcagLevels)}" data-outcome="${escapeHtml(occurrence.outcome)}" data-display-outcome="${escapeHtml(consolidated)}" data-classification="${escapeHtml(occurrence.classification)}" data-page="${escapeHtml(occurrence.pageId)}" data-engine="${escapeHtml(occurrence.source.engine)}" data-abnt-item="${escapeHtml(abntToken)}" aria-labelledby="${anchor}-titulo">
 <div class="occurrence-heading"><h3 id="${anchor}-titulo">${escapeHtml(title)}</h3>${statusMarkup(consolidated)}</div>
-<div class="chip-row">${impactMarkup(occurrence.impact)}${classificationMarkup(occurrence.classification)}</div>
+<div class="chip-row">${impactMarkup(occurrence.impact, consolidated === 'cantTell', occurrence.classification === 'passed' || consolidated === 'passed')}${classificationMarkup(occurrence.classification)}</div>
 <p><strong>Página:</strong> ${escapeHtml(occurrence.pageId)} — ${pageStatus(page.status)}. <strong>Observada até:</strong> ${escapeHtml(page.timestamps.endedAt)}.</p>
 <div class="decision-strip"><p>Resultado do motor: ${escapeHtml(outcomeLabel(occurrence.outcome))}</p><p>Decisão humana: ${escapeHtml(decisionLabel)}</p><p>Estado consolidado: ${escapeHtml(outcomeLabel(consolidated))}</p></div>
 <div class="observed"><h4>O que foi observado</h4><p>${escapeHtml(occurrence.justification || rule?.summary || 'O motor registrou esta ocorrência sem descrição adicional.')}</p>${labelComparisonsHtml(item?.id, evidence)}</div>
@@ -855,8 +854,9 @@ function statusMarkup(outcome) {
   return `<span class="status status--${escapeHtml(outcome)}"><span aria-hidden="true">${status.icon}</span><span>${status.label}</span></span>`;
 }
 
-function impactMarkup(impact) {
-  return `<span class="chip"><span aria-hidden="true">◆</span><span>Impacto ${escapeHtml(IMPACT[impact] || impact)}</span></span>`;
+function impactMarkup(impact, pendingConfirmation = false, positive = false) {
+  const text = impactText(impact, pendingConfirmation, { positive }) ?? (positive || !impact ? 'Impacto não aplicável' : `Impacto ${impact}`);
+  return `<span class="chip"><span aria-hidden="true">◆</span><span>${escapeHtml(text)}</span></span>`;
 }
 
 function classificationMarkup(classification) {
