@@ -275,6 +275,64 @@ test('sem ocorrências não quebra e a lista segue estável entre execuções', 
   assert.deepEqual(first, second);
 });
 
+test('imagem ou ícone dentro de link ou botão não é item sem caixa', () => {
+  // Medido na página real de uma loja on-line: seis fotos de produto apareciam como "parece clicável
+  // e o Tab não alcança" só porque a própria foto declara a seta de clique. Quem clica na foto segue o
+  // link dono dela, e o Tab chega nesse link — o item não está sem caixa.
+  const result = selectKeyboardMapStops(snapshot([
+    { nodeId: 'card-link', tagName: 'a', attributes: { href: '/produto' }, rect: rect(10, 120), children: ['photo', 'badge'] },
+    { nodeId: 'photo', parentId: 'card-link', tagName: 'img', attributes: { alt: 'Foto do produto' }, styles: { cursor: 'pointer' }, accessibleName: 'Foto do produto', axRole: 'image', rect: rect(10, 100) },
+    { nodeId: 'badge', parentId: 'card-link', tagName: 'span', styles: { cursor: 'pointer' }, accessibleName: 'Novo', axRole: 'generic', rect: rect(20, 20) },
+    { nodeId: 'icon-button', tagName: 'button', accessibleName: 'Buscar', axRole: 'button', rect: rect(200), children: ['icon'] },
+    { nodeId: 'icon', parentId: 'icon-button', tagName: 'svg', styles: { cursor: 'pointer' }, accessibleName: 'Lupa', axRole: 'image', rect: rect(200) },
+    { nodeId: 'solto', tagName: 'img', attributes: { alt: 'Banner que só abre com o mouse' }, styles: { cursor: 'pointer' }, accessibleName: 'Banner que só abre com o mouse', axRole: 'image', rect: rect(400) },
+  ]), { occurrences: [] });
+
+  assert.deepEqual(result.suspects.map(entry => entry.nodeId), ['solto']);
+  assert.deepEqual(result.stops.map(stop => stop.nodeId), ['card-link', 'icon-button']);
+});
+
+test('fotos dentro de links não enchem o teto e os itens de verdade continuam na lista', () => {
+  // Página de catálogo como as de loja on-line: dezenas de fotos de produto, cada uma com a seta de
+  // clique dentro do próprio link. Antes da dispensa, cada foto consumia uma vaga do teto de 60 e os
+  // quatro itens de verdade ficavam escondidos atrás do ruído (ou fora da lista, pelo limite).
+  const nodes = [];
+  for (let index = 0; index < 99; index += 1) {
+    nodes.push({ nodeId: `link-${index}`, tagName: 'a', attributes: { href: `/produto-${index}` }, rect: rect(index * 4, 40) });
+    nodes.push({
+      nodeId: `foto-${index}`, parentId: `link-${index}`, tagName: 'img', attributes: { alt: `Foto do produto ${index}` },
+      styles: { cursor: 'pointer' }, accessibleName: `Foto do produto ${index}`, axRole: 'image', rect: rect(index * 4, 40),
+    });
+  }
+  const occurrences = [];
+  for (let index = 0; index < 4; index += 1) {
+    nodes.push({
+      nodeId: `cartao-${index}`, tagName: 'div', styles: { cursor: 'pointer' },
+      accessibleName: `Serviço ${index}`, axRole: 'generic', rect: rect(100000 + index * 40),
+    });
+    occurrences.push({ ruleId: 'hover-only-interactive-content', nodeId: `cartao-${index}`, outcome: 'failed' });
+  }
+  const result = selectKeyboardMapStops(snapshot(nodes), { occurrences });
+
+  assert.deepEqual(result.suspects.map(entry => entry.nodeId), ['cartao-0', 'cartao-1', 'cartao-2', 'cartao-3']);
+  assert.equal(result.limitations.includes('suspect-limit-reached'), false);
+  assert.equal(result.counts.omittedLimit, 0);
+  assert.equal(result.stops.length, 99, 'cada link do catálogo continua sendo uma parada do Tab');
+});
+
+test('item com ocorrência de regra continua apontado mesmo dentro de uma parada do Tab', () => {
+  // A dispensa acima vale só para o desenho com seta de clique: um item que a verificação de teclado
+  // confirmou como inalcançável continua sendo um achado, mesmo aninhado em outra parada.
+  const result = selectKeyboardMapStops(snapshot([
+    { nodeId: 'wrapper-link', tagName: 'a', attributes: { href: '/servico' }, rect: rect(10, 120), children: ['only-hover'] },
+    { nodeId: 'only-hover', parentId: 'wrapper-link', tagName: 'span', styles: { cursor: 'pointer' }, accessibleName: 'Abrir opções', axRole: 'generic', rect: rect(20, 30) },
+  ]), { occurrences: [{ ruleId: 'hover-only-interactive-content', nodeId: 'only-hover', outcome: 'failed' }] });
+
+  assert.deepEqual(result.suspects.map(entry => [entry.nodeId, entry.reason]), [
+    ['only-hover', 'keyboard-rule'],
+  ]);
+});
+
 test('o texto de dentro de um cartão apontado não vira outro item (cursor herdado)', () => {
   // Medido nas capturas da loja: com `cursor: pointer` no cartão, o título e o subtítulo herdavam o
   // cursor e cada cartão aparecia três vezes na lista do que o Tab não alcança.

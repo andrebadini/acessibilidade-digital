@@ -19,6 +19,8 @@ const chromeBinary = resolveRealChromeTestBinary();
 const privateMarker = 'KEYBOARD-MAP-PRIVATE-731905';
 const strictCsp = "default-src 'none'; script-src 'none'; style-src 'self'; img-src 'self' data:; frame-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; report-uri /csp-report";
 const CARD_LABELS = ['Consultar processo', 'Emitir segunda via', 'Agendar atendimento', 'Registrar pedido'];
+// Itens com seta de clique que estão DENTRO de um link ou botão: o Tab chega no dono deles.
+const FALSO_POSITIVO_LABELS = ['Foto do produto em oferta', 'Foto do segundo produto', 'Filtros'];
 
 test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caixa numerada', { timeout: 300_000 }, async t => {
   assert.ok(chromeBinary, 'AUDITA_E2E_CHROME ou CHROME_BIN é obrigatório para o E2E real do mapa do teclado.');
@@ -112,6 +114,16 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.ok(live.suspects.every(entry =>
     /mostra a seta de clique e mesmo assim não recebe o Tab|abre opções só quando o mouse passa por cima/u.test(entry)),
   JSON.stringify(live.suspects));
+
+  // Falsos positivos medidos em sites reais: a foto do produto e o ícone com seta de clique que estão
+  // DENTRO de um link ou botão. O Tab chega no dono deles, então eles não entram na lista — e o link
+  // dono continua sendo parada do Tab.
+  for (const falso of FALSO_POSITIVO_LABELS) {
+    assert.equal(live.suspects.some(entry => entry.includes(falso)), false,
+      `"${falso}" está dentro de um item alcançável pelo Tab e não pode aparecer entre os itens sem caixa: ${JSON.stringify(live.suspects)}`);
+  }
+  assert.equal(live.stops.filter(entry => entry.includes('Foto do produto em oferta')).length, 1,
+    `o link que contém a foto precisa ser parada do Tab: ${JSON.stringify(live.stops)}`);
   t.diagnostic(`keyboard-map live: stops=${live.stops.length}; suspects=${live.suspects.length}; counts=${live.counts}`);
 
   await extension.evaluate(report, `document.querySelector('[data-keyboard-map-page="page-1"]').scrollIntoView({ behavior: 'instant', block: 'start' })`);
@@ -199,6 +211,12 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.equal(map.stops.some(stop => stop.tabIndex < 0), false, 'tabindex negativo não é parada do Tab');
   assert.equal(map.stops.some(stop => /Campo desativado/u.test(stop.name ?? '')), false, 'campo desativado não é parada do Tab');
   assert.equal(JSON.stringify(map).includes('Botão fora da ordem do Tab'), false);
+  // O nome do link dono (que vem do alt da foto) aparece legitimamente entre as PARADAS; o que não
+  // pode existir é o item de dentro entrando na lista de suspeitos.
+  for (const falso of FALSO_POSITIVO_LABELS) {
+    assert.equal(map.suspects.some(suspect => (suspect.name ?? '').includes(falso)), false,
+      `"${falso}" está dentro de um item alcançável pelo Tab e não pode entrar nos suspeitos: ${JSON.stringify(map.suspects)}`);
+  }
   assert.equal(JSON.stringify(map).includes('Link em bloco escondido'), false);
   assert.equal(JSON.stringify(map).includes('Link decorativo'), false);
   t.diagnostic(`keyboard-map artifact: stops=${map.stops.length}; suspects=${map.suspects.length}; limitations=${map.limitations.join(',')}`);

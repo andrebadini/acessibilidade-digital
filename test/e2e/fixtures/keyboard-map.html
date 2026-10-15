@@ -55,6 +55,23 @@
         <summary>Ver mais serviços</summary>
         <p>Mais serviços aparecem nesta lista.</p>
       </details>
+      <!-- Caso falso medido numa loja on-line real: a foto do produto declara a seta de clique, mas
+           quem recebe o Tab é o link que a contém — clicar na foto segue esse link. Sem a dispensa do
+           que está dentro de uma parada, cada foto entrava na lista de itens sem caixa. -->
+      <ul class="catalog">
+        <li>
+          <a class="catalog-link" href="#foto-produto">
+            <img class="catalog-photo" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="120" height="80" alt="Foto do produto em oferta">
+          </a>
+        </li>
+        <li>
+          <a class="catalog-link" href="#foto-produto-dois">
+            <img class="catalog-photo" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" width="120" height="80" alt="Foto do segundo produto">
+          </a>
+        </li>
+      </ul>
+      <!-- O ícone com seta de clique dentro do botão também é alcançado pelo Tab, que chega no botão. -->
+      <button type="button" class="catalog-button">Abrir filtros <span class="catalog-icon">Filtros</span></button>
       <div class="counter" tabindex="0">Contador com foco próprio: 3</div>
       <a href="#rodape" tabindex="3">Link com ordem de foco declarada</a>
       <button type="button" tabindex="-1">Botão fora da ordem do Tab</button>

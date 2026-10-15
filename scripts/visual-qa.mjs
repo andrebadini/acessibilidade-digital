@@ -933,6 +933,90 @@ function describeFindings(panel) {
   };
 }
 
+// A lista de suspeitos do mapa do teclado como o relatório a guardou, não como ela aparece na tela:
+// nome, motivo e a tag do elemento são o que permite classificar à mão cada suspeito em verdadeiro ou
+// falso positivo. A página do relatório é uma página da própria extensão, então ela mesma consegue
+// abrir o armazenamento e devolver o artefato do mapa.
+function keyboardSuspectsExpression(auditId) {
+  return `import(chrome.runtime.getURL('/src/storage/audit-store.js')).then(module =>
+    module.createAuditStore().getReportRevision(${JSON.stringify(auditId)})).then(revision => {
+    const artifact = (revision?.model?.evidence ?? []).find(item => item.kind === 'keyboard-map');
+    if (!artifact) return { present: false, suspects: [] };
+    return { present: true, status: artifact.status ?? null,
+      counts: artifact.counts ?? null, limitations: artifact.limitations ?? [],
+      suspects: (artifact.suspects ?? []).map(entry => ({ number: entry.number,
+        nodeId: entry.nodeId, tag: entry.tag, role: entry.role, reason: entry.reason,
+        ruleId: entry.ruleId, name: entry.name, nameSource: entry.nameSource,
+        nameStatus: entry.nameStatus, bounds: entry.bounds })) };
+  })`;
+}
+
+/**
+ * Cadeia de ancestrais de cada suspeito, medida na própria página auditada.
+ *
+ * O artefato do mapa guarda só o retângulo, a tag e o motivo de cada suspeito; para classificar à mão
+ * um item em verdadeiro ou falso positivo falta saber o que está em volta dele — se está dentro de um
+ * link, se um contêiner grande declara a seta de clique, se o Texto que o nomeia é do próprio item.
+ * O retângulo do artefato está em coordenadas de documento (o mesmo espaço do DOMSnapshot), então o
+ * elemento é encontrado comparando `getBoundingClientRect()` mais a rolagem.
+ */
+function suspectContextExpression(suspects) {
+  const wanted = (Array.isArray(suspects) ? suspects : []).map(entry => ({
+    number: entry.number, tag: entry.tag, bounds: entry.bounds,
+  }));
+  return `(() => {
+    const wanted = ${JSON.stringify(wanted)};
+    const TABBABLE = 'a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]';
+    const describe = element => {
+      if (!element || element === document.documentElement) return null;
+      const style = getComputedStyle(element);
+      return {
+        tag: element.tagName.toLowerCase(),
+        href: element.getAttribute('href'),
+        tabindex: element.getAttribute('tabindex'),
+        role: element.getAttribute('role'),
+        cursor: style.cursor,
+        display: style.display,
+        texto: (element.textContent || '').replace(/\\s+/gu, ' ').trim().slice(0, 60),
+      };
+    };
+    const elements = [...document.querySelectorAll('body *')];
+    const place = element => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.left + scrollX, y: rect.top + scrollY, width: rect.width, height: rect.height };
+    };
+    return wanted.map(entry => {
+      const box = entry.bounds;
+      if (!box) return { number: entry.number, encontrado: false };
+      const sameBox = elements.filter(element => {
+        const rect = place(element);
+        return Math.abs(rect.x - box.x) <= 1.5 && Math.abs(rect.y - box.y) <= 1.5 &&
+          Math.abs(rect.width - box.width) <= 1.5 && Math.abs(rect.height - box.height) <= 1.5;
+      });
+      // Vários elementos dividem o mesmo retângulo (o link e a imagem de dentro dele, por exemplo):
+      // o suspeito é o que casa também a tag registrada pelo mapa.
+      const node = sameBox.find(element => element.tagName.toLowerCase() === entry.tag) ?? sameBox[0] ?? null;
+      const ancestors = [];
+      for (let current = node?.parentElement; current && ancestors.length < 8; current = current.parentElement) {
+        const described = describe(current);
+        if (described) ancestors.push(described);
+        if (described?.tag === 'body') break;
+      }
+      // Quem responde à pergunta do mapa: existe alguma parada do Tab acima do item?
+      const ancestralParada = node?.parentElement
+        ? node.parentElement.closest(TABBABLE) : null;
+      return {
+        number: entry.number,
+        encontrado: Boolean(node),
+        mesmaCaixa: sameBox.map(element => element.tagName.toLowerCase()),
+        proprio: describe(node),
+        ancestralParada: describe(ancestralParada),
+        pais: ancestors,
+      };
+    });
+  })()`;
+}
+
 async function captureReport({ launch, panel, page, directory, attempt, shot }) {
   const report = { opened: false, screenshots: [], evidenceFigures: 0, evidenceCaptured: 0 };
   const opened = await attempt('abrir-relatorio', async () => {
@@ -1010,6 +1094,21 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
     const saved = await attempt('captura:09-mapa-teclado.png', () => captureElementClip(target, directory, '09-mapa-teclado.png',
       'article.keyboard-map-card', 0, { maxHeight: 1_400 }));
     if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
+  }
+  // A lista de suspeitos em JSON: é ela que a revisão humana classifica em verdadeiro ou falso
+  // positivo, porque a captura sozinha não diz a tag nem o motivo de cada item laranja.
+  if (keyboard.value?.present) {
+    const auditId = await readAuditId(panel);
+    const listed = await attempt('ler-suspeitos-teclado', () => evaluate(target,
+      keyboardSuspectsExpression(auditId), { awaitPromise: true }));
+    report.keyboardSuspects = listed.value ?? null;
+    // A classificação manual de cada suspeito precisa do que está em volta dele na página.
+    const suspects = listed.value?.suspects ?? [];
+    if (suspects.length > 0) {
+      const context = await attempt('contexto-dos-suspeitos', () => evaluate(page,
+        suspectContextExpression(suspects)));
+      report.keyboardSuspectContext = context.value ?? null;
+    }
   }
   return report;
 }
@@ -1154,6 +1253,18 @@ function printPageSummary(summary) {
       `(${summary.report.evidenceVisibleBefore ?? 0} visíveis antes de abrir as seções), ` +
       `${summary.report.evidenceCaptured} capturada(s)` +
       (summary.report.map?.present ? `, mapa: ${(summary.report.map.statuses ?? []).join('/')}` : ', mapa: ausente'));
+  }
+  if (summary.report?.keyboardSuspects?.present) {
+    // A lista crua, uma linha por item: é o que a revisão humana classifica em verdadeiro ou falso.
+    const suspects = summary.report.keyboardSuspects.suspects ?? [];
+    lines.push(`  suspeitos do mapa do teclado: ${suspects.length}`);
+    for (const suspect of suspects) {
+      lines.push(`    ${suspect.number}. <${suspect.tag}> papel=${suspect.role || '—'} motivo=${suspect.reason}` +
+        `${suspect.ruleId ? ` regra=${suspect.ruleId}` : ''} nome="${(suspect.name ?? '').slice(0, 80)}"` +
+        `${suspect.nameStatus === 'omitted-privacy' ? ' (nome omitido)' : ''}`);
+    }
+  } else if (summary.report?.keyboardSuspects?.present === false) {
+    lines.push('  suspeitos do mapa do teclado: mapa ausente no artefato');
   }
   if (Array.isArray(summary.highlight) && summary.highlight.length > 0) {
     lines.push(`  ATENÇÃO: ${summary.highlight.length} destaque(s) ficaram na página depois das capturas`);
