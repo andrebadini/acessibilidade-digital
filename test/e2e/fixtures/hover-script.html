@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Menus que abrem por script</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; }
+  h1 { font-size: 24px; }
+  .row { display: flex; flex-wrap: wrap; gap: 16px; padding: 0; list-style: none; }
+  .card { border: 1px solid #767676; border-radius: 8px; padding: 12px; width: 220px; background: #fff; }
+  .card__title { display: block; font-weight: 700; margin-bottom: 8px; }
+  .card ul { display: none; margin: 8px 0 0; padding-left: 20px; }
+  .card a, .card button { font-size: 16px; }
+
+  /* Cartão de script: quem revela a lista é o JavaScript, não o motor de estilo. Nenhuma regra
+     `:hover` existe aqui, e o cartão não é focável nem tem controle focável visível dentro. */
+  .card.is-open ul { display: block; }
+
+  /* Cartão de CSS: o caso que a sondagem por pseudo-classe já cobre — e que agora serve de controle,
+     porque o teclado também o abre. Sem animação de propósito: o teste não pode depender do tempo de
+     uma transição de fechamento para dizer que a página voltou ao estado original. */
+  .card--css ul { display: none; }
+  .card--css:hover ul, .card--css:focus-within ul { display: block; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Serviços</h1>
+  <ul class="row" id="row">
+    <li class="card" id="script-no-keyboard" data-menu="script">
+      <span class="card__title">Certidões</span>
+      <ul>
+        <li><a href="#certidao-emitir">Emitir certidão</a></li>
+        <li><a href="#certidao-consultar">Consultar certidão</a></li>
+      </ul>
+    </li>
+    <li class="card" id="script-with-button" data-menu="script">
+      <span class="card__title">Protocolos</span>
+      <button class="card__button" type="button">Abrir protocolos</button>
+      <ul>
+        <li><a href="#protocolo-consultar">Consultar protocolo</a></li>
+      </ul>
+    </li>
+    <li class="card card--css" id="css-hover">
+      <span class="card__title">Agendamentos</span>
+      <a class="card__trigger" href="#agenda">Ver agenda</a>
+      <ul>
+        <li><a href="#agenda-marcar">Marcar atendimento</a></li>
+      </ul>
+    </li>
+  </ul>
+  <!-- Seção própria: o ouvinte de teclado do ancestral fica a um nível deste cartão e a nenhum dos
+       cartões acima, que é o que separa "abre por script e o teclado também abre" de "só o mouse". -->
+  <section id="alvaras">
+    <div class="card" id="script-ancestor-key" data-menu="script">
+      <span class="card__title">Alvarás</span>
+      <ul>
+        <li><a href="#alvara-emitir">Emitir alvará</a></li>
+      </ul>
+    </div>
+  </section>
+  <p><a href="#ajuda">Ajuda</a></p>
+</main>
+<script>
+  // O painel da página conta os eventos de ponteiro recebidos. É assim que o teste da página atual
+  // prova que a sondagem não disparou evento nenhum no modo passivo.
+  window.__pointerEvents = 0;
+  document.addEventListener('mouseover', () => { window.__pointerEvents += 1; }, true);
+
+  // Menu que abre por script no mouseenter e fecha no mouseleave: é o gatilho que a pseudo-classe
+  // forçada não acorda e que só a leitura dos ouvintes encontra.
+  for (const card of document.querySelectorAll('[data-menu="script"]')) {
+    card.addEventListener('mouseenter', () => card.classList.add('is-open'));
+    card.addEventListener('mouseleave', () => card.classList.remove('is-open'));
+  }
+
+  // O botão focável abre a lista pelo teclado: caminho de teclado conhecido, bloco sem achado.
+  const withButton = document.getElementById('script-with-button');
+  const openWithButton = () => withButton.classList.add('is-open');
+  withButton.querySelector('button').addEventListener('click', openWithButton);
+  withButton.querySelector('button').addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') openWithButton();
+  });
+
+  // Ouvinte de teclado no ancestral de um cartão só: o indício de script existe, mas o caminho de
+  // teclado também — e este bloco não pode virar achado por causa disso.
+  document.getElementById('alvaras').addEventListener('keydown', () => {});
+</script>
+</body>
+</html>

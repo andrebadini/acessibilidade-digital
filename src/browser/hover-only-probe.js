@@ -1,6 +1,7 @@
 import { sanitizeWarning } from '../core/privacy.js';
 import { assertSnapshotV1 } from '../core/snapshot-schema.js';
 import { HOVER_ONLY_OBSERVATION_KEY } from '../core/rules/hover-only.js';
+import { HOVER_SCRIPT_LIMITS, inspectHoverScriptPaths, scriptHoverWithoutKeyboardPath } from './hover-script-probe.js';
 
 /**
  * Sonda de conteúdo interativo que só aparece com o mouse (ABNT 5.1.13 / WCAG 2.1.1).
@@ -33,6 +34,16 @@ export const HOVER_ONLY_PROBE_LIMITS = Object.freeze({
   // Quanto a sondagem espera, no máximo, pela transição declarada que ela disparou.
   maxSettleMs: 600,
   deadlineMs: 20_000,
+  // Blocos em que o `:hover` de CSS não revelou nada e que ainda podem abrir por script. A leitura
+  // dos ouvintes é uma consulta por nó; o mesmo teto de blocos da descoberta mantém a cobertura
+  // coerente (nada de bloco descoberto sem veredito) e o prazo próprio evita que uma página com
+  // muitos ouvintes estoure o prazo total da sondagem.
+  maxScriptGroups: 60,
+  scriptDeadlineMs: 6_000,
+  // Confirmação com o ponteiro de verdade: só no modo descartável, e com teto bem menor, porque
+  // cada bloco confirmado move o mouse sobre a página e mexe no JavaScript do site.
+  maxPointerGroups: 5,
+  maxPointerScrollSettleMs: 250,
 });
 
 const OBJECT_GROUP = 'audita-mt-hover-probe';
@@ -362,6 +373,14 @@ export async function runHoverOnlyProbe(cdp, options = {}) {
       if (!examined) { incomplete = true; continue; }
       groups.push(examined);
     }
+    // Segunda fase: nos blocos em que o `:hover` forçado não revelou nada, o gatilho pode ser um
+    // ouvinte de mouse do próprio site, que a pseudo-classe não acorda. `DOMDebugger` mostra quais
+    // ouvintes existem no bloco e nos ancestrais, sem chamar nenhum deles; a confirmação com o
+    // ponteiro de verdade (que executa o site) fica reservada ao modo descartável.
+    if (groups.length > 0) {
+      const outcome = await inspectScriptHoverGroups(cdp, groups, limits, options, expired, warn);
+      if (outcome.incomplete) incomplete = true;
+    }
   } catch {
     incomplete = true;
     warn(FAILED_WARNING.code);
@@ -393,40 +412,235 @@ export async function runHoverOnlyProbe(cdp, options = {}) {
   };
 }
 
-async function examineGroup(cdp, group, limits, maintain, release) {
-  const anchor = await describeAtPath(cdp, group.anchorPath);
-  const targetPaths = Array.isArray(group.targets) ? group.targets : [];
-  if (!anchor || targetPaths.length === 0) return null;
+/** Uma leitura de visibilidade dos alvos do bloco. */
+async function measureGroupReveal(cdp, payload) {
+  const remote = await cdp.command('Runtime.evaluate', {
+    expression: `(${measureHoverOnlyReveal.toString()})(${JSON.stringify(payload)})`,
+    awaitPromise: false, returnByValue: true, objectGroup: OBJECT_GROUP,
+  }, COMMAND_OPTIONS);
+  const value = remote?.result?.value;
+  return value && typeof value === 'object' ? value : null;
+}
+
+/**
+ * Lê o estado do bloco e, se algo ainda está animando, espera a animação declarada antes de concluir.
+ * `settled` diz se a última leitura já é o estado final: quando a animação dura mais que o teto, o
+ * bloco não pode ser dado como conforme — a medição não terminou.
+ */
+async function measureGroupSettled(cdp, payload, limits) {
+  const first = await measureGroupReveal(cdp, payload);
+  if (!first || first.anchorMissing) return { reading: first, settled: false, budgetMs: 0 };
+  const pending = Number.isSafeInteger(first.settleMs) && first.settleMs > 0 ? first.settleMs : 0;
+  if (pending === 0 || first.revealed >= first.total) return { reading: first, settled: true, budgetMs: 0 };
+  const budgetMs = Math.min(pending, limits.maxSettleMs);
+  await sleep(budgetMs);
+  const second = await measureGroupReveal(cdp, payload);
+  if (!second || second.anchorMissing) return { reading: first, settled: false, budgetMs };
+  const stillPending = Number.isSafeInteger(second.settleMs) && second.settleMs > 0;
+  return {
+    reading: { ...second, revealed: Math.max(first.revealed, second.revealed) },
+    settled: !stillPending,
+    budgetMs,
+  };
+}
+
+/**
+ * Onde o ponteiro precisa ficar para ficar sobre o bloco. Primeiro passo, enviado por
+ * `Runtime.evaluate`: precisa ser autocontida. `onTarget` responde se o ponto central é mesmo o
+ * bloco (ou algo dentro dele) — se um banner cobre o cartão, o ponteiro pousaria em outro
+ * elemento e a medição seguinte não valeria como confirmação.
+ */
+function anchorPointerTarget(path) {
+  const resolve = () => {
+    let node = document.documentElement;
+    for (const index of path) {
+      if (!node || !node.children || !node.children[index]) return null;
+      node = node.children[index];
+    }
+    return node;
+  };
+  const anchor = resolve();
+  if (!anchor) return null;
+  const center = () => {
+    const rect = anchor.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
+  };
+  const scroll = { x: scrollX, y: scrollY };
+  const first = center();
+  if (!(first.width > 0 && first.height > 0)) return null;
+  const visible = point => point.x >= 0 && point.y >= 0 && point.x < innerWidth && point.y < innerHeight;
+  let point = first;
+  let scrolled = false;
+  if (!visible(point)) {
+    try { anchor.scrollIntoView({ block: 'center', inline: 'center' }); } catch { return null; }
+    point = center();
+    scrolled = true;
+  }
+  if (!(point.width > 0 && point.height > 0) || !visible(point)) return null;
+  let onTarget = false;
+  try {
+    const hit = document.elementFromPoint(point.x, point.y);
+    onTarget = !!hit && (hit === anchor || anchor.contains(hit));
+  } catch { onTarget = false; }
+  return {
+    x: point.x, y: point.y, onTarget, scrolled,
+    scrollX: scroll.x, scrollY: scroll.y,
+  };
+}
+
+/**
+ * Confirma com o ponteiro de verdade o bloco que só tem indício de abertura por script. Esta é a
+ * única parte da sondagem que executa JavaScript do site: `Input.dispatchMouseEvent` entrega os
+ * eventos de mouse ao renderizador como se a pessoa tivesse movido o mouse, e por isso só roda
+ * quando a política do modo permite interagir com a página (modo descartável). O ponteiro é levado
+ * sobre o bloco, os alvos são medidos, o ponteiro volta para um ponto neutro e a rolagem é
+ * restaurada; quem confirma que nada ficou aberto é a prova de restauração, que roda depois de tudo.
+ *
+ * Devolve `null` quando não deu para medir; `{ revealed }` quando deu.
+ */
+async function confirmGroupWithPointer(cdp, group, limits) {
+  const targetPaths = Array.isArray(group.targetPaths) ? group.targetPaths : [];
+  if (targetPaths.length === 0) return null;
   const payload = { anchorPath: group.anchorPath, targetPaths, maxAncestorLevels: limits.maxAncestorLevels };
-  const measure = async () => {
+  const read = async () => {
     const remote = await cdp.command('Runtime.evaluate', {
-      expression: `(${measureHoverOnlyReveal.toString()})(${JSON.stringify(payload)})`,
+      expression: `(${anchorPointerTarget.toString()})(${JSON.stringify(group.anchorPath)})`,
       awaitPromise: false, returnByValue: true, objectGroup: OBJECT_GROUP,
     }, COMMAND_OPTIONS);
     const value = remote?.result?.value;
     return value && typeof value === 'object' ? value : null;
   };
-  /**
-   * Lê o estado forçado e, se algo ainda está animando, espera a animação declarada antes de concluir.
-   * `settled` diz se a última leitura já é o estado final: quando a animação dura mais que o teto, o
-   * bloco não pode ser dado como conforme — a medição não terminou.
-   */
-  const measureSettled = async () => {
-    const first = await measure();
-    if (!first || first.anchorMissing) return { reading: first, settled: false, budgetMs: 0 };
-    const pending = Number.isSafeInteger(first.settleMs) && first.settleMs > 0 ? first.settleMs : 0;
-    if (pending === 0 || first.revealed >= first.total) return { reading: first, settled: true, budgetMs: 0 };
-    const budgetMs = Math.min(pending, limits.maxSettleMs);
-    await sleep(budgetMs);
-    const second = await measure();
-    if (!second || second.anchorMissing) return { reading: first, settled: false, budgetMs };
-    const stillPending = Number.isSafeInteger(second.settleMs) && second.settleMs > 0;
-    return {
-      reading: { ...second, revealed: Math.max(first.revealed, second.revealed) },
-      settled: !stillPending,
-      budgetMs,
+  const move = (x, y) => cdp.command('Input.dispatchMouseEvent', {
+    type: 'mouseMoved', x: Math.round(x), y: Math.round(y), button: 'none', buttons: 0,
+  }, COMMAND_OPTIONS);
+
+  let point = await read();
+  if (!point) return null;
+  const origin = { x: point.scrollX, y: point.scrollY };
+  try {
+    // Rolar para alcançar o bloco muda a página por um instante: a posição original volta no fim.
+    if (point.scrolled) {
+      await sleep(limits.maxPointerScrollSettleMs);
+      point = await read();
+      if (!point || point.onTarget !== true) return null;
+    }
+    if (point.onTarget !== true) return null;
+    await move(point.x, point.y);
+    const hovered = await measureGroupSettled(cdp, payload, limits);
+    const revealed = Number.isSafeInteger(hovered?.reading?.revealed) ? hovered.reading.revealed : 0;
+    await move(1, 1);
+    // Sair também passa pela transição declarada: medir no mesmo instante diria que o menu continuou
+    // aberto quando o que corre é a animação de fechamento que o `mouseleave` disparou.
+    if (hovered.budgetMs > 0) await sleep(hovered.budgetMs);
+    return { revealed, settled: hovered.settled === true };
+  } finally {
+    if (point?.scrolled) {
+      try {
+        await cdp.command('Runtime.evaluate', {
+          expression: `window.scrollTo(${Math.max(0, Math.round(origin.x))}, ${Math.max(0, Math.round(origin.y))})`,
+          awaitPromise: false, returnByValue: true, objectGroup: OBJECT_GROUP,
+        }, COMMAND_OPTIONS);
+      } catch { /* a prova de restauração confere o resultado; rolagem é melhor esforço */ }
+    }
+  }
+}
+
+/**
+ * Segunda fase da sondagem, sobre os blocos em que o `:hover` forçado não revelou nada. Só entram os
+ * blocos que já passariam como conformes e que não têm controle focável nenhum — os que têm caminho
+ * de teclado conhecido não precisam de nada, e os que já são dúvida mantêm o motivo que têm.
+ *
+ * A leitura dos ouvintes é pura e vale em qualquer modo. A confirmação com o ponteiro de verdade só
+ * roda quando `allowPointerInteraction` está ligado (modo descartável), porque é a única parte que
+ * executa JavaScript do site. Quando o indício existe e a confirmação não é possível, o bloco vira
+ * revisão humana: o silêncio nunca é a resposta.
+ */
+async function inspectScriptHoverGroups(cdp, groups, limits, options, expired, warn) {
+  const candidates = groups.filter(group =>
+    group.outcome === 'passed' && group.unsettled !== true && group.revealedOnHover === 0 &&
+    group.focusableInside !== true && Array.isArray(group.anchorPath));
+  if (candidates.length === 0) return { incomplete: false };
+  if (expired()) {
+    warn(TIMEOUT_WARNING.code);
+    return { incomplete: true };
+  }
+  const keyOf = group => group.anchorPath.join('.');
+  let inspection = null;
+  try {
+    inspection = await inspectHoverScriptPaths(
+      cdp,
+      candidates.map(group => ({ key: keyOf(group), anchorPath: group.anchorPath })),
+      {
+        objectGroup: OBJECT_GROUP,
+        timeoutMs: limits.deadlineMs,
+        limits: {
+          ancestorLevels: HOVER_SCRIPT_LIMITS.ancestorLevels,
+          maxGroups: limits.maxScriptGroups,
+          maxListeners: HOVER_SCRIPT_LIMITS.maxListeners,
+          deadlineMs: limits.scriptDeadlineMs,
+        },
+      },
+    );
+  } catch {
+    warn(FAILED_WARNING.code);
+    return { incomplete: true };
+  }
+  // Bloco sem leitura de ouvintes não pode ser dado como conforme: a observação inteira fica
+  // incompleta, e a regra devolve dúvida em vez de "nada encontrado".
+  let incomplete = inspection.inspected !== true;
+  if (incomplete) warn(FAILED_WARNING.code);
+  const byKey = new Map(candidates.map(group => [keyOf(group), group]));
+  for (const [requestKey, evidence] of inspection.entries) {
+    const group = byKey.get(requestKey);
+    if (!group) continue;
+    const merged = {
+      hoverScript: evidence.hoverScript === true,
+      keyboardPath: group.keyboardPath === true || evidence.keyboardPath === true,
     };
-  };
+    group.hoverScript = merged.hoverScript;
+    group.keyboardPath = merged.keyboardPath;
+    if (scriptHoverWithoutKeyboardPath(merged)) group.outcome = 'cantTell';
+  }
+  if (options.allowPointerInteraction !== true) return { incomplete };
+
+  let confirmed = 0;
+  for (const group of candidates) {
+    if (group.outcome !== 'cantTell' || group.hoverScript !== true || group.keyboardPath === true) continue;
+    if (confirmed >= limits.maxPointerGroups) break;
+    if (expired()) {
+      incomplete = true;
+      warn(TIMEOUT_WARNING.code);
+      break;
+    }
+    confirmed += 1;
+    let confirmedByPointer = null;
+    try {
+      confirmedByPointer = await confirmGroupWithPointer(cdp, group, limits);
+    } catch {
+      confirmedByPointer = null;
+    }
+    // Sem medição (bloco coberto por outro elemento, geometria inútil, prazo estourado) a dúvida
+    // continua, já com o motivo próprio dela.
+    if (!confirmedByPointer) continue;
+    if (confirmedByPointer.revealed > 0) {
+      group.outcome = 'failed';
+      group.revealedByPointer = confirmedByPointer.revealed;
+      group.revealedOnHover = confirmedByPointer.revealed;
+      continue;
+    }
+    // O ponteiro pousou no bloco e nada apareceu: o indício não se confirmou. Se a animação ainda
+    // corria, a medição não terminou e o bloco segue como dúvida.
+    if (confirmedByPointer.settled === true) group.outcome = 'passed';
+  }
+  return { incomplete };
+}
+
+async function examineGroup(cdp, group, limits, maintain, release) {
+  const anchor = await describeAtPath(cdp, group.anchorPath);
+  const targetPaths = Array.isArray(group.targets) ? group.targets : [];
+  if (!anchor || targetPaths.length === 0) return null;
+  const payload = { anchorPath: group.anchorPath, targetPaths, maxAncestorLevels: limits.maxAncestorLevels };
+  const measureSettled = () => measureGroupSettled(cdp, payload, limits);
   const base = {
     backendNodeId: anchor.backendNodeId,
     anchorPath: group.anchorPath,
@@ -435,6 +649,11 @@ async function examineGroup(cdp, group, limits, maintain, release) {
     sampledTargets: targetPaths.length,
     revealedOnHover: 0,
     focusableInside: group.selfFocusable === true || Array.isArray(group.focusPath),
+    // O caminho de teclado conhecido já na descoberta: o próprio bloco focável ou um controle focável
+    // e visível dentro dele. O resto (ouvintes de foco/teclado) só a leitura dos ouvintes responde.
+    keyboardPath: group.selfFocusable === true || Array.isArray(group.focusPath),
+    hoverScript: false,
+    revealedByPointer: 0,
     selfFocusable: group.selfFocusable === true,
     revealedByFocus: false,
     restored: true,
@@ -484,14 +703,10 @@ async function examineGroup(cdp, group, limits, maintain, release) {
 async function verifyRestored(cdp, groups, limits) {
   let restored = true;
   const read = async group => {
-    const remote = await cdp.command('Runtime.evaluate', {
-      expression: `(${measureHoverOnlyReveal.toString()})(${JSON.stringify({
-        anchorPath: group.anchorPath, targetPaths: group.targetPaths, maxAncestorLevels: limits.maxAncestorLevels,
-      })})`,
-      awaitPromise: false, returnByValue: true, objectGroup: OBJECT_GROUP,
-    }, COMMAND_OPTIONS);
-    const value = remote?.result?.value;
-    if (!value || typeof value !== 'object') throw new TypeError('leitura ausente');
+    const value = await measureGroupReveal(cdp, {
+      anchorPath: group.anchorPath, targetPaths: group.targetPaths, maxAncestorLevels: limits.maxAncestorLevels,
+    });
+    if (!value) throw new TypeError('leitura ausente');
     return value;
   };
   for (const group of groups) {
@@ -536,6 +751,10 @@ export function normalizeHoverOnlyProbe(raw) {
       // A medição que não terminou não pode virar "passou": quem lê a observação precisa saber que a
       // dúvida vem da animação, e não de um controle focável que não revelou o conteúdo.
       unsettled: group.unsettled === true,
+      // Indício de abertura por script e caminho de teclado: é o que separa a dúvida "abre por script
+      // e o teclado não chega" das outras dúvidas deste item no relatório.
+      hoverScript: group.hoverScript === true,
+      keyboardPath: group.keyboardPath === true,
       outcome: group.outcome,
     });
   }
@@ -592,7 +811,13 @@ export function mergeHoverOnlyIntoSnapshot(snapshot, observation) {
 export async function applyHoverOnlyProbe(snapshot, cdp, options = {}) {
   let raw;
   try {
-    raw = await runHoverOnlyProbe(cdp, { limits: options.limits });
+    raw = await runHoverOnlyProbe(cdp, {
+      limits: options.limits,
+      // Só o modo descartável permite mexer no mouse sobre a página: é o único em que o site pode
+      // ser executado. Sem esta autorização explícita, o indício de abertura por script continua
+      // sendo dúvida para revisão humana em vez de falha confirmada.
+      allowPointerInteraction: options.allowPointerInteraction === true,
+    });
   } catch {
     raw = { status: 'incomplete', warnings: [FAILED_WARNING] };
   }
