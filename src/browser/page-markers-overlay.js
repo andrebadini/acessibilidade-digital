@@ -381,6 +381,15 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
   const LABEL_STEP = 4;
   // Above this area an obstacle is a container (a section, a card): a label may rest on it.
   const SMALL_OBSTACLE_AREA = 60000;
+  // Visible page text is a costly obstacle: a label resting on it hides the very words the reader
+  // is checking. The cost stays finite, so a page with no free space still gets its label. The scan
+  // that finds the text is bounded in elements, lines and time, so a long page cannot stall a pass.
+  const TEXT_COST = 600;
+  const TEXT_COVER_COST = 1e9;
+  const TEXT_BUCKET = 200;
+  const TEXT_SCAN_BUDGET_MS = 12;
+  const MAX_TEXT_ELEMENTS = 2000;
+  const MAX_TEXT_LINES = 1500;
   const CHECK_INTERVAL_MS = 100;
   const REPOSITION_INTERVAL_MS = 400;
 
@@ -736,11 +745,113 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       return Math.hypot(dx, dy);
     }
 
+    function withinViewport(box, viewport) {
+      return box.right > viewport.left && box.left < viewport.right &&
+        box.bottom > viewport.top && box.top < viewport.bottom;
+    }
+
+    // The label may rest on the text of the element it marks — that text is already inside the
+    // contour. Every other element's text is protected.
+    function ownsText(element, node) {
+      try {
+        return typeof element?.contains === 'function' && element.contains(node) === true;
+      } catch {
+        return false;
+      }
+    }
+
+    function indexTextLine(index, line) {
+      const firstRow = Math.floor(line.top / TEXT_BUCKET);
+      const lastRow = Math.floor(line.bottom / TEXT_BUCKET);
+      const firstColumn = Math.floor(line.left / TEXT_BUCKET);
+      const lastColumn = Math.floor(line.right / TEXT_BUCKET);
+      for (let row = firstRow; row <= lastRow; row += 1) {
+        for (let column = firstColumn; column <= lastColumn; column += 1) {
+          const key = `${column}:${row}`;
+          const bucket = index.get(key);
+          if (bucket) bucket.push(line);
+          else index.set(key, [line]);
+        }
+      }
+    }
+
+    // Visible text of the page as line rectangles, measured once per pass. An element whose box is
+    // entirely off the viewport takes its whole subtree with it, so a long page costs one geometry
+    // read per visible element instead of one per node. The overlay's own shadow tree is never
+    // walked: the host carries no light child, and every marker lives in the shadow root.
+    function collectTextLines(scan) {
+      if (scan.lines) return scan.lines;
+      scan.lines = [];
+      scan.index = new Map();
+      const document = environment.document;
+      const viewport = viewportRect();
+      const root = document?.body ?? document?.documentElement ?? null;
+      if (!viewport || !root || typeof document?.createRange !== 'function') return scan.lines;
+      let range = null;
+      try { range = document.createRange(); } catch { return scan.lines; }
+      if (typeof range?.selectNodeContents !== 'function' || typeof range?.getClientRects !== 'function') {
+        return scan.lines;
+      }
+      const started = clockNow();
+      const stack = [root];
+      let visited = 0;
+      while (stack.length > 0 && scan.lines.length < MAX_TEXT_LINES) {
+        const node = stack.pop();
+        visited += 1;
+        if (visited > MAX_TEXT_ELEMENTS) break;
+        if ((visited & 31) === 0 && clockNow() - started > TEXT_SCAN_BUDGET_MS) break;
+        if (node === host) continue;
+        let box = null;
+        try { box = node.getBoundingClientRect(); } catch {}
+        if (box && box.width > 0 && box.height > 0 &&
+          !withinViewport({ left: box.left, top: box.top, right: box.left + box.width,
+            bottom: box.top + box.height }, viewport)) continue;
+        for (const child of node.childNodes ?? []) {
+          if (child?.nodeType !== 3 || typeof child.nodeValue !== 'string' || !/\S/u.test(child.nodeValue)) continue;
+          let rects = null;
+          try {
+            range.selectNodeContents(child);
+            rects = range.getClientRects();
+          } catch {
+            rects = null;
+          }
+          for (let index = 0; index < (rects?.length ?? 0) && scan.lines.length < MAX_TEXT_LINES; index += 1) {
+            const rect = rects[index];
+            if (!rect || !(rect.width > 0) || !(rect.height > 0)) continue;
+            const line = { left: rect.left, top: rect.top, right: rect.left + rect.width,
+              bottom: rect.top + rect.height, node: child };
+            if (!withinViewport(line, viewport)) continue;
+            scan.lines.push(line);
+            indexTextLine(scan.index, line);
+          }
+        }
+        for (const child of node.children ?? []) stack.push(child);
+      }
+      return scan.lines;
+    }
+
+    function textLinesNear(scan, box) {
+      const lines = collectTextLines(scan);
+      if (lines.length === 0) return lines;
+      const found = [];
+      const seen = new Set();
+      for (let row = Math.floor(box.top / TEXT_BUCKET); row <= Math.floor(box.bottom / TEXT_BUCKET); row += 1) {
+        for (let column = Math.floor(box.left / TEXT_BUCKET); column <= Math.floor(box.right / TEXT_BUCKET); column += 1) {
+          for (const line of scan.index.get(`${column}:${row}`) ?? []) {
+            if (seen.has(line)) continue;
+            seen.add(line);
+            if (overlapArea(box, line) > 0) found.push(line);
+          }
+        }
+      }
+      return found;
+    }
+
     // The label is a tab glued to the contour: bottom edge on the contour's top edge, flipped under
     // it when there is no room above. When every glued spot would hide another label or another
     // marked element, it moves to the nearest free row above or below and a thin leader joins it to
     // its contour. A label never buries another label.
-    function placeLabel(ring, width, height, placed, obstacles, cut = {}) {
+    function placeLabel(ring, width, height, placed, obstacles, cut = {}, textLines = []) {
       const viewport = viewportRect();
       const bounds = viewport ?? { left: 0, top: 0, right: ring.left + ring.width, bottom: ring.top + ring.height };
       const clampLeft = value => Math.min(Math.max(value, bounds.left), Math.max(bounds.left, bounds.right - width));
@@ -800,6 +911,14 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
           if (area === 0) continue;
           const obstacleArea = (obstacle.right - obstacle.left) * (obstacle.bottom - obstacle.top);
           cost += area * (obstacleArea <= SMALL_OBSTACLE_AREA ? 40 : 0.05);
+        }
+        // A line of page text under the label is worse than a small detour: the reader would have
+        // to read the number through the words it covers. Burying a whole line is the worst case.
+        for (const line of textLines) {
+          const area = overlapArea(rect, line);
+          if (area === 0) continue;
+          cost += area * TEXT_COST;
+          if (covers(rect, line)) cost += TEXT_COVER_COST;
         }
         // Never sit on the marked element itself unless nothing else fits (a contour taller than the
         // viewport keeps its label pinned to the top of the visible band).
@@ -906,13 +1025,21 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
     }
 
     // Second pass: the label of each contour, glued to the first line fragment when possible.
-    function placeGroupLabel(layout, obstacles, placed) {
+    function placeGroupLabel(layout, obstacles, placed, scan) {
       const { group, selected, rings, boxes } = layout;
       const label = group.button;
       const width = labelWidth(label, selected);
       const height = selected ? LABEL_HEIGHT_SELECTED : LABEL_HEIGHT;
       const others = obstacles.filter(entry => entry.owner !== group);
-      const spot = placeLabel(rings[0], width, height, placed, others, layout.cuts?.[0] ?? {});
+      // Only the ground the candidates can reach has to be measured: four label widths sideways and
+      // four label heights up or down, the span of the detached rows.
+      const reach = 4 * LABEL_STEP;
+      const textLines = textLinesNear(scan, {
+        left: rings[0].left - (4 * width) - reach, top: rings[0].top - (4 * height) - reach,
+        right: rings[0].left + rings[0].width + (4 * width) + reach,
+        bottom: rings[0].top + rings[0].height + (4 * height) + reach,
+      }).filter(line => !ownsText(group.element, line.node));
+      const spot = placeLabel(rings[0], width, height, placed, others, layout.cuts?.[0] ?? {}, textLines);
       label.style.width = `${width}px`;
       label.style.height = `${height}px`;
       label.style.left = `${spot.left}px`;
@@ -992,6 +1119,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
         return false;
       }
       const cache = new Map();
+      const scan = { lines: null, index: null };
       const placed = [];
       const layouts = [];
       for (const group of groups) {
@@ -1004,7 +1132,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       // The selected signal chooses first, then smaller contours (crowded icons) before large ones.
       layouts.sort((left, right) => (Number(right.selected) - Number(left.selected)) ||
         ((left.rings[0].width * left.rings[0].height) - (right.rings[0].width * right.rings[0].height)));
-      for (const layout of layouts) placeGroupLabel(layout, obstacles, placed);
+      for (const layout of layouts) placeGroupLabel(layout, obstacles, placed, scan);
       return true;
     }
 

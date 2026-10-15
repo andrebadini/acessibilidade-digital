@@ -28,6 +28,55 @@ class FixtureEventTarget {
   listenerCount(type) { return this._listeners.get(type)?.size ?? 0; }
 }
 
+// A text node carries the line rectangles the overlay measures, like a real `Range` over it does.
+export class FixtureTextNode {
+  constructor(value, ownerDocument = null) {
+    this.nodeType = 3;
+    this.nodeValue = String(value);
+    this.ownerDocument = ownerDocument;
+    this.parentNode = null;
+    this.parentElement = null;
+    this._rects = [];
+  }
+
+  get textContent() { return this.nodeValue; }
+
+  setRects(rects) {
+    this._rects = rects.map(rect => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+      right: rect.left + rect.width, bottom: rect.top + rect.height }));
+    return this;
+  }
+
+  setRect(rect) { return this.setRects([rect]); }
+
+  getClientRects() { return this._rects.map(rect => ({ ...rect })); }
+
+  getBoundingClientRect() {
+    if (this._rects.length === 0) return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+    const left = Math.min(...this._rects.map(rect => rect.left));
+    const top = Math.min(...this._rects.map(rect => rect.top));
+    const right = Math.max(...this._rects.map(rect => rect.right));
+    const bottom = Math.max(...this._rects.map(rect => rect.bottom));
+    return { left, top, width: right - left, height: bottom - top, right, bottom };
+  }
+}
+
+class FixtureRange {
+  constructor() { this.contents = null; }
+
+  selectNodeContents(node) { this.contents = node; }
+
+  getClientRects() {
+    return typeof this.contents?.getClientRects === 'function' ? this.contents.getClientRects() : [];
+  }
+
+  getBoundingClientRect() {
+    return typeof this.contents?.getBoundingClientRect === 'function'
+      ? this.contents.getBoundingClientRect()
+      : { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+  }
+}
+
 export class FixtureElement extends FixtureEventTarget {
   constructor(tag, attributes = {}, ownerDocument = null) {
     super();
@@ -36,7 +85,7 @@ export class FixtureElement extends FixtureEventTarget {
     this.ownerDocument = ownerDocument;
     this.parentNode = null;
     this.parentElement = null;
-    this.children = [];
+    this.nodes = [];
     this.style = {};
     this.shadowRoot = null;
     this._textContent = '';
@@ -46,23 +95,34 @@ export class FixtureElement extends FixtureEventTarget {
     this.clickCalls = 0;
   }
 
+  // Element children, as in the DOM; text nodes are reachable through `childNodes`.
+  get children() { return this.nodes.filter(node => node.nodeType !== 3); }
+  get childNodes() { return this.nodes; }
+
   appendChild(child) {
     child.parentNode = this;
     child.parentElement = this;
     child.ownerDocument = this.ownerDocument;
-    this.children.push(child);
+    this.nodes.push(child);
     return child;
   }
 
   append(...children) { for (const child of children) this.appendChild(child); }
 
   removeChild(child) {
-    const index = this.children.indexOf(child);
+    const index = this.nodes.indexOf(child);
     if (index < 0) throw new Error('fixture child absent');
-    this.children.splice(index, 1);
+    this.nodes.splice(index, 1);
     child.parentNode = null;
     child.parentElement = null;
     return child;
+  }
+
+  contains(node) {
+    for (let current = node; current; current = current.parentNode) {
+      if (current === this) return true;
+    }
+    return false;
   }
 
   remove() { this.parentNode?.removeChild(this); }
@@ -96,7 +156,7 @@ export class FixtureElement extends FixtureEventTarget {
     return root?.nodeType === 9 || root?.host?.isConnected === true;
   }
 
-  set textContent(value) { this._textContent = String(value); this.children = []; }
+  set textContent(value) { this._textContent = String(value); this.nodes = []; }
   get textContent() { return `${this._textContent}${this.children.map(child => child.textContent).join('')}`; }
 
   getBoundingClientRect() { return { ...this._rect }; }
@@ -152,6 +212,20 @@ class FixtureDocument extends FixtureEventTarget {
 
   createElement(tag) { return new FixtureElement(tag, {}, this); }
 
+  createRange() { return new FixtureRange(); }
+
+  get body() {
+    let found = null;
+    const visit = node => {
+      for (const child of node.children ?? []) {
+        if (!found && child.tagName === 'BODY') found = child;
+        visit(child);
+      }
+    };
+    visit(this);
+    return found;
+  }
+
   querySelectorAll(selector) {
     this.queryCounts.set(selector, (this.queryCounts.get(selector) ?? 0) + 1);
     if (this.queryOverrides.has(selector)) return [...this.queryOverrides.get(selector)];
@@ -186,7 +260,7 @@ function fixtureQuery(root, selector) {
     const attributeResults = [];
     const visitAttribute = node => {
       for (const child of node.children ?? []) {
-        if (child.tagName.toLowerCase() === attribute[1] && child.getAttribute(attribute[2]) === value) {
+        if (child.tagName?.toLowerCase() === attribute[1] && child.getAttribute(attribute[2]) === value) {
           attributeResults.push(child);
         }
         visitAttribute(child);
@@ -201,7 +275,7 @@ function fixtureQuery(root, selector) {
   const visit = node => {
     for (const child of node.children ?? []) {
       const classes = (child.getAttribute('class') ?? '').split(/[\t\n\f\r ]+/u).filter(Boolean);
-      if (child.tagName.toLowerCase() === match[1] &&
+      if (child.tagName?.toLowerCase() === match[1] &&
         (match[2] === undefined ? match[3].slice(1).split('.').every(value => classes.includes(value)) : child.getAttribute('id') === match[2])) results.push(child);
       visit(child);
     }
@@ -368,6 +442,13 @@ export function install(overrides = {}) {
 
 export function idMatch(tag, id) {
   return { tag, id };
+}
+
+// Visible page text, as the overlay measures it: one text node whose line rectangles are known.
+export function textLine(parent, value, rect) {
+  const node = new FixtureTextNode(value, parent.ownerDocument);
+  parent.appendChild(node);
+  return node.setRect(rect);
 }
 
 export function semanticMatch(tag, name, value) {
