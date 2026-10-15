@@ -762,13 +762,14 @@ function renderPageMarkerReview(document, markers, emit) {
   if (changedAddress) {
     action.setAttribute('aria-label', 'Refazer auditoria: o endereço da página mudou depois da auditoria');
   }
-  wrapper.append(action);
-
   const status = paragraph(document, markerStatusMessage(markers), 'page-marker-status');
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
   status.setAttribute('aria-atomic', 'true');
-  wrapper.append(status);
+  // Recarga e endereço novo pedem uma decisão: o motivo vem antes do botão, para quem lê de cima
+  // para baixo entender por que a ação mudou antes de chegar a ela.
+  if (offerReload || changedAddress) wrapper.append(status, action);
+  else wrapper.append(action, status);
   if (markers.counts?.omitted > 0) wrapper.append(paragraph(document,
     `${markers.counts.omitted} ${markers.counts.omitted === 1 ? 'ocorrência omitida' : 'ocorrências omitidas'} dos sinais — consulte o relatório.`,
     'page-marker-limit'));

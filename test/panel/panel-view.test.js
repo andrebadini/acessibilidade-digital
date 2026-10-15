@@ -1476,6 +1476,9 @@ test('a reloaded page offers the current version with one explicit button and no
   assert.equal(region.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]'), null);
   assert.match(root.textContent, /A página foi recarregada depois da auditoria/u);
   assert.match(action.getAttribute('aria-label'), /recarregada/u);
+  const status = region.querySelector('.page-marker-status');
+  const order = [...region.children];
+  assert.ok(order.indexOf(status) < order.indexOf(action), 'o motivo aparece antes do botão');
   action.click();
   assert.deepEqual(intents, [{ type: 'SHOW_PAGE_MARKERS_RELOADED' }]);
   assert.equal(region.dataset.markerStatus, 'reload-offer');
