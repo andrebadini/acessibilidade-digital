@@ -532,7 +532,14 @@ for (const scenario of [
       await extension.waitForValue(panel, `document.querySelector('[data-page-marker-review]')?.dataset.markerStatus`, value => value === 'idle');
       await extension.waitForValue(panel, `Boolean(document.querySelector('[data-intent="SHOW_PAGE_MARKERS"]:not(:disabled)'))`, Boolean);
       await extension.click(panel, '[data-intent="SHOW_PAGE_MARKERS"]');
-      assert.equal((await waitForMarkerState(extension, panel, 'unavailable')).state, 'unavailable');
+      // 1.1.60: outro endereço não vira "indisponível" genérico — o painel diz que o endereço mudou e oferece
+      // refazer a auditoria, sem desenhar nada na página nova.
+      await extension.waitForValue(panel, `document.querySelector('[data-page-marker-review]')?.dataset.markerStatus`,
+        value => value === 'changed-address');
+      assert.equal(await extension.evaluate(panel,
+        `Boolean(document.querySelector('[data-page-marker-review] button[data-intent="NEW_AUDIT"]'))`), true);
+      assert.match(await extension.evaluate(panel,
+        `document.querySelector('[data-page-marker-review] .page-marker-status')?.textContent ?? ''`), /endereço da página mudou/u);
       assert.equal((await extension.evaluate(extension.startPage.page, markerSurface)).roots, 0);
       assert.deepEqual(await markerRecordFingerprint(extension, auditId), fingerprint);
     });
