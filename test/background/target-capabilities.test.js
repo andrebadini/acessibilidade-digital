@@ -427,7 +427,7 @@ test('prepares an exact one-use target and atomically persists its running sessi
     { name: 'review', path: '/src/review/index.html', contextType: 'TAB' },
   ]);
   assert.deepEqual(session.intents, {
-    panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'review-markers'] },
+    panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'review-markers', 'highlight'] },
     review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
   });
   assert.equal(sessionArea.writes.at(-1).keys.length, 2);
@@ -1447,16 +1447,71 @@ test('review-markers belongs only to a terminal panel session, not review or act
   }
 });
 
-test('review-markers can be requested by a fresh view-only panel without granting highlight', async () => {
+// A leitura do resultado (o painel volta assim quando a aba navegou depois da auditoria) pode pedir
+// os sinais e o destaque — é nela que a versão recarregada é oferecida. O que a leitura NÃO ganha
+// são os poderes da auditoria: cancelar e confirmar pixels continuam exclusivos da sessão de
+// auditoria. O destaque concedido aqui continua sendo conferido contra o documento vivo e contra a
+// estrutura registrada antes de desenhar (ver highlight-controller).
+test('a fresh view-only panel can request signals and highlight but not the audit-only intents', async () => {
   const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
   const { chromeApi } = panelChromeApi(sender);
   const { authority } = authorityFixture({ chromeApi });
   const session = await authority.rehydrateViewOnly({ auditId: 'audit-1', windowId: 9, mode: 'attached' });
   const base = { sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', sender, claimedWindowId: 9 };
-  assert.equal((await authority.authorizeSession({ ...base, intent: 'review-markers' })).ok, true);
-  for (const intent of ['highlight', 'cancel', 'confirm-pixels']) {
+  for (const intent of ['review-markers', 'highlight']) {
+    const authorized = await authority.authorizeSession({ ...base, intent });
+    assert.equal(authorized.ok, true, `${intent} is part of the read-only lane`);
+    assert.equal(authorized.session.state, 'view-only');
+  }
+  for (const intent of ['cancel', 'confirm-pixels']) {
     assert.deepEqual(await authority.authorizeSession({ ...base, intent }), { ok: false, code: 'SESSION_DENIED' });
   }
+  assert.deepEqual(await authority.authorizeSession({ ...base, sender: { ...sender, id: 'foreign' }, intent: 'highlight' }),
+    { ok: false, code: 'SESSION_DENIED' });
+});
+
+// A tabela anterior (sem o destaque na leitura) continua sendo reconhecida: sessões gravadas por
+// versões anteriores precisam abrir, e abrir com os mesmos poderes que tinham — nada é ampliado
+// retroativamente.
+test('a stored view-only session from the previous table keeps opening without the highlight', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority, sessionArea } = authorityFixture({ chromeApi });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const stored = (await sessionArea.get(key))[key];
+  const previous = {
+    panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'review-markers'] },
+    review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
+  };
+  await sessionArea.set({ [key]: { ...stored, state: 'view-only', targetBinding: { kind: 'view-only' }, intents: previous } });
+  const base = { sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', sender, claimedWindowId: 9 };
+  const signals = await authority.authorizeSession({ ...base, intent: 'review-markers' });
+  assert.equal(signals.ok, true);
+  assert.equal(signals.session.state, 'view-only');
+  assert.deepEqual(await authority.authorizeSession({ ...base, intent: 'highlight' }), { ok: false, code: 'SESSION_DENIED' });
+});
+
+// Uma tabela "quase válida" (a nova com o destaque tirado do lugar, ou uma tabela desconhecida) não
+// vira sessão: o catálogo é casado por formato exato.
+test('a nearly valid intents table is not accepted', async () => {
+  const sender = { id: 'test', documentId: 'panel-document-1', url: PANEL_URL };
+  const { chromeApi } = panelChromeApi(sender);
+  const { authority, sessionArea } = authorityFixture({ chromeApi });
+  const prepared = await prepareAttached(authority);
+  const claimed = await authority.claimAndIssueAuditSession(validStart(prepared.capabilityId));
+  const key = sessionCapabilityStorageKey(claimed.sessionCapabilityId);
+  const stored = (await sessionArea.get(key))[key];
+  const tampered = {
+    panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'highlight'] },
+    review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
+  };
+  await sessionArea.set({ [key]: { ...stored, state: 'view-only', targetBinding: { kind: 'view-only' }, intents: tampered } });
+  assert.deepEqual(await authority.authorizeSession({
+    sessionCapabilityId: claimed.sessionCapabilityId, auditId: 'audit-1', consumer: 'panel', sender, claimedWindowId: 9,
+    intent: 'highlight',
+  }), { ok: false, code: 'SESSION_DENIED' });
 });
 
 test('pre-markers sessions stay readable through result transition without a new grant', async () => {
@@ -2088,7 +2143,9 @@ test('rehydrates a closed view-only session without resurrecting running intent'
   assert.equal(session.state, 'view-only');
   assert.deepEqual(session.targetBinding, { kind: 'view-only' });
   assert.equal((await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'open-report', sender, claimedWindowId: 9 })).ok, true);
-  assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'highlight', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
+  // O destaque da leitura é o da versão recarregada; ele continua sendo conferido contra o documento
+  // vivo e a estrutura registrada antes de desenhar. Cancelar, não: segue exclusivo da auditoria.
+  assert.equal((await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'highlight', sender, claimedWindowId: 9 })).ok, true);
   assert.deepEqual(await authority.authorizeSession({ sessionCapabilityId: result.sessionCapabilityId, auditId: 'audit-view-1', consumer: 'panel', intent: 'cancel', sender, claimedWindowId: 9 }), { ok: false, code: 'SESSION_DENIED' });
 });
 

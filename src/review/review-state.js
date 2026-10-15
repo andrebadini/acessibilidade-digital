@@ -142,7 +142,10 @@ function sameReviewDecision(current, expected) {
     current.itemId === expected.itemId && current.occurrenceId === expected.occurrenceId &&
     current.answer === expected.answer && current.evaluator === expected.evaluator &&
     current.decidedAt === expected.decidedAt && current.mode === expected.mode &&
-    (current.note ?? '') === (expected.note ?? '');
+    (current.note ?? '') === (expected.note ?? '') &&
+    // As marcas do mapa entram na conferência: sem isso, uma gravação que perdesse os apontamentos
+    // (itens e áreas) passaria como confirmação válida da decisão.
+    JSON.stringify(current.marks ?? null) === JSON.stringify(expected.marks ?? null);
 }
 
 function verifiedCommittedRevision(value, receipt, decision) {

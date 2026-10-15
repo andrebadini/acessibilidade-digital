@@ -255,3 +255,107 @@ test('picking an occurrence without a signal on the page explains it instead of 
   assert.equal(await failing, false);
   assert.match(f.session.read().message, /Não foi possível atualizar este sinal/u);
 });
+
+// --- Página recarregada (1.1.60): o convite, o aceite e o endereço que mudou ------------------
+
+test('a reloaded page offers the signals instead of the unavailable message', async () => {
+  const f = fixture();
+  const pending = f.session.show();
+  await tick();
+  assert.deepEqual(f.requests[0].intent, { type: 'PANEL_SHOW_PAGE_MARKERS', modelRevision: 1 });
+  f.requests[0].resolve({ ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  assert.equal(await pending, false);
+  const state = f.session.read();
+  assert.equal(state.status, 'reload-offer');
+  assert.match(state.message, /foi recarregada depois da auditoria/u);
+  assert.match(state.message, /Mostrar os sinais na versão atual\?/u);
+  assert.deepEqual(state.groups, []);
+  assert.equal(state.relocated, false);
+  assert.equal(await f.session.hide(), true, 'nada foi desenhado, então não há o que remover');
+});
+
+test('accepting the invitation asks for the reloaded variant and marks the relocated signals', async () => {
+  const f = fixture();
+  const refused = f.session.show();
+  await tick(); f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' }); await refused;
+  const pending = f.session.showReloaded();
+  await tick();
+  assert.deepEqual(f.requests.at(-1).intent, { type: 'PANEL_SHOW_PAGE_MARKERS_RELOADED', modelRevision: 1 });
+  f.requests.at(-1).resolve(active(1)); await pending;
+  const state = f.session.read();
+  assert.equal(state.status, 'active');
+  assert.equal(state.relocated, true);
+  assert.deepEqual(state.groups, [{ number: 4, occurrenceIds: ['one', 'two'] }]);
+  assert.equal(state.selectedOccurrenceId, 'two');
+});
+
+test('the relocation flag survives filters and selection but never a collapse', async () => {
+  const f = fixture();
+  const offered = f.session.show();
+  await tick(); f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' }); await offered;
+  const pending = f.session.showReloaded();
+  await tick(); f.requests.at(-1).resolve(active()); await pending;
+  assert.equal(f.session.read().relocated, true);
+  const selecting = f.session.select('two', false);
+  await tick(); f.requests.at(-1).resolve(active(1)); await selecting;
+  assert.equal(f.session.read().relocated, true);
+  f.session.receive({ modelRevision: 1, state: 'clear', selectedOrdinal: null });
+  assert.deepEqual(f.session.read(), {
+    status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, reasons: [], message: null, relocated: false,
+  });
+});
+
+test('another address asks for a new audit instead of relocating anything', async () => {
+  for (const code of ['PAGE_MARKERS_DOCUMENT_CHANGED', 'PAGE_MARKERS_UNAVAILABLE']) {
+    const f = fixture();
+    const pending = f.session.showReloaded();
+    await tick(); f.requests[0].resolve({ ok: false, code }); assert.equal(await pending, false);
+    const state = f.session.read();
+    if (code === 'PAGE_MARKERS_DOCUMENT_CHANGED') {
+      assert.equal(state.status, 'changed-address');
+      assert.match(state.message, /endereço da página mudou/u);
+      assert.match(state.message, /refaça a auditoria/u);
+    } else {
+      assert.equal(state.status, 'unavailable');
+    }
+    assert.equal(f.requests[0].intent.type, 'PANEL_SHOW_PAGE_MARKERS_RELOADED');
+  }
+});
+
+test('the offer is never accepted without the explicit request and never outlives a reset', async () => {
+  const f = fixture();
+  const first = f.session.show();
+  await tick(); f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' }); await first;
+  // O botão da página (destacar elemento) aceita o convite que já está na tela.
+  const direct = f.session.highlight('one');
+  await tick();
+  assert.equal(f.requests.at(-1).intent.type, 'PANEL_SHOW_PAGE_MARKERS_RELOADED');
+  f.requests.at(-1).resolve(active()); await tick();
+  assert.equal(f.requests.at(-1).intent.type, 'PANEL_SELECT_PAGE_MARKER');
+  f.requests.at(-1).resolve(active(1));
+  assert.equal(await direct, true);
+  assert.equal(f.session.read().relocated, true);
+
+  const other = fixture();
+  const refused = other.session.show();
+  await tick(); other.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' }); await refused;
+  other.session.reset();
+  const again = other.session.show();
+  await tick();
+  assert.equal(other.requests.at(-1).intent.type, 'PANEL_SHOW_PAGE_MARKERS',
+    'o convite não sobrevive ao reset: a próxima tentativa volta ao pedido de sempre');
+  other.requests.at(-1).resolve(active()); await again;
+});
+
+test('a second reload while accepting only offers again, never draws the older version', async () => {
+  const f = fixture();
+  const pending = f.session.showReloaded();
+  await tick(); f.requests.at(-1).resolve({ ok: false, code: 'PAGE_MARKERS_RELOADED_PAGE' });
+  assert.equal(await pending, false);
+  assert.equal(f.session.read().status, 'reload-offer');
+  const accepted = f.session.showReloaded();
+  await tick(); f.requests.at(-1).resolve(active()); await accepted;
+  assert.equal(f.session.read().relocated, true);
+  // O sinal desenhado é um só: o inventário antigo nunca é reaproveitado como se fosse o novo.
+  assert.equal(f.session.read().groups.length, 1);
+});

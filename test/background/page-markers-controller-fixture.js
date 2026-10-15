@@ -36,6 +36,11 @@ export async function createControllerFixture(options = {}) {
     manifestVersion: '1.1.0', rulesVersion: '1.0.0', browserVersion: 'Chrome/152.0.0.0',
   });
   const snapshot = { model, modelRevision: 7, modelHash: model.integrity.canonicalModelHash };
+  // `liveDocumentId` é o documento que a aba mostra AGORA: igual ao auditado no caso de sempre e
+  // diferente depois de uma recarga com o mesmo endereço (`liveDigest` para o endereço diferente).
+  const auditedDocumentId = 'document-a';
+  const liveDocumentId = options.liveDocumentId ?? auditedDocumentId;
+  const liveDigest = options.liveDigest ?? DIGEST;
   const auditStore = {
     async getAuditSnapshot() {
       if (options.modelGate) await options.modelGate.promise;
@@ -46,7 +51,7 @@ export async function createControllerFixture(options = {}) {
   const modelAuthority = createHighlightModelAuthority({ auditStore });
   const originCache = createPageMarkerOriginCache({ now: () => time });
   originCache.register({
-    auditId: model.auditId, tabId: 17, windowId: 9, documentId: 'document-a',
+    auditId: model.auditId, tabId: 17, windowId: 9, documentId: auditedDocumentId,
     urlSessionDigest: DIGEST, createdAt: time, expiresAt: time + 60_000,
   });
   if (options.noOrigin) originCache.clearAudit(model.auditId);
@@ -58,7 +63,7 @@ export async function createControllerFixture(options = {}) {
   };
   const page = createPageMarkersFixture();
   page.first.setAttribute('id', 'continuar');
-  const proof = () => ({ tabId: 17, windowId: 9, documentId: 'document-a', urlSessionDigest: DIGEST });
+  const proof = () => ({ tabId: 17, windowId: 9, documentId: liveDocumentId, urlSessionDigest: liveDigest });
   const proofQueue = [...(options.proofs ?? [])];
   const calls = { authorize: [], probe: [], source: [], scripts: [], publish: [] };
   const timers = new Map();
@@ -71,7 +76,7 @@ export async function createControllerFixture(options = {}) {
     const port = {
       name: 'audita-page-markers-v1',
       sender: {
-        id: 'extension-id', documentId: 'document-a', frameId: 0,
+        id: 'extension-id', documentId: liveDocumentId, frameId: 0,
         tab: { id: 17, windowId: 9 }, ...senderOverrides,
       },
       onMessage: new EventHook(), onDisconnect: new EventHook(), disconnected: 0,
@@ -88,7 +93,7 @@ export async function createControllerFixture(options = {}) {
     scripting: {
       async executeScript(request) {
         calls.scripts.push(request);
-        assert.deepEqual(request.target, { tabId: 17, documentIds: ['document-a'] });
+        assert.deepEqual(request.target, { tabId: 17, documentIds: [liveDocumentId] });
         assert.equal(request.world, 'ISOLATED');
         if (options.scriptPause?.when(request, calls.scripts.length)) {
           options.scriptPause.entered.resolve();
@@ -100,16 +105,16 @@ export async function createControllerFixture(options = {}) {
           const argument = options.omitNullArguments
             ? JSON.parse(JSON.stringify(request.args[0], (_key, value) => value === null ? undefined : value)) : request.args[0];
           const result = runAuditaPageMarkersCommand(argument, page.environment);
-          return [{ frameId: 0, documentId: 'document-a', result }];
+          return [{ frameId: 0, documentId: liveDocumentId, result }];
         }
         if (name === 'bindAuditaPageMarkersPort') {
           const port = nativePort(request.args[0]);
           assert.equal(controller.attachPort(port), true);
           if (options.autoHello !== false) queueMicrotask(() => port.hello());
-          return [{ frameId: 0, documentId: 'document-a', result: { ok: true } }];
+          return [{ frameId: 0, documentId: liveDocumentId, result: { ok: true } }];
         }
         const isolated = (0, eval)(`(${request.func.toString()})`);
-        return [{ frameId: 0, documentId: 'document-a', result: isolated(request.args[0], page.environment) }];
+        return [{ frameId: 0, documentId: liveDocumentId, result: isolated(request.args[0], page.environment) }];
       },
     },
   };
@@ -159,6 +164,7 @@ export async function createControllerFixture(options = {}) {
     authority, chromeApi, chromeAdapter, targetQueue,
     now: () => time, createInstallationId: () => INSTALLATION_ID,
     publish: async message => { calls.publish.push(structuredClone(message)); },
+    ...(options.relocationOffers ? { relocationOffers: options.relocationOffers } : {}),
     setTimer(callback, delay) { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
     clearTimer(id) { timers.delete(id); },
   });

@@ -1,4 +1,5 @@
 import { ANSWER_LABELS, CLASSIFICATION_WORDS, describeEvidenceElement, formatLocalInstant } from './lay-review.js';
+import { reviewMarksRecords } from './review-marks-presentation.js';
 
 // Presentation only: callers provide the already canonical, validated audit.
 export const HUMAN_REVIEW_DESCRIPTION = 'Estas conclusões foram registradas pela pessoa avaliadora e valem para as ocorrências indicadas. Não comprovam a identidade informada, não apagam falhas automáticas e não certificam a página inteira.';
@@ -18,6 +19,9 @@ export function projectReviewHistory(model) {
   const pages = new Map(model.pages.map(value => [value.pageId, value]));
   const items = new Map((model.itemResults ?? []).map(value => [value.id, value]));
   const evidenceById = new Map((model.evidence ?? []).map(value => [value.evidenceId, value]));
+  // Apontamento no mapa do teclado (quando a decisão apontou itens sem caixa ou marcou áreas): chega
+  // pronto em texto e em recortes, para as duas rotas de relatório mostrarem o mesmo.
+  const marksByDecision = new Map(reviewMarksRecords(model).map(record => [record.decisionId, record]));
   return model.reviewDecisions.map(decision => {
     const occurrence = occurrences.get(decision.occurrenceId);
     const page = pages.get(occurrence.pageId);
@@ -27,6 +31,7 @@ export function projectReviewHistory(model) {
       originalOutcome: occurrence.outcome, evidenceRefs: [...occurrence.evidenceRefs],
       itemTitle: item?.title ?? null, itemClassification: item?.classification ?? null,
       element: elementLabel(occurrence, evidenceById), timezone: model.timezone ?? 'UTC',
+      marksRecord: marksByDecision.get(decision.decisionId) ?? null,
     };
   }).sort((left, right) => left.decidedAt.localeCompare(right.decidedAt) || left.occurrenceId.localeCompare(right.occurrenceId));
 }
@@ -48,6 +53,9 @@ export function humanReviewMetadata(entry) {
   if (entry.element) rows.push(['Elemento', entry.element]);
   rows.push(['Ocorrência', entry.occurrenceId]);
   rows.push(['Nota registrada', entry.note || 'Nenhuma nota registrada.']);
+  // O que a pessoa apontou no mapa vira texto do próprio registro: "Itens apontados: …" e
+  // "Áreas marcadas no mapa do teclado: N".
+  if (entry.marksRecord?.text) rows.push(['Apontamento no mapa do teclado', entry.marksRecord.text]);
   for (const [index, revision] of (entry.revisions ?? []).entries()) {
     rows.push([`Resposta anterior ${index + 1} (substituída)`,
       `${ANSWER_LABELS[revision.answer] ?? revision.answer} — ${revision.evaluator}, ${formatLocalInstant(revision.decidedAt, timezone)}${revision.note ? `. Nota: ${revision.note}` : ''}`]);

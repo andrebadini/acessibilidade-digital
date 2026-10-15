@@ -361,6 +361,16 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   assert.ok(map.segments.length > 0);
   assert.ok(map.legend.length > 0);
   assert.ok(map.segments.every(segment => /^[a-f0-9]{64}$/u.test(segment.contentHash)));
+  // Alinhamento (1.1.60): nesta página parada a captura e a leitura da estrutura descrevem o mesmo
+  // leiaute. A escala sai uniforme, nenhum item sai da imagem por mudança de tamanho da página, e cada
+  // item da legenda tem o próprio número desenhado — a legenda e as marcas contam a mesma história.
+  const mapGeometry = map.derivation.geometry;
+  assert.ok(Math.abs(mapGeometry.scaleX - mapGeometry.scaleY) <= 0.01, `escalas divergentes: ${JSON.stringify(mapGeometry)}`);
+  assert.equal(map.limitations.includes('non-uniform-pixel-scale'), false);
+  assert.equal(map.limitations.includes('source-layout-changed'), false);
+  assert.equal(map.counts.annotated, map.legend.length);
+  assert.ok(map.counts.annotated > 0, 'a legenda precisa ter números desenhados na imagem');
+  assert.equal(map.counts.omittedNoRect, 0, 'nenhum item pode sair da imagem por falta de posição medida');
   const rendered = await extension.evaluate(report, `(() => {
     const card = document.querySelector('[data-announcement-map-page="page-1"]');
     return {

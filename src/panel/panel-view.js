@@ -2,6 +2,7 @@ import { highlightActionForOccurrence } from './highlight-action.js';
 import { checklistElement } from '../core/report/checklist-presentation.js';
 import { decodePngDataUrl } from '../core/evidence/png.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
+import { impactLabel, impactText } from '../core/report/impact-labels.js';
 
 const SCREEN_NAMES = Object.freeze(['initial', 'running', 'result', 'unavailable']);
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -133,8 +134,10 @@ export function renderPanelView({ view, document, onIntent, onEvent = () => {} }
       case 'SELECT_OCCURRENCE':
       case 'CONSULT_EVIDENCE':
       case 'HIGHLIGHT_OCCURRENCE':
+      case 'HIGHLIGHT_OCCURRENCE_RELOADED':
       case 'CLEAR_HIGHLIGHT':
       case 'SHOW_PAGE_MARKERS':
+      case 'SHOW_PAGE_MARKERS_RELOADED':
       case 'HIDE_PAGE_MARKERS':
       case 'GO_TO_PAGE_MARKER':
       case 'HIGHLIGHT_PAGE_OCCURRENCE':
@@ -734,25 +737,39 @@ function renderPageMarkerReview(document, markers, emit) {
   );
 
   // When the page has no live extension surface the offer cannot succeed, so the primary
-  // action stops promising a retry and moves the person to the recorded evidence instead.
+  // action stops promising a retry and moves the person to the recorded evidence instead. A page
+  // that was merely reloaded keeps its audit: the offer is to show the signals again, by gesture.
+  // A page whose address changed needs a new audit — the retired result cannot be projected.
   const unavailable = markers.status === 'unavailable';
+  const offerReload = markers.status === 'reload-offer';
+  const changedAddress = markers.status === 'changed-address';
   const action = ['active', 'hiding'].includes(markers.status)
     ? actionButton(document, markers.status === 'hiding' ? 'Removendo sinais' : 'Ocultar sinais na página',
       'HIDE_PAGE_MARKERS', 'page-marker-action', emit, 'secondary-action page-marker-action', {}, markers.status === 'hiding')
-    : actionButton(document, markers.status === 'showing' ? 'Preparando sinais'
-      : unavailable ? 'Ver evidências no relatório' : 'Mostrar sinais na página',
-    unavailable ? 'OPEN_REPORT' : 'SHOW_PAGE_MARKERS', 'page-marker-action', emit,
+    : actionButton(document, offerReload ? 'Mostrar sinais na versão atual'
+      : changedAddress ? 'Refazer auditoria'
+        : markers.status === 'showing' ? 'Preparando sinais'
+          : unavailable ? 'Ver evidências no relatório' : 'Mostrar sinais na página',
+    offerReload ? 'SHOW_PAGE_MARKERS_RELOADED' : changedAddress ? 'NEW_AUDIT'
+      : unavailable ? 'OPEN_REPORT' : 'SHOW_PAGE_MARKERS', 'page-marker-action', emit,
     unavailable ? 'secondary-action page-marker-action' : 'primary-action page-marker-action', {}, markers.status === 'showing');
   if (unavailable) {
     action.setAttribute('aria-label', 'Ver evidências no relatório: os sinais não podem ser mostrados nesta página');
   }
-  wrapper.append(action);
-
+  if (offerReload) {
+    action.setAttribute('aria-label', 'Mostrar sinais na versão atual: a página foi recarregada depois da auditoria');
+  }
+  if (changedAddress) {
+    action.setAttribute('aria-label', 'Refazer auditoria: o endereço da página mudou depois da auditoria');
+  }
   const status = paragraph(document, markerStatusMessage(markers), 'page-marker-status');
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
   status.setAttribute('aria-atomic', 'true');
-  wrapper.append(status);
+  // Recarga e endereço novo pedem uma decisão: o motivo vem antes do botão, para quem lê de cima
+  // para baixo entender por que a ação mudou antes de chegar a ela.
+  if (offerReload || changedAddress) wrapper.append(status, action);
+  else wrapper.append(action, status);
   if (markers.counts?.omitted > 0) wrapper.append(paragraph(document,
     `${markers.counts.omitted} ${markers.counts.omitted === 1 ? 'ocorrência omitida' : 'ocorrências omitidas'} dos sinais — consulte o relatório.`,
     'page-marker-limit'));
@@ -766,7 +783,15 @@ function renderPageMarkerReview(document, markers, emit) {
   const helpLabel = document.createElement('summary');
   helpLabel.textContent = 'Legenda e limites dos sinais';
   helpLabel.dataset.focusId = 'page-marker-help';
-  help.append(helpLabel, paragraph(document,
+  help.append(helpLabel);
+  // Na versão recarregada, a legenda abre com o aviso: o que está na tela foi reencontrado, e quem
+  // olha precisa conferir se corresponde ao que foi auditado.
+  if (markers.status === 'active' && markers.relocated === true) {
+    const relocatedNote = paragraph(document, RELOADED_MARKERS_NOTE, 'page-marker-relocated-note');
+    relocatedNote.dataset.pageMarkerRelocated = '';
+    help.append(relocatedNote);
+  }
+  help.append(paragraph(document,
     'Os sinais ligam o resultado registrado na auditoria ao elemento correspondente na página atual. Essa associação não cria nova prova.',
     'page-marker-explanation'), renderMarkerLegend(document));
   if (markers.counts !== null) help.append(renderMarkerCounts(document, markers.counts));
@@ -778,10 +803,15 @@ function markerStatusMessage(markers) {
   if (typeof markers.message === 'string') return markers.message;
   if (markers.status === 'showing') return 'Preparando os sinais na página atual.';
   if (markers.status === 'hiding') return 'Removendo os sinais da página atual.';
+  // Enquanto os sinais forem os reencontrados na versão recarregada, o aviso acompanha o estado em
+  // vez de dizer apenas que os sinais estão visíveis.
+  if (markers.status === 'active' && markers.relocated === true) return RELOADED_MARKERS_NOTE;
   if (markers.status === 'active') return 'Sinais visíveis na página atual.';
   if (markers.status === 'unavailable') return 'Não foi possível mostrar os sinais. Tente novamente.';
   return 'Os sinais estão ocultos.';
 }
+
+const RELOADED_MARKERS_NOTE = 'Sinais reencontrados na versão recarregada — confira se correspondem ao que foi auditado.';
 
 function renderMarkerLegend(document) {
   const legend = section(document, 'page-marker-legend');
@@ -825,6 +855,9 @@ function renderMarkerLegend(document) {
 // the honest "não foi reencontrado" sentence instead of leaking a technical token into the panel.
 const MARKER_REASONS = Object.freeze({
   'not-found': ['não foi reencontrado na página', 'não foram reencontrados na página'],
+  // A página foi recarregada e o elemento achado não confere com a evidência registrada: o sinal
+  // não é desenhado.
+  'evidence-mismatch': ['não foi reencontrado nesta versão da página', 'não foram reencontrados nesta versão da página'],
   'not-rendered': ['estava oculto no momento', 'estavam ocultos no momento'],
   'ambiguous': ['corresponde a mais de um elemento na página', 'correspondem a mais de um elemento na página'],
   'unsupported-context': ['está dentro de um quadro incorporado (iframe)',
@@ -980,7 +1013,7 @@ function renderGroup(document, name, cards, view, emit, onEvent, detail) {
     wrapper.append(renderCard(document, card, view, emit));
     if (detail && card.occurrenceIds.includes(detail.occurrenceId)) {
       wrapper.append(renderDetail(document, detail, view.evidenceExpanded, view.highlight, view.markers,
-        emit, onEvent, view.captureMode));
+        emit, onEvent, view.captureMode, card.displayOutcome === 'cantTell'));
     }
   }
   return wrapper;
@@ -1034,7 +1067,8 @@ function renderCard(document, card, view, emit) {
   }
   root.append(
     paragraph(document, classificationLabel(card.classification), 'card-classification'),
-    paragraph(document, card.impact ? `Impacto ${impactLabel(card.impact)}` : 'Sem impacto associado', 'card-impact'),
+    paragraph(document, impactText(card.impact, card.displayOutcome === 'cantTell',
+      { positive: card.classification === 'passed' || card.displayOutcome === 'passed' }) ?? 'Sem impacto associado', 'card-impact'),
     paragraph(document, card.abntItemIds.length ? `ABNT ${card.abntItemIds.join(', ')}` : 'Sem item ABNT associado', 'card-normative'),
     paragraph(document, card.wcag.length ? `WCAG ${card.wcag.join(', ')}` : 'Sem critério WCAG associado', 'card-normative'),
     paragraph(document, occurrenceText(card.occurrenceIds.length), 'card-occurrences'),
@@ -1072,15 +1106,17 @@ function pageMarkerButtonTitle(document, text) {
   return title;
 }
 
-function renderDetail(document, detail, expanded, highlight, markers, emit, onEvent, captureMode) {
+function renderDetail(document, detail, expanded, highlight, markers, emit, onEvent, captureMode, pendingConfirmation = false) {
   const root = section(document, 'result-detail');
   root.dataset.resultDetail = '';
   root.dataset.classification = detail.heading.classification;
   root.dataset.context = detail.heading.context;
+  const headingImpact = impactText(detail.heading.impact, pendingConfirmation,
+    { positive: detail.heading.classification === 'passed' });
   root.append(
     detailBlock(document, 'heading', 'Questão selecionada', [
       detail.heading.title,
-      `${classificationLabel(detail.heading.classification)}${detail.heading.impact ? ` · Impacto ${impactLabel(detail.heading.impact)}` : ''}`,
+      `${classificationLabel(detail.heading.classification)}${headingImpact ? ` · ${headingImpact}` : ''}`,
     ]),
     detailBlock(document, 'affected', 'Quem é afetado', [detail.affected.audience, detail.affected.reason]),
     detailBlock(document, 'observed', 'O que foi observado', [detail.observed]),
@@ -1128,6 +1164,12 @@ function renderDetail(document, detail, expanded, highlight, markers, emit, onEv
         occurrenceId: detail.occurrenceId,
       }, busy);
     button.dataset.action = 'highlight-occurrence';
+    actions.append(button);
+  } else if (action.kind === 'highlight-reloaded') {
+    // Mesmo botão, mesmo lugar: muda só o pedido, que agora nomeia a versão recarregada.
+    const button = actionButton(document, action.label, 'HIGHLIGHT_OCCURRENCE_RELOADED',
+      'live-highlight-action', emit, 'primary-action', { occurrenceId: detail.occurrenceId });
+    button.dataset.action = 'highlight-reloaded';
     actions.append(button);
   } else if (action.kind === 'clear') {
     const busy = highlight.state === 'busy' && highlight.operation === 'clear';
@@ -1597,8 +1639,8 @@ function copyPersona(value) {
 
 function copyPageMarkers(value) {
   const statusValue = dataProperty(value, 'status');
-  const status = ['idle', 'showing', 'active', 'hiding', 'unavailable'].includes(statusValue)
-    ? statusValue : 'idle';
+  const status = ['idle', 'showing', 'active', 'hiding', 'unavailable', 'reload-offer', 'changed-address']
+    .includes(statusValue) ? statusValue : 'idle';
   const groupsValue = dataProperty(value, 'groups');
   const groups = Array.isArray(groupsValue) ? groupsValue.flatMap(group => {
     const number = dataProperty(group, 'number');
@@ -1623,16 +1665,18 @@ function copyPageMarkers(value) {
     return typeof reason === 'string' && Number.isSafeInteger(count) && count > 0 ? [{ reason, count }] : [];
   }) : [];
   const message = dataProperty(value, 'message');
+  const relocatedValue = dataProperty(value, 'relocated');
   return {
     status, groups, counts, reasons,
     selectedOccurrenceId: typeof selectedOccurrenceId === 'string' ? selectedOccurrenceId : null,
     message: typeof message === 'string' ? message : null,
+    relocated: relocatedValue === true,
   };
 }
 
 function copyHighlight(value) {
   let bindingStatus = { state: 'unchecked' };
-  if (['available', 'checking', 'unchecked'].includes(value?.bindingStatus?.state)) {
+  if (['available', 'checking', 'unchecked', 'reload-offer'].includes(value?.bindingStatus?.state)) {
     bindingStatus = { state: value.bindingStatus.state };
   } else if (value?.bindingStatus?.state === 'unavailable' && typeof value.bindingStatus.reason === 'string') {
     bindingStatus = { state: 'unavailable', reason: value.bindingStatus.reason };
@@ -1729,9 +1773,6 @@ function filterHeading(dimension) {
   return 'Distribuição por ABNT';
 }
 function filterLabel(dimension, value) { return dimension === 'impact' ? impactLabel(value) : value; }
-function impactLabel(value) {
-  return ({ critical: 'Crítico', serious: 'Sério', moderate: 'Moderado', minor: 'Menor' })[value] ?? value;
-}
 function groupHeading(name) {
   return ({ failed: 'Falhas confirmadas', alerts: 'Recomendações e alertas', humanReview: 'Suspeitas a confirmar', passed: 'Resultados positivos' })[name];
 }

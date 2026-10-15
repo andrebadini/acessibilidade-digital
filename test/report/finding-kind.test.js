@@ -30,6 +30,18 @@ test('the per-field requiredness suspicions of ABNT 5.9.7 are suspicions, not a 
   }
 });
 
+test('a block whose content a script opens on mouse over is a suspicion of its own, not a checklist question', () => {
+  // A dúvida diz qual bloco parece abrir por script e manda conferir com Tab. No checklist ela
+  // perderia as duas coisas: o texto da regra e o seletor do bloco não chegam a quem lê.
+  assert.equal(findingKind(occurrence, rule('hover-script-no-keyboard-path')), 'suspected');
+  assert.equal(findingKind({ ...occurrence, nodeId: 'other' }, rule('hover-script-no-keyboard-path')), 'checklist',
+    'a suspeita precisa do alvo correlacionado, nunca da página inteira');
+  // As outras dúvidas desta mesma regra continuam perguntas gerais: elas não apontam um bloco.
+  for (const reason of ['hover-only-keyboard-path-unconfirmed', 'hover-only-observation-unavailable']) {
+    assert.equal(findingKind(occurrence, rule(reason)), 'checklist');
+  }
+});
+
 test('recommendations do not masquerade as requirement failures; human conclusions remain explicit', () => {
   assert.equal(findingKind({ ...occurrence, outcome: 'failed' }), 'detected');
   assert.equal(findingKind({ ...occurrence, outcome: 'failed', classification: 'recommendation' }), 'advisory');

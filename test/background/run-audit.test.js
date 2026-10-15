@@ -838,6 +838,7 @@ function fakeAdapter(options = {}) {
   const events = [];
   const page = options.page || rawPage();
   let screenshots = 0;
+  let warmUps = 0;
   let fullPageCalls = 0;
   let elementCalls = 0;
   let disconnects = 0;
@@ -846,6 +847,14 @@ function fakeAdapter(options = {}) {
     async command(method, params = {}) {
       if (method === 'Page.getLayoutMetrics') return page.layoutMetrics;
       if (method === 'Page.captureScreenshot') {
+        // O aquecimento descartável (1.1.60) é jpeg em escala pequena e NÃO é captura de evidência: não
+        // entra na contagem de raster nem na ordem das capturas que os testes observam. Os bytes são
+        // descartados pelo próprio módulo, então aqui basta devolver qualquer coisa — nada os lê.
+        if (params.format === 'jpeg') {
+          warmUps += 1;
+          events.push('warm-up');
+          return { data: 'AQUECIMENTO-DESCARTAVEL' };
+        }
         screenshots += 1;
         const pristine = screenshots === 1;
         events.push(pristine ? 'full-page' : `thumbnail:${params.clip?.y}`);
@@ -871,7 +880,7 @@ function fakeAdapter(options = {}) {
   let randomValue = 0;
   const adapter = {
     events,
-    get counts() { return { screenshots, fullPageCalls, elementCalls, disconnects, removals }; },
+    get counts() { return { screenshots, warmUps, fullPageCalls, elementCalls, disconnects, removals }; },
     async createTab() {
       events.push('create-tab');
       if (options.createTabFailure) throw new Error('detalhe privado de criação');
@@ -1474,6 +1483,10 @@ test('attached full-evidence derives one map from the authorized pristine source
   assert.ok(adapter.events.indexOf('map') > adapter.events.findLastIndex(event => event.startsWith('thumbnail:')));
   const raster = adapter.events.indexOf('full-page');
   assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
+  // A captura integral sai colada na leitura da estrutura (1.1.60): é o que faz a imagem e os retângulos
+  // serem do mesmo estado da página. Se voltar para antes da coleta, os mapas desalinham de novo.
+  assert.ok(adapter.events.includes('collect'), 'a estrutura foi lida nesta auditoria');
+  assert.ok(adapter.events.indexOf('collect') < raster, 'a captura integral vem depois da leitura da estrutura');
   assert.deepEqual(gateCalls, ['after']);
 });
 
@@ -3130,6 +3143,59 @@ test('forces legacy element-only and full-evidence hints through the canonical n
   assert.equal(fullModel.evidence.artifacts.some(artifact => artifact.kind === 'element' && artifact.dataUrl), false);
 });
 
+test('o aquecimento da captura integral só roda quando ela está permitida', async () => {
+  // A auditoria por URL passa pelo adapter observado, que publica `captureFullPageEnabled` a partir da
+  // política de captura — é essa flag que decide o aquecimento.
+  const auditarUrl = (policy, adapter, auditId) => runUrlAudit({
+    auditId, ownershipId: `owner_${'W'.repeat(22)}`, windowId: 9,
+    navigationToken: 'W'.repeat(22), navigationPurpose: 'single-url',
+    evidenceUrl: TEST_EVIDENCE_URL, sessionDigest: TEST_DIGEST,
+    rawNavigationVault: Object.freeze({ async take() { return 'https://example.test/final'; } }),
+    chromeAdapter: adapter, capturePolicy: policy,
+    privacyGate: policy.mode === 'no-pixels'
+      ? null
+      : ownedPixelGate(policy, [], { auditId, ownershipId: `owner_${'W'.repeat(22)}` }),
+    checkpointStore: Object.freeze({ async writeSanitized() {} }),
+    onProgress() {}, now: () => '2026-09-01T12:00:00.000Z', signal: undefined,
+    expectedExtensionId: TEST_EXTENSION_ID, auditRunner: runObservedTabAudit,
+  });
+
+  // (a) captura integral permitida: um aquecimento, depois do axe e antes da leitura da estrutura.
+  const permitido = fakeAdapter({ canonicalInternals: true, sessionValues: {}, trackCaptureCalls: true });
+  const completo = await auditarUrl(createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false }), permitido, 'audit-warm-up-allowed');
+  assert.ok(['complete', 'partial'].includes(completo.status), completo.status);
+  assert.equal(permitido.counts.warmUps, 1, 'a página é aquecida uma vez');
+  assert.ok(permitido.events.indexOf('axe') < permitido.events.indexOf('warm-up'));
+  assert.ok(permitido.events.indexOf('warm-up') < permitido.events.indexOf('collect'),
+    'o aquecimento precisa vir antes da leitura da estrutura — é isso que evita caixa desalinhada');
+
+  // (b) modos sem captura integral: `captureFullPage` é falso e o aquecimento nem começa, para o resultado
+  // de nenhum modo sem pixels poder mudar por causa dele.
+  for (const mode of ['element-only', 'no-pixels']) {
+    const adapter = fakeAdapter({ canonicalInternals: true, sessionValues: {}, mode, trackCaptureCalls: true });
+    const resultado = await auditarUrl(createCapturePolicyV1({ mode, includeQuery: false }), adapter, `audit-warm-up-${mode}`);
+    assert.ok(['complete', 'partial'].includes(resultado.status), resultado.status);
+    assert.equal(adapter.counts.warmUps, 0, `${mode} não pode aquecer`);
+    assert.equal(adapter.events.includes('warm-up'), false);
+    // No modo sem pixels nenhum raster pode acontecer; no modo somente elementos as miniaturas continuam.
+    if (mode === 'no-pixels') assert.equal(adapter.counts.screenshots, 0, 'sem pixels nenhum raster');
+  }
+
+  // (c) página do próprio usuário (adapter passivo) no modo com captura integral: a captura já acontece
+  // ali, com o pedido de quem auditou a própria página, então o aquecimento também acontece — é o caminho
+  // em que a loja on-line foi medida (ensaio visual, §5) e onde a recusa deixava a pessoa sem caixa nenhuma.
+  const anexado = fakeAdapter({
+    trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const anexadoResult = await attachedFullEvidence(anexado, 'audit-warm-up-attached');
+  assert.equal(anexadoResult.state, 'model');
+  assert.equal(anexado.counts.warmUps, 1, 'a página do próprio usuário também é aquecida, uma vez');
+  assert.ok(anexado.events.indexOf('warm-up') < anexado.events.indexOf('collect'),
+    'e o aquecimento vem antes da leitura da estrutura');
+  assert.ok(anexado.counts.screenshots >= 1, 'a captura de evidência continua acontecendo');
+});
+
 test('collects element evidence and announcement for an inconclusive supplemental image', async () => {
   const page = rawPage();
   page.nodes = [
@@ -3169,7 +3235,7 @@ test('collects element evidence and announcement for an inconclusive supplementa
   assert.ok(exported.evidenceRefs.includes(evidence.evidenceId));
 });
 
-test('orders capture→axe→collect→probes→core→normalize, correlates target-size by node and drops raw axe', async () => {
+test('orders axe→collect→probes→core→normalize, correlates target-size by node and drops raw axe', async () => {
   const page = rawPage();
   page.nodes = [
     { backendNodeId: 10, tagName: 'html', attributes: {}, text: '', parentBackendNodeId: null, rect: { x: 0, y: 0, width: 800, height: 600 } },
@@ -3209,7 +3275,8 @@ test('orders capture→axe→collect→probes→core→normalize, correlates tar
   const axe = model.occurrences.find(occurrence => occurrence.ruleId === 'axe.target-size');
   const core = model.occurrences.find(occurrence => occurrence.ruleId === 'target-size-minimum');
 
-  assert.ok(adapter.events.indexOf('full-page') < adapter.events.indexOf('axe'));
+  // Modo sem pixels: nenhuma captura acontece, então a ordem verificável aqui começa no axe.
+  assert.equal(adapter.events.includes('full-page'), false);
   assert.ok(adapter.events.indexOf('axe') < adapter.events.indexOf('collect'));
   assert.ok(adapter.events.indexOf('collect') < adapter.events.indexOf('probes'));
   assert.ok(adapter.events.indexOf('probes') < adapter.events.indexOf('normalize-axe'));
@@ -4379,10 +4446,13 @@ test('a very tall page keeps a capped pristine capture, declares the truncation 
     composeMap: async input => { mapInput = input; return createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }); },
   });
   const original = adapter.connectCdp;
+  const aquecimentos = [];
   adapter.connectCdp = async (...args) => {
     const cdp = await original(...args);
     return { ...cdp, async command(method, params) {
-      if (method === 'Page.captureScreenshot') clips.push(params.clip);
+      // O aquecimento (1.1.60) também é uma captura, mas descartável e em jpeg de escala pequena: o teto de
+      // altura do dispositivo vale para a evidência, que é a imagem que fica.
+      if (method === 'Page.captureScreenshot') (params.format === 'jpeg' ? aquecimentos : clips).push(params.clip);
       return cdp.command(method, params);
     } };
   };
@@ -4391,11 +4461,54 @@ test('a very tall page keeps a capped pristine capture, declares the truncation 
   assert.equal(result.failureCode, null);
   assert.ok(['complete', 'partial'].includes(result.model.session.status), result.model.session.status);
   assert.equal(clips[0].height, 16_384, 'the pristine capture never exceeds the safe device height');
+  assert.equal(aquecimentos.length, 1, 'a página é aquecida uma vez, e nenhum aquecimento vira evidência');
+  assert.ok(aquecimentos[0].scale <= 0.1, `o aquecimento sai em escala pequena: ${JSON.stringify(aquecimentos[0])}`);
   const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
   assert.ok(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'));
   assert.equal(codes.includes('FULL_PAGE_CAPTURE_FAILED'), false);
   assert.equal(result.model.evidence.find(artifact => artifact.kind === 'full-page').metadata.height, 16_384);
   assert.equal(mapInput.layoutMetrics.cssContentSize.height, 16_384, 'the map geometry matches the captured area');
+});
+
+test('a page that grows while it is read gets maps without boxes and the geometry of the capture instant', async () => {
+  const page = rawPage();
+  // Leiaute no começo da leitura e leiaute quando a captura sai: a página ganhou 1.800 px de conteúdo no
+  // meio (carregamento sob demanda). Antes da 1.1.60 as caixas eram desenhadas com a escala do primeiro
+  // estado sobre a imagem do segundo, e cada caixa caía longe do item.
+  const collected = { cssContentSize: { width: 800, height: 1200 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  const grown = { cssContentSize: { width: 800, height: 3000 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  page.layoutMetrics = collected;
+  // O instantâneo mediu os retângulos com a página em 1.200 px; a coleta terminou e o leiaute já era outro.
+  page.layoutMetricsAtSnapshot = collected;
+  const inputs = [];
+  const adapter = fakeAdapter({
+    page, trackCaptureCalls: true,
+    afterCollect: () => { page.layoutMetrics = grown; },
+    composeMap: async input => {
+      inputs.push(input);
+      return createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
+    },
+    composeKeyboardMap: async input => {
+      inputs.push(input);
+      return createKeyboardMapFixture({
+        sourceEvidenceId: input.fullPageEvidence.evidenceId,
+        pageId: input.fullPageEvidence.pageId ?? 'page-1',
+        name: 'Continuar, botão',
+      });
+    },
+  });
+
+  const result = await attachedFullEvidence(adapter, 'audit-growing-page');
+
+  assert.equal(result.state, 'model');
+  assert.equal(inputs.length, 2, 'os dois mapas continuam sendo gerados');
+  for (const input of inputs) {
+    assert.equal(input.sourceAligned, false, 'sem acordo de leiaute nenhuma caixa é desenhada');
+    assert.equal(input.layoutMetrics.cssContentSize.height, 3000, 'a geometria descreve o instante da captura');
+  }
+  const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
+  assert.equal(codes.includes('FULL_PAGE_CAPTURE_FAILED'), false);
+  assert.equal(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'), false);
 });
 
 test('a page with more occurrences than the thumbnail budget keeps every occurrence and declares the budget', async () => {

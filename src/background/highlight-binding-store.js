@@ -6,6 +6,9 @@ const OVERLAY_KEYS = Object.freeze([
   'version', 'tabId', 'windowId', 'topDocumentId', 'documentId', 'frameId', 'nonce',
   'auditId', 'occurrenceId', 'createdAt', 'expiresAt', 'state', 'revision',
 ]);
+// `relocatedFrom` só existe no registro nascido de uma página recarregada: guarda o documento
+// auditado, contra o qual a estrutura do alvo foi assinada.
+const OVERLAY_OPTIONAL_KEYS = Object.freeze(['relocatedFrom']);
 const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const IDENTIFIER = /^[A-Za-z0-9._:-]{1,200}$/u;
 const DOCUMENT_ID = /^[A-Za-z0-9._:-]{1,240}$/u;
@@ -16,16 +19,20 @@ const MAX_REGISTRY_ENTRIES = 4_096;
 const MAX_TOTAL_TARGETS = 5_000;
 const MODEL_DIVERGENCE_SENTINEL = Object.freeze(Object.create(null));
 
-function exactDataRecord(value, expectedKeys) {
+// `optionalKeys` vale para o registro que ganhou um campo em um modo só (documento recarregado);
+// a contagem continua fechada: nada além do esperado, nada de fora da lista.
+function exactDataRecord(value, expectedKeys, optionalKeys = []) {
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const prototype = Reflect.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) return null;
     const keys = Reflect.ownKeys(value);
-    if (keys.length !== expectedKeys.length || keys.some(key => typeof key !== 'string') ||
-      expectedKeys.some(key => !keys.includes(key))) return null;
+    if (keys.some(key => typeof key !== 'string') || keys.length < expectedKeys.length ||
+      keys.length > expectedKeys.length + optionalKeys.length ||
+      expectedKeys.some(key => !keys.includes(key)) ||
+      keys.some(key => !expectedKeys.includes(key) && !optionalKeys.includes(key))) return null;
     const result = Object.create(null);
-    for (const key of expectedKeys) {
+    for (const key of keys) {
       const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
       if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
       result[key] = descriptor.value;
@@ -76,10 +83,12 @@ function overlayKey(tabId) {
 }
 
 function overlayRecord(value) {
-  const record = exactDataRecord(value, OVERLAY_KEYS);
+  const record = exactDataRecord(value, OVERLAY_KEYS, OVERLAY_OPTIONAL_KEYS);
   if (!record || record.version !== 1 || !chromeId(record.tabId) || !chromeId(record.windowId) ||
     typeof record.topDocumentId !== 'string' || !DOCUMENT_ID.test(record.topDocumentId) ||
     typeof record.documentId !== 'string' || !DOCUMENT_ID.test(record.documentId) ||
+    (record.relocatedFrom !== undefined &&
+      (typeof record.relocatedFrom !== 'string' || !DOCUMENT_ID.test(record.relocatedFrom))) ||
     !chromeId(record.frameId) || typeof record.nonce !== 'string' || !NONCE.test(record.nonce) ||
     !boundedId(record.auditId) ||
     !boundedId(record.occurrenceId) || !safeTimestamp(record.createdAt) ||
@@ -93,6 +102,7 @@ function overlayRecord(value) {
     windowId: record.windowId,
     topDocumentId: record.topDocumentId,
     documentId: record.documentId,
+    ...(record.relocatedFrom === undefined ? {} : { relocatedFrom: record.relocatedFrom }),
     frameId: record.frameId,
     nonce: record.nonce,
     auditId: record.auditId,
@@ -180,10 +190,19 @@ function overlayMatchesStoredBinding(registry, overlay) {
   if (matches.length !== 1) return false;
   const binding = matches[0];
   const target = binding.targets[overlay.occurrenceId];
-  return binding.tabId === overlay.tabId && binding.windowId === overlay.windowId &&
-    binding.topDocumentId === overlay.topDocumentId && target.documentId === overlay.documentId &&
-    target.frameId === overlay.frameId && overlay.createdAt >= binding.createdAt &&
+  const common = binding.windowId === overlay.windowId && overlay.createdAt >= binding.createdAt &&
     overlay.createdAt < binding.expiresAt && overlay.expiresAt === binding.expiresAt;
+  if (!common) return false;
+  // Registro recolocado: o alvo é o MESMO do documento auditado (seletor, assinatura e quadro), mas
+  // vive no documento de agora. A ligação continua sendo com o documento de origem declarado, o
+  // mesmo contra o qual a assinatura foi conferida dentro da página.
+  if (overlay.relocatedFrom !== undefined) {
+    return binding.tabId === overlay.tabId && binding.topDocumentId === overlay.relocatedFrom &&
+      overlay.topDocumentId === overlay.documentId && overlay.relocatedFrom !== overlay.documentId &&
+      overlay.frameId === 0 && target.frameId === 0;
+  }
+  return binding.tabId === overlay.tabId && binding.topDocumentId === overlay.topDocumentId &&
+    target.documentId === overlay.documentId && target.frameId === overlay.frameId;
 }
 
 function deepFreezePlain(value) {

@@ -315,6 +315,8 @@ register(['hover-only-interactive-content'], 'hover-only-content-not-keyboard-re
   'Os links deste bloco só aparecem com o mouse, e o teclado (TAB) não chega até eles. Torne o bloco focável para abrir o conteúdo, ou mostre o conteúdo também com o foco.');
 register(['hover-only-interactive-content'], 'hover-only-keyboard-path-unconfirmed', [],
   'Este bloco tem um controle focável, mas o conteúdo oculto não apareceu ao forçar o foco. Use TAB e Enter sem tocar no mouse para confirmar se o menu abre pelo teclado.');
+register(['hover-only-interactive-content'], 'hover-script-no-keyboard-path', [],
+  'Os links deste bloco parecem abrir por um script quando o mouse passa por cima, e não encontramos jeito de abri-los pelo teclado. Use a tecla Tab para conferir.');
 register(['hover-only-interactive-content'], 'hover-only-observation-unavailable', [],
   'A sondagem de conteúdo revelado apenas por hover não foi executada ou não cobriu a página inteira. Confirme com o teclado se algo só aparece com o mouse.');
 

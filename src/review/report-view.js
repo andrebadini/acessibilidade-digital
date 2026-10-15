@@ -4,6 +4,7 @@ import { checklistElement } from '../core/report/checklist-presentation.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
+import { IMPACT_LABELS, impactText } from '../core/report/impact-labels.js';
 import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
 import {
   EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
@@ -23,6 +24,7 @@ import {
 import { projectEvidenceProvenance, evidenceProvenanceRows } from '../core/report/evidence-provenance.js';
 import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/plain-language-guidance.js';
 import { projectReviewHistory, humanReviewMetadata, humanReviewHeading, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from '../core/report/human-review-presentation.js';
+import { marksCropParts } from '../core/report/review-marks-presentation.js';
 import {
   buildFindingsBoard, FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence,
 } from '../core/report/findings-board.js';
@@ -36,7 +38,6 @@ const OUTCOME_LABELS = Object.freeze({
   failed: 'Não atendido neste teste', passed: 'Atendido no escopo observado', cantTell: 'Requer revisão humana',
   inapplicable: 'Não aplicável', untested: 'Não testado',
 });
-const IMPACT_LABELS = Object.freeze({ critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Menor' });
 const CLASSIFICATION_LABELS = Object.freeze({
   failed: 'Não conformidade identificada', alerts: 'Alerta', 'manual-review': 'Revisão humana necessária', passed: 'Resultado positivo',
   requirement: 'Requisito ABNT', recommendation: 'Recomendação ABNT', 'best-practice': 'Boa prática suplementar', editorial: 'Alerta editorial',
@@ -706,6 +707,31 @@ function appendTechnicalDetails(document, article, issue, evidence) {
   article.append(details);
 }
 
+/**
+ * Recortes das áreas marcadas na revisão guiada. Os atributos vêm de `marksCropParts`, os mesmos que o
+ * HTML exportado usa: a imagem guardada entra inteira e o `viewBox` recorta, com o contorno vermelho
+ * por cima. Nenhum pixel novo é gerado e nada depende de `style` embutido.
+ */
+function appendMarksCrops(document, parent, record) {
+  if (!record?.crops?.length) return;
+  const container = element(document, 'div', undefined, 'marks-crops');
+  container.setAttribute('data-review-marks', '');
+  for (const crop of record.crops) {
+    const parts = marksCropParts(crop);
+    const figure = document.createElement('figure');
+    const svg = document.createElementNS(SVG_NAMESPACE, 'svg');
+    for (const [name, value] of Object.entries(parts.svg)) svg.setAttribute(name, String(value));
+    const image = document.createElementNS(SVG_NAMESPACE, 'image');
+    for (const [name, value] of Object.entries(parts.image)) image.setAttribute(name, String(value));
+    const area = document.createElementNS(SVG_NAMESPACE, 'rect');
+    for (const [name, value] of Object.entries(parts.rect)) area.setAttribute(name, String(value));
+    svg.append(image, area);
+    figure.append(svg, element(document, 'figcaption', crop.caption));
+    container.append(figure);
+  }
+  parent.append(container);
+}
+
 function appendHumanHistory(document, parent, entries, evidenceAnchorById) {
   if (!entries.length) {
     const empty = element(document, 'p', HUMAN_REVIEW_EMPTY);
@@ -724,6 +750,7 @@ function appendHumanHistory(document, parent, entries, evidenceAnchorById) {
       metadata.append(element(document, 'dt', label), element(document, 'dd', value));
     }
     card.append(metadata);
+    appendMarksCrops(document, card, entry.marksRecord);
     const links = entry.evidenceRefs.map(id => evidenceAnchorById.get(id)).filter(Boolean);
     if (!links.length) card.append(element(document, 'p', 'Nenhuma evidência correlata foi registrada para esta ocorrência.'));
     for (const [index, anchor] of links.entries()) {
@@ -839,7 +866,7 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
   heading.append(
     element(document, 'h3', issue.title),
     element(document, 'p', `Resultado neste item: ${outcomeLabel(presentation.outcome)}.`),
-    element(document, 'p', `Classificação: ${presentation.classifications.map(classificationLabel).join(', ')}. Impacto: ${impactLabel(issue.impact)}.`),
+    element(document, 'p', `Classificação: ${presentation.classifications.map(classificationLabel).join(', ')}. ${impactText(issue.impact, presentation.outcome === 'cantTell', { positive: presentation.outcome === 'passed' }) ?? 'Impacto não aplicável'}.`),
   );
   const content = document.createElement('details');
   content.setAttribute('data-report-issue-details', '');

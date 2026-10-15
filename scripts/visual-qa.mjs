@@ -7,7 +7,7 @@
 // página aponta para o elemento certo, e se a caixa/anel cobre exatamente o que o achado descreve.
 //
 // Uso:
-//   node scripts/visual-qa.mjs [--out qa-out/<nome>] [--url https://... ...] [--no-fixture]
+//   node scripts/visual-qa.mjs [--out qa-out/<nome>] [--url https://... ...] [--no-fixture] [--reload-check]
 //
 // Para cada página (a fixture local, salvo --no-fixture, e cada --url):
 //   01-painel.png          painel no resultado da auditoria
@@ -16,12 +16,17 @@
 //   03-sinais-rolagem-N.png página nas posições de rolagem
 //   04-selecionado-N.png   página com o anel do N-ésimo achado selecionado
 //   05-persistencia.png    página 6 s depois, com o ponteiro mexido e rolagem
+//   05b-recarga-painel.png painel logo depois de a aba recarregar — o CONVITE, só com --reload-check
+//   05c-recarga-sinais.png sinais reencontrados na versão recarregada, só com --reload-check
+//   05d-recarga-destaque-convite.png convite do destaque na versão atual, só com --reload-check
+//   05e-recarga-destaque.png caixa do destaque desenhada na versão recarregada, só com --reload-check
 //   06-relatorio-N.png     seções do relatório com as miniaturas de evidência
 //   07-evidencia-N.png     cada miniatura marcada isolada (o <figure> com o svg)
 //   08-mapa.png            mapa de anúncios, quando existe
 //   09-mapa-teclado.png    mapa do teclado, quando existe (caixas azuis numeradas e tracejadas)
 //   summary.json           o que foi medido: localizados, não localizados com motivo,
-//                          retângulo do alvo vs. retângulo do anel/botão, persistência
+//                          retângulo do alvo vs. retângulo do anel/botão, persistência e, com
+//                          --reload-check, o que o painel respondeu depois da recarga
 //
 // Um erro numa página é registrado no summary.json e não aborta as outras.
 
@@ -86,20 +91,23 @@ function normalizeText(value) {
 // Argumentos
 // ---------------------------------------------------------------------------------------------
 
-const USAGE = `Uso: node scripts/visual-qa.mjs [--out qa-out/<nome>] [--url https://... ...] [--no-fixture]
+const USAGE = `Uso: node scripts/visual-qa.mjs [--out qa-out/<nome>] [--url https://... ...] [--no-fixture] [--reload-check]
 
   --out <dir>     diretório de saída (padrão: qa-out/visual-qa-<data-hora>)
   --url <url>     audita também esta página (pode repetir)
   --no-fixture    não audita a fixture local test/e2e/fixtures/visual-qa/marcacao.html
+  --reload-check  depois das capturas, recarrega a aba auditada e mostra os sinais na versão
+                  recarregada (o convite e os sinais reencontrados ficam em 05b/05c-*.png)
   --help          mostra esta ajuda
 `;
 
 function parseArguments(argv) {
-  const options = { out: null, urls: [], fixture: true, help: false };
+  const options = { out: null, urls: [], fixture: true, reloadCheck: false, help: false };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') { options.help = true; continue; }
     if (argument === '--no-fixture') { options.fixture = false; continue; }
+    if (argument === '--reload-check') { options.reloadCheck = true; continue; }
     if (argument === '--out' || argument === '--url') {
       const value = argv[index + 1];
       if (typeof value !== 'string' || !value || value.startsWith('--')) {
@@ -198,7 +206,14 @@ const PANEL_MARKERS = `(() => {
 // antes, e ler só o primeiro botão escondia o destaque ao vivo que está ao lado dele.
 const DETAIL_ACTIONS = `[...document.querySelectorAll('[data-result-detail] .detail-actions [data-action]')].map(node => node.dataset.action)`;
 // "highlight-checking" é a espera enquanto o worker confere o vínculo, não uma oferta.
-const SETTLED_HIGHLIGHT_ACTIONS = ['highlight-occurrence', 'consult-evidence', 'clear-highlight'];
+// "highlight-reloaded" é a oferta que só existe quando a página recarregou depois da auditoria:
+// ela É uma resposta assentada (o destaque na versão de agora), e sem estar nesta lista a espera
+// do detalhe terminaria antes de o convite aparecer.
+const SETTLED_HIGHLIGHT_ACTIONS = ['highlight-occurrence', 'consult-evidence', 'clear-highlight', 'highlight-reloaded'];
+
+// O que o painel ANUNCIA sobre o destaque (as regiões vivas que falam de destaque).
+const PANEL_HIGHLIGHT_LIVE = `[...document.querySelectorAll('.panel-live')].map(node => node.textContent)
+  .filter(text => /destaque/iu.test(text))`;
 
 const PANEL_DETAIL = `(() => {
   const detail = document.querySelector('[data-result-detail]');
@@ -233,11 +248,44 @@ const OVERLAY_STATE = `(() => {
   });
   const pageElements = [...document.querySelectorAll('body *')]
     .filter(element => !element.closest('[data-audita-page-markers-root="v1"]'));
+  // O texto visível da página, uma linha por fragmento, medido com Range — a mesma conta que o
+  // produto faz para não pousar a etiqueta em cima de palavras. Só a viewport é varrida, com teto de
+  // elementos e de linhas, para o roteiro não pesar numa página longa.
+  const textLines = (() => {
+    const lines = [];
+    const range = typeof document.createRange === 'function' ? document.createRange() : null;
+    if (!range || !document.body) return lines;
+    const stack = [document.body];
+    let visited = 0;
+    while (stack.length > 0 && lines.length < 1500) {
+      const node = stack.pop();
+      visited += 1;
+      if (visited > 2000) break;
+      if (node.closest?.('[data-audita-page-markers-root="v1"],[data-audita-highlight-root]')) continue;
+      const box = node.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0 &&
+        !(box.left < innerWidth && box.right > 0 && box.top < innerHeight && box.bottom > 0)) continue;
+      for (const child of node.childNodes) {
+        if (child.nodeType !== 3 || !/\\S/u.test(child.nodeValue ?? '')) continue;
+        range.selectNodeContents(child);
+        for (const rect of range.getClientRects()) {
+          if (!(rect.width > 0) || !(rect.height > 0)) continue;
+          if (!(rect.left < innerWidth && rect.right > 0 && rect.top < innerHeight && rect.bottom > 0)) continue;
+          lines.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, node: child });
+          if (lines.length >= 1500) break;
+        }
+      }
+      for (const child of node.children) stack.push(child);
+    }
+    return lines;
+  })();
   const groups = [...shadow.querySelectorAll('.audita-group')].map(group => {
     const ring = group.querySelector('.audita-ring');
     const button = group.querySelector('.audita-marker');
     const label = button?.getAttribute('aria-label') ?? '';
     const match = /^Sinal (\\d+)/u.exec(label);
+    const drawn = element => element.style.display !== 'none' &&
+      element.getBoundingClientRect().width > 0;
     const ringBox = { x: number(ring.style.left), y: number(ring.style.top),
       width: number(ring.style.width), height: number(ring.style.height) };
     const rect = button.getBoundingClientRect();
@@ -256,14 +304,23 @@ const OVERLAY_STATE = `(() => {
       ? document.elementsFromPoint(x, y)
         .filter(element => !element.closest('[data-audita-page-markers-root="v1"]')).slice(0, 3).map(describe)
       : [];
+    // Quem é o dono do texto que a etiqueta pode cobrir: o elemento marcado. Ele é procurado pelo
+    // retângulo do contorno e, quando a folga não casa exatamente, pelo elemento mais fundo sob o
+    // centro do anel — assim o texto do próprio alvo não entra na conta.
+    const owners = [...matching];
+    const deep = located ? (document.elementsFromPoint(ringBox.x + ringBox.width / 2, ringBox.y + ringBox.height / 2)
+      .filter(element => !element.closest('[data-audita-page-markers-root="v1"]'))[0] ?? null) : null;
+    if (deep && !owners.includes(deep)) owners.push(deep);
+    const labelOnText = drawn(button) ? textLines.filter(line =>
+      !owners.some(owner => owner.contains?.(line.node) === true) &&
+      Math.min(buttonBox.x + buttonBox.width, line.right) - Math.max(buttonBox.x, line.left) > 1 &&
+      Math.min(buttonBox.y + buttonBox.height, line.bottom) - Math.max(buttonBox.y, line.top) > 1) : [];
     const overlapWidth = located ? Math.max(0, Math.min(ringBox.x + ringBox.width, buttonBox.x + buttonBox.width) - Math.max(ringBox.x, buttonBox.x)) : 0;
     const overlapHeight = located ? Math.max(0, Math.min(ringBox.y + ringBox.height, buttonBox.y + buttonBox.height) - Math.max(ringBox.y, buttonBox.y)) : 0;
     // O anel só é exibido na ocorrência selecionada; fora disso o produto o deixa em display:none
     // e o retângulo medido abaixo passa a ser zero. A caixa em ringBox continua sendo o alvo que
     // o overlay resolveu (ela vem dos estilos em linha), e é com ela que se mede a precisão.
     const ringRect = ring.getBoundingClientRect();
-    const drawn = element => element.style.display !== 'none' &&
-      element.getBoundingClientRect().width > 0;
     return {
       number: match ? Number.parseInt(match[1], 10) : null,
       label,
@@ -280,6 +337,14 @@ const OVERLAY_STATE = `(() => {
       buttonOverlapArea: Math.round(overlapWidth * overlapHeight),
       targetCandidates: matching.slice(0, 4).map(describe),
       targetCandidateCount: matching.length,
+      labelOnTextCount: labelOnText.length,
+      labelOnText: labelOnText.slice(0, 3).map(line => ({
+        text: (line.node.nodeValue ?? '').replace(/\\s+/gu, ' ').trim().slice(0, 60),
+        owner: line.node.parentElement ? describe(line.node.parentElement) : null,
+        coveredPx: Math.round((Math.min(buttonBox.x + buttonBox.width, line.right) - Math.max(buttonBox.x, line.left)) *
+          (Math.min(buttonBox.y + buttonBox.height, line.bottom) - Math.max(buttonBox.y, line.top))),
+      })),
+      labelOnTextLines: textLines.length,
       paintedUnderRing: located ? painted(ringBox.x + ringBox.width / 2, ringBox.y + ringBox.height / 2) : [],
       paintedUnderButton: painted(buttonBox.x + buttonBox.width / 2, buttonBox.y + buttonBox.height / 2),
     };
@@ -351,6 +416,18 @@ const DISABLE_SMOOTH_SCROLL = `(() => {
 
 async function scrollTo(target, top) {
   return evaluate(target, `(() => { window.scrollTo({ top: ${Math.max(0, Math.round(top))}, left: 0, behavior: 'instant' }); return Math.round(scrollY); })()`);
+}
+
+// O painel rola dentro de #panel-root (a janela do painel não rola), então a rolagem da captura
+// precisa ser feita no contêiner certo para a imagem mostrar o bloco que ela promete mostrar.
+async function scrollPanelTo(panel, selector, margin = 12) {
+  return evaluate(panel, `(() => {
+    const node = document.querySelector(${JSON.stringify(selector)});
+    const scroller = document.querySelector('#panel-root');
+    if (!node || !scroller) return false;
+    scroller.scrollTo({ top: Math.max(0, Math.round(node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - ${Math.round(margin)})), left: 0, behavior: 'instant' });
+    return Math.round(scroller.scrollTop);
+  })()`);
 }
 
 async function scrollBy(target, delta) {
@@ -596,11 +673,210 @@ async function waitForPanelScreen(panel, accepted, timeoutMs) {
   }
 }
 
+// A recarga da aba recria o documento do painel: um clique pode cair em um documento que já não
+// existe. Repetir o clique no MESMO botão do produto é o que a pessoa faz (tentar de novo), e não
+// uma espera cega — a foto do estado continua sendo tirada uma única vez, depois do gesto.
+async function clickWhenReady(target, selector, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try { await click(target, selector); return true; } catch { /* o documento do painel está sendo trocado */ }
+    if (Date.now() >= deadline) throw new Error(`CLIQUE_NAO_CHEGOU: ${selector}`);
+    await sleep(300);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Recarga da aba auditada (passo opcional --reload-check)
+// ---------------------------------------------------------------------------------------------
+
+// A página recarregou: o endereço é o mesmo, o documento não. O painel não pode desenhar sozinho —
+// ele CONVIDA, e o gesto seguinte aceita a versão de agora. Este passo percorre exatamente esses
+// dois gestos (com os mesmos botões que a pessoa usa), mede o que foi reencontrado na página e
+// repete o par no destaque individual. As capturas 05b–05e são o que a revisão humana olha.
+async function captureReload({ panel, page, directory, located, attempt, shot }) {
+  const reload = {
+    reloaded: false,
+    addressBefore: null,
+    addressAfter: null,
+    sameAddress: null,
+    staleLayerAfterReload: null,
+    offer: null,
+    offerButtonText: null,
+    drawnAfterOffer: null,
+    relocated: null,
+    highlight: { candidates: [], attempts: [], offered: false, drawn: null, boxes: null, buttonText: null },
+  };
+
+  reload.addressBefore = (await attempt('recarga-endereco-antes', () => evaluate(page, 'location.href'))).value ?? null;
+  // A sentinela marca o documento velho: quando ela some, o documento NOVO assumiu. Sem isso o
+  // primeiro gesto do roteiro cairia no painel que a recarga acabou de descartar.
+  await attempt('recarga-sentinela', () => evaluate(panel, 'window.__auditaQaPanelBeforeReload = true'));
+  await attempt('recarga-sentinela-pagina', () => evaluate(page, 'window.__auditaQaPageBeforeReload = true'));
+  const reloaded = await attempt('recarga-pagina', async () => {
+    await command(page, 'Page.reload', { ignoreCache: false });
+    return waitForValue(page,
+      `({ fresh: typeof window.__auditaQaPageBeforeReload === 'undefined', ready: document.readyState })`,
+      value => value?.fresh === true && value?.ready === 'complete', { timeoutMs: 60_000, intervalMs: 100 });
+  });
+  reload.reloaded = reloaded.ok;
+  if (!reload.reloaded) return reload;
+
+  reload.addressAfter = (await attempt('recarga-endereco-depois', () => evaluate(page, 'location.href'))).value ?? null;
+  reload.sameAddress = reload.addressBefore !== null && reload.addressBefore === reload.addressAfter;
+  reload.staleLayerAfterReload = (await attempt('recarga-camada-antiga', () => evaluate(page,
+    `document.querySelectorAll('[data-audita-page-markers-root="v1"]').length`))).value ?? null;
+  await waitForValue(panel, 'typeof window.__auditaQaPanelBeforeReload', value => value === 'undefined',
+    { timeoutMs: 30_000, intervalMs: 200 }).catch(() => null);
+
+  // Pedir os sinais de novo, como a pessoa pede: se o painel ainda acha que eles estão na página,
+  // retira primeiro. São os mesmos dois botões do produto, na ordem em que eles aparecem.
+  await attempt('recarga-pedir-sinais', async () => {
+    const card = await waitForValue(panel, PANEL_MARKERS, value => value?.status !== null,
+      { timeoutMs: 30_000, intervalMs: 200 });
+    if ((card.actions ?? []).includes('HIDE_PAGE_MARKERS')) {
+      await clickWhenReady(panel, '[data-page-marker-review] [data-intent="HIDE_PAGE_MARKERS"]');
+      await waitForValue(panel, PANEL_MARKERS, value => (value?.actions ?? []).includes('SHOW_PAGE_MARKERS'),
+        { timeoutMs: 30_000, intervalMs: 200 });
+    }
+    await clickWhenReady(panel, '[data-page-marker-review] [data-intent="SHOW_PAGE_MARKERS"]');
+    return true;
+  });
+  const offered = await attempt('recarga-convite', () => waitForValue(panel, PANEL_MARKERS,
+    value => ['reload-offer', 'changed-address', 'active', 'unavailable'].includes(value?.status),
+    { timeoutMs: 120_000, intervalMs: 200 }));
+  reload.offer = offered.value
+    ? { status: offered.value.status, message: offered.value.message, actions: offered.value.actions ?? [] }
+    : null;
+  await attempt('recarga-painel-visivel', async () => {
+    await command(panel, 'Page.bringToFront');
+    await scrollPanelTo(panel, '[data-page-marker-review]', 8);
+    await sleep(300);
+    return true;
+  });
+  await shot('05b-recarga-painel.png', () => captureViewport(panel, directory, '05b-recarga-painel.png'));
+  if (reload.offer?.status !== 'reload-offer') return reload;
+
+  reload.offerButtonText = (await attempt('recarga-texto-do-convite', () => evaluate(panel,
+    `document.querySelector('[data-page-marker-review] [data-intent="SHOW_PAGE_MARKERS_RELOADED"]')?.textContent ?? null`))).value ?? null;
+  // O convite sozinho não desenha nada: quem mostra a versão de agora é o gesto seguinte.
+  reload.drawnAfterOffer = (await attempt('recarga-camada-apos-convite', () => evaluate(page,
+    `document.querySelectorAll('[data-audita-page-markers-root="v1"]').length`))).value ?? null;
+
+  await attempt('recarga-aceitar', () => clickWhenReady(panel, '[data-page-marker-review] [data-intent="SHOW_PAGE_MARKERS_RELOADED"]'));
+  const accepted = await attempt('recarga-sinais', () => waitForValue(panel, PANEL_MARKERS,
+    value => ['active', 'unavailable'].includes(value?.status), { timeoutMs: 120_000, intervalMs: 200 }));
+  const drawn = await attempt('recarga-ler-sinais', () => evaluate(page, OVERLAY_STATE));
+  const groups = drawn.value?.groups ?? [];
+  reload.relocated = {
+    status: accepted.value?.status ?? null,
+    message: accepted.value?.message ?? null,
+    noteInPanel: (await attempt('recarga-aviso', () => evaluate(panel,
+      `document.querySelector('[data-page-marker-relocated]')?.textContent ?? null`))).value ?? null,
+    drawn: groups.filter(group => group.visible).length,
+    onScreen: groups.filter(group => group.onScreen).length,
+    precise: groups.filter(group => group.targetCandidateCount >= 1).length,
+    numbers: groups.map(group => group.number),
+  };
+  await attempt('recarga-focar-pagina', () => command(page, 'Page.bringToFront'));
+  await attempt('recarga-topo', () => scrollTo(page, 0));
+  await sleep(400);
+  await shot('05c-recarga-sinais.png', () => captureViewport(page, directory, '05c-recarga-sinais.png'));
+
+  // O destaque individual segue a mesma lógica no documento novo: a primeira tentativa convida, o
+  // gesto seguinte desenha a caixa. Um alvo que a página não tem como mostrar (elemento de slide
+  // oculto, por exemplo) é recusado pelo produto mesmo com o convite aceito — por isso o roteiro
+  // percorre os sinais que a própria página acabou de desenhar, como a pessoa faria, e registra o
+  // que o painel respondeu em cada um. Se a oferta já vier pronta (o convite já estava na tela), o
+  // gesto de aceitar é o mesmo.
+  const visibleNumbers = new Set(groups.filter(group => group.visible).map(group => group.number));
+  const withHighlight = located.filter(occurrence => occurrence.action === 'highlight-occurrence');
+  const candidates = [...withHighlight.filter(occurrence => visibleNumbers.has(Number(occurrence.number))),
+    ...withHighlight.filter(occurrence => !visibleNumbers.has(Number(occurrence.number)))].slice(0, 3);
+  reload.highlight.candidates = candidates.map(occurrence => Number(occurrence.number));
+  for (const candidate of candidates) {
+    const entry = { number: Number(candidate.number), firstAttempt: null, offered: false, buttonText: null,
+      drawn: 0, boxes: null, announcements: null, afterInvite: null };
+    reload.highlight.attempts.push(entry);
+    const first = await attempt(`recarga-destaque-${entry.number}`, async () => {
+      await clickByFocusId(panel, candidate.focusId);
+      return settleDetailAction(panel, 10_000);
+    });
+    entry.firstAttempt = first.value?.highlight ?? null;
+    let offeredHighlight = entry.firstAttempt === 'highlight-reloaded';
+    if (entry.firstAttempt === 'highlight-occurrence') {
+      const invited = await attempt(`recarga-destaque-convite-${entry.number}`, async () => {
+        await click(panel, '[data-result-detail] .detail-actions [data-action="highlight-occurrence"]');
+        return waitForValue(panel, DETAIL_ACTIONS,
+          value => Array.isArray(value) && value.includes('highlight-reloaded'), { timeoutMs: 30_000, intervalMs: 100 });
+      });
+      offeredHighlight = invited.ok === true;
+      entry.afterInvite = (await attempt(`recarga-destaque-sem-caixa-${entry.number}`, () => evaluate(page, HIGHLIGHT_STATE))).value?.length ?? null;
+      if (offeredHighlight) {
+        // A captura do convite é do painel: ele precisa estar à frente, e com o botão do convite à
+        // vista, senão a imagem mostra uma parte da tela que não tem o que ela promete.
+        await attempt('recarga-destaque-painel-visivel', async () => {
+          await command(panel, 'Page.bringToFront');
+          await scrollPanelTo(panel, '[data-result-detail] .detail-actions', 140);
+          await sleep(300);
+          return true;
+        });
+        await shot('05d-recarga-destaque-convite.png', () => captureViewport(panel, directory, '05d-recarga-destaque-convite.png'));
+      }
+    }
+    entry.offered = offeredHighlight;
+    if (!offeredHighlight) continue;
+    entry.buttonText = (await attempt(`recarga-destaque-texto-${entry.number}`, () => evaluate(panel,
+      `document.querySelector('[data-result-detail] .detail-actions [data-action="highlight-reloaded"]')?.textContent ?? null`))).value ?? null;
+    await attempt(`recarga-destaque-aceitar-${entry.number}`, async () => {
+      await click(panel, '[data-result-detail] .detail-actions [data-action="highlight-reloaded"]');
+      return waitForValue(page, `document.querySelectorAll('[data-audita-highlight-root]').length`,
+        value => value === 1, { timeoutMs: 20_000, intervalMs: 100 });
+    });
+    const boxes = await attempt(`recarga-destaque-caixa-${entry.number}`, () => evaluate(page, HIGHLIGHT_STATE));
+    entry.boxes = boxes.value ?? null;
+    entry.drawn = boxes.value?.length ?? 0;
+    // O que o PAINEL diz e oferece depois do gesto: a resposta do produto quando a caixa não entra
+    // fica na região viva, e o botão de limpar é a prova de que o painel assumiu o destaque.
+    // A caixa entra na página antes de o painel receber a resposta, então a leitura espera o painel
+    // decidir — senão a captura pega o convite que ainda estava na tela.
+    entry.panelActions = (await attempt(`recarga-destaque-acoes-${entry.number}`, () => waitForValue(panel,
+      `(() => ({ actions: ${DETAIL_ACTIONS}, live: ${PANEL_HIGHLIGHT_LIVE} }))()`,
+      value => (value?.actions ?? []).includes('clear-highlight') || /Não foi possível destacar/u.test((value?.live ?? []).join(' ')),
+      { timeoutMs: 15_000, intervalMs: 100 }))).value?.actions ?? null;
+    entry.announcements = (await attempt(`recarga-destaque-aviso-${entry.number}`, () => evaluate(panel, PANEL_HIGHLIGHT_LIVE))).value ?? null;
+    if (entry.drawn === 0) continue;
+    reload.highlight.drawn = entry.drawn;
+    reload.highlight.boxes = entry.boxes;
+    reload.highlight.buttonText = entry.buttonText;
+    await attempt('recarga-destaque-focar-pagina', () => command(page, 'Page.bringToFront'));
+    await sleep(300);
+    await shot('05e-recarga-destaque.png', () => captureViewport(page, directory, '05e-recarga-destaque.png'));
+    // Uma caixa acesa sujaria as capturas seguintes: o roteiro limpa como a pessoa limparia, pelo
+    // botão do detalhe ou pelo botão global de destaque ativo — o produto oferece os dois.
+    await attempt('recarga-destaque-limpar', async () => {
+      const cleared = await evaluate(panel, `(() => {
+        const node = document.querySelector('[data-result-detail] .detail-actions [data-action="clear-highlight"]')
+          ?? document.querySelector('[data-action="clear-highlight"]');
+        if (!node || node.disabled) return false;
+        node.click();
+        return true;
+      })()`, { userGesture: true });
+      if (cleared !== true) throw new Error('SEM_BOTAO_DE_LIMPAR');
+      return waitForValue(page, `document.querySelectorAll('[data-audita-highlight-root]').length`,
+        value => value === 0, { timeoutMs: 15_000, intervalMs: 100 });
+    });
+    break;
+  }
+  reload.highlight.offered = reload.highlight.attempts.some(entry => entry.offered);
+  if (reload.highlight.drawn === null) reload.highlight.drawn = 0;
+  return reload;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Uma página
 // ---------------------------------------------------------------------------------------------
 
-async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
+async function auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck = false }) {
   const directory = join(outRoot, target.slug);
   await mkdir(directory, { recursive: true });
   const summary = {
@@ -619,6 +895,7 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
     selectionProbe: [],
     highlight: null,
     persistence: null,
+    reload: null,
     report: null,
   };
   const cleanupHost = { after: handler => cleanups.push(handler) };
@@ -784,6 +1061,10 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
       summary.signals.onScreen = summary.signals.groups.filter(group => group.onScreen).length;
       summary.signals.withRing = summary.signals.groups.filter(group => group.ringVisible).length;
       summary.signals.numbers = summary.signals.groups.map(group => group.number);
+      // A métrica do rótulo: quantas etiquetas caem em cima de uma linha de texto de OUTRO elemento.
+      summary.signals.labelsOverText = summary.signals.groups.filter(group => (group.labelOnTextCount ?? 0) > 0).length;
+      summary.signals.textLinesCovered = summary.signals.groups.reduce((total, group) => total + (group.labelOnTextCount ?? 0), 0);
+      summary.signals.textLinesInViewport = summary.signals.groups[0]?.labelOnTextLines ?? 0;
     }
 
     // (e) selecionar achados na página e medir persistência -------------------------------------
@@ -904,6 +1185,11 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary }) {
     };
     await shot('05-persistencia.png', () => captureViewport(page, directory, '05-persistencia.png'));
 
+    // (e2) a aba recarrega e os sinais voltam para a versão de agora (opcional) --------------------
+    if (reloadCheck) {
+      summary.reload = await captureReload({ panel, page, directory, located: probe, attempt, shot });
+    }
+
     // (f) relatório ------------------------------------------------------------------------------
     summary.report = await captureReport({ launch, panel, page, directory, attempt, shot });
 
@@ -933,12 +1219,109 @@ function describeFindings(panel) {
   };
 }
 
+// A lista de suspeitos do mapa do teclado como o relatório a guardou, não como ela aparece na tela:
+// nome, motivo e a tag do elemento são o que permite classificar à mão cada suspeito em verdadeiro ou
+// falso positivo. A página do relatório é uma página da própria extensão, então ela mesma consegue
+// abrir o armazenamento e devolver o artefato do mapa.
+function keyboardSuspectsExpression(auditId) {
+  return `import(chrome.runtime.getURL('/src/storage/audit-store.js')).then(module =>
+    module.createAuditStore().getReportRevision(${JSON.stringify(auditId)})).then(revision => {
+    const artifact = (revision?.model?.evidence ?? []).find(item => item.kind === 'keyboard-map');
+    if (!artifact) return { present: false, suspects: [] };
+    return { present: true, status: artifact.status ?? null,
+      counts: artifact.counts ?? null, limitations: artifact.limitations ?? [],
+      suspects: (artifact.suspects ?? []).map(entry => ({ number: entry.number,
+        nodeId: entry.nodeId, tag: entry.tag, role: entry.role, reason: entry.reason,
+        ruleId: entry.ruleId, name: entry.name, nameSource: entry.nameSource,
+        nameStatus: entry.nameStatus, bounds: entry.bounds })) };
+  })`;
+}
+
+/**
+ * Cadeia de ancestrais de cada suspeito, medida na própria página auditada.
+ *
+ * O artefato do mapa guarda só o retângulo, a tag e o motivo de cada suspeito; para classificar à mão
+ * um item em verdadeiro ou falso positivo falta saber o que está em volta dele — se está dentro de um
+ * link, se um contêiner grande declara a seta de clique, se o Texto que o nomeia é do próprio item.
+ * O retângulo do artefato está em coordenadas de documento (o mesmo espaço do DOMSnapshot), então o
+ * elemento é encontrado comparando `getBoundingClientRect()` mais a rolagem.
+ */
+function suspectContextExpression(suspects) {
+  const wanted = (Array.isArray(suspects) ? suspects : []).map(entry => ({
+    number: entry.number, tag: entry.tag, bounds: entry.bounds,
+  }));
+  return `(() => {
+    const wanted = ${JSON.stringify(wanted)};
+    const TABBABLE = 'a[href],button,input:not([type="hidden"]),select,textarea,[tabindex],[contenteditable="true"]';
+    const describe = element => {
+      if (!element || element === document.documentElement) return null;
+      const style = getComputedStyle(element);
+      return {
+        tag: element.tagName.toLowerCase(),
+        href: element.getAttribute('href'),
+        tabindex: element.getAttribute('tabindex'),
+        role: element.getAttribute('role'),
+        cursor: style.cursor,
+        display: style.display,
+        texto: (element.textContent || '').replace(/\\s+/gu, ' ').trim().slice(0, 60),
+      };
+    };
+    const elements = [...document.querySelectorAll('body *')];
+    const place = element => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.left + scrollX, y: rect.top + scrollY, width: rect.width, height: rect.height };
+    };
+    return wanted.map(entry => {
+      const box = entry.bounds;
+      if (!box) return { number: entry.number, encontrado: false };
+      const sameBox = elements.filter(element => {
+        const rect = place(element);
+        return Math.abs(rect.x - box.x) <= 1.5 && Math.abs(rect.y - box.y) <= 1.5 &&
+          Math.abs(rect.width - box.width) <= 1.5 && Math.abs(rect.height - box.height) <= 1.5;
+      });
+      // Vários elementos dividem o mesmo retângulo (o link e a imagem de dentro dele, por exemplo):
+      // o suspeito é o que casa também a tag registrada pelo mapa.
+      const node = sameBox.find(element => element.tagName.toLowerCase() === entry.tag) ?? sameBox[0] ?? null;
+      const ancestors = [];
+      for (let current = node?.parentElement; current && ancestors.length < 8; current = current.parentElement) {
+        const described = describe(current);
+        if (described) ancestors.push(described);
+        if (described?.tag === 'body') break;
+      }
+      // Quem responde à pergunta do mapa: existe alguma parada do Tab acima do item?
+      const ancestralParada = node?.parentElement
+        ? node.parentElement.closest(TABBABLE) : null;
+      return {
+        number: entry.number,
+        encontrado: Boolean(node),
+        mesmaCaixa: sameBox.map(element => element.tagName.toLowerCase()),
+        proprio: describe(node),
+        ancestralParada: describe(ancestralParada),
+        pais: ancestors,
+      };
+    });
+  })()`;
+}
+
 async function captureReport({ launch, panel, page, directory, attempt, shot }) {
-  const report = { opened: false, screenshots: [], evidenceFigures: 0, evidenceCaptured: 0 };
-  const opened = await attempt('abrir-relatorio', async () => {
+  const report = { opened: false, screenshots: [], evidenceFigures: 0, evidenceCaptured: 0, launchMessage: null };
+  // A frase que o painel mostra depois do clique diz se a abertura foi feita: é ela que decide se
+  // vale repetir o gesto, e não o tempo que a aba levou para aparecer.
+  const launchMessage = async () => (await attempt('mensagem-do-relatorio', () => evaluate(panel,
+    `document.querySelector('[data-report-launch-status]')?.textContent ?? null`))).value ?? null;
+  const open = () => attempt('abrir-relatorio', async () => {
     await click(panel, 'button[data-intent="OPEN_REPORT"]');
     return launch.waitForReport({ auditId: await readAuditId(panel) });
   });
+  let opened = await open();
+  report.launchMessage = await launchMessage();
+  // O painel avisa quando a abertura falhou; repetir o clique é o "Tente novamente" que ele oferece.
+  // Com a aba já abrindo, um segundo clique criaria duas abas e embaraçaria a prova — por isso o
+  // retry só acontece quando a frase do próprio painel diz que não abriu.
+  if (!opened.ok && /Não foi possível abrir/u.test(report.launchMessage ?? '')) {
+    opened = await open();
+    report.launchMessage = await launchMessage();
+  }
   if (!opened.ok || !opened.value) return report;
   const target = opened.value;
   report.opened = true;
@@ -1011,6 +1394,21 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
       'article.keyboard-map-card', 0, { maxHeight: 1_400 }));
     if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
   }
+  // A lista de suspeitos em JSON: é ela que a revisão humana classifica em verdadeiro ou falso
+  // positivo, porque a captura sozinha não diz a tag nem o motivo de cada item laranja.
+  if (keyboard.value?.present) {
+    const auditId = await readAuditId(panel);
+    const listed = await attempt('ler-suspeitos-teclado', () => evaluate(target,
+      keyboardSuspectsExpression(auditId), { awaitPromise: true }));
+    report.keyboardSuspects = listed.value ?? null;
+    // A classificação manual de cada suspeito precisa do que está em volta dele na página.
+    const suspects = listed.value?.suspects ?? [];
+    if (suspects.length > 0) {
+      const context = await attempt('contexto-dos-suspeitos', () => evaluate(page,
+        suspectContextExpression(suspects)));
+      report.keyboardSuspectContext = context.value ?? null;
+    }
+  }
   return report;
 }
 
@@ -1070,7 +1468,7 @@ async function main() {
   try {
     for (const target of targets) {
       process.stdout.write(`→ ${target.url}\n`);
-      const summary = await auditPage({ target, outRoot, cleanups, chromeBinary });
+      const summary = await auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck: options.reloadCheck });
       pages.push(summary);
       printPageSummary(summary);
       await writeFile(join(outRoot, summary.slug, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
@@ -1089,6 +1487,7 @@ async function main() {
     chrome: pages.find(page => page.chrome)?.chrome ?? null,
     viewport: { ...VIEWPORT },
     captureMode: CAPTURE_MODE,
+    reloadCheck: options.reloadCheck,
     outRoot: relative(process.cwd(), outRoot) || '.',
     pages,
   };
@@ -1126,6 +1525,12 @@ function printPageSummary(summary) {
     const sobreOutros = (summary.signals.groups ?? []).filter(group => group.labelOverOtherRing?.length);
     lines.push(`  etiquetas sobrepostas: ${colisoes.length}; etiquetas sobre outro elemento marcado: ${sobreOutros.length}` +
       (colisoes.length ? ` (${colisoes.map(group => `${group.number}↔${group.labelOverLabel.join('/')}`).join(', ')})` : ''));
+    const sobreTexto = (summary.signals.groups ?? []).filter(group => (group.labelOnTextCount ?? 0) > 0);
+    lines.push(`  etiquetas sobre TEXTO de outro elemento: ${sobreTexto.length}` +
+      ` (${summary.signals.textLinesCovered ?? 0} linha(s) de texto coberta(s) de ` +
+      `${summary.signals.textLinesInViewport ?? 0} medidas na viewport)` +
+      (sobreTexto.length ? ` — ${sobreTexto.slice(0, 4).map(group =>
+        `Sinal ${group.number} cobre ${group.labelOnTextCount}× "${(group.labelOnText?.[0]?.text ?? '').slice(0, 28)}"`).join('; ')}` : ''));
   }
   if (summary.unlocated?.length) {
     lines.push(`  não localizados: ${summary.unlocated.length}` +
@@ -1149,11 +1554,39 @@ function printPageSummary(summary) {
     lines.push(`  persistência após ${summary.persistence.waitedMs / 1000} s: ${summary.persistence.survived ? 'sinais mantidos' : 'SINAIS PERDIDOS'} ` +
       `(${summary.persistence.before.drawn} → ${summary.persistence.after.drawn})`);
   }
+  if (summary.reload) {
+    const reload = summary.reload;
+    lines.push(`  recarga da aba: ${reload.reloaded ? 'sim' : 'NÃO ACONTECEU'}` +
+      (reload.sameAddress === null ? '' : `; mesmo endereço: ${reload.sameAddress ? 'sim' : 'NÃO'}`) +
+      `; painel: ${reload.offer?.status ?? 'sem leitura'}` +
+      (reload.relocated ? `; sinais reencontrados: ${reload.relocated.drawn ?? 0}` +
+        ` (precisos ${reload.relocated.precise ?? 0}, na moldura ${reload.relocated.onScreen ?? 0})` +
+        `, aviso no painel: ${reload.relocated.noteInPanel ? 'sim' : 'não'}` : '') +
+      `; destaque na versão atual: ${reload.highlight?.drawn
+        ? `caixa desenhada (${reload.highlight.attempts.length} de ${reload.highlight.candidates.length} sinal(is) tentado(s))`
+        : reload.highlight?.offered ? 'oferecido, sem caixa' : 'não oferecido'}`);
+    if ((reload.highlight?.attempts ?? []).length > 1) {
+      lines.push(`  destaque na versão atual, por sinal: ${reload.highlight.attempts.map(entry =>
+        `Sinal ${entry.number}=${entry.offered ? (entry.drawn ? 'caixa desenhada' : 'sem caixa') : 'sem convite'}`).join('; ')}`);
+    }
+  }
   if (summary.report?.opened) {
     lines.push(`  relatório: aberto, ${summary.report.evidenceFigures} miniatura(s) ` +
       `(${summary.report.evidenceVisibleBefore ?? 0} visíveis antes de abrir as seções), ` +
       `${summary.report.evidenceCaptured} capturada(s)` +
       (summary.report.map?.present ? `, mapa: ${(summary.report.map.statuses ?? []).join('/')}` : ', mapa: ausente'));
+  }
+  if (summary.report?.keyboardSuspects?.present) {
+    // A lista crua, uma linha por item: é o que a revisão humana classifica em verdadeiro ou falso.
+    const suspects = summary.report.keyboardSuspects.suspects ?? [];
+    lines.push(`  suspeitos do mapa do teclado: ${suspects.length}`);
+    for (const suspect of suspects) {
+      lines.push(`    ${suspect.number}. <${suspect.tag}> papel=${suspect.role || '—'} motivo=${suspect.reason}` +
+        `${suspect.ruleId ? ` regra=${suspect.ruleId}` : ''} nome="${(suspect.name ?? '').slice(0, 80)}"` +
+        `${suspect.nameStatus === 'omitted-privacy' ? ' (nome omitido)' : ''}`);
+    }
+  } else if (summary.report?.keyboardSuspects?.present === false) {
+    lines.push('  suspeitos do mapa do teclado: mapa ausente no artefato');
   }
   if (Array.isArray(summary.highlight) && summary.highlight.length > 0) {
     lines.push(`  ATENÇÃO: ${summary.highlight.length} destaque(s) ficaram na página depois das capturas`);

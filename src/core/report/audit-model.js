@@ -12,6 +12,7 @@ import {
   TEST_MODES,
 } from '../result.js';
 import { createReviewDecision, deriveReviewedItemOutcome, REVIEW_MODES } from '../review/decisions.js';
+import { REVIEW_MARKS_ITEM_ID } from '../review/review-marks.js';
 import { canonicalStringify } from './canonical-json.js';
 import { isCompatibleCoreTestedWcagRefs } from './tested-criteria.js';
 import { projectClosedAuditShape } from './closed-schema.js';
@@ -646,7 +647,7 @@ function projectManualReview(entries) {
 
 function projectReviewDecisions(entries) {
   return entries.map(entry => projectRecord(entry, [
-    'answer', 'auditId', 'decidedAt', 'decisionId', 'evaluator', 'itemId', 'mode', 'note', 'occurrenceId', 'revisions',
+    'answer', 'auditId', 'decidedAt', 'decisionId', 'evaluator', 'itemId', 'marks', 'mode', 'note', 'occurrenceId', 'revisions',
   ]));
 }
 
@@ -2434,6 +2435,36 @@ function validateLegalAnalysis(occurrence, occurrenceLabel) {
   }
 }
 
+/**
+ * Confere as marcas do mapa do teclado contra o mapa da própria página: os números apontados precisam
+ * ser itens suspeitos daquele mapa e as áreas precisam caber no documento auditado, em pixels CSS.
+ * Sem esta conferência, `marks` seria um campo livre — e um apontamento que não existe no mapa não
+ * pode virar constatação no relatório.
+ */
+function assertDecisionMarks(decision, occurrence, map) {
+  const label = `Decisão ${decision.decisionId}`;
+  if (decision.itemId !== REVIEW_MARKS_ITEM_ID || !map || map.status === 'absent') {
+    throw new TypeError(`${label} aponta o mapa do teclado, mas a página avaliada não tem esse mapa no item ${REVIEW_MARKS_ITEM_ID}.`);
+  }
+  const geometry = map.derivation?.geometry;
+  const size = geometry?.sourceCssSize;
+  if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height)) {
+    throw new TypeError(`${label} aponta áreas, mas o mapa não registra o tamanho do documento observado.`);
+  }
+  if (decision.marks.areas.length > 0 && map.segments.length === 0) {
+    throw new TypeError(`${label} aponta áreas, mas o mapa desta página não tem imagem guardada.`);
+  }
+  const suspects = new Set(map.suspects.map(entry => entry.number));
+  for (const number of decision.marks.suspects) {
+    if (!suspects.has(number)) throw new TypeError(`${label} aponta o item ${number}, que não é um item sem caixa deste mapa.`);
+  }
+  for (const [index, area] of decision.marks.areas.entries()) {
+    if (area.x + area.width > size.width + 1e-9 || area.y + area.height > size.height + 1e-9) {
+      throw new TypeError(`${label}: área ${index + 1} fica fora do documento observado (${size.width} × ${size.height} pixels CSS).`);
+    }
+  }
+}
+
 function validateReview(model, { itemIds, itemById, occurrenceById }) {
   if (!Array.isArray(model.manualReview) || !Array.isArray(model.reviewDecisions)) throw new TypeError('Fila e decisões de revisão devem ser listas.');
   const queueByOccurrence = new Map();
@@ -2466,6 +2497,12 @@ function validateReview(model, { itemIds, itemById, occurrenceById }) {
 
   const decisionIds = new Set();
   const decisionByOccurrence = new Map();
+  const keyboardMapByPage = new Map();
+  for (const artifact of model.evidence ?? []) {
+    if (artifact?.kind === 'keyboard-map' && !keyboardMapByPage.has(artifact.pageId)) {
+      keyboardMapByPage.set(artifact.pageId, artifact);
+    }
+  }
   for (const decision of model.reviewDecisions) {
     const normalized = createReviewDecision(decision);
     const decisionId = requiredId(decision.decisionId, 'reviewDecision.decisionId');
@@ -2482,6 +2519,10 @@ function validateReview(model, { itemIds, itemById, occurrenceById }) {
     for (const field of ['auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode', 'note']) {
       if (decision[field] !== normalized[field]) throw new TypeError(`Decisão ${decisionId} não está em forma canônica.`);
     }
+    if (canonicalStringify(decision.marks ?? null) !== canonicalStringify(normalized.marks ?? null)) {
+      throw new TypeError(`Decisão ${decisionId} não está em forma canônica.`);
+    }
+    if (normalized.marks) assertDecisionMarks(normalized, occurrence, keyboardMapByPage.get(occurrence.pageId));
     if (canonicalStringify(decision.revisions ?? null) !== canonicalStringify(normalized.revisions ?? null)) {
       throw new TypeError(`Decisão ${decisionId} não está em forma canônica.`);
     }

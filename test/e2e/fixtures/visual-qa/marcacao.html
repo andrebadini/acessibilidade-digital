@@ -53,6 +53,31 @@
     </div>
   </section>
 
+  <!-- CASO 13 — cartões de notícia: título longo em três linhas e o link "Leia mais" logo abaixo,
+       sem folga entre os dois. A etiqueta do link, colada por cima do contorno, caía na última
+       linha do título e cobria palavras; o fundo livre fica logo ABAIXO do link.
+       O contraste do link é baixo de propósito (~2:1), porque é o achado que produz o sinal. -->
+  <section class="bloco" id="noticias">
+    <h2>Notícias</h2>
+    <div class="noticias">
+      <article class="noticia">
+        <div class="noticia__midia"><img src="/img/servico-1.svg" alt="" width="300" height="120"></div>
+        <h3 class="noticia__titulo">Mutirão de vacinação começa na segunda-feira em todos os postos da cidade</h3>
+        <a class="noticia__mais" href="#noticias">Leia mais</a>
+      </article>
+      <article class="noticia">
+        <div class="noticia__midia"><img src="/img/servico-2.svg" alt="" width="300" height="120"></div>
+        <h3 class="noticia__titulo">Matrícula escolar para o próximo semestre abre inscrições pela internet</h3>
+        <a class="noticia__mais" href="#noticias">Leia mais</a>
+      </article>
+      <article class="noticia">
+        <div class="noticia__midia"><img src="/img/servico-3.svg" alt="" width="300" height="120"></div>
+        <h3 class="noticia__titulo">Atualização do cadastro pode ser feita pelo aplicativo até sexta-feira</h3>
+        <a class="noticia__mais" href="#noticias">Leia mais</a>
+      </article>
+    </div>
+  </section>
+
   <!-- CASO 8 — container com overflow:auto contendo itens problemáticos.
        A gaveta tem 132 px de altura e conteúdo de ~420 px: os itens do fim ficam
        geometricamente fora da área visível do container. O produto precisa decidir

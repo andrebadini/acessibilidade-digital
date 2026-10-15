@@ -847,3 +847,72 @@ test('privacy reducer events fail closed for no-pixels, extra fields, accessors,
     type: 'CAPTURE_MODE_SELECTED', mode: 'full-evidence', focusId: 'capture-mode-full-evidence', extra: true,
   }), selected);
 });
+
+// --- Página recarregada (1.1.60): convite do destaque e destaque reencontrado ----------------
+
+test('a denied highlight on a reloaded page becomes an explicit invitation instead of a dead end', () => {
+  const loaded = () => {
+    let state = reducePanelState(createInitialPanelState(), { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
+    state = reducePanelState(state, { type: 'SELECT_OCCURRENCE', occurrenceId: 'occ-1' });
+    return reducePanelState(state, { type: 'HIGHLIGHT_AVAILABLE', occurrenceId: 'occ-1' });
+  };
+  const offered = reducePanelState(loaded(), { type: 'HIGHLIGHT_RELOAD_OFFERED', occurrenceId: 'occ-1' });
+  assert.deepEqual(offered.highlight.bindingStatus, { state: 'reload-offer' });
+  assert.equal(offered.highlight.state, 'idle');
+  assert.equal(offered.highlight.occurrenceId, null);
+  assert.match(offered.highlight.message, /foi recarregada depois da auditoria/u);
+  assert.match(offered.highlight.message, /Destacar na versão atual/u);
+  // O convite é da ocorrência selecionada: outro item não herda a oferta.
+  const other = reducePanelState(loaded(), { type: 'HIGHLIGHT_RELOAD_OFFERED', occurrenceId: 'occ-2' });
+  assert.deepEqual(other.highlight.bindingStatus, { state: 'available' });
+  assert.equal(reducePanelState(loaded(), { type: 'HIGHLIGHT_RELOAD_OFFERED' }).highlight.bindingStatus.state, 'available');
+});
+
+test('accepting the invitation reports the relocated highlight and never the original one', () => {
+  let state = reducePanelState(createInitialPanelState(), { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
+  state = reducePanelState(state, { type: 'SELECT_OCCURRENCE', occurrenceId: 'occ-1' });
+  state = reducePanelState(state, { type: 'HIGHLIGHT_RELOAD_OFFERED', occurrenceId: 'occ-1' });
+  const busy = reducePanelState(state, { type: 'HIGHLIGHT_BUSY', occurrenceId: 'occ-1', relocated: true });
+  assert.match(busy.highlight.message, /na versão recarregada da página/u);
+  const active = reducePanelState(busy, { type: 'HIGHLIGHT_ACTIVE', occurrenceId: 'occ-1', relocated: true });
+  assert.equal(active.highlight.state, 'active');
+  assert.deepEqual(active.highlight.bindingStatus, { state: 'available' });
+  assert.match(active.highlight.message, /reencontrado na versão recarregada/u);
+  assert.match(active.highlight.message, /confira se corresponde ao que foi auditado/u);
+  // O caminho de sempre continua dizendo exatamente o que dizia.
+  const ordinary = reducePanelState(loadedState(), { type: 'HIGHLIGHT_ACTIVE', occurrenceId: 'occ-1' });
+  assert.equal(ordinary.highlight.message, 'Destaque visível na página atual.');
+});
+
+test('the worker announcement of a relocated highlight keeps the advisory wording', () => {
+  // O anúncio do worker (HIGHLIGHT_STATE_CHANGED) chega antes da resposta ao pedido do painel e não
+  // diz em que modo o destaque foi pedido: quem ainda sabe é o convite guardado no estado.
+  let state = reducePanelState(createInitialPanelState(), { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
+  state = reducePanelState(state, { type: 'SELECT_OCCURRENCE', occurrenceId: 'occ-1' });
+  state = reducePanelState(state, { type: 'HIGHLIGHT_RELOAD_OFFERED', occurrenceId: 'occ-1' });
+  state = reducePanelState(state, { type: 'HIGHLIGHT_BUSY', occurrenceId: 'occ-1', relocated: true });
+  const announced = reducePanelState(state, { type: 'HIGHLIGHT_ACTIVE', occurrenceId: 'occ-1' });
+  assert.equal(announced.highlight.state, 'active');
+  assert.match(announced.highlight.message, /reencontrado na versão recarregada/u);
+  // Com outro item selecionado o convite não serve de prova para este destaque.
+  const other = reducePanelState(
+    { ...loadedState(), selectedOccurrenceId: 'occ-2', highlight: { ...loadedState().highlight, bindingStatus: { state: 'reload-offer' } } },
+    { type: 'HIGHLIGHT_ACTIVE', occurrenceId: 'occ-1' });
+  assert.equal(other.highlight.message, 'Destaque visível na página atual.');
+});
+
+function loadedState() {
+  let state = reducePanelState(createInitialPanelState(), { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
+  return reducePanelState(state, { type: 'HIGHLIGHT_AVAILABLE', occurrenceId: 'occ-1' });
+}
+
+test('the invitation is a closed, frozen state: nothing outside reload-offer is representable', () => {
+  let state = reducePanelState(createInitialPanelState(), { type: 'AUDIT_RESULT', auditId: 'audit-1', result: resultBundle() });
+  state = reducePanelState(state, { type: 'HIGHLIGHT_RELOAD_OFFERED', occurrenceId: 'occ-1' });
+  assert.deepEqual(state.highlight.bindingStatus, { state: 'reload-offer' });
+  assert.equal(Object.isFrozen(state.highlight.bindingStatus), true);
+  assert.equal(Object.isFrozen(state.highlight), true);
+  // Uma cópia com estado inventado cai no neutro em vez de virar uma capacidade nova.
+  const copy = panelStateModule.createInitialPanelState();
+  assert.deepEqual(copy.highlight.bindingStatus, { state: 'unchecked' });
+});

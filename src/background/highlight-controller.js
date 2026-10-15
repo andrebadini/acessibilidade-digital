@@ -1,7 +1,10 @@
 import { assertBindingMatchesModel } from './highlight-binding.js';
+import { createPageRelocationOfferStore } from './page-relocation-offer.js';
 
 const IDENTIFIER = /^[A-Za-z0-9._:-]{1,200}$/u;
 const NONCE = /^[A-Za-z0-9_-]{22}$/u;
+const DOCUMENT_PROOF_ID = /^[A-Za-z0-9._:-]{1,240}$/u;
+const PROOF_DIGEST = /^hmac-sha256:[A-Za-z0-9_-]{43}$/u;
 const DANGEROUS_IDS = new Set(['__proto__', 'prototype', 'constructor']);
 const BASE64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
@@ -168,6 +171,7 @@ export function createHighlightController({
   targetQueue,
   now,
   randomBytes,
+  relocationOffers = null,
 } = {}) {
   const authorizeSession = callable(sessionAuthority, 'authorizeSession');
   const loadValidated = callable(modelAuthority, 'loadValidated');
@@ -182,6 +186,9 @@ export function createHighlightController({
   const purgeExpiredBindings = callable(bindingStore, 'purgeExpired');
   const verifyLive = callable(liveVerifier, 'verify');
   const injectHighlight = callable(chromeAdapter, 'injectHighlight');
+  // Opcional: sem uma sonda de identidade de documento o destaque não tem como reconhecer uma
+  // recarga, e o comportamento é exatamente o de antes.
+  const probeDocumentIdentity = callable(chromeAdapter, 'probeDocumentIdentity');
   const tabs = ownData(chromeApi, 'tabs');
   const getTab = callable(tabs, 'get');
   const withTarget = callable(targetQueue, 'withTarget');
@@ -193,6 +200,62 @@ export function createHighlightController({
     !assertHeld || typeof now !== 'function' || typeof randomBytes !== 'function' ||
     typeof runtimeId !== 'string' || runtimeId.length < 1) {
     throw new TypeError('HIGHLIGHT_CONTROLLER_INVALID');
+  }
+
+  const offers = relocationOffers ?? createPageRelocationOfferStore({ now: () => readNow() });
+  const registerOffer = callable(offers, 'register');
+  const acceptOffer = callable(offers, 'accept');
+  const clearOfferAudit = callable(offers, 'clearAudit');
+  const clearOfferTab = callable(offers, 'clearTab');
+  if (!registerOffer || !acceptOffer) throw new TypeError('HIGHLIGHT_CONTROLLER_INVALID');
+
+  function validProof(value) {
+    const tabId = ownData(value, 'tabId');
+    const windowId = ownData(value, 'windowId');
+    const documentId = ownData(value, 'documentId');
+    const urlSessionDigest = ownData(value, 'urlSessionDigest');
+    return validChromeId(tabId) && validChromeId(windowId) &&
+      typeof documentId === 'string' && DOCUMENT_PROOF_ID.test(documentId) &&
+      typeof urlSessionDigest === 'string' && PROOF_DIGEST.test(urlSessionDigest)
+      ? Object.freeze({ tabId, windowId, documentId, urlSessionDigest })
+      : null;
+  }
+
+  // Mesmo endereço (o digest de sessão cobre origem, caminho e consulta), mesma aba e janela, e um
+  // documento diferente: é uma recarga. Só o quadro principal pode ser recolocado, porque é o único
+  // cujo documento novo o worker consegue provar sem repetir a captura de estrutura do alvo.
+  async function inspectRelocation(binding, target) {
+    if (!probeDocumentIdentity || !target || target.frameId !== 0) return null;
+    let proof;
+    try { proof = validProof(await Reflect.apply(probeDocumentIdentity, chromeAdapter, [binding.tabId])); } catch { return null; }
+    if (!proof || proof.tabId !== binding.tabId || proof.windowId !== binding.windowId ||
+      proof.documentId === binding.topDocumentId || proof.urlSessionDigest !== binding.topUrlSessionDigest) return null;
+    return proof;
+  }
+
+  function offerRelocation(binding, proof) {
+    try {
+      return Reflect.apply(registerOffer, offers, [Object.freeze({ auditId: binding.auditId, tabId: binding.tabId,
+        windowId: binding.windowId, documentId: proof.documentId, urlSessionDigest: proof.urlSessionDigest,
+        scope: 'highlight', expiresAt: binding.expiresAt })]) === true;
+    } catch { return false; }
+  }
+
+  function relocationAccepted(binding, proof, liveDocumentId) {
+    if (!proof || proof.documentId !== liveDocumentId) return false;
+    try {
+      return Reflect.apply(acceptOffer, offers, [Object.freeze({ auditId: binding.auditId, tabId: binding.tabId,
+        windowId: binding.windowId, documentId: liveDocumentId, scope: 'highlight' })]) === true;
+    } catch { return false; }
+  }
+
+  // Uma tentativa em que a página recarregou e a recolocação é possível vira convite, com o mesmo
+  // código do painel dos sinais. Qualquer outro caso continua sendo "a página mudou".
+  async function changedFailure(binding, target) {
+    const proof = await inspectRelocation(binding, target);
+    if (!proof) return failure('HIGHLIGHT_DOCUMENT_CHANGED');
+    offerRelocation(binding, proof);
+    return failure('HIGHLIGHT_RELOADED_PAGE');
   }
 
   let lastNow = null;
@@ -218,8 +281,14 @@ export function createHighlightController({
       return false;
     }
     const session = ownData(result, 'session');
+    // O painel volta como leitura do resultado (sessão "view-only") quando a aba navegou depois da
+    // auditoria, e é justamente aí que a versão recarregada pode ser destacada. O que autoriza
+    // desenhar não é o estado da sessão: é a ligação durável registrada na auditoria somada à prova
+    // do documento vivo — a mesma página auditada ou a versão recarregada do mesmo endereço, sempre
+    // reconferida contra a estrutura registrada. Para a leitura continuar sem os poderes da
+    // auditoria, "cancelar" e "confirmar pixels" seguem fora da tabela dela.
     return ownData(result, 'ok') === true && ownData(session, 'auditId') === request.auditId &&
-      ownData(session, 'state') === 'result';
+      ['result', 'view-only'].includes(ownData(session, 'state'));
   }
 
   async function loadBoundTarget(request) {
@@ -383,7 +452,7 @@ export function createHighlightController({
         const current = await loadBoundTarget(request);
         if (!current.ok) return failure(current.code);
         if (current.binding.tabId !== queueTarget.tabId || current.binding.topDocumentId !== queueTarget.documentId) {
-          return failure('HIGHLIGHT_DOCUMENT_CHANGED');
+          return changedFailure(current.binding, current.target);
         }
         const marker = kindAndMarker(current.snapshot.model, request.occurrenceId);
         if (!marker) return failure('HIGHLIGHT_NOT_APPLICABLE');
@@ -396,7 +465,13 @@ export function createHighlightController({
         } catch {
           live = null;
         }
-        if (ownData(live, 'ok') !== true) return failure(liveFailureCode(ownData(live, 'reason')));
+        if (ownData(live, 'ok') !== true) {
+          // O documento do topo mudou com o mesmo endereço: a verificação de estrutura do alvo não
+          // tem como ser refeita contra o documento auditado, e a recolocação é oferecida em vez do
+          // erro. Todo o resto continua com o código de sempre.
+          if (ownData(live, 'reason') === 'document-changed') return changedFailure(current.binding, current.target);
+          return failure(liveFailureCode(ownData(live, 'reason')));
+        }
         if (!confirmedLiveProof(live, current.binding, current.target)) {
           return failure('HIGHLIGHT_LIVE_PROOF_FAILED');
         }
@@ -485,6 +560,135 @@ export function createHighlightController({
     }
   }
 
+  // Recolocação do destaque numa página recarregada: mesmo endereço, documento novo, quadro
+  // principal, e só depois do convite aceito no painel. A estrutura registrada continua sendo
+  // conferida dentro da página, contra o documento auditado (`signedDocumentId`), porque o documento
+  // novo tem outro id; a identidade da aba, da janela e do endereço é provada de novo aqui, antes e
+  // depois do efeito.
+  async function highlightReloaded(rawRequest) {
+    const request = highlightRequest(rawRequest);
+    if (!request) return failure('HIGHLIGHT_INPUT_INVALID');
+    const inspected = await loadBoundTarget(request);
+    if (!inspected.ok) return failure(inspected.code);
+    const firstProof = await inspectRelocation(inspected.binding, inspected.target);
+    if (!firstProof) return changedFailure(inspected.binding, inspected.target);
+    if (!relocationAccepted(inspected.binding, firstProof, firstProof.documentId)) {
+      offerRelocation(inspected.binding, firstProof);
+      return failure('HIGHLIGHT_RELOADED_PAGE');
+    }
+    const queueTarget = Object.freeze({ tabId: inspected.binding.tabId, documentId: firstProof.documentId });
+    try {
+      return await Reflect.apply(withTarget, targetQueue, [queueTarget, async lock => {
+        Reflect.apply(assertHeld, targetQueue, [lock, queueTarget]);
+        const current = await loadBoundTarget(request);
+        if (!current.ok) return failure(current.code);
+        if (current.binding.tabId !== queueTarget.tabId ||
+          current.binding.topDocumentId !== inspected.binding.topDocumentId) {
+          return failure('HIGHLIGHT_DOCUMENT_CHANGED');
+        }
+        const proof = await inspectRelocation(current.binding, current.target);
+        if (!proof) return changedFailure(current.binding, current.target);
+        // A oferta vale para um documento específico: se a aba recarregou de novo no meio do
+        // caminho, a recolocação é oferecida outra vez em vez de acontecer sobre outra página.
+        if (proof.documentId !== queueTarget.documentId || !relocationAccepted(current.binding, proof, proof.documentId)) {
+          offerRelocation(current.binding, proof);
+          return failure('HIGHLIGHT_RELOADED_PAGE');
+        }
+        const marker = kindAndMarker(current.snapshot.model, request.occurrenceId);
+        if (!marker) return failure('HIGHLIGHT_NOT_APPLICABLE');
+
+        const prior = await Reflect.apply(getActiveOverlay, bindingStore, [current.binding.tabId]);
+        if (prior) {
+          const cleared = await clearOwner(prior);
+          if (!cleared.ok) return cleared;
+        }
+
+        const nonce = createNonce(randomBytes);
+        if (!nonce) return failure('HIGHLIGHT_STATE_FAILED');
+        const createdAt = readNow();
+        if (createdAt >= current.binding.expiresAt) return failure('HIGHLIGHT_EXPIRED');
+        const owner = Object.freeze({
+          version: 1,
+          tabId: current.binding.tabId,
+          windowId: current.binding.windowId,
+          topDocumentId: proof.documentId,
+          documentId: proof.documentId,
+          frameId: 0,
+          nonce,
+          auditId: current.binding.auditId,
+          occurrenceId: request.occurrenceId,
+          createdAt,
+          expiresAt: current.binding.expiresAt,
+          state: 'installing',
+          revision: 1,
+          relocatedFrom: current.binding.topDocumentId,
+        });
+        let begun;
+        try { begun = await Reflect.apply(beginOverlay, bindingStore, [owner]); }
+        catch { return failure('HIGHLIGHT_STATE_FAILED'); }
+        if (begun?.ok !== true) {
+          const retained = await Reflect.apply(getActiveOverlay, bindingStore, [owner.tabId]);
+          if (retained?.nonce === nonce) {
+            const compensated = await clearOwner(retained);
+            if (!compensated.ok) return compensated;
+          }
+          return failure('HIGHLIGHT_STATE_FAILED');
+        }
+
+        const command = Object.freeze({
+          version: 1,
+          op: 'install',
+          nonce,
+          documentId: owner.documentId,
+          signedDocumentId: current.binding.topDocumentId,
+          frameId: owner.frameId,
+          selector: current.target.selector,
+          structuralSignature: current.target.structuralSignature,
+          kind: marker.kind,
+          markerNumber: marker.markerNumber,
+        });
+        let injected;
+        try {
+          injected = await Reflect.apply(injectHighlight, chromeAdapter, [{
+            tabId: owner.tabId,
+            documentId: owner.documentId,
+            command,
+          }]);
+        } catch {
+          injected = null;
+        }
+        if (!confirmedInjection(injected, owner)) {
+          const compensated = await compensateNonce(owner.tabId, nonce);
+          return compensated.ok ? failure('HIGHLIGHT_INJECTION_FAILED') : compensated;
+        }
+        // Depois do efeito, o documento vivo precisa continuar sendo aquele que a oferta nomeou.
+        const settled = await inspectRelocation(current.binding, current.target);
+        if (!settled || settled.documentId !== proof.documentId) {
+          const compensated = await compensateNonce(owner.tabId, nonce);
+          return compensated.ok ? failure('HIGHLIGHT_DOCUMENT_CHANGED') : compensated;
+        }
+
+        let activated;
+        try {
+          activated = await Reflect.apply(activateOverlay, bindingStore, [{
+            tabId: owner.tabId,
+            nonce,
+            expectedRevision: begun.overlay.revision,
+          }]);
+        } catch {
+          activated = null;
+        }
+        if (activated?.ok !== true) {
+          const compensated = await compensateNonce(owner.tabId, nonce);
+          return compensated.ok ? failure('HIGHLIGHT_STATE_FAILED') : compensated;
+        }
+        return activeSuccess(request.occurrenceId);
+      }]);
+    } catch {
+      return failure('HIGHLIGHT_STATE_FAILED');
+    }
+  }
+
   async function clear(rawRequest) {
     const request = clearRequest(rawRequest);
     if (!request) return failure('HIGHLIGHT_INPUT_INVALID');
@@ -533,6 +737,9 @@ export function createHighlightController({
     if (!validId(auditId) || typeof reason !== 'string' || reason.length < 1 || reason.length > 100) {
       throw new TypeError('HIGHLIGHT_INPUT_INVALID');
     }
+    // O convite para recolocar o destaque morre junto com a auditoria: nada de oferecer de novo
+    // uma auditoria que já foi descartada.
+    try { clearOfferAudit(auditId); } catch { /* ofertas vencidas não impedem a limpeza */ }
     let owners;
     try {
       owners = (await Reflect.apply(listRecoverableOverlays, bindingStore, []))
@@ -598,6 +805,7 @@ export function createHighlightController({
     if (!validChromeId(tabId) || typeof reason !== 'string' || reason.length < 1 || reason.length > 100) {
       throw new TypeError('HIGHLIGHT_INPUT_INVALID');
     }
+    try { clearOfferTab(tabId); } catch { /* ofertas vencidas não impedem a limpeza */ }
     let owner;
     try { owner = await Reflect.apply(getActiveOverlay, bindingStore, [tabId]); }
     catch { return failure('HIGHLIGHT_STATE_FAILED'); }
@@ -613,6 +821,14 @@ export function createHighlightController({
       }]);
       if (!cleared.ok) return cleared;
       clearedAuditIds.push(owner.auditId);
+    }
+    // Navegação: o destaque desenhado sai (o documento dele já não existe), mas as ligações
+    // duráveis da auditoria ficam. São elas que guardam o seletor e a assinatura com que o painel
+    // volta a oferecer o destaque na versão recarregada; cada uso é conferido de novo contra o
+    // documento vivo, com o mesmo endereço e o gesto do leitor. Aba fechada ou descartada leva
+    // tudo junto.
+    if (reason === 'navigation') {
+      return lifecycleSuccess({ state: 'invalidated', clearedAuditIds: Object.freeze(clearedAuditIds) });
     }
     try {
       await Reflect.apply(invalidateStoredTab, bindingStore, [tabId]);
@@ -742,6 +958,7 @@ export function createHighlightController({
     currentState,
     availability,
     highlight,
+    highlightReloaded,
     clear,
     clearForTargetLocked,
     clearAudit,

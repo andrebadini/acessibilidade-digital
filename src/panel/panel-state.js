@@ -417,7 +417,10 @@ export function reducePanelState(current, event) {
       return validPanelOccurrenceId(event.occurrenceId) ? nextPanelState(current, {
         highlight: {
           ...current.highlight, state: 'busy', operation: 'highlight',
-          occurrenceId: event.occurrenceId, message: 'Destacando na página atual.',
+          occurrenceId: event.occurrenceId,
+          message: event.relocated === true
+            ? 'Destacando na versão recarregada da página.'
+            : 'Destacando na página atual.',
         },
         focusId: panelFocusId(event.focusId, current.focusId),
         scrollTop: panelScrollTop(event.scrollTop, current.scrollTop),
@@ -428,17 +431,27 @@ export function reducePanelState(current, event) {
         focusId: panelFocusId(event.focusId, current.focusId),
         scrollTop: panelScrollTop(event.scrollTop, current.scrollTop),
       }) : current;
-    case 'HIGHLIGHT_ACTIVE':
+    case 'HIGHLIGHT_ACTIVE': {
+      // Duas chegadas dizem a mesma coisa: a resposta do pedido do painel e o anúncio do worker. O
+      // anúncio chega primeiro e não sabe em que modo o destaque foi pedido — quem sabe é o próprio
+      // estado, que ainda carrega o convite da versão recarregada. Sem isto o aviso de conferência
+      // apareceria só quando a resposta chegasse depois do anúncio, isto é, nunca.
+      const relocated = event.relocated === true || (
+        current.highlight.bindingStatus?.state === 'reload-offer' &&
+        current.highlight.occurrenceId === event.occurrenceId);
       return validPanelOccurrenceId(event.occurrenceId) ? nextPanelState(current, {
         highlight: {
           state: 'active', operation: null, occurrenceId: event.occurrenceId,
           bindingStatus: current.selectedOccurrenceId === event.occurrenceId
             ? { state: 'available' } : current.highlight.bindingStatus,
-          message: 'Destaque visível na página atual.',
+          message: relocated
+            ? 'Destaque reencontrado na versão recarregada — confira se corresponde ao que foi auditado.'
+            : 'Destaque visível na página atual.',
         },
         focusId: panelFocusId(event.focusId, current.focusId),
         scrollTop: panelScrollTop(event.scrollTop, current.scrollTop),
       }) : current;
+    }
     case 'HIGHLIGHT_CLEARED':
       return nextPanelState(current, {
         highlight: {
@@ -467,6 +480,18 @@ export function reducePanelState(current, event) {
         ? nextPanelState(current, {
           highlight: { ...current.highlight, bindingStatus: { state: 'available' }, message: 'Este item pode ser destacado na página.' },
         }) : current;
+    case 'HIGHLIGHT_RELOAD_OFFERED':
+      // A página recarregou depois da auditoria e o endereço confere: o resultado registrado continua
+      // valendo, então o painel convida a destacar na versão de agora em vez de só recusar.
+      if (!validPanelOccurrenceId(event.occurrenceId) || event.occurrenceId !== current.selectedOccurrenceId) return current;
+      return nextPanelState(current, {
+        highlight: {
+          state: 'idle', operation: null, occurrenceId: null, bindingStatus: { state: 'reload-offer' },
+          message: 'A página foi recarregada depois da auditoria. Use "Destacar na versão atual" para ver o item na página de agora.',
+        },
+        focusId: panelFocusId(event.focusId, current.focusId),
+        scrollTop: panelScrollTop(event.scrollTop, current.scrollTop),
+      });
     case 'HIGHLIGHT_UNAVAILABLE':
       if (event.occurrenceId && event.occurrenceId !== current.selectedOccurrenceId) return current;
       return nextPanelState(current, {
@@ -597,7 +622,8 @@ function readerSpeechMessage(availability, voiceId) {
 
 function copyHighlight(value) {
   const binding = value?.bindingStatus;
-  const bindingStatus = binding?.state === 'available' || binding?.state === 'checking' || binding?.state === 'unchecked'
+  const bindingStatus = binding?.state === 'available' || binding?.state === 'checking' ||
+    binding?.state === 'unchecked' || binding?.state === 'reload-offer'
     ? { state: binding.state }
     : binding?.state === 'unavailable' && HIGHLIGHT_BINDING_REASONS.has(binding.reason)
       ? { state: 'unavailable', reason: binding.reason }

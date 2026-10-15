@@ -226,8 +226,15 @@ function placeBadges(entries, geometry, width, height) {
 /**
  * Plano determinístico do mapa: geometria, paradas, suspeitos, contagens e fatias com as caixas já
  * posicionadas em pixel de imagem. Nenhuma ida ao navegador acontece aqui.
+ *
+ * `sourceAligned: false` diz que a captura integral e a leitura estrutural descrevem leiautes
+ * diferentes (ver `src/core/evidence/map-source-geometry.js`). Nesse caso as caixas não são
+ * posicionadas nem desenhadas: a lista numerada continua inteira, o mapa declara a limitação e a
+ * imagem sai sem marcação — melhor sem caixa do que com caixa no lugar errado.
  */
-export function buildKeyboardMapPlan({ snapshot, occurrences, sourceMetadata, layoutMetrics = {}, segmentCssHeight } = {}) {
+export function buildKeyboardMapPlan({
+  snapshot, occurrences, sourceMetadata, layoutMetrics = {}, segmentCssHeight, sourceAligned = true,
+} = {}) {
   if (!sourceWithinLimits(sourceMetadata)) {
     throw new KeyboardMapError('KEYBOARD_MAP_SOURCE_LIMIT', 'A captura original excede os limites do mapa do teclado.');
   }
@@ -245,10 +252,11 @@ export function buildKeyboardMapPlan({ snapshot, occurrences, sourceMetadata, la
     limitations.add('non-uniform-pixel-scale');
   }
   const counts = { ...selected.counts };
+  let anyOutsideSource = false;
   const clampAll = (entries, entryKind) => entries.map(entry => {
     if (outsideSource(entry.bounds, geometry.cssWidth, geometry.cssHeight)) {
       counts.omittedNoRect += 1;
-      limitations.add('stops-outside-source-clamped');
+      anyOutsideSource = true;
     }
     return { ...entry, entryKind, bounds: clampedBox(entry.bounds, geometry.cssWidth, geometry.cssHeight) };
   });
@@ -283,9 +291,16 @@ export function buildKeyboardMapPlan({ snapshot, occurrences, sourceMetadata, la
     counts.omittedLimit += 1;
     segments = buildSegments();
   }
+  const drawBoxes = sourceAligned === true && (stops.length > 0 || suspects.length > 0);
+  if (!drawBoxes && (stops.length > 0 || suspects.length > 0)) limitations.add('source-layout-changed');
+  // "Encaixados na borda da imagem" só descreve o que aconteceu quando alguma caixa foi desenhada: sem
+  // caixa nenhuma, o encaixe não chegou à imagem, e dizer que chegou confundiria quem lê o relatório.
+  if (anyOutsideSource && drawBoxes) limitations.add('stops-outside-source-clamped');
   let unresolved = 0;
-  for (const segment of segments) {
-    unresolved += placeBadges(segment.entries, geometry, segment.sourcePixelClip.width, segment.sourcePixelClip.height);
+  if (drawBoxes) {
+    for (const segment of segments) {
+      unresolved += placeBadges(segment.entries, geometry, segment.sourcePixelClip.width, segment.sourcePixelClip.height);
+    }
   }
   if (unresolved > 0) limitations.add('badge-overlap-unresolved');
   const segmentIndexByNumber = new Map();
@@ -307,6 +322,9 @@ export function buildKeyboardMapPlan({ snapshot, occurrences, sourceMetadata, la
   });
   return {
     geometry,
+    // `drawBoxes: false` é o caso "captura e leitura em leiautes diferentes": as fatias continuam
+    // saindo (a imagem existe), os itens continuam listados, e nenhuma caixa é desenhada.
+    drawBoxes,
     stops: stops.map((entry, offset) => ({
       ...shared(entry, offset, 'stop'), kind: entry.kind, tabIndex: entry.tabIndex,
     })),
@@ -344,6 +362,9 @@ function strokeBox(context, box, color, { dashed = false, scale = 1 } = {}) {
 /**
  * Desenha uma fatia: a imagem, as caixas dos suspeitos (tracejadas), as caixas das paradas (sólidas) e,
  * por cima de tudo, as etiquetas — o número da ordem de Tab e o "?" do suspeito.
+ *
+ * Sem caixas confiáveis (`plan.drawBoxes === false`) só a imagem é desenhada: é melhor não marcar do
+ * que marcar o lugar errado.
  */
 function drawSegment(context, bitmap, segment, plan) {
   const width = segment.sourcePixelClip.width;
@@ -352,6 +373,7 @@ function drawSegment(context, bitmap, segment, plan) {
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, width, height);
   context.drawImage(bitmap, 0, segment.sourcePixelClip.y, width, height, 0, 0, width, height);
+  if (!plan.drawBoxes) return;
   for (const entry of segment.entries) {
     if (entry.entryKind === 'suspect') strokeBox(context, entry.placement.box, SUSPECT_COLOR, { dashed: true, scale });
   }
@@ -375,7 +397,8 @@ function drawSegment(context, bitmap, segment, plan) {
 
 /** Composes the keyboard map locally. It never mutates the page or the pristine source artifact. */
 export async function composeKeyboardMap({
-  pageId, snapshot, occurrences, fullPageEvidence, layoutMetrics = {}, segmentCssHeight, signal, runtime, timeoutMs,
+  pageId, snapshot, occurrences, fullPageEvidence, layoutMetrics = {}, segmentCssHeight, sourceAligned = true,
+  signal, runtime, timeoutMs,
 } = {}) {
   throwIfAborted(signal);
   const worker = featureRuntime(runtime);
@@ -407,7 +430,9 @@ export async function composeKeyboardMap({
   if (sourceHash !== fullPageEvidence.hash) {
     throw new KeyboardMapError('KEYBOARD_MAP_SOURCE_HASH_MISMATCH', 'O hash da captura original não corresponde aos pixels recebidos.');
   }
-  const plan = buildKeyboardMapPlan({ snapshot, occurrences, sourceMetadata: source, layoutMetrics, segmentCssHeight });
+  const plan = buildKeyboardMapPlan({
+    snapshot, occurrences, sourceMetadata: source, layoutMetrics, segmentCssHeight, sourceAligned: sourceAligned !== false,
+  });
   const geometry = {
     coordinateSpace: 'document-css-px',
     sourceCssSize: { width: plan.geometry.cssWidth, height: plan.geometry.cssHeight },

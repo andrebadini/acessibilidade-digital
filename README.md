@@ -4,6 +4,11 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.60 — pendências da 1.1.59 resolvidas.** Áreas marcadas sobre o mapa do teclado (com mouse ou só com o
+teclado), menus que abrem por script ao passar o mouse, sinais de volta depois que a página se recarrega, impacto
+graduado em cada achado (Crítico, Alto, Moderado, Baixo), menos itens falsos no mapa do teclado, números que não cobrem
+o texto da página e mapas alinhados em páginas que se montam aos poucos. Veja as [notas da 1.1.60](docs/releases/1.1.60.md).
+
 **Versão 1.1.59 — ajustes vistos nas novas capturas da loja.** O conteúdo que só aparece com o mouse passa a ter
 impacto alto, o mapa do teclado aparece no tamanho real na revisão guiada, as listas do mapa deixam de repetir números
 e itens, e a loja ganha cinco capturas novas sobre um portal fictício. Veja as [notas da 1.1.59](docs/releases/1.1.59.md).

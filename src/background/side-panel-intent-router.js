@@ -48,13 +48,15 @@ const PANEL_PORT_TYPES = new Set([
   'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
 ]);
 const HIGHLIGHT_TYPES = new Set([
-  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED',
+  'CLEAR_HIGHLIGHT',
 ]);
 const HIGHLIGHT_FAILURE_CODES = new Set([
   'HIGHLIGHT_AMBIGUOUS', 'HIGHLIGHT_CLEANUP_UNCONFIRMED', 'HIGHLIGHT_DOCUMENT_CHANGED',
   'HIGHLIGHT_EXPIRED', 'HIGHLIGHT_INACCESSIBLE', 'HIGHLIGHT_INJECTION_FAILED',
   'HIGHLIGHT_INPUT_INVALID', 'HIGHLIGHT_LIVE_PROOF_FAILED', 'HIGHLIGHT_NOT_APPLICABLE',
   'HIGHLIGHT_NOT_AUTHORIZED', 'HIGHLIGHT_NO_BINDING', 'HIGHLIGHT_PAGE_OR_PROCESS',
+  'HIGHLIGHT_RELOADED_PAGE',
   'HIGHLIGHT_SHADOW_ROOT', 'HIGHLIGHT_STATE_FAILED', 'HIGHLIGHT_URL_CHANGED',
   'HIGHLIGHT_WINDOW_CHANGED',
 ]);
@@ -195,6 +197,7 @@ export function createSidePanelIntentRouter(raw) {
     typeof input.highlightController?.currentState !== 'function' ||
     typeof input.highlightController?.availability !== 'function' ||
     typeof input.highlightController?.highlight !== 'function' ||
+    typeof input.highlightController?.highlightReloaded !== 'function' ||
     typeof input.highlightController?.clear !== 'function' ||
     typeof input.highlightController?.invalidateContent !== 'function' ||
     typeof input.highlightSessionBridge?.createPanelSender !== 'function' ||
@@ -839,6 +842,9 @@ export function createSidePanelIntentRouter(raw) {
         : input.highlightSessionBridge.createPanelSender({ sender, windowId: panelWindowId });
     } catch { return fail('CONTEXT_DENIED'); }
     if (!token || typeof token !== 'object') return fail('CONTEXT_DENIED');
+    // Recarregar e recolocar o destaque é conversa do painel com a aba: o relatório continua com o
+    // caminho de hoje (mensagem de que a página mudou).
+    if (panelWindowId === null && envelope.type === 'HIGHLIGHT_OCCURRENCE_RELOADED') return fail('CONTEXT_DENIED');
     if (panelWindowId === null && ['HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT'].includes(envelope.type)) {
       if (typeof input.reportLaunch?.returnToSource !== 'function') return fail('HIGHLIGHT_RETURN_FAILED');
       let returned;
@@ -895,8 +901,11 @@ export function createSidePanelIntentRouter(raw) {
         }
         return fail('HIGHLIGHT_OPERATION_FAILED');
       }
-      if (envelope.type === 'HIGHLIGHT_OCCURRENCE') {
-        result = await input.highlightController.highlight(request);
+      if (['HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED'].includes(envelope.type)) {
+        const reloaded = envelope.type === 'HIGHLIGHT_OCCURRENCE_RELOADED';
+        result = reloaded
+          ? await input.highlightController.highlightReloaded(request)
+          : await input.highlightController.highlight(request);
         const failed = projectHighlightFailure(result);
         if (failed) return failed;
         const success = exact(result, ['ok', 'highlight']);

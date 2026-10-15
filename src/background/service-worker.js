@@ -61,6 +61,7 @@ import { validateExecutionCheckpoint } from './execution-checkpoint.js';
 import { recordHighlightBindingV1 } from './highlight-binding.js';
 import { createHighlightBindingRecorder } from './highlight-binding-recorder.js';
 import { createHighlightBindingStore } from './highlight-binding-store.js';
+import { createPageRelocationOfferStore } from './page-relocation-offer.js';
 import { createHighlightController } from './highlight-controller.js';
 import { createHighlightLiveVerifier } from './highlight-live-verifier.js';
 import { createHighlightModelAuthority } from './highlight-model-authority.js';
@@ -1070,7 +1071,7 @@ export function createPublishingHighlightController(raw) {
 }
 
 const PAGE_MARKER_PANEL_TYPES = new Set([
-  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS',
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED', 'PANEL_HIDE_PAGE_MARKERS',
   'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
 ]);
 
@@ -1152,7 +1153,8 @@ export function createPageMarkersCleanupComposition(raw) {
     },
     async invalidateTab(tabId, reason) {
       let highlightResult = null;
-      try { await markers.invalidateTab(tabId); } catch {}
+      // O motivo chega até os sinais: é ele que separa "a aba navegou" de "a aba saiu".
+      try { await markers.invalidateTab(tabId, reason); } catch {}
       try { highlightResult = await highlight.invalidateTab(tabId, reason); }
       catch { return Object.freeze({ ok: false, code: 'HIGHLIGHT_STATE_FAILED' }); }
       return highlightResult;
@@ -1287,7 +1289,7 @@ export function createReportOperations({
     return commitReviewDecisions(entries.map(entry => ({
       input: {
         auditId, itemId: entry.itemId, occurrenceId: entry.occurrenceId, answer: entry.answer,
-        evaluator, decidedAt, mode: entry.mode, note: entry.note,
+        evaluator, decidedAt, mode: entry.mode, note: entry.note, marks: entry.marks ?? null,
       },
       revise: entry.revise === true,
     })));
@@ -1625,6 +1627,9 @@ async function buildDefaultRuntime(chromeApi, options) {
     chromeApi, digestManager, chromeAdapter, now: epochNow,
   });
   const highlightSessionBridge = createHighlightSessionAuthorityBridge({ authority, reportLaunch });
+  // Um único store de convites de recolocação para os dois controladores: sinais da página e
+  // destaque individual compartilham a mesma janela de validade e a mesma limpeza.
+  const pageRelocationOffers = createPageRelocationOfferStore({ now: epochNow });
   const highlightController = createHighlightController({
     chromeApi,
     chromeAdapter,
@@ -1635,6 +1640,7 @@ async function buildDefaultRuntime(chromeApi, options) {
     targetQueue,
     now: epochNow,
     randomBytes: bytes,
+    relocationOffers: pageRelocationOffers,
   });
   async function scheduleHighlightExpiry() {
     const snapshot = await highlightBindingStore.snapshot();
@@ -1724,6 +1730,7 @@ async function buildDefaultRuntime(chromeApi, options) {
       publish: event => pageMarkersWorkerLifecycle.publish(event),
       setTimer: (callback, delay) => setTimeout(callback, delay),
       clearTimer: timer => clearTimeout(timer),
+      relocationOffers: pageRelocationOffers,
     });
     if (typeof own(controller, 'closePanel') !== 'function') throw new Error('PAGE_MARKERS_UNAVAILABLE');
     pageMarkersWorkerBridge = createPageMarkersWorkerBridge({

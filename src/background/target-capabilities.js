@@ -40,6 +40,13 @@ const CONSUMERS = deepFreeze([
   { name: 'review', path: REVIEW_SURFACE.path, contextType: REVIEW_SURFACE.contextType },
 ]);
 const INTENTS = deepFreeze({
+  panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'review-markers', 'highlight'] },
+  review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
+});
+// O formato desta tabela antes de o painel poder destacar na versão recarregada. Guardar o formato
+// anterior é o que mantém abrindo as sessões gravadas por versões anteriores; o destaque que a leitura
+// ganhou aqui continua sendo conferido contra o documento vivo antes de desenhar qualquer coisa.
+const PRE_RELOCATION_INTENTS = deepFreeze({
   panel: { running: ['cancel'], 'privacy-paused': ['cancel', 'confirm-pixels'], result: ['open-report', 'highlight', 'review-markers'], 'view-only': ['open-report', 'review-markers'] },
   review: { running: [], 'privacy-paused': [], result: ['export', 'highlight'], 'view-only': ['export'] },
 });
@@ -1301,7 +1308,7 @@ function parseIntents(value) {
   const panel = readDataRecord(intents.panel, ['running', 'privacy-paused', 'result', 'view-only']);
   const review = readDataRecord(intents.review, ['running', 'privacy-paused', 'result', 'view-only']);
   if (panel && review) {
-    for (const allowed of [INTENTS, PRE_MARKERS_INTENTS]) {
+    for (const allowed of [INTENTS, PRE_RELOCATION_INTENTS, PRE_MARKERS_INTENTS]) {
       if (sameDataArray(panel.running, allowed.panel.running) &&
         sameDataArray(panel['privacy-paused'], allowed.panel['privacy-paused']) &&
         sameDataArray(panel.result, allowed.panel.result) &&

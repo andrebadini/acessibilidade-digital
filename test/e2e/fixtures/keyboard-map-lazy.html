@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Mapa do teclado — página que cresce sozinha</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+      h1 { font-size: 20px; }
+      /* Conteúdo já maior do que a janela: sem isto, os primeiros blocos quase não mudariam a altura da
+         página (o documento nunca fica menor do que a janela), e a comparação de altura que o mapa usa não
+         veria diferença nenhuma. */
+      .preenchimento { min-height: 1200px; border: 1px dashed #ccd; }
+      .item { margin: 8px 0; padding: 12px; border: 1px solid #ccd; min-height: 110px; }
+      /* Cada bloco é bem alto: qualquer bloco novo precisa deslocar o que vem depois de forma inequívoca
+         (o deslocamento é o que o acordo de leiaute mede). */
+      .item.grande { min-height: 300px; }
+      .mouse-only { display: block; margin: 8px 0; padding: 12px; border: 1px solid #ccd; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Protocolos em análise</h1>
+      <p>Esta lista continua carregando depois que a página abre.</p>
+      <label for="busca">Buscar protocolo</label>
+      <input id="busca" name="busca" type="search">
+      <button type="button">Buscar</button>
+      <nav aria-label="Atalho"><a href="#fim">Ir para o fim da lista</a></nav>
+      <section class="preenchimento" aria-label="Resumo do atendimento">
+        <p>Resumo do atendimento do dia, já carregado quando a página abre.</p>
+      </section>
+      <div id="itens"></div>
+      <div class="mouse-only" id="menu-so-mouse">Abre as opções só com o mouse</div>
+      <footer id="fim"><p>Fim da lista.</p></footer>
+    </main>
+    <script src="/keyboard-map-lazy.js"></script>
+  </body>
+</html>

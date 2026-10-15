@@ -5,9 +5,14 @@
 // the field message and the selector never reached the exported HTML or PDF, and the print output
 // carried only a count. The rule that emits them calls them concrete suspicions, and the product
 // promises suspicions and checklist as separate groups, so they belong in this set.
+// `hover-script-no-keyboard-path` is the block whose interactive content a script opens when the
+// mouse passes over it and for which no keyboard path was found. The doubt names one block and tells
+// the person to check it with Tab; the checklist would drop both, because it shows the generic
+// guidance of the item and never the message or the selector of the block that raised it.
 const CONCRETE_REASONS = new Set([
   'generic-link-purpose', 'new-window-warning-observation-incomplete', 'ambiguous-idref',
-  'missing-required-identification', 'invalid-required-state', 'required-state-mismatch'
+  'missing-required-identification', 'invalid-required-state', 'required-state-mismatch',
+  'hover-script-no-keyboard-path'
 ]);
 export function findingKind(occurrence, rule, decision) {
   const outcome = ['failed', 'passed'].includes(occurrence.outcome) ? occurrence.outcome

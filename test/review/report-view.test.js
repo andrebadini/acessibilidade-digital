@@ -7,7 +7,7 @@ import { projectOccurrenceEvidencePreviews } from '../../src/core/report/evidenc
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { REPORT_VIEW_SCRIPT, REPORT_VIEW_SCRIPT_CSP_HASH } from '../../src/core/report/report-view-script.js';
-import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
+import { canonicalCoreRuleSummary, canonicalReviewQuestion } from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
@@ -17,6 +17,8 @@ import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
 import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
+import { hashKeyboardMapArtifact } from '../../src/core/keyboard/keyboard-map-artifact.js';
+import { REVIEW_MARKS_VERSION } from '../../src/core/review/review-marks.js';
 
 const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
 const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_PAGE_CAPTURE_OMITTED_MESSAGE}`;
@@ -698,6 +700,79 @@ test('the exported report carries the keyboard map legend, pixels and counts in 
   assert.ok(legacy.includes('data-keyboard-map-stop="1"'));
 });
 
+/**
+ * Auditoria com o mapa do teclado e a resposta humana do item 5.1.13 apontando um item sem caixa e uma
+ * área desenhada: é o que a tela do relatório, o HTML entregue e a impressão precisam mostrar.
+ */
+async function marksFixture() {
+  const map = await createKeyboardMapFixture();
+  map.suspects = [{
+    number: 1, nodeId: 'n-card', tag: 'div', role: '', reason: 'cursor-pointer', ruleId: null,
+    name: 'Consumidor', nameSource: 'contents', nameStatus: 'projected',
+    bounds: { x: 0, y: 0, width: 1, height: 1 }, segmentIndex: 1,
+  }];
+  map.counts.suspects = 1;
+  map.hash = await hashKeyboardMapArtifact(map);
+  return fixture({ mutateDraft(draft) {
+    draft.evidence[0] = createPristineMapSource();
+    draft.evidence.push(map);
+    const review = structuredClone(draft.occurrences.find(value => value.occurrenceId === 'occ-cross-page'));
+    const item = draft.itemResults.find(value => value.id === '5.1.13');
+    draft.occurrences.push(Object.assign(review, {
+      occurrenceId: 'occ-keyboard-513', itemId: '5.1.13', nbrItemRef: '5.1.13',
+      source: { ...review.source, ruleId: 'manual:5.1.13' }, classification: item.classification,
+      justification: item.humanReason,
+    }));
+    draft.manualReview.push({
+      occurrenceId: 'occ-keyboard-513', itemId: '5.1.13', ruleId: null, mode: 'manual', status: 'unanswered',
+      question: canonicalReviewQuestion(item), reason: item.humanReason,
+    });
+    const decided = applyReviewDecisions(draft, [createReviewDecision({
+      auditId: draft.auditId, itemId: '5.1.13', occurrenceId: 'occ-keyboard-513', answer: 'não conforme',
+      evaluator: 'Pessoa revisora', decidedAt: '2026-08-27T12:00:00.000Z', mode: 'manual',
+      note: 'Os cartões de serviço abrem menus só quando o mouse passa por cima.',
+      marks: { version: REVIEW_MARKS_VERSION, suspects: [1], areas: [{ x: 0, y: 0, width: 1, height: 1 }] },
+    })]);
+    // O modelo que a decisão devolve vem congelado; a fixture ainda precisa ajustar os hashes
+    // pendentes, então o efeito da revisão volta para o rascunho mutável.
+    draft.itemResults = structuredClone(decided.itemResults);
+    draft.manualReview = structuredClone(decided.manualReview);
+    draft.reviewDecisions = structuredClone(decided.reviewDecisions);
+    return draft;
+  } });
+}
+
+test('the review marks appear on screen and in the delivered and printed report as a crop of the saved image', async () => {
+  const { model, summary } = await marksFixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const before = JSON.stringify(model);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const block = root.querySelector('[data-review-marks]');
+  assert.ok(block, 'o apontamento do mapa precisa aparecer na tela do relatório');
+  assert.ok(root.textContent.includes('Apontamento no mapa do teclado'));
+  assert.ok(root.textContent.includes('Itens apontados: Consumidor. Áreas marcadas no mapa do teclado: 1.'));
+  assert.ok(block.textContent.includes('Área 1 marcada na revisão guiada'));
+  const svg = block.querySelector('svg[data-marks-crop="1"]');
+  assert.equal(svg?.getAttribute('class'), 'marks-crop');
+  assert.match(svg.getAttribute('viewBox'), /^-?\d+ -?\d+ \d+ \d+$/u);
+  const image = svg.querySelector('image');
+  assert.equal(image?.getAttribute('href'), TEST_PNG, 'o recorte reaproveita a imagem já guardada');
+  const outline = svg.querySelector('rect');
+  assert.equal(outline?.getAttribute('class'), 'marks-area-outline');
+  assert.equal(outline.getAttribute('x'), '0');
+  assert.equal(outline.getAttribute('width'), '1');
+  assert.equal(svg.getAttribute('style'), null, 'o desenho não usa estilo embutido');
+
+  for (const html of [renderHtmlReport(model, { reportView: view }), renderHtmlReport(model, { reportView: view, forPrint: true })]) {
+    assert.match(html, /Itens apontados: Consumidor\. Áreas marcadas no mapa do teclado: 1\./u);
+    assert.match(html, /<svg class="marks-crop"[^>]*data-marks-crop="1"[^>]*><image[^>]+href="data:image\/png/u);
+    assert.match(html, /<rect class="marks-area-outline"[^>]*\/?>|<rect class="marks-area-outline"/u);
+    assert.ok(html.includes(TEST_PNG));
+    assert.doesNotMatch(html, /<svg[^>]*data-marks-crop[^>]* style=/u);
+  }
+  assert.equal(JSON.stringify(model), before, 'apresentar o apontamento não pode mudar a auditoria');
+});
+
 test('keyboard map absence and partial coverage are explicit without inventing boxes or approval', async () => {
   const absent = await fixture();
   const absentView = buildReportView({
@@ -1266,6 +1341,48 @@ test('live filters expose visible Portuguese labels and apply WCAG levels', asyn
   const visible = root.querySelectorAll('[data-report-issue]').filter(issue => !issue.hidden);
   assert.equal(visible.length, 2);
   assert.equal(visible.every(issue => issue.getAttribute('data-wcag').split(' ').includes('AA')), true);
+});
+
+const IMPACT_WORDS = Object.freeze({ critical: 'Crítico', serious: 'Alto', moderate: 'Moderado', minor: 'Baixo' });
+
+test('impact wording is one closed vocabulary in the live report, including the suspicion caveat', async () => {
+  async function headingsOf(options) {
+    const { model, summary } = await fixture(options);
+    const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+    const root = renderReportView({ view, document: new Document(), onExport() {} });
+    // 'minor' passou a ser "Baixo": nenhum ponto do relatório vivo pode dizer "Menor".
+    assert.doesNotMatch(root.textContent, /Menor/u);
+    const impactGroup = [...root.querySelector('[role="group"]').children]
+      .filter(child => child.getAttribute('role') === 'group')[0];
+    for (const button of impactGroup.querySelectorAll('button')) {
+      const word = IMPACT_WORDS[button.getAttribute('data-filter-value')];
+      if (word === undefined) continue; // níveis sem graduação própria mantêm o próprio rótulo
+      assert.match(button.textContent, new RegExp(`^${word} \\(\\d+\\)$`, 'u'));
+    }
+    return root.querySelectorAll('[data-report-issue]')
+      .map(issue => [issue.getAttribute('data-result'), issue.getAttribute('data-impact'),
+        issue.querySelector('[data-report-issue-heading]').textContent]);
+  }
+
+  const confirmed = await headingsOf();
+  assert.ok(confirmed.length > 0, 'a amostra precisa de constatações para fixar o texto');
+  for (const [_result, impact, heading] of confirmed) {
+    const word = IMPACT_WORDS[impact];
+    if (word === undefined) { assert.match(heading, /Impacto não aplicável\./u); continue; }
+    assert.match(heading, new RegExp(`Impacto ${word}\\.`, 'u'));
+  }
+  // Falha confirmada afirma o impacto, sem a condicional.
+  const failed = confirmed.filter(([result]) => result === 'failed');
+  assert.ok(failed.length > 0, 'a amostra precisa de uma falha confirmada');
+  for (const [_result, _impact, heading] of failed) assert.doesNotMatch(heading, /se confirmado/u);
+
+  // A suspeita ('cantTell') troca só o anúncio, nunca o impacto gravado; o texto condicional
+  // é o mesmo de `impactText` e está fixado nos testes do painel e do relatório autônomo.
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  assert.deepEqual(root.querySelectorAll('[data-report-issue]').map(issue => issue.getAttribute('data-impact')),
+    ['moderate', 'none'], 'o impacto projetado é o gravado, sem reclassificação pelo resultado');
 });
 
 test('missing ABNT association is explicit in the live report and HTML/PDF source', async () => {

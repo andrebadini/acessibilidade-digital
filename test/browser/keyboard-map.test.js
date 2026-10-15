@@ -10,6 +10,7 @@ import {
 } from '../../src/browser/keyboard-map.js';
 import { KEYBOARD_MAP_LIMITS, hashKeyboardMapArtifact, validateKeyboardMapArtifact } from '../../src/core/keyboard/keyboard-map-artifact.js';
 import { pngDataUrlFromBytes } from '../../src/core/evidence/png.js';
+import { keyboardMapPresentation } from '../../src/core/report/keyboard-map-presentation.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 import { buildPng } from '../support/png-fixture.js';
 
@@ -197,6 +198,62 @@ test('declara parcialidade quando o instantâneo não traz o cursor e clampa cai
   assert.deepEqual(artifact.stops[0].bounds, { x: 10, y: 99, width: 60, height: 1 });
   assert.equal(artifact.counts.omittedNoRect, 1);
   assert.deepEqual(validateKeyboardMapArtifact(artifact), artifact);
+
+  // Com o leiaute reprovado não há encaixe nenhum na imagem: dizer que alguma caixa foi "encaixada na
+  // borda" seria descrever um desenho que não existe. O item continua contado como fora da área.
+  const rejected = await composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
+    snapshot: snapshot([
+      { nodeId: 'below', tagName: 'button', accessibleName: 'Abaixo da captura', axRole: 'button', rect: { x: 10, y: 400, width: 60, height: 20 } },
+    ]),
+    layoutMetrics: SOURCE, sourceAligned: false, ...canvasRuntime(recordingLog()),
+  });
+  assert.equal(rejected.limitations.includes('stops-outside-source-clamped'), false);
+  assert.ok(rejected.limitations.includes('source-layout-changed'));
+  assert.equal(rejected.counts.omittedNoRect, 1);
+  assert.deepEqual(validateKeyboardMapArtifact(rejected), rejected);
+});
+
+test('sem caixas confiáveis a imagem sai limpa, a lista continua completa e a limitação é declarada', async () => {
+  const log = recordingLog();
+  const { runtime } = canvasRuntime(log);
+  const fullPageEvidence = await pristineSource(200, 100);
+  const artifact = await composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence, snapshot: snapshot(PAGE), layoutMetrics: SOURCE,
+    sourceAligned: false, runtime,
+  });
+
+  // A imagem existe (a pessoa vê a página), mas sem caixa, sem etiqueta e sem risco de apontar errado.
+  assert.equal(artifact.status, 'partial');
+  assert.ok(artifact.limitations.includes('source-layout-changed'));
+  assert.equal(log.strokes.length, 0);
+  assert.equal(log.texts.length, 0);
+  assert.equal(log.drawImages.length, 1);
+  // A lista completa continua: os itens aparecem com nome e posição estimada, sem número na imagem.
+  assert.deepEqual(artifact.stops.map(entry => [entry.number, entry.nodeId, entry.kind]), [[1, 'action', 'button']]);
+  assert.deepEqual(artifact.suspects.map(entry => [entry.number, entry.nodeId, entry.reason]), [[1, 'menu', 'interactive-role']]);
+  assert.equal(artifact.counts.stops, 1);
+  assert.equal(artifact.counts.suspects, 1);
+  assert.equal(artifact.segments.length, 1);
+  assert.deepEqual(validateKeyboardMapArtifact(artifact, { sourceArtifact: fullPageEvidence }), artifact);
+
+  // O relatório diz, em português claro, que a imagem vai sem marcação e que a lista continua valendo.
+  const [presented] = keyboardMapPresentation([{ pageId: 'page-1' }], [artifact]);
+  assert.match(presented.summary, /mudou de tamanho/iu);
+  assert.match(presented.coverage, /nenhum número foi desenhado/iu);
+  assert.deepEqual(presented.stops.map(entry => entry.name), ['Consultar']);
+  assert.deepEqual(presented.stops.map(entry => entry.location), ['Sem marca na imagem; posição estimada no documento.']);
+  assert.ok(presented.limitations.some(text => /mudou de tamanho/iu.test(text)));
+
+  // O mesmo instantâneo com o leiaute confirmado volta a desenhar as caixas: a omissão não é permanente.
+  const alignedLog = recordingLog();
+  const aligned = await composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence, snapshot: snapshot(PAGE), layoutMetrics: SOURCE,
+    sourceAligned: true, runtime: canvasRuntime(alignedLog).runtime,
+  });
+  assert.equal(aligned.limitations.includes('source-layout-changed'), false);
+  assert.equal(alignedLog.strokes.length > 0, true, 'com o leiaute confirmado as caixas voltam');
+  assert.equal(alignedLog.texts.length, 2);
 });
 
 test('recusa origem que não é a captura integral pristine da mesma página', async () => {

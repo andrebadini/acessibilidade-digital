@@ -194,6 +194,19 @@ a { color: #0b4ea2; }
 .card__titulo { grid-area: titulo; font-size: 15px; margin: 0; }
 .card__acao { grid-area: acao; }
 
+/* CASO 13 — cartões de notícia: título longo e o link logo abaixo, sem folga entre os dois. */
+.noticias {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+}
+.noticia { border: 1px solid #e0e0e0; border-radius: 8px; padding: 14px 14px 16px; }
+.noticia__midia { margin: 0 0 10px; }
+.noticia__midia img { display: block; width: 100%; height: 120px; background: #eef2f8; }
+.noticia__titulo { font-size: 17px; line-height: 1.3; margin: 0; }
+/* Contraste baixo de propósito (~2:1): é o achado que faz o painel numerar estes links. */
+.noticia__mais { display: inline-block; color: #b6b6b6; }
+
 /* CASO 3 — classes com hash de CSS-modules. Os nomes não descrevem nada de propósito. */
 .AccountActions_wrap__9d2c1b { display: flex; align-items: center; gap: 10px; }
 .Button_root__x8f3a9c2 { border: 1px solid #b9b9b9; border-radius: 6px; background: transparent; padding: 6px; cursor: pointer; }

@@ -46,6 +46,7 @@ export const ANNOTATION_MAP_LIMITATIONS = Object.freeze([
   // Acrescentada depois da 1.1.0, sempre no fim: a ordem canônica é a da lista, então anexar mantém
   // válidos os mapas já guardados.
   'ancestor-clipped-elements-omitted',
+  'source-layout-changed',
 ]);
 
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -408,7 +409,8 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
   if (artifact.status === 'complete' && (artifact.legend.length === 0 || artifact.segments.length === 0)) throw new TypeError('Mapa completo não contém segmentos ou legenda.');
   if (artifact.legend.length === 0 && artifact.segments.length !== 0) throw new TypeError('Mapa sem legenda não pode conter segmentos.');
   const materiallyPartial = artifact.counts.omittedNoRect > 0 || artifact.counts.omittedFrame > 0 || omittedClipped > 0 ||
-    artifact.counts.omittedLimit > 0 || artifact.counts.unresolvedOverlap > 0 || artifact.limitations.includes('closed-shadow-root-omitted');
+    artifact.counts.omittedLimit > 0 || artifact.counts.unresolvedOverlap > 0 || artifact.limitations.includes('closed-shadow-root-omitted') ||
+    artifact.limitations.includes('source-layout-changed');
   if ((artifact.status === 'partial') !== materiallyPartial) {
     throw new TypeError('Estado parcial do mapa diverge das contagens.');
   }

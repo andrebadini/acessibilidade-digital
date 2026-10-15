@@ -66,6 +66,27 @@ function occurrenceCard(html, occurrenceId) {
   return html.slice(start, end + '</article>'.length);
 }
 
+test('standalone impact labels are uniform and a suspicion is announced as conditional', () => {
+  const html = renderHtmlReport(SAMPLE_AUDIT);
+  // O rótulo é único em todo o produto: 'minor' é "Baixo", nunca "Menor"; 'serious' é "Alto".
+  assert.doesNotMatch(html, /Menor/u);
+  assert.match(html, /<option value="critical">Crítico<\/option>/u);
+  assert.match(html, /<option value="serious">Alto<\/option>/u);
+  assert.match(html, /<option value="moderate">Moderado<\/option>/u);
+  assert.match(html, /<option value="minor">Baixo<\/option>/u);
+
+  // Falha confirmada: o impacto é afirmado.
+  const failed = occurrenceCard(html, 'occ-focus-failed');
+  assert.match(failed, /<span>Impacto Moderado<\/span>/u);
+  assert.match(failed, /data-impact="moderate"/u);
+  assert.doesNotMatch(failed, /Impacto se confirmado/u);
+
+  // Suspeita ('cantTell'): o impacto é o mesmo, mas condicionado à confirmação humana.
+  const review = occurrenceCard(html, 'occ-focus-review');
+  assert.match(review, /<span>Impacto se confirmado: Moderado<\/span>/u);
+  assert.match(review, /data-impact="moderate"/u);
+});
+
 test('legacy occurrence reference uses the concise ABNT wording without repeated legal qualification', () => {
   const html = renderHtmlReport(SAMPLE_AUDIT);
   const card = occurrenceCard(html, SAMPLE_AUDIT.occurrences.find(row => row.outcome === 'failed').occurrenceId);
@@ -759,7 +780,7 @@ test('renders absent, empty, partial, complete and legend-continuation map state
   assert.match(complete, /data-map-status="complete"[\s\S]*audita\.annotation-map[\s\S]*1\.0\.0/u);
   assert.match(complete, /200 nós[\s\S]*32.000.000 pixels[\s\S]*64 segmentos/u);
   assert.match(complete, /proporção raster imprimível[^.]*1,3:1/iu);
-  assert.match(complete, /non-atomic-source-geometry — captura e geometria foram coletadas/iu);
+  assert.match(complete, /non-atomic-source-geometry — captura e geometria são lidas em passos separados/iu);
   assert.match(complete, /com marcador 1/iu);
   assert.doesNotMatch(complete, /marcadores 1 a 1/iu);
   assert.match(complete, /Ordem observada DOM\/AX[\s\S]*não é ordem de foco/iu);

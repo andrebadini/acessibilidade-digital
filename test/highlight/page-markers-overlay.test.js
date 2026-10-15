@@ -874,3 +874,81 @@ test('fixed page chrome over an element trims its contour and hides a fully cove
   fixture.environment.settle();
   assert.equal(ringOf(group).style.display, 'block');
 });
+
+// --- Corroboração da recarga (1.1.60): o sinal só é desenhado se o elemento reencontrado
+// --- continuar trazendo o nome acessível ou o texto registrados na auditoria.
+
+function corroborated(match, corroboration, overrides = {}) {
+  return install({
+    targets: [{ markerId: 'm1', number: 1, match, corroboration,
+      signals: [{ selectionId: 's1', classification: 'failed' }] }],
+    ...overrides,
+  });
+}
+
+test('a reloaded signal is drawn when the re-found element still carries the recorded name or text', () => {
+  const named = createPageMarkersFixture();
+  named.first.setAttribute('aria-label', 'Continuar');
+  assert.deepEqual(runAuditaPageMarkersCommand(
+    corroborated(idMatch('button', 'continue'), { name: 'Continuar' }), named.environment),
+  { ok: true, locatedMarkerIds: ['m1'], unlocated: [] });
+  assert.equal(named.environment.markerButtons().length, 1);
+
+  const texted = createPageMarkersFixture();
+  texted.first.textContent = 'Toque para avançar agora';
+  assert.deepEqual(runAuditaPageMarkersCommand(
+    corroborated(idMatch('button', 'continue'), { name: 'Continuar', text: 'Avançar' }), texted.environment),
+  { ok: true, locatedMarkerIds: ['m1'], unlocated: [] });
+  assert.equal(texted.environment.markerButtons().length, 1);
+});
+
+test('the recorded text has to be inside the live text: the other direction is a mismatch', () => {
+  const shorter = createPageMarkersFixture();
+  shorter.first.textContent = 'Avançar';
+  assert.deepEqual(runAuditaPageMarkersCommand(
+    corroborated(idMatch('button', 'continue'), { text: 'Avançar agora mesmo' }), shorter.environment),
+  { ok: true, locatedMarkerIds: [], unlocated: [{ markerId: 'm1', reason: 'evidence-mismatch' }] });
+  assert.equal(shorter.environment.markerButtons().length, 0);
+});
+
+test('a re-found element with another name and other text is reported, never drawn', () => {
+  const fixture = createPageMarkersFixture();
+  fixture.first.textContent = 'Outra coisa';
+  fixture.first.setAttribute('aria-label', 'Outro nome');
+  assert.deepEqual(runAuditaPageMarkersCommand(
+    corroborated(idMatch('button', 'continue'), { name: 'Continuar', text: 'Avançar' }), fixture.environment),
+  { ok: true, locatedMarkerIds: [], unlocated: [{ markerId: 'm1', reason: 'evidence-mismatch' }] });
+  assert.equal(fixture.environment.markerButtons().length, 0);
+  assert.equal(fixture.environment.markerGroups().length, 0);
+  // A sessão vazia continua removível: nada ficou preso na página.
+  assert.deepEqual(runAuditaPageMarkersCommand(clear(), fixture.environment), { ok: true });
+  assertClean(fixture);
+});
+
+test('the comparison ignores case and surrounding spaces without accepting credentials', () => {
+  const fixture = createPageMarkersFixture();
+  fixture.first.setAttribute('title', '  continuar  ');
+  assert.deepEqual(runAuditaPageMarkersCommand(
+    corroborated(idMatch('button', 'continue'), { name: 'Continuar' }), fixture.environment),
+  { ok: true, locatedMarkerIds: ['m1'], unlocated: [] });
+});
+
+test('an invalid corroboration rejects the whole command instead of drawing a partial install', () => {
+  for (const corroboration of [
+    {}, { name: 'Continuar', text: 'Avançar', extra: 'x' }, { name: '' }, { name: 17 },
+    { text: 'linha\u0000quebrada' }, { text: 'x'.repeat(201) }, { name: 'Continuar', text: null },
+  ]) {
+    const fixture = createPageMarkersFixture();
+    assert.deepEqual(runAuditaPageMarkersCommand(
+      corroborated(idMatch('button', 'continue'), corroboration), fixture.environment),
+    { ok: false, reason: 'invalid-command' }, JSON.stringify(corroboration));
+    assertClean(fixture);
+  }
+});
+
+test('without corroboration the install behaves exactly as before', () => {
+  const fixture = createPageMarkersFixture();
+  assert.deepEqual(runAuditaPageMarkersCommand(singleTarget(idMatch('button', 'continue')), fixture.environment),
+  { ok: true, locatedMarkerIds: ['m1'], unlocated: [] });
+  assert.equal(fixture.environment.markerButtons().length, 1);
+});

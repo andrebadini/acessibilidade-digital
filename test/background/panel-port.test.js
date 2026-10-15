@@ -1287,6 +1287,59 @@ test('reauthorizes every highlight publication against an unexpired attached res
   assert.equal(connected.disconnects, 1);
 });
 
+test('publishes highlight state to a reloaded view-only session and never on a forged panel document', async () => {
+  let issuerDocument = 'panel-document';
+  const resultBundle = await bundle();
+  const env = fixture({
+    loadPanelResultBundle: async () => resultBundle,
+    async authorizeHighlightSession({ sender }) {
+      return {
+        ok: true,
+        session: {
+          version: 1, sessionCapabilityId: VIEW_SESSION, auditId: 'audit-port', windowId: 9, mode: 'attached',
+          targetBinding: { kind: 'view-only' },
+          consumers: [
+            { name: 'panel', path: '/src/panel/index.html', contextType: 'SIDE_PANEL' },
+            { name: 'review', path: '/src/review/index.html', contextType: 'TAB' },
+          ],
+          intents: {
+            panel: { running: ['cancel'], result: ['open-report', 'highlight'], 'view-only': ['open-report', 'highlight'] },
+            review: { running: [], result: ['export', 'highlight'], 'view-only': ['export'] },
+          },
+          state: 'view-only', issuedAt: EPOCH, expiresAt: EPOCH + 10_000,
+        },
+        context: {
+          issuer: { type: 'extension-document', documentId: issuerDocument, path: '/src/panel/index.html' },
+          windowId: 9, tabId: null, contextType: 'SIDE_PANEL', documentUrl: sender.url,
+        },
+      };
+    },
+  });
+  env.sessions.set(SESSION, session('result'));
+  env.sessionArea.values[panelBootstrapStorageKey(9)] = {
+    version: 1, kind: 'audit-session', auditId: 'audit-port', sessionCapabilityId: SESSION,
+    windowId: 9, createdAt: EPOCH, expiresAt: EPOCH + 10_000, state: 'consumed',
+  };
+  const connected = port();
+  env.coordinator.attachPanelPort(connected);
+  connected.onMessage.emit({ protocol: 'audita-panel', version: 1, type: 'bootstrap' });
+  await tick();
+  assert.equal(connected.messages[0].state, 'view-only');
+  assert.equal(connected.messages[0].sessionCapabilityId, VIEW_SESSION);
+
+  const event = {
+    version: 1, type: 'HIGHLIGHT_STATE_CHANGED', auditId: 'audit-port', occurrenceId: 'occ-1', state: 'active',
+  };
+  assert.deepEqual(await env.coordinator.publishHighlightState(event), { delivered: 1 });
+  assert.deepEqual(connected.messages.at(-1), event);
+  assert.equal(connected.disconnects, 0);
+
+  // O painel de outro documento da extensão não recebe o estado, e a Port cai.
+  issuerDocument = 'foreign-document';
+  assert.deepEqual(await env.coordinator.publishHighlightState(event), { delivered: 0 });
+  assert.equal(connected.disconnects, 1);
+});
+
 test('keeps scoped mutation authority across awaits and serializes independent lock requests', async () => {
   const { coordinator } = fixture();
   const order = [];

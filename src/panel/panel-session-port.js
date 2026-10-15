@@ -46,7 +46,8 @@ const INTENT_RESULT_KEYS = Object.freeze(['protocol', 'version', 'type', 'reques
 const HIGHLIGHT_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'occurrenceId', 'state']);
 const PAGE_MARKERS_STATE_KEYS = Object.freeze(['version', 'type', 'auditId', 'modelRevision', 'state', 'selectedOrdinal']);
 const PAGE_MARKERS_TYPES = new Set([
-  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS', 'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED', 'PANEL_HIDE_PAGE_MARKERS',
+  'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
 ]);
 
 function freeze(value, seen = new WeakSet()) {
@@ -618,7 +619,7 @@ export function createPanelSessionPortClient(raw) {
       if (Reflect.ownKeys(intent).length !== 1 || auditId === null || sessionId === null) return Promise.resolve(localUnavailable());
       intent = freeze({ type: intent.type, sessionCapabilityId: sessionId, auditId });
     }
-    if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE'].includes(intent.type)) {
+    if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED'].includes(intent.type)) {
       if (Reflect.ownKeys(intent).length !== 2 || typeof intent.occurrenceId !== 'string' ||
         !OCCURRENCE_ID.test(intent.occurrenceId) || auditId === null || sessionId === null) {
         return Promise.resolve(localUnavailable());
@@ -649,7 +650,8 @@ export function createPanelSessionPortClient(raw) {
           rememberRetiredRequest(requestId);
         }
         settle(entry, localUnavailable());
-      }, ['PANEL_OPEN_REPORT', 'PANEL_SHOW_PAGE_MARKERS'].includes(intent.type) ? REPORT_OPEN_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+      }, ['PANEL_OPEN_REPORT', 'PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED'].includes(intent.type)
+        ? REPORT_OPEN_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
       pending.set(requestId, {
         resolve, timer,
         type: intent.type,

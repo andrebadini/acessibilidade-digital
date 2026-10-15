@@ -5,6 +5,7 @@ import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { createHighlightBindingV1 } from '../../src/background/highlight-binding.js';
 import { createHighlightBindingStore } from '../../src/background/highlight-binding-store.js';
 import { createHighlightController } from '../../src/background/highlight-controller.js';
+import { createPageRelocationOfferStore } from '../../src/background/page-relocation-offer.js';
 import { createTargetOperationQueue } from '../../src/background/target-operation-queue.js';
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { verifyAuditIntegritySnapshot } from '../../src/core/report/integrity.js';
@@ -101,15 +102,25 @@ function randomBytesFixture() {
   };
 }
 
-async function harness({ inject, decorateStore, liveVerify, tabState, authorize, snapshotForLoad } = {}) {
+async function harness({
+  inject, decorateStore, liveVerify, tabState, authorize, snapshotForLoad, probe, relocationOffers, clock: givenClock,
+} = {}) {
   const snapshot = await snapshotFixture();
   const binding = bindingFixture(snapshot);
-  const clock = { value: EPOCH };
+  const clock = givenClock ?? { value: EPOCH };
   const realStore = createHighlightBindingStore({ sessionArea: sessionArea(), now: () => clock.value });
   await realStore.put(binding);
   const bindingStore = decorateStore ? decorateStore(realStore) : realStore;
   const trace = [];
   const chromeAdapter = {
+    // Prova de documento viva: o documento auditado no caso de sempre, o documento recarregado
+    // quando o teste declara um `probe`.
+    async probeDocumentIdentity(tabId) {
+      trace.push(['probe', tabId]);
+      if (typeof probe === 'function') return probe(tabId, trace);
+      if (probe) return structuredClone(probe);
+      return { tabId, windowId: 9, documentId: 'document-main', urlSessionDigest: DIGEST };
+    },
     async injectHighlight(input) {
       trace.push(['inject', structuredClone(input)]);
       if (inject) return inject(input, trace);
@@ -174,6 +185,7 @@ async function harness({ inject, decorateStore, liveVerify, tabState, authorize,
     targetQueue: createTargetOperationQueue(),
     now: () => clock.value,
     randomBytes: randomBytesFixture(),
+    ...(relocationOffers ? { relocationOffers } : {}),
   });
   return { controller, binding, bindingStore, realStore, snapshot, clock, trace };
 }
@@ -452,15 +464,76 @@ test('navigation and discard events retire owner and binding without injecting i
       ok: true, state: 'invalidated', clearedAuditIds: [fixture.snapshot.model.auditId],
     }, reason);
     assert.equal(await fixture.realStore.getActiveOverlay(7), null, reason);
-    assert.equal(await fixture.realStore.findTarget({
+    const found = await fixture.realStore.findTarget({
       auditId: fixture.snapshot.model.auditId, occurrenceId: 'occ-focus-failed',
-    }), null, reason);
+    });
+    // Uma navegação não é o fim da auditoria: a ligação durável (seletor e assinatura) fica, e é
+    // ela que permite oferecer o destaque na versão recarregada. Nenhum sinal é desenhado no
+    // documento que foi embora em nenhum dos casos.
+    if (reason === 'navigation') assert.ok(found, reason);
+    else assert.equal(found, null, reason);
     assert.deepEqual(
       fixture.trace.filter(entry => entry[0] === 'inject').map(entry => entry[1].command.op),
       ['install'],
       reason,
     );
   }
+});
+
+test('a navigation keeps the durable binding so the reloaded page can offer the highlight', async () => {
+  let live = 'document-main';
+  let verifier = async input => ({
+    ok: true, tabId: 7, windowId: 9, documentId: input.target.documentId, frameId: input.target.frameId,
+  });
+  const fixture = await harness({
+    probe: tabId => reloadedProbe(live)(tabId),
+    liveVerify: input => verifier(input),
+  });
+  const input = request(fixture.snapshot.model.auditId, 'occ-focus-failed');
+
+  // A auditoria e o destaque originais, e então a navegação: o painel pergunta de novo, tenta
+  // destacar, recebe o convite e só desenha depois do gesto.
+  assert.equal((await fixture.controller.highlight(input)).ok, true);
+  live = 'document-next';
+  verifier = documentChanged;
+  await fixture.controller.invalidateTab(7, 'navigation');
+  assert.deepEqual(await fixture.controller.availability(input), { ok: true, bindingStatus: { state: 'available' } });
+  assert.deepEqual(await fixture.controller.highlight(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  assert.equal((await fixture.controller.highlightReloaded(input)).ok, true);
+
+  const commands = installs(fixture);
+  assert.equal(commands.length, 2);
+  assert.equal(commands[1].command.signedDocumentId, 'document-main');
+  assert.equal(commands[1].command.documentId, 'document-next');
+  assert.equal((await fixture.realStore.getActiveOverlay(7)).relocatedFrom, 'document-main');
+});
+
+test('a read-only session may relocate the highlight, and no other session state may', async () => {
+  let sessionState = 'view-only';
+  const fixture = await harness({
+    authorize: input => ({
+      ok: true, session: { auditId: input.auditId, windowId: 9, state: sessionState, intents: ['highlight'] },
+    }),
+    probe: tabId => ({ tabId, windowId: 9, documentId: 'document-next', urlSessionDigest: DIGEST }),
+    liveVerify: documentChanged,
+  });
+  const input = request(fixture.snapshot.model.auditId, 'occ-focus-failed');
+  // A leitura do resultado (o painel volta assim quando a aba navegou) recebe o convite e, com o
+  // gesto seguinte, recoloca o destaque no documento de agora.
+  assert.deepEqual(await fixture.controller.highlight(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  assert.equal((await fixture.controller.highlightReloaded(input)).ok, true);
+  assert.equal(installs(fixture).at(-1).command.signedDocumentId, 'document-main');
+  // Sessão em execução ou parada por privacidade não ganha nada por isso: continua fora.
+  for (const denied of ['running', 'privacy-paused']) {
+    sessionState = denied;
+    assert.deepEqual(await fixture.controller.availability(input), { ok: false, code: 'HIGHLIGHT_NOT_AUTHORIZED' });
+    assert.deepEqual(await fixture.controller.highlightReloaded(input), { ok: false, code: 'HIGHLIGHT_NOT_AUTHORIZED' });
+  }
+  assert.deepEqual(
+    fixture.trace.filter(entry => entry[0] === 'inject').map(entry => entry[1].command.op),
+    ['install'],
+    'a denied session never reaches the page',
+  );
 });
 
 test('recovery and expiry confirm a discarded tab as absent before retiring owner and binding', async () => {
@@ -539,4 +612,139 @@ test('rejects hostile request accessors before authorization or injection', asyn
   });
   assert.equal(getterCalls, 0);
   assert.equal(fixture.trace.length, traceLength);
+});
+
+// --- Página recarregada (1.1.60): mesmo endereço, documento novo ---
+
+const OTHER_DIGEST = `hmac-sha256:${'C'.repeat(43)}`;
+
+function reloadedProbe(live) {
+  return tabId => ({ tabId, windowId: 9, documentId: live, urlSessionDigest: DIGEST });
+}
+
+const documentChanged = async () => ({ ok: false, reason: 'document-changed' });
+
+function injected(fixture, from = 0) {
+  return fixture.trace.slice(from).filter(row => row[0] === 'inject').map(row => row[1]);
+}
+
+function installs(fixture) {
+  return injected(fixture).filter(command => command.command.op === 'install');
+}
+
+test('relocation demands both the invitation from the refusal and the explicit request', async () => {
+  const fixture = await harness({ probe: reloadedProbe('document-next'), liveVerify: documentChanged });
+  const input = request(fixture.snapshot.model.auditId, 'occ-focus-failed');
+
+  // Recolocar sem convite: nada é desenhado e o convite é (re)feito.
+  assert.deepEqual(await fixture.controller.highlightReloaded(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  assert.deepEqual(injected(fixture), []);
+
+  // A tentativa comum também não desenha nada: ela só convida.
+  assert.deepEqual(await fixture.controller.highlight(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  assert.deepEqual(injected(fixture), []);
+
+  const mark = fixture.trace.length;
+  const accepted = await fixture.controller.highlightReloaded(input);
+  assert.equal(accepted.ok, true);
+  // O convite não repete a verificação de estrutura do alvo: ela não tem como valer no documento novo.
+  assert.equal(fixture.trace.slice(mark).some(row => row[0] === 'verify'), false);
+
+  const [install] = installs(fixture);
+  assert.equal(install.documentId, 'document-next');
+  assert.equal(install.command.documentId, 'document-next');
+  assert.equal(install.command.signedDocumentId, 'document-main');
+  assert.equal(install.command.frameId, 0);
+  assert.equal(install.command.kind, 'failed');
+
+  const owner = await fixture.realStore.getActiveOverlay(7);
+  assert.equal(owner.state, 'active');
+  assert.equal(owner.topDocumentId, 'document-next');
+  assert.equal(owner.documentId, 'document-next');
+  assert.equal(owner.relocatedFrom, 'document-main');
+  assert.equal(owner.frameId, 0);
+  assert.equal(owner.occurrenceId, 'occ-focus-failed');
+  assert.equal(owner.expiresAt, fixture.binding.expiresAt);
+});
+
+test('a second reload needs a new invitation before drawing anything', async () => {
+  let live = 'document-next';
+  const fixture = await harness({ probe: tabId => reloadedProbe(live)(tabId), liveVerify: documentChanged });
+  const input = request(fixture.snapshot.model.auditId, 'occ-focus-failed');
+
+  assert.deepEqual(await fixture.controller.highlight(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  live = 'document-third';
+  assert.deepEqual(await fixture.controller.highlightReloaded(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  assert.deepEqual(injected(fixture), []);
+  assert.equal(await fixture.realStore.getActiveOverlay(7), null);
+
+  assert.equal((await fixture.controller.highlightReloaded(input)).ok, true);
+  const [install] = installs(fixture);
+  assert.equal(install.command.documentId, 'document-third');
+  assert.equal(install.command.signedDocumentId, 'document-main');
+  assert.equal((await fixture.realStore.getActiveOverlay(7)).topDocumentId, 'document-third');
+});
+
+test('another address, tab or window never becomes a relocation', async () => {
+  const cases = [
+    { name: 'endereço', probe: tabId => ({ tabId, windowId: 9, documentId: 'document-next', urlSessionDigest: OTHER_DIGEST }) },
+    { name: 'janela', probe: tabId => ({ tabId, windowId: 11, documentId: 'document-next', urlSessionDigest: DIGEST }) },
+  ];
+  for (const scenario of cases) {
+    const fixture = await harness({ probe: scenario.probe, liveVerify: documentChanged });
+    const input = request(fixture.snapshot.model.auditId, 'occ-focus-failed');
+    assert.deepEqual(await fixture.controller.highlight(input), { ok: false, code: 'HIGHLIGHT_DOCUMENT_CHANGED' }, scenario.name);
+    assert.deepEqual(await fixture.controller.highlightReloaded(input), { ok: false, code: 'HIGHLIGHT_DOCUMENT_CHANGED' }, scenario.name);
+    assert.deepEqual(injected(fixture), [], scenario.name);
+  }
+
+  // Outra aba: o alvo é o documento do quadro principal da aba guardada, e nada é oferecido.
+  const otherTab = await harness({
+    probe: tabId => ({ tabId: 8, windowId: 9, documentId: 'document-next', urlSessionDigest: DIGEST }),
+    liveVerify: documentChanged,
+  });
+  assert.deepEqual(await otherTab.controller.highlightReloaded(request(otherTab.snapshot.model.auditId, 'occ-focus-failed')), {
+    ok: false, code: 'HIGHLIGHT_DOCUMENT_CHANGED',
+  });
+  assert.deepEqual(injected(otherTab), []);
+});
+
+test('the invitation expires and dies with the audit', async () => {
+  const clock = { value: EPOCH };
+  const offers = createPageRelocationOfferStore({ now: () => clock.value, ttlMs: 5_000 });
+  const fixture = await harness({
+    clock, relocationOffers: offers, probe: reloadedProbe('document-next'), liveVerify: documentChanged,
+  });
+  const auditId = fixture.snapshot.model.auditId;
+  const input = request(auditId, 'occ-focus-failed');
+
+  assert.deepEqual(await fixture.controller.highlight(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  clock.value += 5_000;
+  assert.deepEqual(await fixture.controller.highlightReloaded(input), { ok: false, code: 'HIGHLIGHT_RELOADED_PAGE' });
+  assert.deepEqual(injected(fixture), []);
+  assert.equal(await fixture.realStore.getActiveOverlay(7), null);
+
+  // Depois de limpar a auditoria o convite também não serve mais.
+  const cleared = await harness({
+    clock, relocationOffers: offers, probe: reloadedProbe('document-next'), liveVerify: documentChanged,
+  });
+  await cleared.controller.highlight(input);
+  await cleared.controller.clearAudit(auditId, 'audit-deleted');
+  assert.equal((await cleared.controller.highlightReloaded(input)).ok, false);
+  assert.deepEqual(injected(cleared), []);
+});
+
+test('rejects hostile relocation accessors before touching the store or the page', async () => {
+  const fixture = await harness({ probe: reloadedProbe('document-next'), liveVerify: documentChanged });
+  let getterCalls = 0;
+  const hostile = request(fixture.snapshot.model.auditId, 'occ-focus-failed');
+  Object.defineProperty(hostile, 'occurrenceId', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'occ-focus-failed'; },
+  });
+  const mark = fixture.trace.length;
+
+  assert.deepEqual(await fixture.controller.highlightReloaded(hostile), { ok: false, code: 'HIGHLIGHT_INPUT_INVALID' });
+  assert.equal(getterCalls, 0);
+  assert.equal(fixture.trace.length, mark);
 });

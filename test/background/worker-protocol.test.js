@@ -20,6 +20,7 @@ const markerEnvelope = (type, extra = {}) => ({
 test('page-marker intents are panel-only and acquire the admitted window, never a client window', () => {
   for (const intent of [
     markerEnvelope('PANEL_SHOW_PAGE_MARKERS'),
+    markerEnvelope('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
     markerEnvelope('PANEL_HIDE_PAGE_MARKERS'),
     markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 63, scroll: false }),
     markerEnvelope('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals: '0,2,63' }),
@@ -56,8 +57,10 @@ test('page-marker revision, ordinal and filter boundaries are closed and canonic
 
 test('page-marker protocol rejects extra authority and accessor fields without reading them', () => {
   const intent = markerEnvelope('PANEL_SHOW_PAGE_MARKERS');
-  for (const extra of [{ tabId: 7 }, { documentId: 'document-a' }, { installationId: 'a'.repeat(22) }, { ordinal: 0 }]) {
-    assert.equal(parsePanelPortIntent({ ...intent, ...extra }, 9).ok, false);
+  for (const value of [intent, markerEnvelope('PANEL_SHOW_PAGE_MARKERS_RELOADED')]) {
+    for (const extra of [{ tabId: 7 }, { documentId: 'document-a' }, { installationId: 'a'.repeat(22) }, { ordinal: 0 }]) {
+      assert.equal(parsePanelPortIntent({ ...value, ...extra }, 9).ok, false, `${value.type} ${Object.keys(extra)[0]}`);
+    }
   }
   let reads = 0;
   Object.defineProperty(intent, 'modelRevision', { enumerable: true, get() { reads += 1; return 1; } });
@@ -140,6 +143,7 @@ const validMessages = [
   { type: 'GET_HIGHLIGHT_STATE', sessionCapabilityId: SESSION, auditId: '1-audit' },
   { type: 'GET_HIGHLIGHT_AVAILABILITY', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
   { type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
+  { type: 'HIGHLIGHT_OCCURRENCE_RELOADED', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
   { type: 'CLEAR_HIGHLIGHT', sessionCapabilityId: SESSION, auditId: '1-audit' },
   { type: 'AUDITA_HIGHLIGHT_INVALIDATED', nonce: 'N'.repeat(22) },
   { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'emergency-stop' },
@@ -419,7 +423,8 @@ test('rejects non-canonical or hostile pixel confirmations without invoking acce
 
 test('admits shared highlight intents through the panel Port without adding or accepting a UI window claim', () => {
   for (const message of validMessages.filter(value => [
-    'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+    'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE',
+    'HIGHLIGHT_OCCURRENCE_RELOADED', 'CLEAR_HIGHLIGHT',
   ].includes(value.type))) {
     const parsed = parsePanelPortIntent(message, 9);
     assert.equal(parsed.ok, true, message.type);
@@ -433,6 +438,18 @@ test('admits shared highlight intents through the panel Port without adding or a
     type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION, auditId: 'audit-1',
     occurrenceId: 'occ-1', selector: '#forged',
   }), { ok: false, code: 'INVALID_MESSAGE' });
+
+  // A intenção da página recarregada não carrega autoridade própria: nem documento, nem alvo.
+  for (const forged of [{ documentId: 'document-next' }, { tabId: 7 }, { signedDocumentId: 'document-main' }]) {
+    assert.deepEqual(parsePanelPortIntent({
+      type: 'HIGHLIGHT_OCCURRENCE_RELOADED', sessionCapabilityId: SESSION, auditId: 'audit-1',
+      occurrenceId: 'occ-1', ...forged,
+    }, 9), { ok: false, code: 'INVALID_MESSAGE' });
+  }
+  assert.deepEqual(parsePanelPortIntent({
+    type: 'HIGHLIGHT_OCCURRENCE_RELOADED', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    occurrenceId: 'not a review id',
+  }, 9), { ok: false, code: 'INVALID_MESSAGE' });
 });
 
 test('admits only the exact opaque content invalidation notice outside the panel Port lane', () => {
@@ -555,7 +572,9 @@ test('guided review: "não se aplica", an explicit revise flag and the bounded p
 test('a guided review answer travels as one closed batch envelope', async () => {
   const { parseReviewBatchEntries } = await import('../../src/background/worker-protocol.js');
   const entry = (occurrenceId, extra = {}) => ({
-    itemId: '5.2.1', occurrenceId, answer: 'não conforme', mode: 'assisted', note: 'Imagem sem alternativa.', revise: false, ...extra,
+    itemId: '5.2.1', occurrenceId, answer: 'não conforme', mode: 'assisted', note: 'Imagem sem alternativa.',
+    // O apontamento do mapa do teclado vai sempre no envelope: `null` quando a pessoa não apontou nada.
+    marks: null, revise: false, ...extra,
   });
   const envelope = decisions => ({
     type: 'REPORT_COMMIT_REVIEW_BATCH', sessionCapabilityId: SESSION, auditId: 'audit-1',
@@ -564,10 +583,28 @@ test('a guided review answer travels as one closed batch envelope', async () => 
   const accepted = parseWorkerMessage(envelope([entry('occ-1'), entry('occ-2', { revise: true })]));
   assert.equal(accepted.ok, true);
   assert.deepEqual(parseReviewBatchEntries(accepted.value.decisions).map(value => value.occurrenceId), ['occ-1', 'occ-2']);
+  // O apontamento do mapa atravessa o envelope já canônico: números em ordem e áreas inteiras. Sem
+  // nada apontado o envelope leva `null`, nunca um objeto vazio.
+  const comMarcas = parseReviewBatchEntries(JSON.stringify([
+    entry('occ-1', { marks: { version: 1, suspects: [2, 1], areas: [{ x: 10, y: 20, width: 30, height: 40 }] } }),
+    entry('occ-2', { marks: { version: 1, suspects: [3], areas: [] } }),
+  ]));
+  assert.deepEqual(comMarcas[0].marks, { version: 1, suspects: [1, 2], areas: [{ x: 10, y: 20, width: 30, height: 40 }] });
+  assert.deepEqual(comMarcas[1].marks, { version: 1, suspects: [3], areas: [] });
+  assert.equal(Object.isFrozen(comMarcas[0].marks) && Object.isFrozen(comMarcas[0].marks.areas), true);
   for (const decisions of [
     [], [entry('occ-1'), entry('occ-1')], [{ ...entry('occ-1'), extra: true }], [entry('occ-1', { answer: 'talvez' })],
     [entry('occ-1', { note: ' com espaço ' })], [entry('occ-1', { revise: 'sim' })], [entry('occ-1', { mode: 'automated' })],
     Array.from({ length: 65 }, (_, index) => entry(`occ-${index}`)),
+    [entry('occ-1', { marks: { version: 2, suspects: [1], areas: [] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [0], areas: [] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [1], areas: [{ x: 0, y: 0, width: 0, height: 1 }] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [1], areas: [], extra: true } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [1] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [], areas: [] } })],
+    [entry('occ-1', { marks: [] })],
+    [entry('occ-1', { marks: 'nada' })],
+    [(() => { const value = entry('occ-1'); delete value.marks; return value; })()],
   ]) assert.equal(parseWorkerMessage(envelope(decisions)).ok, false, JSON.stringify(decisions).slice(0, 80));
   assert.equal(parseWorkerMessage({ ...envelope([entry('occ-1')]), decisions: '{"não":"lista"}' }).ok, false);
   assert.equal(parseWorkerMessage({ ...envelope([entry('occ-1')]), evaluator: '' }).ok, false);

@@ -14,6 +14,10 @@ import {
 import {
   keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO,
 } from '../core/report/keyboard-map-presentation.js';
+import {
+  documentRectToSegmentPixels, integerDocumentArea, segmentPixelsToDocumentRect,
+} from '../core/keyboard/keyboard-map-geometry.js';
+import { canonicalReviewMarks, describeReviewAreaPosition, REVIEW_MARKS_LIMITS, REVIEW_MARKS_VERSION } from '../core/review/review-marks.js';
 import { applyReportSourceControls, buildReportView, renderReportView, updateReportHighlightAction } from './report-view.js';
 import { REPORT_PORT_NAME } from '../background/report-port.js';
 import { createReportHighlightPolicy } from './report-highlight-policy.js';
@@ -618,9 +622,9 @@ async function saveDecisionBatch(entries, card, trigger) {
   }
   const auditId = auditModel.auditId;
   const decidedAt = new Date().toISOString();
-  const inputs = entries.map(({ occurrence, answer, note }) => ({
+  const inputs = entries.map(({ occurrence, answer, note, marks }) => ({
     auditId, itemId: occurrence.itemId, occurrenceId: occurrence.occurrenceId, answer, evaluator: evaluatorName,
-    note, decidedAt, mode: occurrence.mode === 'manual' ? 'manual' : 'assisted',
+    note, marks: marks ?? null, decidedAt, mode: occurrence.mode === 'manual' ? 'manual' : 'assisted',
   }));
   const reviseByOccurrence = new Map(entries.map(entry => [entry.occurrence.occurrenceId, entry.revise === true]));
   const items = [...new Set(entries.map(entry => entry.occurrence.itemId))].join(', ');
@@ -630,7 +634,8 @@ async function saveDecisionBatch(entries, card, trigger) {
       type: 'REPORT_COMMIT_REVIEW_BATCH', sessionCapabilityId, auditId, evaluator: evaluatorName, decidedAt,
       decisions: JSON.stringify(decisions.map(decision => ({
         itemId: decision.itemId, occurrenceId: decision.occurrenceId, answer: decision.answer,
-        mode: decision.mode, note: decision.note ?? '', revise: reviseByOccurrence.get(decision.occurrenceId) === true,
+        mode: decision.mode, note: decision.note ?? '', marks: decision.marks ?? null,
+        revise: reviseByOccurrence.get(decision.occurrenceId) === true,
       }))),
     })).then(response => { lastCommitFailureCode = response?.ok === true ? null : response?.code ?? null; return response; }),
     loadReportRevision: id => store.getReportRevision(id),
@@ -671,6 +676,9 @@ const layState = {
   revising: new Set(),
   imagePurpose: new Map(),
   imageFollowUps: new Map(),
+  // Marcas por cartão (itens sem caixa e áreas desenhadas no mapa do teclado), fora do DOM porque o
+  // formulário é remontado a cada resposta.
+  marks: new Map(),
   visible: { requirement: REVIEW_CARD_LIMIT, recommendation: REVIEW_CARD_LIMIT },
   showRecommendations: true,
   activeAids: new Set(),
@@ -740,14 +748,19 @@ async function commitAnswers(card, plan, trigger) {
   const node = layState.cardNodes.get(card.key);
   if (!node) return false;
   const entries = [];
-  for (const { target, answer, note, itemId } of plan) {
+  for (const { target, answer, note, itemId, marks } of plan) {
     const text = typeof note === 'string' ? note.trim() : '';
+    const apontamentos = marks ?? null;
     // Uma ocorrência já decidida só é regravada quando a pessoa pediu "Rever resposta"; uma nova
-    // tentativa depois de falha parcial não cria revisão falsa da resposta que já estava salva.
+    // tentativa depois de falha parcial não cria revisão falsa da resposta que já estava salva. As
+    // marcas entram na comparação: revisar só o apontamento (mesma resposta, mesma descrição) é uma
+    // mudança de verdade e precisa ser gravada.
     const revising = layState.revising.has(`${card.key}|${itemId ?? target.entry.itemId}`);
-    if (target.decision && (!revising || (target.decision.answer === answer && (target.decision.note ?? '') === text))) continue;
+    if (target.decision && (!revising ||
+      (target.decision.answer === answer && (target.decision.note ?? '') === text &&
+        JSON.stringify(target.decision.marks ?? null) === JSON.stringify(apontamentos)))) continue;
     if (entries.some(entry => entry.occurrence.occurrenceId === target.occurrence.occurrenceId)) continue;
-    entries.push({ occurrence: target.occurrence, answer, note: text, revise: Boolean(target.decision) });
+    entries.push({ occurrence: target.occurrence, answer, note: text, marks: apontamentos, revise: Boolean(target.decision) });
   }
   // Quando esta resposta completa o cartão, a revisão já segue para o próximo enquanto a gravação
   // termina: em páginas grandes a gravação leva alguns segundos e a pessoa não precisa esperar. O
@@ -958,6 +971,345 @@ function answeredLine(question, card) {
  * Mostra a imagem quando a auditoria teve pixels e, sempre, a lista numerada — que é a única forma
  * de responder no modo sem imagens. Nada aqui decide: a pessoa olha e responde.
  */
+// ---- Apontar no mapa do teclado (item 5.1.13) ----
+//
+// Depois de "Sim, falta caixa em algum item", a pessoa pode APONTAR o que ficou sem caixa: marcar os
+// itens suspeitos na lista e desenhar até cinco áreas sobre a imagem. A descrição continua obrigatória
+// — o apontamento é opcional e serve para o relatório mostrar onde olhar.
+// O limite de áreas vem de REVIEW_MARKS_LIMITS (esquema fechado) e é lido dentro das funções: nenhuma
+// constante de topo pode depender de um `import`, porque os testes de renderização executam este
+// arquivo num DOM falso sem os módulos importados.
+const MARKS_AREA_STEP = 8;
+const MARKS_MIN_SIZE = 8;
+const MARKS_NEW_AREA_RATIO = 0.15;
+const MARKS_MIN_NEW_AREA = 40;
+
+/** Estado das marcas de um cartão. Fica fora do DOM: o formulário é remontado a cada atualização. */
+function marksState(cardKey, question) {
+  const existing = layState.marks.get(cardKey);
+  if (existing) return existing;
+  const decisions = question.entries.map(entry => entry.decision).filter(Boolean);
+  const latest = [...decisions].sort((left, right) => left.decidedAt.localeCompare(right.decidedAt)).at(-1);
+  const marks = latest?.marks ?? null;
+  const state = {
+    suspects: new Set(marks?.suspects ?? []),
+    areas: (marks?.areas ?? []).map(area => ({ ...area })),
+    selected: null,
+  };
+  layState.marks.set(cardKey, state);
+  return state;
+}
+
+/** Marcas prontas para gravar: `null` quando a pessoa não apontou nada. */
+function marksForSubmit(cardKey, question) {
+  const state = layState.marks.get(cardKey);
+  if (!state) return null;
+  try {
+    return canonicalReviewMarks({
+      version: REVIEW_MARKS_VERSION,
+      suspects: [...state.suspects],
+      areas: state.areas.map(area => ({ ...area })),
+    });
+  } catch {
+    return null;
+  }
+}
+
+let marksDocumentSize = null;
+
+function describeMarksArea(area, number) {
+  const where = describeReviewAreaPosition(area, marksDocumentSize);
+  return where ? `Área ${number}, ${where}.` : `Área ${number}.`;
+}
+
+/**
+ * Lista dos itens laranja do mapa e superfície de desenho.
+ *
+ * O desenho usa SVG e não gera pixel novo: a imagem guardada entra inteira e cada área é um
+ * `<rect>` sobre ela. A mesma escolha vale para o relatório, e evita atributo de estilo — que a
+ * política de segurança do relatório bloqueia.
+ */
+function keyboardMarksBlock(card, question) {
+  const model = auditModel;
+  const map = (model?.evidence ?? [])
+    .find(artifact => artifact.kind === 'keyboard-map' && artifact.pageId === card.pageId);
+  const geometry = map?.derivation?.geometry;
+  marksDocumentSize = geometry?.sourceCssSize ?? null;
+  const segments = Array.isArray(map?.segments) ? map.segments : [];
+  if (!map || !geometry || segments.length === 0) return null;
+  const projection = keyboardMapPresentation([{ pageId: card.pageId }], [map])[0];
+  const state = marksState(card.key, question);
+  const block = el('div', undefined, 'lay-marks');
+  block.setAttribute('data-lay-marks', card.key);
+  block.append(el('p', 'Marque os itens que ficaram sem caixa azul (opcional).', 'lay-map-subtitle'));
+
+  // O anúncio do apontamento tem a sua própria região viva: marcações e áreas não disputam a linha de
+  // status da página, que fala do registro da resposta.
+  const live = el('p', undefined, 'lay-marks-status');
+  live.setAttribute('aria-live', 'polite');
+  live.setAttribute('data-lay-marks-status', '');
+  const announce = message => { live.textContent = message; };
+
+  if (projection.suspects.length > 0) {
+    const list = el('ul', undefined, 'lay-marks-suspects');
+    for (const suspect of projection.suspects) {
+      const item = el('li');
+      const label = el('label');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.value = String(suspect.number);
+      // O atributo marca a caixa já apontada numa resposta anterior; o estado vivo é lido do próprio
+      // elemento no evento de mudança.
+      if (state.suspects.has(suspect.number)) box.setAttribute('checked', '');
+      box.setAttribute('data-lay-marks-suspect', String(suspect.number));
+      box.addEventListener('change', () => {
+        if (box.checked) state.suspects.add(suspect.number);
+        else state.suspects.delete(suspect.number);
+        announce(box.checked
+          ? `Item “${suspect.name}” marcado como sem caixa azul.`
+          : `Item “${suspect.name}” desmarcado.`);
+      });
+      label.append(box, el('span', ` ${suspect.name} — ${suspect.reason}`));
+      item.append(label);
+      list.append(item);
+    }
+    block.append(list);
+  } else {
+    block.append(el('p', 'Esta página não tem itens laranja na lista do mapa; marque uma área na imagem se algo ficou sem caixa.', 'lay-hint'));
+  }
+
+  const areas = el('ol', undefined, 'lay-marks-areas');
+  const removeRow = el('div', undefined, 'lay-marks-remove');
+  const surface = el('div', undefined, 'lay-marks-surface');
+  surface.setAttribute('tabindex', '0');
+  surface.setAttribute('role', 'group');
+  surface.setAttribute('aria-label', 'Mapa do teclado para marcar áreas. Use as setas para mover a área escolhida, Shift com as setas para redimensionar e Delete para remover.');
+  const figures = [];
+
+  const drawAreas = () => {
+    for (const figure of figures) {
+      for (const rect of figure.rects.values()) rect.remove();
+      figure.rects.clear();
+      state.areas.forEach((area, index) => {
+        const painted = documentRectToSegmentPixels(figure.segment, geometry, area);
+        if (!painted) return;
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', String(painted.x));
+        rect.setAttribute('y', String(painted.y));
+        rect.setAttribute('width', String(painted.width));
+        rect.setAttribute('height', String(painted.height));
+        rect.setAttribute('class', `lay-marks-area${state.selected === index ? ' lay-marks-area--selected' : ''}`);
+        rect.setAttribute('data-lay-marks-area', String(index + 1));
+        figure.svg.append(rect);
+        figure.rects.set(index, rect);
+      });
+    }
+    areas.replaceChildren();
+    for (const [index, area] of state.areas.entries()) {
+      const chosen = state.selected === index;
+      const item = el('li');
+      item.setAttribute('data-lay-marks-area-list', String(index + 1));
+      const choose = button(`${describeMarksArea(area, index + 1)}${chosen ? ' (área escolhida)' : ''}`,
+        `lay-marks-pick${chosen ? ' lay-marks-pick--selected' : ''}`, () => {
+          state.selected = index;
+          drawAreas();
+          surface.focus();
+          announce(`${describeMarksArea(area, index + 1)} Área escolhida. Use as setas para mover, Shift com as setas para redimensionar e Delete para remover.`);
+        });
+      choose.setAttribute('aria-pressed', chosen ? 'true' : 'false');
+      item.append(choose);
+      areas.append(item);
+    }
+    removeRow.replaceChildren();
+    for (const [index] of state.areas.entries()) {
+      removeRow.append(button(`Remover área ${index + 1}`, 'lay-marks-remove-button', () => removeArea(index)));
+    }
+  };
+
+  const removeArea = index => {
+    const removed = state.areas[index];
+    if (!removed) return;
+    state.areas.splice(index, 1);
+    if (state.selected !== null) {
+      state.selected = state.selected === index ? null : state.selected > index ? state.selected - 1 : state.selected;
+    }
+    drawAreas();
+    announce(`Área removida: ${describeMarksArea(removed, index + 1)} Restam ${state.areas.length} ${state.areas.length === 1 ? 'área' : 'áreas'} marcadas.`);
+  };
+
+  const commitArea = rect => {
+    const area = integerDocumentArea(rect, geometry.sourceCssSize);
+    if (!area) return null;
+    if (area.width < MARKS_MIN_SIZE || area.height < MARKS_MIN_SIZE) return null;
+    if (state.areas.length >= REVIEW_MARKS_LIMITS.maxAreas) {
+      announce(`O limite é de ${REVIEW_MARKS_LIMITS.maxAreas} áreas marcadas. Remova uma área antes de marcar outra.`);
+      return null;
+    }
+    state.areas.push(area);
+    state.selected = state.areas.length - 1;
+    drawAreas();
+    announce(`${describeMarksArea(area, state.areas.length)} Área marcada. Use as setas para mover, Shift com as setas para redimensionar e Delete para remover.`);
+    return area;
+  };
+
+  // Centro do pedaço do mapa que está à vista: é onde "Adicionar área" cria o retângulo.
+  const visibleCenter = () => {
+    const rect = surface.getBoundingClientRect();
+    const visibleTop = Math.max(rect.top, 0);
+    const visibleBottom = Math.min(rect.bottom, window.innerHeight) - visibleTop;
+    const centerY = visibleBottom > 0 ? visibleTop + visibleBottom / 2 : rect.top + rect.height / 2;
+    return { x: rect.left + rect.width / 2, y: centerY };
+  };
+
+  const addAreaAtCenter = () => {
+    if (state.areas.length >= REVIEW_MARKS_LIMITS.maxAreas) {
+      announce(`O limite é de ${REVIEW_MARKS_LIMITS.maxAreas} áreas marcadas. Remova uma área antes de marcar outra.`);
+      return;
+    }
+    const figure = figures[0];
+    if (!figure) return;
+    const box = figure.svg.getBoundingClientRect();
+    const center = visibleCenter();
+    const point = segmentPixelsToDocumentRect(figure.segment, geometry, {
+      x: (center.x - box.left) * (figure.segment.width / box.width),
+      y: (center.y - box.top) * (figure.segment.height / box.height),
+      width: 0, height: 0,
+    });
+    const size = {
+      width: Math.max(MARKS_MIN_NEW_AREA, Math.round(geometry.sourceCssSize.width * MARKS_NEW_AREA_RATIO)),
+      height: Math.max(MARKS_MIN_NEW_AREA, Math.round(figure.segment.sourceCssClip.height * MARKS_NEW_AREA_RATIO)),
+    };
+    commitArea({ x: point.x - size.width / 2, y: point.y - size.height / 2, ...size });
+  };
+
+  const moveSelected = (dx, dy, resize) => {
+    const index = state.selected;
+    if (index === null || !state.areas[index]) {
+      announce('Escolha uma área na lista antes de mover.');
+      return;
+    }
+    const current = state.areas[index];
+    const next = integerDocumentArea(resize
+      ? { ...current, width: current.width + dx, height: current.height + dy }
+      : { ...current, x: current.x + dx, y: current.y + dy }, geometry.sourceCssSize);
+    if (!next) return;
+    state.areas[index] = next;
+    drawAreas();
+    announce(describeMarksArea(next, index + 1));
+  };
+
+  surface.addEventListener('keydown', event => {
+    const step = MARKS_AREA_STEP;
+    if (event.key === 'ArrowLeft') { event.preventDefault(); moveSelected(-step, 0, event.shiftKey); return; }
+    if (event.key === 'ArrowRight') { event.preventDefault(); moveSelected(step, 0, event.shiftKey); return; }
+    if (event.key === 'ArrowUp') { event.preventDefault(); moveSelected(0, -step, event.shiftKey); return; }
+    if (event.key === 'ArrowDown') { event.preventDefault(); moveSelected(0, step, event.shiftKey); return; }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      if (state.selected === null) return;
+      event.preventDefault();
+      removeArea(state.selected);
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); addAreaAtCenter(); }
+  });
+
+  for (const segment of segments) {
+    if (!isSafeEvidenceImageUrl(segment.dataUrl, chrome.runtime.getURL('/'))) continue;
+    const figure = el('figure');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${segment.width} ${segment.height}`);
+    svg.setAttribute('width', String(segment.width));
+    svg.setAttribute('height', String(segment.height));
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.setAttribute('class', 'lay-marks-image');
+    svg.setAttribute('data-lay-marks-segment', String(segment.index));
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', `Trecho ${segment.index} do mapa do teclado para marcar áreas.`);
+    const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+    image.setAttribute('x', '0');
+    image.setAttribute('y', '0');
+    image.setAttribute('width', String(segment.width));
+    image.setAttribute('height', String(segment.height));
+    image.setAttribute('href', segment.dataUrl);
+    svg.append(image);
+    const record = { svg, segment, rects: new Map() };
+    figures.push(record);
+    let drawing = null;
+    let start = null;
+    svg.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      const target = event.target;
+      if (target?.getAttribute?.('data-lay-marks-area')) {
+        const index = Number(target.getAttribute('data-lay-marks-area')) - 1;
+        state.selected = index;
+        drawAreas();
+        surface.focus();
+        announce(`${describeMarksArea(state.areas[index], index + 1)} Área escolhida.`);
+        return;
+      }
+      const box = svg.getBoundingClientRect();
+      start = {
+        x: (event.clientX - box.left) * (segment.width / box.width),
+        y: (event.clientY - box.top) * (segment.height / box.height),
+      };
+      drawing = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      drawing.setAttribute('class', 'lay-marks-area lay-marks-area--drawing');
+      drawing.setAttribute('x', String(start.x));
+      drawing.setAttribute('y', String(start.y));
+      drawing.setAttribute('width', '0');
+      drawing.setAttribute('height', '0');
+      svg.append(drawing);
+      svg.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    });
+    svg.addEventListener('pointermove', event => {
+      if (!drawing || !start) return;
+      const box = svg.getBoundingClientRect();
+      const current = {
+        x: (event.clientX - box.left) * (segment.width / box.width),
+        y: (event.clientY - box.top) * (segment.height / box.height),
+      };
+      drawing.setAttribute('x', String(Math.min(start.x, current.x)));
+      drawing.setAttribute('y', String(Math.min(start.y, current.y)));
+      drawing.setAttribute('width', String(Math.abs(current.x - start.x)));
+      drawing.setAttribute('height', String(Math.abs(current.y - start.y)));
+    });
+    const finish = event => {
+      if (!drawing || !start) return;
+      const painted = {
+        x: Number(drawing.getAttribute('x')), y: Number(drawing.getAttribute('y')),
+        width: Number(drawing.getAttribute('width')), height: Number(drawing.getAttribute('height')),
+      };
+      drawing.remove();
+      drawing = null;
+      start = null;
+      svg.releasePointerCapture?.(event.pointerId);
+      const area = segmentPixelsToDocumentRect(segment, geometry, painted);
+      if (!area) return;
+      if (area.width < MARKS_MIN_SIZE || area.height < MARKS_MIN_SIZE) {
+        announce('A área marcada ficou pequena demais; clique e arraste para desenhar um retângulo maior.');
+        return;
+      }
+      commitArea(area);
+    };
+    svg.addEventListener('pointerup', finish);
+    svg.addEventListener('pointercancel', finish);
+    figure.append(svg, el('figcaption', `Trecho ${segment.index} do mapa do teclado.`));
+    surface.append(figure);
+  }
+  if (figures.length === 0) return null;
+
+  const actions = el('div', undefined, 'lay-marks-actions');
+  actions.append(button('Adicionar área', 'lay-marks-add', addAreaAtCenter));
+  const help = el('p', 'Para marcar com o mouse: clique e arraste sobre a imagem. Pelo teclado: use “Adicionar área”, escolha a área na lista e mova com as setas; Shift com as setas redimensiona e Delete remove.', 'lay-hint');
+  block.append(help, surface, actions, removeRow, areas, live);
+  drawAreas();
+  if (state.areas.length > 0) {
+    live.textContent = `${state.areas.length} ${state.areas.length === 1 ? 'área marcada' : 'áreas marcadas'} nesta resposta.`;
+  }
+  return block;
+}
+
 function keyboardMapBlock() {
   const model = auditModel;
   const maps = Array.isArray(model?.evidence)
@@ -1036,10 +1388,12 @@ function answerForm(card, question) {
   note.setAttribute('aria-label', `Observação opcional sobre o item ${question.itemId}`);
   noteBox.append(note);
   const targets = () => question.entries;
-  const submit = async (answer, text, trigger, required = false) => {
+  const submit = async (answer, text, trigger, required = false, marks = null) => {
     const problem = noteProblem(text, required);
     if (problem) { status.textContent = problem; (required ? findingText : note).focus(); return; }
-    await commitAnswers(card, targets().map(target => ({ target, answer, note: text, itemId: question.itemId })), trigger);
+    await commitAnswers(card, targets().map(target => ({
+      target, answer, note: text, itemId: question.itemId, marks: answer === 'não conforme' ? marks : null,
+    })), trigger);
   };
   for (const option of LAY_ANSWERS) {
     // Em cartões de elemento, "não existe nesta página" seria estranho: o elemento existe, o item é que não se aplica.
@@ -1062,12 +1416,21 @@ function answerForm(card, question) {
   });
   answers.append(skip);
   const confirm = button('Registrar “não atende”', 'lay-confirm-fail', event => {
-    void submit('não conforme', findingText.value, event.currentTarget, true);
+    void submit('não conforme', findingText.value, event.currentTarget, true, marksForSubmit(card.key, question));
   });
   const cancel = button('Cancelar', 'lay-cancel', () => { finding.hidden = true; });
   const findingActions = el('div', undefined, 'lay-finding-actions');
   findingActions.append(confirm, cancel);
   finding.append(findingLabel, findingActions);
+  // O apontamento no mapa só aparece no caminho de "falta caixa em algum item": é ali que faz sentido
+  // dizer QUAIS itens e ONDE. O bloco (com a imagem do mapa) é montado só quando a pessoa escolhe
+  // "Sim, falta caixa" — montá-lo escondido duplicaria a imagem do mapa em toda a página.
+  let marksBlock = null;
+  const showMarksBlock = () => {
+    if (marksBlock || !keyboardMap) return;
+    marksBlock = keyboardMarksBlock(card, question);
+    if (marksBlock) finding.insertBefore(marksBlock, findingActions);
+  };
   if (keyboardMap) {
     // Três respostas com o vocabulário do mapa, no lugar do grupo genérico: duas fileiras de botões
     // com dois caminhos de "não conforme" confundiriam quem só quer conferir o mapa. "Sim" cai no
@@ -1079,6 +1442,7 @@ function answerForm(card, question) {
       const choice = button(option.label, `lay-answer lay-answer--${option.answer.replace(/\s+/gu, '-')}`, event => {
         if (option.answer === 'não conforme') {
           finding.hidden = false;
+          showMarksBlock();
           findingText.focus();
           return;
         }

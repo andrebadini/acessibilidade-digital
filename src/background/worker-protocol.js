@@ -1,3 +1,5 @@
+import { canonicalReviewMarks } from '../core/review/review-marks.js';
+
 const MAX_ENVELOPE_BYTES = 4096;
 const MAX_REVIEW_DECISION_ENVELOPE_BYTES = 24 * 1024;
 const MAX_BATCH_ENVELOPE_BYTES = 164 * 1024;
@@ -5,7 +7,9 @@ const MAX_BATCH_ENVELOPE_BYTES = 164 * 1024;
 // perguntas de uma imagem). Elas vão num só envelope, com a mesma nota repetida no máximo 64 vezes.
 const MAX_REVIEW_BATCH_ENTRIES = 64;
 const MAX_REVIEW_BATCH_ENVELOPE_BYTES = 640 * 1024;
-const REVIEW_BATCH_ENTRY_KEYS = Object.freeze(['itemId', 'occurrenceId', 'answer', 'mode', 'note', 'revise']);
+// `marks` vai sempre no envelope — `null` quando a pessoa não apontou nada —, para que o conjunto de
+// chaves continue fechado e uma resposta sem marcas não dependa de omissão de campo.
+const REVIEW_BATCH_ENTRY_KEYS = Object.freeze(['itemId', 'occurrenceId', 'answer', 'mode', 'note', 'marks', 'revise']);
 const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const REVIEW_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
@@ -28,11 +32,12 @@ const PANEL_PORT_TYPES = new Set([
   'PANEL_READER_ENABLE_VOICE',
   'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
   'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
-  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS',
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED', 'PANEL_HIDE_PAGE_MARKERS',
   'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
 ]);
 const SHARED_HIGHLIGHT_TYPES = new Set([
-  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED',
+  'CLEAR_HIGHLIGHT',
 ]);
 
 const MESSAGE_SCHEMAS = deepFreeze({
@@ -54,6 +59,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
   PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   PANEL_SHOW_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
+  PANEL_SHOW_PAGE_MARKERS_RELOADED: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
   PANEL_HIDE_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
   PANEL_SELECT_PAGE_MARKER: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision', 'ordinal', 'scroll'],
   PANEL_FILTER_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision', 'visibleOrdinals'],
@@ -70,6 +76,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
   GET_HIGHLIGHT_STATE: ['type', 'sessionCapabilityId', 'auditId'],
   GET_HIGHLIGHT_AVAILABILITY: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
   HIGHLIGHT_OCCURRENCE: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
+  HIGHLIGHT_OCCURRENCE_RELOADED: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
   CLEAR_HIGHLIGHT: ['type', 'sessionCapabilityId', 'auditId'],
   AUDITA_HIGHLIGHT_INVALIDATED: ['type', 'nonce'],
   AUDITA_PERSONA_AUTONOMOUS_STOP: ['type', 'leaseId', 'reason'],
@@ -128,7 +135,8 @@ function hasFlatPrimitiveShape(value) {
 }
 
 function validWorkerEnvelope(value) {
-  if (['PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS', 'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS'].includes(value.type)) {
+  if (['PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED', 'PANEL_HIDE_PAGE_MARKERS',
+    'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS'].includes(value.type)) {
     if (!validOpaqueId(value.sessionCapabilityId) || !validAuditId(value.auditId) || !safeChromeId(value.windowId) ||
       !Number.isSafeInteger(value.modelRevision) || value.modelRevision < 1) return false;
     if (value.type === 'PANEL_SELECT_PAGE_MARKER') return validMarkerOrdinal(value.ordinal) && typeof value.scroll === 'boolean';
@@ -190,7 +198,7 @@ function validWorkerEnvelope(value) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
       (!Object.hasOwn(value, 'deleteAfterCompleteExport') || typeof value.deleteAfterCompleteExport === 'boolean');
   }
-  if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE'].includes(value.type)) {
+  if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED'].includes(value.type)) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && validReviewId(value.occurrenceId);
   }
   if (['GET_HIGHLIGHT_STATE', 'CLEAR_HIGHLIGHT'].includes(value.type)) {
@@ -340,11 +348,16 @@ export function parseReviewBatchEntries(text) {
     if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
     const keys = Object.keys(value);
     if (keys.length !== REVIEW_BATCH_ENTRY_KEYS.length || REVIEW_BATCH_ENTRY_KEYS.some(key => !Object.hasOwn(value, key))) return null;
-    const { itemId, occurrenceId, answer, mode, note, revise } = value;
+    const { itemId, occurrenceId, answer, mode, note, marks, revise } = value;
     if (!validReviewId(itemId) || !validReviewId(occurrenceId) || seen.has(occurrenceId) || !REVIEW_ANSWERS.has(answer) ||
       !REVIEW_MODES.has(mode) || !boundedCanonicalText(note, 4_000, true) || typeof revise !== 'boolean') return null;
+    let canonicalMarks;
+    try {
+      canonicalMarks = canonicalReviewMarks(marks);
+    } catch { return null; }
+    if (marks !== null && canonicalMarks === null) return null;
     seen.add(occurrenceId);
-    entries.push(Object.freeze({ itemId, occurrenceId, answer, mode, note, revise }));
+    entries.push(Object.freeze({ itemId, occurrenceId, answer, mode, note, marks: canonicalMarks, revise }));
   }
   return Object.freeze(entries);
 }
