@@ -2,6 +2,7 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS } from '../legal/consumer-basis.js';
 import {
   ANSWER_LABELS, compareItemIds, describeEvidenceElement, formatLocalInstant, layHint, withArticle,
 } from './lay-review.js';
+import { marksText } from './review-marks-presentation.js';
 
 // Quadro de constatações: a situação de cada REQUISITO da ABNT NBR 17225:2025 depois da revisão humana,
 // com frases prontas para citação. Só apresenta o que o modelo canônico já afirma: o resultado de cada
@@ -17,6 +18,15 @@ const OUTCOME_GROUP = Object.freeze({ failed: 'notMet', passed: 'met', inapplica
 
 function evidenceIndex(model) {
   return new Map((model.evidence ?? []).map(value => [value.evidenceId, value]));
+}
+
+/** Mapa do teclado de cada página: é ele que dá nome aos itens apontados na revisão guiada. */
+function keyboardMapIndex(model) {
+  const maps = new Map();
+  for (const artifact of model.evidence ?? []) {
+    if (artifact?.kind === 'keyboard-map' && !maps.has(artifact.pageId)) maps.set(artifact.pageId, artifact);
+  }
+  return maps;
 }
 
 function elementEvidence(occurrence, evidenceById) {
@@ -59,6 +69,7 @@ export function buildFindingsBoard(model) {
   const timezone = model.timezone;
   const pageById = new Map((model.pages ?? []).map(page => [page.pageId, page]));
   const evidenceById = evidenceIndex(model);
+  const keyboardMapByPage = keyboardMapIndex(model);
   const ruleById = new Map((model.ruleResults ?? []).map(rule => [rule.ruleId, rule]));
   const decisionByOccurrence = new Map((model.reviewDecisions ?? []).map(decision => [decision.occurrenceId, decision]));
   const occurrencesByItem = new Map();
@@ -94,7 +105,13 @@ export function buildFindingsBoard(model) {
         const page = pageById.get(occurrence.pageId);
         const element = describeEvidenceElement(elementEvidence(occurrence, evidenceById));
         const observedAt = page?.timestamps?.endedAt ?? model.timestamps?.endedAt;
-        const text = human ? sentence(decision.note) || `A pessoa avaliadora registrou “${ANSWER_LABELS[decision.answer]}”.`
+        // O apontamento no mapa do teclado entra na própria constatação: "Itens apontados: …" nomeia
+        // os itens sem caixa e "Áreas marcadas no mapa do teclado: N" conta os retângulos desenhados.
+        const marks = human ? decision.marks ?? null : null;
+        const marksLine = marks ? marksText(marks, keyboardMapByPage.get(occurrence.pageId) ?? null) : '';
+        const text = human
+          ? [sentence(decision.note) || `A pessoa avaliadora registrou “${ANSWER_LABELS[decision.answer]}”.`, marksLine]
+            .filter(Boolean).join(' ')
           : automaticText(ruleTarget(occurrence, ruleById));
         const finding = {
           occurrenceId: occurrence.occurrenceId,
@@ -107,6 +124,8 @@ export function buildFindingsBoard(model) {
           evaluator: human ? decision.evaluator : null,
           decidedAtLabel: human ? formatLocalInstant(decision.decidedAt, timezone) : null,
           evidence: evidenceSummary(occurrence, evidenceById),
+          marks,
+          marksText: marksLine,
           legalBasis: human ? Boolean(decision.note) : occurrence.legalAnalysis?.basisRef === CONSUMER_ACCESSIBILITY_FIXED_BASIS.id,
         };
         // O mesmo elemento pode ter duas ocorrências do mesmo item (motor próprio e axe) com a mesma

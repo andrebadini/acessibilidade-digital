@@ -7,7 +7,7 @@ import { projectOccurrenceEvidencePreviews } from '../../src/core/report/evidenc
 import { enrichAuditForReport } from '../../src/core/report/enrich-audit.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { REPORT_VIEW_SCRIPT, REPORT_VIEW_SCRIPT_CSP_HASH } from '../../src/core/report/report-view-script.js';
-import { canonicalCoreRuleSummary } from '../../src/core/report/text-policy.js';
+import { canonicalCoreRuleSummary, canonicalReviewQuestion } from '../../src/core/report/text-policy.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
@@ -17,6 +17,8 @@ import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
 import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
 import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
+import { hashKeyboardMapArtifact } from '../../src/core/keyboard/keyboard-map-artifact.js';
+import { REVIEW_MARKS_VERSION } from '../../src/core/review/review-marks.js';
 
 const FULL_PAGE_CAPTURE_OMITTED_MESSAGE = 'A captura integral e o mapa anotado foram omitidos pela política; miniaturas de elementos permaneceram permitidas.';
 const FULL_PAGE_CAPTURE_OMITTED_LIMITATION = `FULL_PAGE_CAPTURE_OMITTED: ${FULL_PAGE_CAPTURE_OMITTED_MESSAGE}`;
@@ -696,6 +698,79 @@ test('the exported report carries the keyboard map legend, pixels and counts in 
   assert.ok(legacy.includes('Cada caixa azul numerada é um lugar onde a tecla Tab para'));
   assert.ok(legacy.includes('1 lugar onde o Tab para; 0 itens que parecem clicáveis e o Tab não alcança.'));
   assert.ok(legacy.includes('data-keyboard-map-stop="1"'));
+});
+
+/**
+ * Auditoria com o mapa do teclado e a resposta humana do item 5.1.13 apontando um item sem caixa e uma
+ * área desenhada: é o que a tela do relatório, o HTML entregue e a impressão precisam mostrar.
+ */
+async function marksFixture() {
+  const map = await createKeyboardMapFixture();
+  map.suspects = [{
+    number: 1, nodeId: 'n-card', tag: 'div', role: '', reason: 'cursor-pointer', ruleId: null,
+    name: 'Consumidor', nameSource: 'contents', nameStatus: 'projected',
+    bounds: { x: 0, y: 0, width: 1, height: 1 }, segmentIndex: 1,
+  }];
+  map.counts.suspects = 1;
+  map.hash = await hashKeyboardMapArtifact(map);
+  return fixture({ mutateDraft(draft) {
+    draft.evidence[0] = createPristineMapSource();
+    draft.evidence.push(map);
+    const review = structuredClone(draft.occurrences.find(value => value.occurrenceId === 'occ-cross-page'));
+    const item = draft.itemResults.find(value => value.id === '5.1.13');
+    draft.occurrences.push(Object.assign(review, {
+      occurrenceId: 'occ-keyboard-513', itemId: '5.1.13', nbrItemRef: '5.1.13',
+      source: { ...review.source, ruleId: 'manual:5.1.13' }, classification: item.classification,
+      justification: item.humanReason,
+    }));
+    draft.manualReview.push({
+      occurrenceId: 'occ-keyboard-513', itemId: '5.1.13', ruleId: null, mode: 'manual', status: 'unanswered',
+      question: canonicalReviewQuestion(item), reason: item.humanReason,
+    });
+    const decided = applyReviewDecisions(draft, [createReviewDecision({
+      auditId: draft.auditId, itemId: '5.1.13', occurrenceId: 'occ-keyboard-513', answer: 'não conforme',
+      evaluator: 'Pessoa revisora', decidedAt: '2026-08-27T12:00:00.000Z', mode: 'manual',
+      note: 'Os cartões de serviço abrem menus só quando o mouse passa por cima.',
+      marks: { version: REVIEW_MARKS_VERSION, suspects: [1], areas: [{ x: 0, y: 0, width: 1, height: 1 }] },
+    })]);
+    // O modelo que a decisão devolve vem congelado; a fixture ainda precisa ajustar os hashes
+    // pendentes, então o efeito da revisão volta para o rascunho mutável.
+    draft.itemResults = structuredClone(decided.itemResults);
+    draft.manualReview = structuredClone(decided.manualReview);
+    draft.reviewDecisions = structuredClone(decided.reviewDecisions);
+    return draft;
+  } });
+}
+
+test('the review marks appear on screen and in the delivered and printed report as a crop of the saved image', async () => {
+  const { model, summary } = await marksFixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const before = JSON.stringify(model);
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const block = root.querySelector('[data-review-marks]');
+  assert.ok(block, 'o apontamento do mapa precisa aparecer na tela do relatório');
+  assert.ok(root.textContent.includes('Apontamento no mapa do teclado'));
+  assert.ok(root.textContent.includes('Itens apontados: Consumidor. Áreas marcadas no mapa do teclado: 1.'));
+  assert.ok(block.textContent.includes('Área 1 marcada na revisão guiada'));
+  const svg = block.querySelector('svg[data-marks-crop="1"]');
+  assert.equal(svg?.getAttribute('class'), 'marks-crop');
+  assert.match(svg.getAttribute('viewBox'), /^-?\d+ -?\d+ \d+ \d+$/u);
+  const image = svg.querySelector('image');
+  assert.equal(image?.getAttribute('href'), TEST_PNG, 'o recorte reaproveita a imagem já guardada');
+  const outline = svg.querySelector('rect');
+  assert.equal(outline?.getAttribute('class'), 'marks-area-outline');
+  assert.equal(outline.getAttribute('x'), '0');
+  assert.equal(outline.getAttribute('width'), '1');
+  assert.equal(svg.getAttribute('style'), null, 'o desenho não usa estilo embutido');
+
+  for (const html of [renderHtmlReport(model, { reportView: view }), renderHtmlReport(model, { reportView: view, forPrint: true })]) {
+    assert.match(html, /Itens apontados: Consumidor\. Áreas marcadas no mapa do teclado: 1\./u);
+    assert.match(html, /<svg class="marks-crop"[^>]*data-marks-crop="1"[^>]*><image[^>]+href="data:image\/png/u);
+    assert.match(html, /<rect class="marks-area-outline"[^>]*\/?>|<rect class="marks-area-outline"/u);
+    assert.ok(html.includes(TEST_PNG));
+    assert.doesNotMatch(html, /<svg[^>]*data-marks-crop[^>]* style=/u);
+  }
+  assert.equal(JSON.stringify(model), before, 'apresentar o apontamento não pode mudar a auditoria');
 });
 
 test('keyboard map absence and partial coverage are explicit without inventing boxes or approval', async () => {

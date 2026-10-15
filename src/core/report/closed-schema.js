@@ -488,14 +488,23 @@ function assertManualReview(entry) {
   for (const key of ['occurrenceId', 'itemId', 'ruleId', 'mode', 'status', 'question', 'reason']) requireOwn(entry, key);
 }
 
+function assertMarks(marks) {
+  assertExact(marks, set('areas suspects version'));
+  assertArray(marks.suspects);
+  assertArray(marks.areas);
+  for (const area of marks.areas) assertExact(area, set('height width x y'));
+}
+
 function assertDecision(decision) {
-  assertAllowedRecord(decision, set('answer auditId decidedAt decisionId evaluator itemId mode note occurrenceId revisions'));
+  assertAllowedRecord(decision, set('answer auditId decidedAt decisionId evaluator itemId marks mode note occurrenceId revisions'));
   for (const key of ['decisionId', 'auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode']) requireOwn(decision, key);
+  if (decision.marks !== undefined && decision.marks !== null) assertMarks(decision.marks);
   if (decision.revisions !== undefined) {
     assertArray(decision.revisions);
     for (const revision of decision.revisions) {
-      assertAllowedRecord(revision, set('answer decidedAt evaluator note'));
+      assertAllowedRecord(revision, set('answer decidedAt evaluator marks note'));
       for (const key of ['answer', 'evaluator', 'decidedAt']) requireOwn(revision, key);
+      if (revision.marks !== undefined && revision.marks !== null) assertMarks(revision.marks);
     }
   }
 }

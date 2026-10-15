@@ -555,7 +555,9 @@ test('guided review: "não se aplica", an explicit revise flag and the bounded p
 test('a guided review answer travels as one closed batch envelope', async () => {
   const { parseReviewBatchEntries } = await import('../../src/background/worker-protocol.js');
   const entry = (occurrenceId, extra = {}) => ({
-    itemId: '5.2.1', occurrenceId, answer: 'não conforme', mode: 'assisted', note: 'Imagem sem alternativa.', revise: false, ...extra,
+    itemId: '5.2.1', occurrenceId, answer: 'não conforme', mode: 'assisted', note: 'Imagem sem alternativa.',
+    // O apontamento do mapa do teclado vai sempre no envelope: `null` quando a pessoa não apontou nada.
+    marks: null, revise: false, ...extra,
   });
   const envelope = decisions => ({
     type: 'REPORT_COMMIT_REVIEW_BATCH', sessionCapabilityId: SESSION, auditId: 'audit-1',
@@ -564,10 +566,28 @@ test('a guided review answer travels as one closed batch envelope', async () => 
   const accepted = parseWorkerMessage(envelope([entry('occ-1'), entry('occ-2', { revise: true })]));
   assert.equal(accepted.ok, true);
   assert.deepEqual(parseReviewBatchEntries(accepted.value.decisions).map(value => value.occurrenceId), ['occ-1', 'occ-2']);
+  // O apontamento do mapa atravessa o envelope já canônico: números em ordem e áreas inteiras. Sem
+  // nada apontado o envelope leva `null`, nunca um objeto vazio.
+  const comMarcas = parseReviewBatchEntries(JSON.stringify([
+    entry('occ-1', { marks: { version: 1, suspects: [2, 1], areas: [{ x: 10, y: 20, width: 30, height: 40 }] } }),
+    entry('occ-2', { marks: { version: 1, suspects: [3], areas: [] } }),
+  ]));
+  assert.deepEqual(comMarcas[0].marks, { version: 1, suspects: [1, 2], areas: [{ x: 10, y: 20, width: 30, height: 40 }] });
+  assert.deepEqual(comMarcas[1].marks, { version: 1, suspects: [3], areas: [] });
+  assert.equal(Object.isFrozen(comMarcas[0].marks) && Object.isFrozen(comMarcas[0].marks.areas), true);
   for (const decisions of [
     [], [entry('occ-1'), entry('occ-1')], [{ ...entry('occ-1'), extra: true }], [entry('occ-1', { answer: 'talvez' })],
     [entry('occ-1', { note: ' com espaço ' })], [entry('occ-1', { revise: 'sim' })], [entry('occ-1', { mode: 'automated' })],
     Array.from({ length: 65 }, (_, index) => entry(`occ-${index}`)),
+    [entry('occ-1', { marks: { version: 2, suspects: [1], areas: [] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [0], areas: [] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [1], areas: [{ x: 0, y: 0, width: 0, height: 1 }] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [1], areas: [], extra: true } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [1] } })],
+    [entry('occ-1', { marks: { version: 1, suspects: [], areas: [] } })],
+    [entry('occ-1', { marks: [] })],
+    [entry('occ-1', { marks: 'nada' })],
+    [(() => { const value = entry('occ-1'); delete value.marks; return value; })()],
   ]) assert.equal(parseWorkerMessage(envelope(decisions)).ok, false, JSON.stringify(decisions).slice(0, 80));
   assert.equal(parseWorkerMessage({ ...envelope([entry('occ-1')]), decisions: '{"não":"lista"}' }).ok, false);
   assert.equal(parseWorkerMessage({ ...envelope([entry('occ-1')]), evaluator: '' }).ok, false);

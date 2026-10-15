@@ -1287,7 +1287,7 @@ export function createReportOperations({
     return commitReviewDecisions(entries.map(entry => ({
       input: {
         auditId, itemId: entry.itemId, occurrenceId: entry.occurrenceId, answer: entry.answer,
-        evaluator, decidedAt, mode: entry.mode, note: entry.note,
+        evaluator, decidedAt, mode: entry.mode, note: entry.note, marks: entry.marks ?? null,
       },
       revise: entry.revise === true,
     })));

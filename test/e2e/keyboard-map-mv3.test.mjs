@@ -10,6 +10,7 @@ import {
   CANONICAL_CHROME_PRODUCT,
   command,
   launchUnpackedExtension,
+  pressKey,
   resolveRealChromeTestBinary,
 } from './support/real-chrome.mjs';
 
@@ -142,6 +143,12 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.deepEqual(review.answers, ['Sim, falta caixa em algum item', 'Não, todos os itens que uso têm caixa', 'Não consegui verificar']);
   assert.deepEqual(review.genericAnswers, [], 'sem fileira genérica duplicando o caminho de "não conforme"');
 
+  // A gravação exige o nome da pessoa avaliadora; sem ele o cartão não é respondido.
+  await extension.evaluate(report, `(() => {
+    document.querySelector('#review-evaluator').value='Pessoa revisora';
+    return true;
+  })()`);
+
   const mandatory = await extension.evaluate(report, `(() => {
     const question=document.querySelector('[data-lay-question="5.1.13"]');
     const fail=[...question.querySelectorAll('.lay-keyboard-map-answers [data-lay-answer]')]
@@ -160,6 +167,148 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.match(mandatory.draft, /mapa do teclado/u, 'o rascunho já cita o mapa do teclado');
   assert.match(mandatory.label, /^Descreva qual item ficou sem caixa/u);
   await extension.captureJourney('review-keyboard-map-question', report, { captureBeyondViewport: false });
+
+  // Apontamento no mapa: a lista traz os itens laranja do próprio mapa e a pessoa marca o que ficou
+  // sem caixa azul. O bloco só existe depois de "Sim, falta caixa".
+  const apontamento = await extension.evaluate(report, `(() => {
+    const question=document.querySelector('[data-lay-question="5.1.13"]');
+    const block=question.querySelector('[data-lay-marks]');
+    if(!block) return null;
+    block.scrollIntoView({behavior:'instant',block:'center'});
+    const box=block.querySelector('[data-lay-marks-suspect]');
+    box.checked=true; box.dispatchEvent(new Event('change',{bubbles:true}));
+    return {
+      subtitle: block.querySelector('.lay-map-subtitle')?.textContent ?? '',
+      suspects: [...block.querySelectorAll('[data-lay-marks-suspect]')].map(caixa => ({
+        value: caixa.value, label: caixa.closest('label').textContent.trim(), checked: caixa.checked })),
+      status: block.querySelector('[data-lay-marks-status]')?.textContent ?? '',
+      areas: block.querySelectorAll('[data-lay-marks-area-list]').length,
+      surfaceLabel: block.querySelector('.lay-marks-surface')?.getAttribute('aria-label') ?? '',
+      hasAdd: Boolean(block.querySelector('.lay-marks-add')),
+      images: [...block.querySelectorAll('.lay-marks-image')].map(image => image.getAttribute('viewBox')),
+    };
+  })()`);
+  assert.ok(apontamento, 'o apontamento no mapa precisa aparecer depois de "Sim, falta caixa"');
+  assert.equal(apontamento.subtitle, 'Marque os itens que ficaram sem caixa azul (opcional).');
+  assert.ok(apontamento.suspects.length >= 1, 'a lista precisa trazer os itens sem caixa do mapa');
+  assert.match(apontamento.suspects[0].label, /^\S.* — \S/u, 'a lista repete o nome e o motivo vistos no mapa');
+  assert.equal(apontamento.suspects[0].checked, true);
+  assert.match(apontamento.status, /marcado como sem caixa azul/u);
+  assert.equal(apontamento.areas, 0, 'nenhuma área marcada antes de desenhar');
+  assert.match(apontamento.surfaceLabel, /setas para mover/u);
+  assert.equal(apontamento.hasAdd, true, 'a alternativa por teclado precisa existir');
+  assert.ok(apontamento.images.every(viewBox => /^0 0 \d+ \d+$/u.test(viewBox)));
+
+  // Caminho de teclado: "Adicionar área" cria a área na parte visível, as setas movem, Delete remove.
+  await extension.click(report, '[data-lay-question="5.1.13"] .lay-marks-add');
+  const primeiraArea = await extension.waitForValue(report, `(() => {
+    const block=document.querySelector('[data-lay-question="5.1.13"] [data-lay-marks]');
+    const item=block.querySelector('[data-lay-marks-area-list="1"]');
+    const rect=block.querySelector('rect[data-lay-marks-area="1"]');
+    return item ? {
+      describe: item.textContent.trim(), status: block.querySelector('[data-lay-marks-status]').textContent,
+      rect: rect ? { x: Number(rect.getAttribute('x')), y: Number(rect.getAttribute('y')),
+        width: Number(rect.getAttribute('width')), height: Number(rect.getAttribute('height')) } : null,
+      remove: [...block.querySelectorAll('.lay-marks-remove-button')].map(button => button.textContent),
+    } : null;
+  })()`, value => value !== null, { timeoutMs: 30_000, intervalMs: 50 });
+  assert.match(primeiraArea.describe, /^Área 1, (no alto|no meio|na parte de baixo) da página, (à esquerda|no centro|à direita)\./u,
+    'a área é descrita em palavras, sem coordenadas');
+  assert.match(primeiraArea.status, /Área marcada\. Use as setas/u);
+  assert.ok(primeiraArea.rect && primeiraArea.rect.width > 0 && primeiraArea.rect.height > 0);
+  assert.deepEqual(primeiraArea.remove, ['Remover área 1']);
+
+  const rectOf = `(() => {
+    const rect=document.querySelector('[data-lay-question="5.1.13"] rect[data-lay-marks-area="1"]');
+    return rect ? [Number(rect.getAttribute('x')), Number(rect.getAttribute('y'))] : null;
+  })()`;
+  await extension.evaluate(report, `(() => {
+    document.querySelector('[data-lay-question="5.1.13"] .lay-marks-surface').focus();
+    return true;
+  })()`);
+  await pressKey(report, { key: 'ArrowRight', code: 'ArrowRight', virtualKeyCode: 39 });
+  const movida = await extension.waitForValue(report, rectOf,
+    value => Array.isArray(value) && value[0] === primeiraArea.rect.x + 8, { timeoutMs: 10_000, intervalMs: 50 });
+  assert.deepEqual(movida[1], primeiraArea.rect.y, 'a seta move só no eixo pedido');
+  await pressKey(report, { key: 'Delete', code: 'Delete', virtualKeyCode: 46 });
+  await extension.waitForValue(report,
+    `document.querySelector('[data-lay-question="5.1.13"] [data-lay-marks-area-list="1"]') === null`,
+    Boolean, { timeoutMs: 10_000, intervalMs: 50 });
+  await extension.click(report, '[data-lay-question="5.1.13"] .lay-marks-add');
+  const areaFinal = await extension.waitForValue(report, `(() => {
+    const block=document.querySelector('[data-lay-question="5.1.13"] [data-lay-marks]');
+    return {
+      describe: block.querySelector('[data-lay-marks-area-list="1"]')?.textContent.trim() ?? '',
+      status: block.querySelector('[data-lay-marks-status]').textContent,
+    };
+  })()`, value => value.describe !== '', { timeoutMs: 30_000, intervalMs: 50 });
+  assert.match(areaFinal.status, /Área marcada\./u);
+  t.diagnostic(`apontamento: suspeitos=${apontamento.suspects.length}; área=${areaFinal.describe}`);
+  // Captura com a lista de itens, a área marcada na lista e o botão da alternativa por teclado à vista.
+  await extension.evaluate(report, `(() => {
+    const question=document.querySelector('[data-lay-question="5.1.13"]');
+    question.querySelector('.lay-marks-suspects')?.scrollIntoView({behavior:'instant',block:'start'});
+    return true;
+  })()`);
+  await extension.captureJourney('review-keyboard-map-marks', report, { captureBeyondViewport: false });
+  // Segunda captura, agora na lista de áreas: "Adicionar área", "Remover área 1", a descrição da área
+  // e o anúncio ficam na mesma faixa da página.
+  await extension.evaluate(report, `(() => {
+    const question=document.querySelector('[data-lay-question="5.1.13"]');
+    question.querySelector('.lay-marks-areas').scrollIntoView({behavior:'instant',block:'center'});
+    return true;
+  })()`);
+  await extension.captureJourney('review-keyboard-map-marks-area', report, { captureBeyondViewport: false });
+
+  // Só com a descrição obrigatória a resposta é registrada com o apontamento.
+  await extension.evaluate(report, `(() => {
+    const question=document.querySelector('[data-lay-question="5.1.13"]');
+    const textarea=question.querySelector('.lay-finding textarea');
+    textarea.value='Os cartões de serviço da seção Serviços abrem menus só com o mouse.';
+    return true;
+  })()`);
+  await extension.click(report, '[data-lay-question="5.1.13"] .lay-confirm-fail');
+  let salvo;
+  try {
+    salvo = await extension.waitForValue(report, `(() => ({
+      status: document.querySelector('#review-status')?.textContent ?? '',
+      marks: Boolean(document.querySelector('[data-review-marks]')),
+    }))()`, value => value.marks === true, { timeoutMs: 120_000, intervalMs: 100 });
+  } catch (error) {
+    t.diagnostic(`a resposta com apontamento não chegou ao relatório: ${await extension.evaluate(report,
+      `document.querySelector('#review-status')?.textContent ?? ''`)}`);
+    throw error;
+  }
+  assert.match(salvo.status, /Resposta salva/u);
+  const naTela = await extension.evaluate(report, `(() => {
+    const block=document.querySelector('[data-review-marks]');
+    return { text: block.closest('li').textContent,
+      crop: block.querySelector('svg[data-marks-crop="1"]')?.getAttribute('viewBox') ?? '',
+      outline: Boolean(block.querySelector('rect.marks-area-outline')),
+      outlineStyle: (() => {
+        const rect=block.querySelector('rect.marks-area-outline');
+        if(!rect) return null;
+        const style=getComputedStyle(rect);
+        return { fill: style.fill, stroke: style.stroke };
+      })(),
+      image: block.querySelector('svg[data-marks-crop="1"] image')?.getAttribute('href')?.slice(0, 22) ?? '' };
+  })()`);
+  assert.match(naTela.text, /Itens apontados: /u);
+  assert.match(naTela.text, /Áreas marcadas no mapa do teclado: 1\./u);
+  assert.equal(naTela.outline, true, 'a área marcada precisa vir com contorno no recorte');
+  // O retângulo do recorte é contorno vazio: sem `fill:none` ele viraria um retângulo preto por cima
+  // da imagem — foi o que a validação visual pegou antes de a regra chegar à tela do relatório.
+  assert.deepEqual(naTela.outlineStyle, { fill: 'none', stroke: 'rgb(176, 0, 32)' });
+  assert.equal(naTela.image, 'data:image/png;base64,', 'o recorte usa a imagem guardada, sem gerar pixel novo');
+  assert.match(naTela.crop, /^-?\d+ -?\d+ \d+ \d+$/u);
+  // A ficha do apontamento vive dentro do expansor das conclusões humanas: sem abri-lo, o recorte não
+  // ocupa espaço e a captura mostraria só o resumo.
+  await extension.evaluate(report, `(() => {
+    document.querySelector('[data-review-history]').open=true;
+    document.querySelector('[data-review-marks]').scrollIntoView({behavior:'instant',block:'center'});
+    return true;
+  })()`);
+  await extension.captureJourney('report-keyboard-map-marks', report, { captureBeyondViewport: false });
 
   // Exportação: o artefato do mapa chega ao JSON e o texto entregue mantém legenda, listas e hash.
   await extension.click(report, 'button[data-report-export]');
@@ -202,6 +351,34 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.equal(JSON.stringify(map).includes('Link em bloco escondido'), false);
   assert.equal(JSON.stringify(map).includes('Link decorativo'), false);
   t.diagnostic(`keyboard-map artifact: stops=${map.stops.length}; suspects=${map.suspects.length}; limitations=${map.limitations.join(',')}`);
+
+  // O apontamento da revisão guiada vai para o JSON e para o HTML entregue, com recorte da área.
+  const apontada = audit.reviewDecisions.find(decision => decision.marks);
+  assert.ok(apontada, 'a decisão apontada no mapa precisa chegar ao relatório técnico');
+  assert.equal(apontada.itemId, '5.1.13');
+  assert.equal(apontada.marks.version, 1);
+  assert.equal(apontada.marks.areas.length, 1);
+  assert.equal(apontada.marks.suspects.length, 1);
+  assert.ok(map.suspects.some(suspect => suspect.number === apontada.marks.suspects[0]),
+    'o número apontado precisa existir entre os itens sem caixa do mapa');
+  const markedArea = apontada.marks.areas[0];
+  assert.ok(markedArea.x + markedArea.width <= map.derivation.geometry.sourceCssSize.width + 1e-9);
+  assert.ok(markedArea.y + markedArea.height <= map.derivation.geometry.sourceCssSize.height + 1e-9);
+  const suposto = map.suspects.find(suspect => suspect.number === apontada.marks.suspects[0]);
+  if (suposto.name) assert.ok(html.includes(`Itens apontados: ${suposto.name}`), 'o apontamento cita o nome visto na lista');
+
+  assert.ok(html.includes('Áreas marcadas no mapa do teclado: 1.'));
+  const crops = html.match(/<svg class="marks-crop"[^>]*>.*?<\/svg>/gsu) ?? [];
+  assert.equal(crops.length, 1, 'o relatório entregue precisa mostrar o recorte da área marcada');
+  assert.match(crops[0], /data-marks-crop="1"/u);
+  assert.match(crops[0], /<rect class="marks-area-outline"/u);
+  assert.equal(crops[0].includes(' style='), false, 'o recorte não usa estilo embutido (CSP do relatório)');
+  assert.match(html, /\.marks-area-outline\{fill:none;stroke:#b00020/u, 'o HTML entregue precisa do contorno vazio');
+  assert.match(html, /\.marks-area-outline\{stroke:#b00020;print-color-adjust:exact\}/u,
+    'a impressão/PDF mantém o contorno da área marcada');
+  const cropHref = crops[0].match(/href="([^"]+)"/u)?.[1];
+  assert.ok(map.segments.some(segment => segment.dataUrl === cropHref),
+    'o recorte reaproveita a imagem já guardada, sem gerar pixels novos');
 
   assert.ok(html.includes('data-keyboard-map-page="page-1"'));
   assert.ok(html.includes('data-keyboard-map-stop="1"'));

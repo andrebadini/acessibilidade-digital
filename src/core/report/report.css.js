@@ -86,6 +86,8 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .evidence-halo{stroke:#fff;stroke-width:5}
 .evidence-highlight{stroke-width:2.5}
 .evidence-highlight--failed{stroke:#8b1e1e}.evidence-highlight--advisory{stroke:#986000}.evidence-highlight--review{stroke:#6b4e00;stroke-dasharray:14 9}.evidence-highlight--passed{stroke:#003b71}
+.marks-crop{display:block;max-width:100%;height:auto;border:1px solid #738596;border-radius:.3rem;background:#eef4f8}
+.marks-area-outline{fill:none;stroke:#b00020;stroke-width:3;vector-effect:non-scaling-stroke}
 .occurrence-evidence{margin:1rem 0 0}
 .page-level-evidence{border:4px double #738596;border-radius:.3rem;padding:.5rem;background:#eef4f8}
 .page-level-evidence--failed{border-color:#8b1e1e}.page-level-evidence--review{border-style:dashed;border-color:#6b4e00}.page-level-evidence--passed{border-color:#003b71}
@@ -221,11 +223,15 @@ th{background:#eef4f8;color:#14212b}
   .report-view-document summary{min-height:0;padding:.3rem .1rem}
   .report-view-document h2{margin:1rem 0 .5rem}
   .report-view-document [data-report-issue-heading] p,.report-view-document figcaption{font-size:10pt}
+  /* O recorte da área marcada sai inteiro no papel e o contorno vermelho mantém a cor — o arquivo já
+     usa print-color-adjust: exact nas métricas; sem isso a marca sumiria na impressão. */
+  .marks-crop{break-inside:avoid;print-color-adjust:exact}
+  .marks-area-outline{stroke:#b00020;print-color-adjust:exact}
 }
 @media (max-width:42rem){main{padding:1rem}.meta{grid-template-columns:1fr}.meta dd{margin-bottom:.5rem}.report-header__inner{align-items:flex-start;flex-direction:column}.filter-actions{display:grid}.filter-actions button{width:100%}.occurrence-heading{display:block}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-@media (forced-colors:active){*{forced-color-adjust:auto}.status,.chip,.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.map-card,.method-card,.filters-shell,.legal-analysis,.page-level-evidence,[data-report-issue],[data-report-evidence-preview] figure,[data-report-technical] section{border-color:CanvasText}.occurrence-card[data-display-outcome="failed"]{border-left-style:double}.occurrence-card[data-display-outcome="cantTell"],[data-report-issue][data-result="humanReview"]{border-left-style:dashed}.evidence-spotlight{fill:none}.evidence-highlight,.evidence-halo{stroke:CanvasText}a:focus-visible,button:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline-color:Highlight;box-shadow:none}}
+@media (forced-colors:active){*{forced-color-adjust:auto}.status,.chip,.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.map-card,.method-card,.filters-shell,.legal-analysis,.page-level-evidence,[data-report-issue],[data-report-evidence-preview] figure,[data-report-technical] section,.marks-crop{border-color:CanvasText}.occurrence-card[data-display-outcome="failed"]{border-left-style:double}.occurrence-card[data-display-outcome="cantTell"],[data-report-issue][data-result="humanReview"]{border-left-style:dashed}.evidence-spotlight{fill:none}.evidence-highlight,.evidence-halo,.marks-area-outline{stroke:CanvasText}a:focus-visible,button:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline-color:Highlight;box-shadow:none}}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-Zw7dTrwLMCm60kXTnuJLpqOpp0v06ay34V/J8lqWcno=';
+export const REPORT_CSS_CSP_HASH = 'sha256-bElpQaqQfD5PE6LZPU7jngCmve4hXp4PvqfipJakcOs=';

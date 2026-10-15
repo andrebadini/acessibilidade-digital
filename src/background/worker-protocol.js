@@ -1,3 +1,5 @@
+import { canonicalReviewMarks } from '../core/review/review-marks.js';
+
 const MAX_ENVELOPE_BYTES = 4096;
 const MAX_REVIEW_DECISION_ENVELOPE_BYTES = 24 * 1024;
 const MAX_BATCH_ENVELOPE_BYTES = 164 * 1024;
@@ -5,7 +7,9 @@ const MAX_BATCH_ENVELOPE_BYTES = 164 * 1024;
 // perguntas de uma imagem). Elas vão num só envelope, com a mesma nota repetida no máximo 64 vezes.
 const MAX_REVIEW_BATCH_ENTRIES = 64;
 const MAX_REVIEW_BATCH_ENVELOPE_BYTES = 640 * 1024;
-const REVIEW_BATCH_ENTRY_KEYS = Object.freeze(['itemId', 'occurrenceId', 'answer', 'mode', 'note', 'revise']);
+// `marks` vai sempre no envelope — `null` quando a pessoa não apontou nada —, para que o conjunto de
+// chaves continue fechado e uma resposta sem marcas não dependa de omissão de campo.
+const REVIEW_BATCH_ENTRY_KEYS = Object.freeze(['itemId', 'occurrenceId', 'answer', 'mode', 'note', 'marks', 'revise']);
 const OPAQUE_ID = /^[A-Za-z0-9_-]{20,240}$/u;
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
 const REVIEW_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
@@ -340,11 +344,16 @@ export function parseReviewBatchEntries(text) {
     if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
     const keys = Object.keys(value);
     if (keys.length !== REVIEW_BATCH_ENTRY_KEYS.length || REVIEW_BATCH_ENTRY_KEYS.some(key => !Object.hasOwn(value, key))) return null;
-    const { itemId, occurrenceId, answer, mode, note, revise } = value;
+    const { itemId, occurrenceId, answer, mode, note, marks, revise } = value;
     if (!validReviewId(itemId) || !validReviewId(occurrenceId) || seen.has(occurrenceId) || !REVIEW_ANSWERS.has(answer) ||
       !REVIEW_MODES.has(mode) || !boundedCanonicalText(note, 4_000, true) || typeof revise !== 'boolean') return null;
+    let canonicalMarks;
+    try {
+      canonicalMarks = canonicalReviewMarks(marks);
+    } catch { return null; }
+    if (marks !== null && canonicalMarks === null) return null;
     seen.add(occurrenceId);
-    entries.push(Object.freeze({ itemId, occurrenceId, answer, mode, note, revise }));
+    entries.push(Object.freeze({ itemId, occurrenceId, answer, mode, note, marks: canonicalMarks, revise }));
   }
   return Object.freeze(entries);
 }

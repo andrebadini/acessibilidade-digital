@@ -29,6 +29,7 @@ import {
 import { projectEvidenceProvenance, evidenceProvenanceRows } from './evidence-provenance.js';
 import { humanReviewHeading, humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from './human-review-presentation.js';
 import { FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence } from './findings-board.js';
+import { marksCropSvg, reviewMarksRecords } from './review-marks-presentation.js';
 
 const OUTCOME = Object.freeze({
   passed: { label: 'Atendido no escopo observado', icon: '✓' },
@@ -386,8 +387,15 @@ function reportHumanHistory(entries, evidenceAnchorById) {
   if (!entries.length) return `<p data-review-history-empty>${HUMAN_REVIEW_EMPTY}</p>`;
   return `<details data-review-history><summary>Conclusões humanas registradas (${entries.length})</summary><p>${HUMAN_REVIEW_DESCRIPTION}</p><ol>${entries.map(entry => {
     const links = entry.evidenceRefs.map(id => evidenceAnchorById.get(id)).filter(Boolean);
-    return `<li data-review-record="${escapeHtml(entry.occurrenceId)}" data-review-answer="${escapeHtml(entry.answer)}"><h3>${escapeHtml(humanReviewHeading(entry))}</h3><dl>${humanReviewMetadata(entry).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>${links.length ? links.map((anchor, index) => `<a data-report-consult-evidence href="#${anchor}">Consultar evidência ${index + 1}</a>`).join(' ') : '<p>Nenhuma evidência correlata foi registrada para esta ocorrência.</p>'}</li>`;
+    return `<li data-review-record="${escapeHtml(entry.occurrenceId)}" data-review-answer="${escapeHtml(entry.answer)}"><h3>${escapeHtml(humanReviewHeading(entry))}</h3><dl>${humanReviewMetadata(entry).map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>${marksCropsHtml(entry.marksRecord)}${links.length ? links.map((anchor, index) => `<a data-report-consult-evidence href="#${anchor}">Consultar evidência ${index + 1}</a>`).join(' ') : '<p>Nenhuma evidência correlata foi registrada para esta ocorrência.</p>'}</li>`;
   }).join('')}</ol></details>`;
+}
+
+/** Recortes das áreas marcadas na revisão: a imagem guardada recortada por `viewBox`, sem pixel novo. */
+function marksCropsHtml(record) {
+  if (!record?.crops?.length) return '';
+  return `<div class="marks-crops" data-review-marks>${record.crops.map(crop =>
+    `<figure>${marksCropSvg(crop, escapeHtml)}<figcaption>${escapeHtml(crop.caption)}</figcaption></figure>`).join('')}</div>`;
 }
 
 function reportViewReaderMaps(view) {
@@ -703,11 +711,12 @@ function humanReviewSection(model, itemById, decisionByOccurrence, orderedOccurr
   const anchorByOccurrence = new Map(orderedOccurrences.map((value, index) => [value.occurrenceId, `ocorrencia-${index + 1}`]));
   const reviewEntries = model.manualReview.slice(0, REPORT_REVIEW_DETAIL_LIMIT);
   const omittedReviews = model.manualReview.length - reviewEntries.length;
+  const marksByDecision = new Map(reviewMarksRecords(model).map(record => [record.decisionId, record]));
   const cards = reviewEntries.map((entry, index) => {
     const item = itemById.get(entry.itemId);
     const occurrence = occurrenceById.get(entry.occurrenceId);
     const decision = decisionByOccurrence.get(entry.occurrenceId);
-    return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p>${decision.revisions?.length ? `<p><strong>Respostas anteriores substituídas:</strong> ${escapeHtml(decision.revisions.map(revision => `${reviewAnswerLabel(revision.answer)} (${revision.evaluator}, ${revision.decidedAt})`).join('; '))}.</p>` : ''}<p class="human-review-note"><strong>Nota registrada:</strong> ${escapeHtml(decision.note || 'Nenhuma nota registrada.')}</p>` : ''}<p><a href="#${escapeHtml(anchorByOccurrence.get(entry.occurrenceId) ?? 'ocorrencias')}">Ir para a ocorrência relacionada</a></p></article>`;
+    return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p>${decision.revisions?.length ? `<p><strong>Respostas anteriores substituídas:</strong> ${escapeHtml(decision.revisions.map(revision => `${reviewAnswerLabel(revision.answer)} (${revision.evaluator}, ${revision.decidedAt})`).join('; '))}.</p>` : ''}<p class="human-review-note"><strong>Nota registrada:</strong> ${escapeHtml(decision.note || 'Nenhuma nota registrada.')}</p>${marksByDecision.get(decision.decisionId)?.text ? `<p><strong>Apontamento no mapa do teclado:</strong> ${escapeHtml(marksByDecision.get(decision.decisionId).text)}</p>${marksCropsHtml(marksByDecision.get(decision.decisionId))}` : ''}` : ''}<p><a href="#${escapeHtml(anchorByOccurrence.get(entry.occurrenceId) ?? 'ocorrencias')}">Ir para a ocorrência relacionada</a></p></article>`;
   }).join('');
   return `<section id="revisao" class="major-section" aria-labelledby="revisao-titulo"><h2 id="revisao-titulo">Revisão humana</h2><p>${escapeHtml(reviewSummary)} Respostas pendentes nunca são tratadas como conformidade. Resultado do motor e decisão humana permanecem separados.</p>${omittedReviews > 0 ? omittedNote(omittedReviews, 'revisão humana', 'revisões humanas') : ''}<div class="review-list">${cards || '<p>Nenhuma revisão humana foi registrada para este escopo.</p>'}</div></section>`;
 }

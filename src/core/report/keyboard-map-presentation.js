@@ -66,6 +66,15 @@ function entryName(entry) {
   return entry.nameStatus === 'omitted-privacy' ? 'Nome omitido por privacidade' : 'Sem nome visível';
 }
 
+/**
+ * Nome de uma parada ou de um item suspeito, com o mesmo tratamento da lista do mapa (caracteres de
+ * controle viram marcador visível, nome vazio ganha rótulo). Exportado para que o apontamento da
+ * revisão guiada cite exatamente o nome que a pessoa viu na lista.
+ */
+export function keyboardMapEntryName(entry) {
+  return entryName(entry ?? {});
+}
+
 function entryLocation(entry) {
   return entry.segmentIndex > 0
     ? `Trecho ${entry.segmentIndex} da imagem.`

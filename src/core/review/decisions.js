@@ -1,6 +1,7 @@
 import { captureAuditInput } from '../report/audit-input.js';
 import { canonicalStringify } from '../report/canonical-json.js';
 import { canonicalEvaluatorSummary } from '../report/text-policy.js';
+import { canonicalReviewMarks } from './review-marks.js';
 
 // "não se aplica" (revisão leiga): a situação do item não existe na página observada.
 const ANSWERS = Object.freeze(['conforme', 'não conforme', 'não foi possível determinar', 'não se aplica']);
@@ -11,9 +12,23 @@ const MAX_NOTE_CODEPOINTS = 4_000;
 // Uma decisão revista guarda, em ordem, as respostas que substituiu. A trilha nunca é apagada.
 const MAX_REVISIONS = 20;
 const DECISION_FIELDS = new Set([
-  'decisionId', 'auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode', 'note', 'revisions',
+  'decisionId', 'auditId', 'itemId', 'occurrenceId', 'answer', 'evaluator', 'decidedAt', 'mode', 'note', 'marks', 'revisions',
 ]);
-const REVISION_FIELDS = new Set(['answer', 'evaluator', 'decidedAt', 'note']);
+const REVISION_FIELDS = new Set(['answer', 'evaluator', 'decidedAt', 'note', 'marks']);
+
+/**
+ * Marcas de revisão (`marks`) num campo opcional: decisões gravadas antes do apontamento no mapa do
+ * teclado não têm o campo e continuam válidas. `undefined` (ausente) e `null` (nada apontado) viram a
+ * mesma coisa: campo ausente.
+ */
+function marksField(value, label) {
+  if (value === undefined) return null;
+  try {
+    return canonicalReviewMarks(value);
+  } catch (error) {
+    throw new TypeError(`${label} inválidas: ${error.message}`);
+  }
+}
 
 function decisionBoundaryError(message = 'Decisão de revisão inválida.') {
   return new TypeError(message);
@@ -103,7 +118,8 @@ function canonicalRevisions(value, decidedAt) {
     const noteValue = Object.hasOwn(entry, 'note') ? ownValue(entry, 'note', 'A nota revista') : undefined;
     const note = noteValue === undefined ? ''
       : boundedHumanText(noteValue, MAX_NOTE_CODEPOINTS, 'Nota da revisão inválida.', { optional: true });
-    return { answer, evaluator, decidedAt: at, ...(note ? { note } : {}) };
+    const marks = Object.hasOwn(entry, 'marks') ? marksField(ownValue(entry, 'marks', 'As marcas revistas'), 'Marcas da revisão') : null;
+    return { answer, evaluator, decidedAt: at, ...(note ? { note } : {}), ...(marks ? { marks } : {}) };
   });
 }
 
@@ -115,7 +131,8 @@ export function reviseReviewDecision(existing, input) {
   const prior = createReviewDecision(existing);
   const { revisions: _ignored, ...rest } = captureAuditInput(input);
   const trail = [...(prior.revisions ?? []), {
-    answer: prior.answer, evaluator: prior.evaluator, decidedAt: prior.decidedAt, ...(prior.note ? { note: prior.note } : {}),
+    answer: prior.answer, evaluator: prior.evaluator, decidedAt: prior.decidedAt,
+    ...(prior.note ? { note: prior.note } : {}), ...(prior.marks ? { marks: prior.marks } : {}),
   }];
   const next = createReviewDecision({ ...rest, revisions: trail });
   if (next.occurrenceId !== prior.occurrenceId || next.itemId !== prior.itemId || next.auditId !== prior.auditId ||
@@ -133,7 +150,7 @@ function isRevisionOf(existing, candidate) {
   const last = trail.at(-1);
   return canonicalStringify(last) === canonicalStringify({
     answer: existing.answer, evaluator: existing.evaluator, decidedAt: existing.decidedAt,
-    ...(existing.note ? { note: existing.note } : {}),
+    ...(existing.note ? { note: existing.note } : {}), ...(existing.marks ? { marks: existing.marks } : {}),
   }) && candidate.itemId === existing.itemId && candidate.mode === existing.mode;
 }
 
@@ -185,9 +202,12 @@ export function createReviewDecision(input) {
   const revisions = Object.hasOwn(captured, 'revisions')
     ? canonicalRevisions(ownValue(captured, 'revisions', 'As revisões da decisão'), decidedAt)
     : [];
+  const marks = Object.hasOwn(captured, 'marks')
+    ? marksField(ownValue(captured, 'marks', 'As marcas da decisão'), 'Marcas da decisão')
+    : null;
   const canonical = {
     auditId, itemId, occurrenceId, answer, evaluator, decidedAt, mode, ...(note ? { note } : {}),
-    ...(revisions.length ? { revisions } : {}),
+    ...(marks ? { marks } : {}), ...(revisions.length ? { revisions } : {}),
   };
   assertJsonData(canonical, 'Decisão de revisão');
   const decisionId = occurrenceId;
