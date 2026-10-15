@@ -79,6 +79,16 @@ export async function resolveUnpackedExtensionPath(value) {
   return value;
 }
 
+// Só para o roteiro das capturas da loja (store-assets/render-screenshots.mjs): mapeia um domínio
+// reservado `.example` para o servidor local, para que a página fictícia apareça com endereço legível.
+// Fechado em forma: um único MAP de host `.example` para 127.0.0.1 com porta; qualquer outra coisa é ignorada.
+function hostResolverArgs() {
+  const rule = process.env.AUDITA_E2E_HOST_RULE ?? '';
+  return /^MAP [a-z0-9-]+(?:\.[a-z0-9-]+)*\.example 127\.0\.0\.1:[0-9]{2,5}$/u.test(rule)
+    ? [`--host-resolver-rules=${rule}`]
+    : [];
+}
+
 export function buildChromeLaunchArgv(raw = {}) {
   const keys = ['chromeBinary', 'extensionPath', 'platform', 'startUrl', 'userDataDir', 'viewport'];
   if (!plain(raw) || Reflect.ownKeys(raw).length !== keys.length ||
@@ -100,6 +110,7 @@ export function buildChromeLaunchArgv(raw = {}) {
     `--user-data-dir=${raw.userDataDir}`,
     `--disable-extensions-except=${raw.extensionPath}`,
     `--load-extension=${raw.extensionPath}`,
+    ...hostResolverArgs(),
     raw.startUrl,
   ];
   return Object.freeze({

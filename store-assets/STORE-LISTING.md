@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.58
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.59
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
@@ -130,8 +130,10 @@ Endereço público (GitHub Pages): **https://andrebadini.github.io/audita-acessi
 
 As três capturas atuais são PNG RGB sem alfa, de 1280×800 pixels. Elas mostram uma execução real sobre uma página demonstrativa local com dados fictícios:
 
-1. `screenshot-tab-report.png` — visão geral da conferência de leitura por Tab e totais por categoria.
-2. `screenshot-tab-elements.png` — sequência estimada, nome acessível, função, prévia e ação de destaque.
-3. `screenshot-tab-highlight.png` — elemento em foco na página, com moldura e legenda textual sem áudio.
+1. `screenshot-1-sinais.png` — página auditada com os sinais numerados e o resumo da avaliação no painel lateral.
+2. `screenshot-2-explicacao.png` — achado selecionado: o elemento destacado na página e a explicação em linguagem simples.
+3. `screenshot-3-mapa-teclado.png` — mapa do teclado na revisão guiada: caixas azuis onde o Tab para e laranja onde não chega.
+4. `screenshot-4-constatacoes.png` — quadro de constatações com o texto pronto para citação.
+5. `screenshot-5-relatorio.png` — sumário executivo do relatório completo.
 
-Use também `promo-small.png`, a imagem promocional de 440×280. As capturas antigas `screenshot-panel.png`, `screenshot-evidence-failed.png` e `screenshot-evidence-review.png` são históricas e não compõem o envio de 1.1.50.
+Use também `promo-small.png`, a imagem promocional de 440×280. As capturas foram geradas pela extensão real sobre o portal fictício `store-assets/demo/vila-aurora.html` (domínio reservado `vila-aurora.example`), com `node store-assets/render-screenshots.mjs`.

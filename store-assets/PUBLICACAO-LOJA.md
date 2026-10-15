@@ -1,4 +1,4 @@
-# Publicação na Chrome Web Store — 1.1.58
+# Publicação na Chrome Web Store — 1.1.59
 
 Roteiro de preparação e envio da Audita Acessibilidade. A publicação exige uma conta de desenvolvedor
 autenticada; o estado do console é a fonte para saber se o item está em rascunho, em revisão ou publicado.
@@ -15,13 +15,13 @@ Este documento não comprova um envio.
 3. Ícone de 128×128 no pacote (`assets/icons/icon-128.png`) e imagem promocional pequena
    `store-assets/promo-small.png`, de 440×280, RGB sem alfa. A fonte vetorial está em `promo-small.svg`;
    no macOS, `sh store-assets/render-promo.sh` regenera o PNG sem iniciar Chrome.
-4. Use as três capturas reais do percurso de Tab, todas em **1280×800**, PNG RGB sem alfa, nesta ordem:
-   `screenshot-tab-report.png` (visão geral e totais), `screenshot-tab-elements.png` (sequência estimada,
-   nomes e funções) e `screenshot-tab-highlight.png` (foco real com legenda na página).
-   Elas mostram a interface atual sobre a página demonstrativa local `fixtures/pages/tab-reading.html`, com
-   dados fictícios. As capturas foram inspecionadas visualmente; as dimensões e o formato são verificados pelo
-   teste de assets. Os arquivos `screenshot-panel.png`, `screenshot-evidence-failed.png` e
-   `screenshot-evidence-review.png` ficam como histórico e **não devem ser enviados nesta versão**.
+4. Use as cinco capturas, todas em **1280×800**, PNG RGB sem alfa, nesta ordem:
+   `screenshot-1-sinais.png`, `screenshot-2-explicacao.png`, `screenshot-3-mapa-teclado.png`,
+   `screenshot-4-constatacoes.png` e `screenshot-5-relatorio.png`. São capturas da extensão real sobre o portal
+   fictício `store-assets/demo/vila-aurora.html` (domínio reservado `vila-aurora.example`), refeitas com
+   `AUDITA_E2E_CHROME=<Chrome for Testing> node store-assets/render-screenshots.mjs`; cada uma tem uma faixa de
+   título e a interface em escala 1:1, sem redimensionar. As capturas antigas (conferência de Tab e painel) foram
+   retiradas e não devem ser reenviadas.
 
 Os requisitos oficiais de imagem estão em
 [Fornecer imagens](https://developer.chrome.com/docs/webstore/images). A imagem promocional é uma peça de marca,
@@ -29,17 +29,17 @@ não uma captura de tela nem evidência de execução do produto.
 
 ## Pacote e verificação
 
-O arquivo de envio é `release/audita-acessibilidade-1.1.58.zip`, com `manifest.json` na raiz e versão `1.1.58`.
+O arquivo de envio é `release/audita-acessibilidade-1.1.59.zip`, com `manifest.json` na raiz e versão `1.1.59`.
 O ZIP deve ser gerado somente depois da validação da implementação final. Confira o digest contra a nota
-`docs/releases/1.1.58.md`; não reutilize o digest de 1.1.57.
+`docs/releases/1.1.59.md`; não reutilize o digest de 1.1.58.
 
 Comandos de conferência local:
 
 ```sh
 AUDITA_VERIFY_SKIP_TESTS=1 npm run verify
 node --test test/release-assets.test.js test/release-package.test.js
-shasum -a 256 release/audita-acessibilidade-1.1.58.zip
-unzip -p release/audita-acessibilidade-1.1.58.zip manifest.json
+shasum -a 256 release/audita-acessibilidade-1.1.59.zip
+unzip -p release/audita-acessibilidade-1.1.59.zip manifest.json
 ```
 
 Os dois primeiros comandos verificam estrutura, política, assets e correspondência de bytes. Eles não
@@ -63,7 +63,7 @@ Copie os textos de `store-assets/STORE-LISTING.md` e confirme cada campo no cons
 | Política de privacidade | URL HTTPS acima, com versão e conteúdo vigentes |
 | Suporte | `https://github.com/andrebadini/audita-acessibilidade-privacidade/issues` |
 | Instruções para o revisor | `store-assets/TEST-INSTRUCTIONS.md`, incluindo a revisão guiada, o quadro de constatações, o percurso de Tab com e sem áudio (voz local opcional) e exportações complementares |
-| Imagens | Ícone, `promo-small.png`, `screenshot-tab-report.png`, `screenshot-tab-elements.png` e `screenshot-tab-highlight.png` |
+| Imagens | Ícone, `promo-small.png` e as cinco capturas `screenshot-1` a `screenshot-5` |
 
 A finalidade única inclui o relatório complementar de Tab: uma inspeção de acessibilidade independente, sem
 imagens, com sequência estimada e acompanhamento de foco real. A prévia textual não deve ser anunciada como

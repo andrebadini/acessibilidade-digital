@@ -449,8 +449,14 @@ export function selectKeyboardMapStops(snapshot, options = {}) {
   });
 
   const suspects = [];
+  const suspectIds = new Set();
+  const parentOf = node => node?.parentId === null || node?.parentId === undefined
+    ? null : indexes.byNodeId.get(String(node.parentId));
   for (const candidate of suspectCandidates) {
     if (stopIds.has(String(candidate.node.nodeId))) continue;
+    // Um texto dentro de um item já apontado (o título do cartão que só abre com o mouse) não é outro
+    // item: listar os dois repetia o mesmo cartão três vezes e escondia o achado no meio do ruído.
+    if (ancestorState(parentOf(candidate.node), indexes, current => suspectIds.has(String(current.nodeId)))) continue;
     // Controle desabilitado não é parada de Tab por decisão do autor: acusar aqui seria apontar como
     // falha o comportamento correto.
     if (isDisabledControl(candidate.node, indexes)) continue;
@@ -464,7 +470,9 @@ export function selectKeyboardMapStops(snapshot, options = {}) {
     if (declared !== null && declared < 0 && ruleId === null) continue;
     const role = observedRole(candidate.node);
     const tag = tagOf(candidate.node);
-    const cursor = cursorStyleCollected && styleValue(candidate.node, 'cursor') === 'pointer';
+    // `cursor` é herdado: só conta quando o próprio elemento o declara de forma diferente do pai.
+    const cursor = cursorStyleCollected && styleValue(candidate.node, 'cursor') === 'pointer' &&
+      styleValue(parentOf(candidate.node), 'cursor') !== 'pointer';
     const projection = ruleId === null && !INTERACTIVE_ROLES.has(role) && !(cursor && !NATIVE_INTERACTIVE_TAGS.has(tag))
       ? null
       : projectEntry(candidate.node, indexes, tainted, 'name', privateLabels);
@@ -482,6 +490,7 @@ export function selectKeyboardMapStops(snapshot, options = {}) {
       !belongsToStop.has(String(candidate.node.nodeId)) && hasLabel) reason = 'cursor-pointer';
     if (reason === null) continue;
     if (projection?.nameStatus === 'omitted-privacy') privacyOmitted = true;
+    suspectIds.add(String(candidate.node.nodeId));
     suspects.push({
       nodeId: String(candidate.node.nodeId),
       tag,

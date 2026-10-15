@@ -274,3 +274,14 @@ test('sem ocorrências não quebra e a lista segue estável entre execuções', 
   const second = selectKeyboardMapStops(input, {});
   assert.deepEqual(first, second);
 });
+
+test('o texto de dentro de um cartão apontado não vira outro item (cursor herdado)', () => {
+  // Medido nas capturas da loja: com `cursor: pointer` no cartão, o título e o subtítulo herdavam o
+  // cursor e cada cartão aparecia três vezes na lista do que o Tab não alcança.
+  const result = selectKeyboardMapStops(snapshot([
+    { nodeId: 'card', tagName: 'div', styles: { cursor: 'pointer' }, visibleText: 'Saúde Consultas e vacinas', axRole: 'generic', rect: rect(10, 120) },
+    { nodeId: 'title', parentId: 'card', tagName: 'span', styles: { cursor: 'pointer' }, visibleText: 'Saúde', axRole: 'generic', rect: rect(60, 20) },
+    { nodeId: 'subtitle', parentId: 'card', tagName: 'span', styles: { cursor: 'pointer' }, visibleText: 'Consultas e vacinas', axRole: 'generic', rect: rect(85, 20) },
+  ]), { occurrences: [] });
+  assert.deepEqual(result.suspects.map(entry => entry.nodeId), ['card']);
+});

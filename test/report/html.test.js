@@ -416,7 +416,7 @@ test('keeps occurrence evidence amber after an inconclusive review decision', ()
 
 test('embeds a shared large PNG once when fifty occurrences reuse it', () => {
   const input = structuredClone(SAMPLE_AUDIT);
-  const dataUrl = `data:image/png;base64,${readFileSync(new URL('../../store-assets/screenshot-panel.png', import.meta.url)).toString('base64')}`;
+  const dataUrl = `data:image/png;base64,${readFileSync(new URL('../../store-assets/screenshot-1-sinais.png', import.meta.url)).toString('base64')}`;
   input.evidence = [{
     ...input.evidence[0],
     dataUrl,

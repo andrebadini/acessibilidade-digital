@@ -4,6 +4,10 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.59 — ajustes vistos nas novas capturas da loja.** O conteúdo que só aparece com o mouse passa a ter
+impacto alto, o mapa do teclado aparece no tamanho real na revisão guiada, as listas do mapa deixam de repetir números
+e itens, e a loja ganha cinco capturas novas sobre um portal fictício. Veja as [notas da 1.1.59](docs/releases/1.1.59.md).
+
 **Versão 1.1.58 — teclado para leigos, páginas que recarregam e destaque em sites reais.** A extensão passa a
 apontar blocos cujos links só aparecem com o mouse (o Tab não chega até eles; ABNT 5.1.13). O relatório e a revisão
 guiada ganham o **mapa do teclado**: a página inteira com uma caixa azul numerada em cada parada do Tab e caixas
