@@ -26,7 +26,7 @@ import { accessibilityGuidance, recordedLabelComparisons } from '../core/report/
 import { projectReviewHistory, humanReviewMetadata, humanReviewHeading, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from '../core/report/human-review-presentation.js';
 import { marksCropParts } from '../core/report/review-marks-presentation.js';
 import {
-  buildFindingsBoard, FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence,
+  buildFindingsBoard, consolidatedCitationParagraph, FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence,
 } from '../core/report/findings-board.js';
 import { compareItemIds } from '../core/report/lay-review.js';
 
@@ -1119,6 +1119,12 @@ function appendFindingsBoard(document, parent, board) {
     article.append(element(document, 'h4', `Item ${entry.itemId} — ${entry.title} (requisito)`));
     article.append(element(document, 'p', `Como foi concluído: ${entry.method}.`, 'findings-method'));
     const list = document.createElement('ol');
+    // Um item com mais de uma constatação ganha UM texto para citação, que nomeia todos os elementos
+    // da lista acima. Assim quem contesta não repete o mesmo item da norma em cada elemento. A lista
+    // continua mostrando cada elemento com a sua própria constatação.
+    const consolidated = entry.findings.length > 1
+      ? consolidatedCitationParagraph({ item: { id: entry.itemId, title: entry.title }, findings: entry.findings })
+      : null;
     for (const finding of entry.findings) {
       const row = document.createElement('li');
       row.setAttribute('data-findings-occurrence', finding.occurrenceId);
@@ -1126,17 +1132,34 @@ function appendFindingsBoard(document, parent, board) {
       row.append(element(document, 'p', finding.source === 'human'
         ? `Constatação (revisão humana de ${finding.evaluator}, ${finding.decidedAtLabel}): ${finding.text}`
         : `Constatação (verificação automática): ${finding.text}`));
-      const citation = element(document, 'p', finding.citation, 'findings-citation');
-      citation.setAttribute('data-findings-citation', '');
-      row.append(citation);
-      const copy = element(document, 'button', 'Copiar texto para citação');
-      copy.setAttribute('type', 'button');
-      copy.setAttribute('data-findings-copy', '');
-      copy.addEventListener('click', () => copyText(finding.citation, copy));
-      row.append(copy);
+      if (consolidated === null) {
+        const citation = element(document, 'p', finding.citation, 'findings-citation');
+        citation.setAttribute('data-findings-citation', '');
+        row.append(citation);
+        const copy = element(document, 'button', 'Copiar texto para citação');
+        copy.setAttribute('type', 'button');
+        copy.setAttribute('data-findings-copy', '');
+        copy.addEventListener('click', () => copyText(finding.citation, copy));
+        row.append(copy);
+      }
       list.append(row);
     }
     article.append(list);
+    if (consolidated !== null) {
+      const block = document.createElement('div');
+      block.setAttribute('class', 'findings-item-citation');
+      block.setAttribute('data-findings-citation-block', 'item');
+      block.append(element(document, 'p', `Texto para citação (abrange os ${entry.findings.length} elementos acima)`, 'findings-citation-title'));
+      const citation = element(document, 'p', consolidated, 'findings-citation');
+      citation.setAttribute('data-findings-citation', '');
+      citation.setAttribute('data-findings-citation-scope', 'item');
+      const copy = element(document, 'button', 'Copiar texto para citação');
+      copy.setAttribute('type', 'button');
+      copy.setAttribute('data-findings-copy', '');
+      copy.addEventListener('click', () => copyText(consolidated, copy));
+      block.append(citation, copy);
+      article.append(block);
+    }
     notMet.append(article);
   }
   parent.append(notMet);

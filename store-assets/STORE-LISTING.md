@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.60
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.61
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 

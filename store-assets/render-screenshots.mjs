@@ -160,7 +160,9 @@ try {
     await finish(0);
   }
   await at('report-summary.png', `document.getElementById('report-section-1')`, -46);
-  await at('report-board.png', `document.getElementById('report-section-3')`, -46);
+  // Quadro de constatações a partir dos requisitos não atendidos: o item 5.1.13 aparece inteiro, com os
+  // quatro elementos e o texto único para citação com o seu botão de copiar.
+  await at('report-board.png', `document.querySelector('[data-findings-group="not-met"]')`, -38);
   // Mapa do teclado na revisão guiada: abre o cartão do 5.1.13 e rola a imagem até os cartões de serviço.
   await evaluate(report, `(() => { const card = [...document.querySelectorAll('details.lay-card')].find(c => /5\\.1\\.13/u.test(c.textContent));
     if (card) card.open = true; return Boolean(card); })()`);

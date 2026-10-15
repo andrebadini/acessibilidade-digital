@@ -172,6 +172,95 @@ export function citationParagraph({ item, finding }) {
     `${lowerFirst(finding.text).replace(/\.$/u, '')} (verificação automática da ferramenta Audita Acessibilidade). ${norm}${evidence}`;
 }
 
+// Texto único para citação: um requisito não atendido pode ter sido constatado em vários elementos.
+// Copiar um parágrafo por elemento obriga quem reclama a repetir o mesmo item da norma em cada um;
+// aqui as constatações do MESMO item viram um parágrafo só, com todos os elementos nomeados. Vale
+// apenas para a tela do relatório (botão “Abrir relatório completo”): as exportações HTML, PDF, CSV e
+// JSON continuam com uma citação por elemento.
+
+const AUTOMATIC_NOTE = 'verificação automática da ferramenta Audita Acessibilidade';
+
+function contextOf(finding) {
+  return `${finding?.pageUrl ?? ''}\u0000${finding?.observedAtLabel ?? ''}`;
+}
+
+/**
+ * Enumera as constatações; automáticas com o mesmo texto no mesmo instante viram uma entrada só.
+ * Elementos com o MESMO nome (por exemplo, vários botões sem nome) não somem do texto: a expressão
+ * aparece uma vez com a quantidade (“ao botão sem nome (3 elementos)”), para que todos os elementos
+ * constatados continuem mencionados sem repetir a mesma expressão dezenas de vezes.
+ */
+function citationEntries(findings) {
+  const entries = [];
+  const automaticByKey = new Map();
+  for (const finding of findings) {
+    if (finding.source !== 'automatic') {
+      entries.push({ kind: 'human', finding });
+      continue;
+    }
+    const key = `${contextOf(finding)}\u0000${finding.text ?? ''}`;
+    const known = automaticByKey.get(key);
+    if (known) {
+      known.subjects.set(finding.subject, (known.subjects.get(finding.subject) ?? 0) + 1);
+      continue;
+    }
+    const entry = { kind: 'automatic', text: finding.text ?? '', subjects: new Map([[finding.subject, 1]]), pageUrl: finding.pageUrl, observedAtLabel: finding.observedAtLabel };
+    automaticByKey.set(key, entry);
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function joinSubjects(subjects) {
+  const names = [...subjects].map(([subject, count]) => (count > 1 ? `${subject} (${count} elementos)` : subject));
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} e ${names.at(-1)}`;
+}
+
+function occurrenceClause(entry, sharedContext) {
+  const where = sharedContext ? '' : `na página ${entry.pageUrl}, em ${entry.observedAtLabel}, `;
+  if (entry.kind === 'human') {
+    const { finding } = entry;
+    const element = finding.element ? `, no elemento ${finding.element}` : '';
+    return `${where}em revisão humana registrada por ${finding.evaluator} em ${finding.decidedAtLabel}, a constatação “${finding.text}”${element}`;
+  }
+  const text = lowerFirst(String(entry.text ?? '').replace(/\s+/gu, ' ').trim()).replace(/\.$/u, '');
+  return `${where}em relação ${joinSubjects(entry.subjects)}, ${text} (${AUTOMATIC_NOTE})`;
+}
+
+/** Evidências citadas uma única vez, sem repetir referências iguais e preservando a ordem. */
+function consolidatedEvidence(findings) {
+  const references = [];
+  for (const finding of findings) {
+    for (const reference of Array.isArray(finding.evidence) ? finding.evidence : []) {
+      if (!references.includes(reference)) references.push(reference);
+    }
+  }
+  if (!references.length) return '';
+  return `${references.length === 1 ? 'Evidência' : 'Evidências'}: ${references.join('; ')}.`;
+}
+
+/**
+ * Parágrafo pronto para citação que reúne TODAS as constatações de um mesmo item da norma — usado só
+ * quando há mais de uma. Com uma constatação só, o texto continua sendo o de citationParagraph.
+ */
+export function consolidatedCitationParagraph({ item, findings }) {
+  const list = (Array.isArray(findings) ? findings : []).filter(finding => finding && typeof finding === 'object');
+  if (!list.length) return '';
+  const sharedContext = new Set(list.map(contextOf)).size === 1;
+  const norm = `o item ${item.id} (${item.title}, requisito) da ABNT NBR 17225:2025`;
+  const counted = list.length === 1 ? 'foi constatada 1 ocorrência' : `foram constatadas ${list.length} ocorrências`;
+  const head = sharedContext
+    ? `Em ${list[0].observedAtLabel}, na página ${list[0].pageUrl}, ${counted} em desacordo com ${norm}:`
+    : `${counted.charAt(0).toLocaleUpperCase('pt-BR')}${counted.slice(1)} em desacordo com ${norm}:`;
+  // Uma entrada só (todos os elementos com a mesma constatação) dispensa a numeração “(1)”.
+  const entries = citationEntries(list);
+  const occurrences = entries.length === 1
+    ? occurrenceClause(entries[0], sharedContext)
+    : entries.map((entry, index) => `(${index + 1}) ${occurrenceClause(entry, sharedContext)}`).join('; ');
+  return [head, `${occurrences}.`, consolidatedEvidence(list)].filter(Boolean).join(' ');
+}
+
 export function scoreboardSentence(scoreboard) {
   return `Dos ${scoreboard.requirements} requisitos da norma: ${scoreboard.notMet} não atendidos, ${scoreboard.met} atendidos, ` +
     `${scoreboard.notApplicable} não aplicáveis e ${scoreboard.pending} sem conclusão.`;
