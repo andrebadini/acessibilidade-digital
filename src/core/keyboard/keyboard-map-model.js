@@ -419,6 +419,7 @@ export function selectKeyboardMapStops(snapshot, options = {}) {
   }
   const stopIds = new Set(keptStops.map(candidate => String(candidate.node.nodeId)));
   const belongsToStop = new Set();
+  const insideStop = new Set();
   for (const candidate of stopCandidates) {
     let current = candidate.node.parentId === null || candidate.node.parentId === undefined
       ? null
@@ -430,6 +431,22 @@ export function selectKeyboardMapStops(snapshot, options = {}) {
       current = current.parentId === null || current.parentId === undefined
         ? null
         : indexes.byNodeId.get(String(current.parentId));
+    }
+    // O outro lado da mesma relação: o que está DENTRO de uma parada do Tab também é alcançado por
+    // ela. É o caso da imagem ou do ícone dentro de um link ou botão — a pessoa que usa o teclado
+    // chega até aquele cartão pelo Tab e o clique do mouse na imagem segue o link do dono dela. A
+    // seta de clique, sozinha, não distingue esse desenho de um item de verdade, então o desenho
+    // entrava na lista de "parece clicável e o Tab não alcança" e escondia os itens reais.
+    const stack = [candidate.node];
+    const seen = new Set();
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (seen.has(String(node.nodeId))) continue;
+      seen.add(String(node.nodeId));
+      for (const child of childNodes(node, indexes)) {
+        insideStop.add(String(child.nodeId));
+        stack.push(child);
+      }
     }
   }
   const stops = keptStops.map((candidate, offset) => {
@@ -486,8 +503,13 @@ export function selectKeyboardMapStops(snapshot, options = {}) {
     let reason = null;
     if (ruleId !== null) reason = 'keyboard-rule';
     else if (INTERACTIVE_ROLES.has(role) && !COMPOSITE_REACHABLE_ROLES.has(role)) reason = 'interactive-role';
+    // A ocorrência de regra e o papel interativo falam do próprio item: quem declara `role="button"`
+    // precisa ser alcançado por si, mesmo dentro de outra parada. Só o desenho apontado pela seta de
+    // clique é que se explica pelo dono (estar dentro de um link, de um botão ou de um item que o Tab
+    // já alcança), e é por isso que a dispensa vale apenas para este motivo.
     else if (cursor && !NATIVE_INTERACTIVE_TAGS.has(tag) && !COMPOSITE_REACHABLE_ROLES.has(role) &&
-      !belongsToStop.has(String(candidate.node.nodeId)) && hasLabel) reason = 'cursor-pointer';
+      !belongsToStop.has(String(candidate.node.nodeId)) && !insideStop.has(String(candidate.node.nodeId)) &&
+      hasLabel) reason = 'cursor-pointer';
     if (reason === null) continue;
     if (projection?.nameStatus === 'omitted-privacy') privacyOmitted = true;
     suspectIds.add(String(candidate.node.nodeId));
