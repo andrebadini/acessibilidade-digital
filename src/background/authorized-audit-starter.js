@@ -1064,6 +1064,10 @@ export function createAuthorizedAuditStarter(input) {
         ...(liveRecord.privacyGate ? { privacyGate: liveRecord.privacyGate } : {}),
         ...(liveRecord.resumeCheckpoint ? { resumeCheckpoint: liveRecord.resumeCheckpoint } : {}),
         modelNow, signal: liveRecord.controller.signal,
+        // Aviso de que a observação acabou (a página foi lida e fotografada; o que falta é o relatório). É o
+        // que separa "a página mudou debaixo da auditoria" de "a página mudou DEPOIS de a auditoria ler
+        // tudo": sem ele, uma navegação que chega na reta final derrubava uma auditoria já concluída.
+        onObservationComplete: () => { liveRecord.observationComplete = true; },
         onCheckpoint: async checkpoint => {
           const canonicalCheckpoint = canonicalIntermediateCheckpoint(active.auditId, checkpoint);
           const stored = await persistCheckpoint({
@@ -2382,7 +2386,7 @@ export function createAuthorizedAuditStarter(input) {
             });
             liveRecord = {
               active, controller, grant, capturePolicy, privacyGate, consentId: null, targetLock: lock,
-              externallyInvalidated: false, liquidationReason: null,
+              externallyInvalidated: false, liquidationReason: null, observationComplete: false,
               committed: null, completion: null, attemptHandle: null,
             };
             live.set(active.auditId, liveRecord);
@@ -2833,6 +2837,19 @@ export function createAuthorizedAuditStarter(input) {
           return freeze({ aborted: false, auditId: null });
         }
       } catch { return freeze({ aborted: false, auditId: null }); }
+      // A observação já terminou: a página foi lida e fotografada e o que corre agora é o relatório, sobre
+      // dados coletados. Uma navegação que chega nesta altura não invalida o que foi observado — e a troca de
+      // documento, que é o que a interrupção existe para pegar, continua verificada pela própria auditoria,
+      // que prova a identidade do documento antes de gravar e responde TARGET_CHANGED se ela mudou. Derrubar
+      // aqui trocava um resultado pronto por "interrompida" (o web worker levava segundos entre o fim da
+      // observação e a gravação, e qualquer evento de carregamento neste intervalo bastava).
+      // Auditoria com consentimento de pixel pendente fica de fora: ali a navegação precisa liquidar a
+      // suspensão como sempre. A exceção vale só para navegação (recarga ou troca de endereço): aba ou janela
+      // fechada continuam encerrando a auditoria como antes.
+      if (record?.observationComplete === true && record.consentId === null &&
+        ['TAB_LOADING', 'TAB_URL_CHANGED', 'TAB_PENDING_URL'].includes(args.reasonCode)) {
+        return freeze({ aborted: false, auditId: active.auditId });
+      }
       if (active.state === 'finalizing') {
         waitFor = recoverAuthorizedAuditLifecycle();
         return freeze({ aborted: false, auditId: active.auditId });

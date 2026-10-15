@@ -783,7 +783,11 @@ test('collectPage issues the minimal structural CDP commands and injects runtime
     if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'root', url: 'https://example.test/' }, childFrames: [{ frame: { id: 'child', url: 'https://example.test/frame' } }] } };
     if (method === 'DOMSnapshot.captureSnapshot') return Object.freeze({ strings: [], documents: [] });
     if (method === 'Accessibility.getFullAXTree') return { nodes: [{ nodeId: `ax-${params.frameId}` }] };
-    if (method === 'Page.getLayoutMetrics') return { cssContentSize: { width: 1, height: 1 } };
+    // Tamanhos distintos para provar qual das duas leituras virou qual campo do resultado.
+    if (method === 'Page.getLayoutMetrics') {
+      const metrics = { cssContentSize: { width: calls.filter(([name]) => name === 'Page.getLayoutMetrics').length, height: 1 } };
+      return metrics;
+    }
     return {};
   } };
   const injections = [];
@@ -797,8 +801,12 @@ test('collectPage issues the minimal structural CDP commands and injects runtime
 
   const raw = await collectPage(cdp, 42, { executeScript });
   assert.deepEqual(calls.slice(0, 4).map(([method]) => method), ['Page.enable', 'DOM.enable', 'Accessibility.enable', 'Network.enable']);
-  assert.deepEqual(calls.slice(4).map(([method]) => method), ['Page.getFrameTree', 'DOMSnapshot.captureSnapshot', 'Accessibility.getFullAXTree', 'Accessibility.getFullAXTree', 'Page.getLayoutMetrics']);
-  assert.deepEqual(calls[5][1], { computedStyles: COMPUTED_STYLES, includeDOMRects: true, includePaintOrder: true });
+  // Duas leituras de leiaute, e a primeira é colada no instantâneo: os retângulos do mapa pertencem a este
+  // estado, não ao do fim da coleta (ver `mapSourceGeometry`, 1.1.60).
+  assert.deepEqual(calls.slice(4).map(([method]) => method), ['Page.getFrameTree', 'Page.getLayoutMetrics', 'DOMSnapshot.captureSnapshot', 'Accessibility.getFullAXTree', 'Accessibility.getFullAXTree', 'Page.getLayoutMetrics']);
+  assert.deepEqual(calls[6][1], { computedStyles: COMPUTED_STYLES, includeDOMRects: true, includePaintOrder: true });
+  assert.equal(raw.layoutMetricsAtSnapshot.cssContentSize.width, 1, 'a primeira leitura é a do instantâneo');
+  assert.equal(raw.layoutMetrics.cssContentSize.width, 2, 'a segunda é a do fim da coleta');
   assert.deepEqual(calls.filter(([method]) => method === 'Accessibility.getFullAXTree').map(([, params]) => params), [{ frameId: 'root' }, { frameId: 'child' }]);
   assert.equal(injections[0].target.tabId, 42);
   assert.equal(injections[0].target.allFrames, true);

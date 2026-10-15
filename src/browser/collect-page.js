@@ -48,6 +48,13 @@ export async function collectPage(cdp, tabId, options = {}) {
 
   // Structural DOM and layout failures are fatal. Keep this sequence
   // deterministic and never request cookies, storage or headers.
+  //
+  // Métricas do leiaute no mesmo instante dos retângulos (1.1.60). O instantâneo mede as caixas do estado
+  // atual da página; a leitura de `layoutMetrics` no fim da coleta (abaixo, depois da árvore de
+  // acessibilidade) pode descrever um leiaute já diferente. Quem desenha caixa sobre a captura integral
+  // precisa saber em que estado os retângulos foram medidos: páginas que crescem sozinhas mudam de altura
+  // entre uma leitura e outra, e comparar a captura com a leitura do fim da coleta não perceberia isso.
+  const layoutMetricsAtSnapshot = await cdp.command('Page.getLayoutMetrics', {});
   const capturedDomSnapshot = await cdp.command('DOMSnapshot.captureSnapshot', {
     computedStyles: [...COMPUTED_STYLE_PROPERTIES],
     includeDOMRects: true,
@@ -133,7 +140,7 @@ export async function collectPage(cdp, tabId, options = {}) {
     }
   };
   const widgetObservations = aggregateWidgetSignals(pageData, coverage.runtime.outcome);
-  return { domSnapshot, axTree, layoutMetrics, pageData, warnings, coverage, widgetObservations };
+  return { domSnapshot, axTree, layoutMetrics, layoutMetricsAtSnapshot, pageData, warnings, coverage, widgetObservations };
 }
 
 function ownData(value, key) {

@@ -483,9 +483,18 @@ function segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight, measur
   return [...imageSegments, ...continuations];
 }
 
-/** Builds deterministic geometry and a legend plan for the supplied text metrics. */
+/**
+ * Builds deterministic geometry and a legend plan for the supplied text metrics.
+ *
+ * `sourceAligned: false` diz que a captura integral e a leitura estrutural descrevem leiautes
+ * diferentes (ver `src/core/evidence/map-source-geometry.js`): os elementos elegíveis saem do mapa e
+ * entram na contagem de "sem posição medida", com a limitação declarada. O mapa deste anúncio é a
+ * própria marcação desenhada, então não há como manter a imagem sem marcador errado — e a alternativa
+ * (marcar o lugar errado) é pior.
+ */
 export function buildAnnotationMapPlan({
   snapshot, sourceMetadata, layoutMetrics = {}, segmentCssHeight, measureLegendText, measureLegendHeading,
+  sourceAligned = true,
 } = {}) {
   if (!sourceMetadata || !Number.isFinite(sourceMetadata.width) || !Number.isFinite(sourceMetadata.height) ||
     sourceMetadata.width <= 0 || sourceMetadata.height <= 0 || sourceMetadata.width > ANNOTATION_MAP_LIMITS.maxDimension ||
@@ -503,9 +512,12 @@ export function buildAnnotationMapPlan({
   };
   const limitations = new Set([...BASE_LIMITATIONS, ...selected.limitations]);
   if (Math.abs(geometry.scaleX - geometry.scaleY) / Math.max(geometry.scaleX, geometry.scaleY) > 0.01) limitations.add('non-uniform-pixel-scale');
+  const boundsTrusted = sourceAligned !== false;
+  if (!boundsTrusted && selected.entries.length > 0) limitations.add('source-layout-changed');
   const entries = [];
   let outside = 0;
   for (const entry of selected.entries) {
+    if (!boundsTrusted) { outside += 1; continue; }
     const bounds = clippedBounds(entry.bounds, geometry.cssWidth, geometry.cssHeight);
     if (!bounds) { outside += 1; continue; }
     entries.push({ ...entry, number: entries.length + 1, bounds });
@@ -649,7 +661,9 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
 }
 
 /** Composes one page map locally. It never mutates the page or the pristine source artifact. */
-export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidence, layoutMetrics = {}, signal, runtime, timeoutMs } = {}) {
+export async function composeAnnouncementMap({
+  pageId, snapshot, fullPageEvidence, layoutMetrics = {}, sourceAligned = true, signal, runtime, timeoutMs,
+} = {}) {
   throwIfAborted(signal);
   const worker = featureRuntime(runtime);
   const waitForOperation = operationWaiter(signal, timeoutMs);
@@ -679,7 +693,9 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
   }
   const sourceHash = await sha256Hex(source.bytes);
   if (sourceHash !== fullPageEvidence.hash) throw new AnnotationMapError('ANNOTATION_MAP_SOURCE_HASH_MISMATCH', 'O hash da captura original não corresponde aos pixels recebidos.');
-  let plan = buildAnnotationMapPlan({ snapshot, sourceMetadata: source, layoutMetrics });
+  let plan = buildAnnotationMapPlan({
+    snapshot, sourceMetadata: source, layoutMetrics, sourceAligned: sourceAligned !== false,
+  });
   if (plan.entries.length) {
     const measurementCanvas = new worker.OffscreenCanvas(1, 1);
     try {
@@ -689,7 +705,7 @@ export async function composeAnnouncementMap({ pageId, snapshot, fullPageEvidenc
       }
       measurementContext.font = LEGEND_FONT;
       plan = buildAnnotationMapPlan({
-        snapshot, sourceMetadata: source, layoutMetrics,
+        snapshot, sourceMetadata: source, layoutMetrics, sourceAligned: sourceAligned !== false,
         measureLegendText: value => {
           measurementContext.font = LEGEND_FONT;
           return measurementContext.measureText(value).width;

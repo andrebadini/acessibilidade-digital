@@ -39,7 +39,8 @@ const KEYBOARD_MAP_SEGMENT_ROLES = Object.freeze(['image']);
  * Limitações que tornam o mapa *materialmente* parcial: alguma coisa que deveria estar desenhada ou
  * listada pode faltar, ou foi desenhada fora de lugar. Elemento escondido, sem caixa útil ou dentro de
  * recorte por rolagem não entra nesta lista por si só — omissão correta não é lacuna —, mas o corte por
- * rolagem entra porque esconde uma parada que existe.
+ * rolagem entra porque esconde uma parada que existe. `source-layout-changed` entra porque a lista sai
+ * inteira e a imagem sai sem caixa nenhuma: o que deveria estar desenhado não está.
  */
 export const KEYBOARD_MAP_PARTIAL_LIMITATIONS = Object.freeze([
   'closed-shadow-root-omitted',
@@ -50,6 +51,7 @@ export const KEYBOARD_MAP_PARTIAL_LIMITATIONS = Object.freeze([
   'privacy-content-omitted',
   'stop-limit-reached',
   'suspect-limit-reached',
+  'source-layout-changed',
 ]);
 
 /**
