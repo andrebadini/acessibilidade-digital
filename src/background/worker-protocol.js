@@ -32,11 +32,12 @@ const PANEL_PORT_TYPES = new Set([
   'PANEL_READER_ENABLE_VOICE',
   'PANEL_STOP_PERSONA', 'PANEL_CANCEL_AUDIT',
   'PANEL_OPEN_REPORT', 'PANEL_REHYDRATE_VIEW',
-  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS',
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED', 'PANEL_HIDE_PAGE_MARKERS',
   'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
 ]);
 const SHARED_HIGHLIGHT_TYPES = new Set([
-  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+  'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED',
+  'CLEAR_HIGHLIGHT',
 ]);
 
 const MESSAGE_SCHEMAS = deepFreeze({
@@ -58,6 +59,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
   PANEL_CANCEL_AUDIT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   PANEL_OPEN_REPORT: ['type', 'sessionCapabilityId', 'auditId', 'windowId'],
   PANEL_SHOW_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
+  PANEL_SHOW_PAGE_MARKERS_RELOADED: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
   PANEL_HIDE_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision'],
   PANEL_SELECT_PAGE_MARKER: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision', 'ordinal', 'scroll'],
   PANEL_FILTER_PAGE_MARKERS: ['type', 'sessionCapabilityId', 'auditId', 'windowId', 'modelRevision', 'visibleOrdinals'],
@@ -74,6 +76,7 @@ const MESSAGE_SCHEMAS = deepFreeze({
   GET_HIGHLIGHT_STATE: ['type', 'sessionCapabilityId', 'auditId'],
   GET_HIGHLIGHT_AVAILABILITY: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
   HIGHLIGHT_OCCURRENCE: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
+  HIGHLIGHT_OCCURRENCE_RELOADED: ['type', 'sessionCapabilityId', 'auditId', 'occurrenceId'],
   CLEAR_HIGHLIGHT: ['type', 'sessionCapabilityId', 'auditId'],
   AUDITA_HIGHLIGHT_INVALIDATED: ['type', 'nonce'],
   AUDITA_PERSONA_AUTONOMOUS_STOP: ['type', 'leaseId', 'reason'],
@@ -132,7 +135,8 @@ function hasFlatPrimitiveShape(value) {
 }
 
 function validWorkerEnvelope(value) {
-  if (['PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS', 'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS'].includes(value.type)) {
+  if (['PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED', 'PANEL_HIDE_PAGE_MARKERS',
+    'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS'].includes(value.type)) {
     if (!validOpaqueId(value.sessionCapabilityId) || !validAuditId(value.auditId) || !safeChromeId(value.windowId) ||
       !Number.isSafeInteger(value.modelRevision) || value.modelRevision < 1) return false;
     if (value.type === 'PANEL_SELECT_PAGE_MARKER') return validMarkerOrdinal(value.ordinal) && typeof value.scroll === 'boolean';
@@ -194,7 +198,7 @@ function validWorkerEnvelope(value) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
       (!Object.hasOwn(value, 'deleteAfterCompleteExport') || typeof value.deleteAfterCompleteExport === 'boolean');
   }
-  if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE'].includes(value.type)) {
+  if (['GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED'].includes(value.type)) {
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) && validReviewId(value.occurrenceId);
   }
   if (['GET_HIGHLIGHT_STATE', 'CLEAR_HIGHLIGHT'].includes(value.type)) {

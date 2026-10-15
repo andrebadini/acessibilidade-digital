@@ -157,6 +157,7 @@ function markerSnapshot(overrides = {}) {
     reasons: [],
     selectedOccurrenceId: 'occ-1',
     message: 'Sinais visíveis na página atual.',
+    relocated: false,
     ...overrides,
   };
 }
@@ -239,6 +240,7 @@ test('result defaults to an idle marker snapshot without changing non-result con
   const view = buildPanelView(input);
   assert.deepEqual(view.markers, {
     status: 'idle', groups: [], counts: null, reasons: [], selectedOccurrenceId: null, message: null,
+    relocated: false,
   });
   assert.deepEqual(view.result.visibleOccurrenceIds, ['occ-1', 'occ-2']);
 });
@@ -1450,4 +1452,74 @@ test('without the strict live proof, the detail still offers the page signals pa
   assert.ok(root.querySelector('[data-action="consult-evidence"]'));
   show.click();
   assert.deepEqual(intents, [{ type: 'HIGHLIGHT_PAGE_OCCURRENCE', occurrenceId: 'occ-1' }]);
+});
+
+// --- Página recarregada (1.1.60): convite, aceite e endereço que mudou ------------------------
+
+function markerActions(input, markers) {
+  const intents = [];
+  const root = renderPanelView({
+    view: buildPanelView({ ...input, markers: markerSnapshot(markers) }),
+    document: new TestDocument(), onIntent: value => intents.push(value), onEvent() {},
+  });
+  return { root, intents, region: root.querySelector('[data-page-marker-review]') };
+}
+
+test('a reloaded page offers the current version with one explicit button and no retry of the old one', () => {
+  const { root, intents, region } = markerActions(fixture(), {
+    status: 'reload-offer', groups: [], counts: null, selectedOccurrenceId: null,
+    message: 'A página foi recarregada depois da auditoria. Mostrar os sinais na versão atual?',
+  });
+  const action = region.querySelector('button[data-intent="SHOW_PAGE_MARKERS_RELOADED"]');
+  assert.equal(action.tagName, 'BUTTON');
+  assert.equal(region.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]'), null);
+  assert.equal(region.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]'), null);
+  assert.match(root.textContent, /A página foi recarregada depois da auditoria/u);
+  assert.match(action.getAttribute('aria-label'), /recarregada/u);
+  action.click();
+  assert.deepEqual(intents, [{ type: 'SHOW_PAGE_MARKERS_RELOADED' }]);
+  assert.equal(region.dataset.markerStatus, 'reload-offer');
+});
+
+test('another address offers a new audit instead of projecting the retired result', () => {
+  const { root, intents, region } = markerActions(fixture(), {
+    status: 'changed-address', groups: [], counts: null, selectedOccurrenceId: null,
+    message: 'O endereço da página mudou depois da auditoria. Para ver os sinais na página de agora, refaça a auditoria.',
+  });
+  const action = region.querySelector('button[data-intent="NEW_AUDIT"]');
+  assert.equal(action.tagName, 'BUTTON');
+  assert.match(action.textContent, /Refazer auditoria/u);
+  assert.match(action.getAttribute('aria-label'), /o endereço da página mudou/u);
+  assert.equal(region.querySelector('button[data-intent="SHOW_PAGE_MARKERS_RELOADED"]'), null);
+  action.click();
+  assert.deepEqual(intents, [{ type: 'NEW_AUDIT' }]);
+  assert.match(root.textContent, /refaça a auditoria/u);
+});
+
+test('the relocated signals say so in the status line and in the legend', () => {
+  const markers = { relocated: true, message: null };
+  const { root, region } = markerActions(fixture(), markers);
+  const note = 'Sinais reencontrados na versão recarregada — confira se correspondem ao que foi auditado.';
+  assert.equal(region.querySelector('[role="status"]').textContent, note);
+  assert.equal(region.querySelector('[data-page-marker-relocated]').textContent, note);
+  // A ação continua sendo a de sempre: esconder os sinais da página atual.
+  assert.equal(region.querySelector('button[data-intent="HIDE_PAGE_MARKERS"]') !== null, true);
+});
+
+test('the ordinary page keeps its plain status line and no relocated note', () => {
+  const { region } = markerActions(fixture(), {});
+  assert.equal(region.querySelector('[role="status"]').textContent, 'Sinais visíveis na página atual.');
+  assert.equal(region.querySelector('[data-page-marker-relocated]'), null);
+});
+
+test('a signal the page could not match in the reloaded version is named in plain words', () => {
+  const { root } = markerActions(fixture(), { relocated: true, reasons: [{ reason: 'evidence-mismatch', count: 2 }] });
+  assert.match(root.textContent, /2 não foram reencontrados nesta versão da página/u);
+  assert.doesNotMatch(root.textContent, /evidence-mismatch/u);
+});
+
+test('the reload offer is a closed state: anything unknown falls back to the idle block', () => {
+  const { region } = markerActions(fixture(), { status: 'reload-offer-private', groups: [], counts: null });
+  assert.equal(region.dataset.markerStatus, 'idle');
+  assert.equal(region.querySelector('button[data-intent="SHOW_PAGE_MARKERS"]') !== null, true);
 });

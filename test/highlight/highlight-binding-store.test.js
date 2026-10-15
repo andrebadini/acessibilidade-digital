@@ -612,3 +612,48 @@ test('renewing an audit keeps its model identity and only extends live proofs', 
   assert.equal(await store.renewAudit('audit-1'), 0, 'uma prova vencida não é ressuscitada');
   assert.equal(await store.renewAudit('missing'), 0);
 });
+
+test('a relocated overlay is bound to the audited document it was signed against', async () => {
+  const { store } = clockFixture();
+  await store.put(bindingFixture());
+  const relocated = {
+    topDocumentId: 'document-next', documentId: 'document-next', relocatedFrom: 'document-main',
+  };
+
+  assert.deepEqual(await store.beginOverlay(overlayFixture(relocated)), {
+    ok: true,
+    overlay: {
+      ...overlayFixture(relocated), state: 'installing', revision: 1,
+    },
+  });
+  const active = await store.getActiveOverlay(7);
+  assert.equal(active.topDocumentId, 'document-next');
+  assert.equal(active.documentId, 'document-next');
+  assert.equal(active.relocatedFrom, 'document-main');
+
+  // A origem declarada é a única aceita: outro documento, ou nenhum, não casa com a ligação guardada.
+  for (const origin of ['document-other', 'document-next']) {
+    const sessionArea = createSessionArea(registryFixture({ binding: bindingFixture() }));
+    const isolated = createHighlightBindingStore({ sessionArea, now: () => EPOCH });
+    assert.deepEqual(await isolated.beginOverlay(overlayFixture({ ...relocated, relocatedFrom: origin })), {
+      ok: false, code: 'HIGHLIGHT_OVERLAY_BINDING_MISMATCH',
+    }, origin);
+    assert.equal(sessionArea.writes.length, 0, origin);
+  }
+
+  // O quadro principal continua sendo o único quadro recolocável.
+  const frameArea = createSessionArea(registryFixture({ binding: bindingFixture() }));
+  const framed = createHighlightBindingStore({ sessionArea: frameArea, now: () => EPOCH });
+  assert.deepEqual(await framed.beginOverlay(overlayFixture({ ...relocated, frameId: 3 })), {
+    ok: false, code: 'HIGHLIGHT_OVERLAY_BINDING_MISMATCH',
+  });
+  assert.equal(frameArea.writes.length, 0);
+
+  // Um registro sem a origem declarada continua preso ao documento auditado.
+  const plainArea = createSessionArea(registryFixture({ binding: bindingFixture() }));
+  const plain = createHighlightBindingStore({ sessionArea: plainArea, now: () => EPOCH });
+  assert.deepEqual(await plain.beginOverlay(overlayFixture({ topDocumentId: 'document-next', documentId: 'document-next' })), {
+    ok: false, code: 'HIGHLIGHT_OVERLAY_BINDING_MISMATCH',
+  });
+  assert.equal(plainArea.writes.length, 0);
+});

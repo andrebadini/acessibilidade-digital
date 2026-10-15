@@ -12,6 +12,11 @@ export function highlightActionForOccurrence({ occurrence, bindingStatus, active
   const occurrenceId = typeof occurrence?.occurrenceId === 'string' ? occurrence.occurrenceId : null;
   if (!occurrenceId) return evidenceAction();
   if (activeOccurrenceId === occurrenceId) return freezeAction({ kind: 'clear', label: 'Limpar destaque', enabled: true, reason: null });
+  // A página recarregou depois da auditoria e a pessoa pediu o destaque: em vez do erro, a mesma
+  // ação, agora dita para a versão de agora. Continua sendo um clique explícito.
+  if (bindingStatus?.state === 'reload-offer') {
+    return freezeAction({ kind: 'highlight-reloaded', label: 'Destacar na versão atual', enabled: true, reason: null });
+  }
   if (['checking', 'unchecked'].includes(bindingStatus?.state)) {
     return freezeAction({ kind: 'checking', label: 'Verificando possibilidade de destaque', enabled: false, reason: null });
   }

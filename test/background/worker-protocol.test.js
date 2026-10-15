@@ -20,6 +20,7 @@ const markerEnvelope = (type, extra = {}) => ({
 test('page-marker intents are panel-only and acquire the admitted window, never a client window', () => {
   for (const intent of [
     markerEnvelope('PANEL_SHOW_PAGE_MARKERS'),
+    markerEnvelope('PANEL_SHOW_PAGE_MARKERS_RELOADED'),
     markerEnvelope('PANEL_HIDE_PAGE_MARKERS'),
     markerEnvelope('PANEL_SELECT_PAGE_MARKER', { ordinal: 63, scroll: false }),
     markerEnvelope('PANEL_FILTER_PAGE_MARKERS', { visibleOrdinals: '0,2,63' }),
@@ -56,8 +57,10 @@ test('page-marker revision, ordinal and filter boundaries are closed and canonic
 
 test('page-marker protocol rejects extra authority and accessor fields without reading them', () => {
   const intent = markerEnvelope('PANEL_SHOW_PAGE_MARKERS');
-  for (const extra of [{ tabId: 7 }, { documentId: 'document-a' }, { installationId: 'a'.repeat(22) }, { ordinal: 0 }]) {
-    assert.equal(parsePanelPortIntent({ ...intent, ...extra }, 9).ok, false);
+  for (const value of [intent, markerEnvelope('PANEL_SHOW_PAGE_MARKERS_RELOADED')]) {
+    for (const extra of [{ tabId: 7 }, { documentId: 'document-a' }, { installationId: 'a'.repeat(22) }, { ordinal: 0 }]) {
+      assert.equal(parsePanelPortIntent({ ...value, ...extra }, 9).ok, false, `${value.type} ${Object.keys(extra)[0]}`);
+    }
   }
   let reads = 0;
   Object.defineProperty(intent, 'modelRevision', { enumerable: true, get() { reads += 1; return 1; } });
@@ -140,6 +143,7 @@ const validMessages = [
   { type: 'GET_HIGHLIGHT_STATE', sessionCapabilityId: SESSION, auditId: '1-audit' },
   { type: 'GET_HIGHLIGHT_AVAILABILITY', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
   { type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
+  { type: 'HIGHLIGHT_OCCURRENCE_RELOADED', sessionCapabilityId: SESSION, auditId: '1-audit', occurrenceId: 'occurrence-1' },
   { type: 'CLEAR_HIGHLIGHT', sessionCapabilityId: SESSION, auditId: '1-audit' },
   { type: 'AUDITA_HIGHLIGHT_INVALIDATED', nonce: 'N'.repeat(22) },
   { type: 'AUDITA_PERSONA_AUTONOMOUS_STOP', leaseId: LEASE, reason: 'emergency-stop' },
@@ -419,7 +423,8 @@ test('rejects non-canonical or hostile pixel confirmations without invoking acce
 
 test('admits shared highlight intents through the panel Port without adding or accepting a UI window claim', () => {
   for (const message of validMessages.filter(value => [
-    'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+    'GET_HIGHLIGHT_STATE', 'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE',
+    'HIGHLIGHT_OCCURRENCE_RELOADED', 'CLEAR_HIGHLIGHT',
   ].includes(value.type))) {
     const parsed = parsePanelPortIntent(message, 9);
     assert.equal(parsed.ok, true, message.type);
@@ -433,6 +438,18 @@ test('admits shared highlight intents through the panel Port without adding or a
     type: 'HIGHLIGHT_OCCURRENCE', sessionCapabilityId: SESSION, auditId: 'audit-1',
     occurrenceId: 'occ-1', selector: '#forged',
   }), { ok: false, code: 'INVALID_MESSAGE' });
+
+  // A intenção da página recarregada não carrega autoridade própria: nem documento, nem alvo.
+  for (const forged of [{ documentId: 'document-next' }, { tabId: 7 }, { signedDocumentId: 'document-main' }]) {
+    assert.deepEqual(parsePanelPortIntent({
+      type: 'HIGHLIGHT_OCCURRENCE_RELOADED', sessionCapabilityId: SESSION, auditId: 'audit-1',
+      occurrenceId: 'occ-1', ...forged,
+    }, 9), { ok: false, code: 'INVALID_MESSAGE' });
+  }
+  assert.deepEqual(parsePanelPortIntent({
+    type: 'HIGHLIGHT_OCCURRENCE_RELOADED', sessionCapabilityId: SESSION, auditId: 'audit-1',
+    occurrenceId: 'not a review id',
+  }, 9), { ok: false, code: 'INVALID_MESSAGE' });
 });
 
 test('admits only the exact opaque content invalidation notice outside the panel Port lane', () => {

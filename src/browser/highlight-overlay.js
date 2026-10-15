@@ -33,16 +33,20 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
     return `inset 0 0 0 1px #ffffff, 0 0 0 1px #ffffff, 0 0 0 4px ${rgba(color, 0.35)}`;
   }
 
-  function exactKeys(value, expectedKeys) {
+  // `optionalKeys` existe para campos que só aparecem em um modo (documento recarregado); a
+  // contagem continua fechada: nem a mais, nem a menos do que o esperado, e nada de fora da lista.
+  function exactKeys(value, expectedKeys, optionalKeys = []) {
     try {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
       const prototype = Reflect.getPrototypeOf(value);
       if (prototype !== Object.prototype && prototype !== null) return null;
       const keys = Reflect.ownKeys(value);
-      if (keys.length !== expectedKeys.length || keys.some(key => typeof key !== 'string') ||
-        expectedKeys.some(key => !keys.includes(key))) return null;
+      if (keys.some(key => typeof key !== 'string') || keys.length < expectedKeys.length ||
+        keys.length > expectedKeys.length + optionalKeys.length ||
+        expectedKeys.some(key => !keys.includes(key)) ||
+        keys.some(key => !expectedKeys.includes(key) && !optionalKeys.includes(key))) return null;
       const snapshot = Object.create(null);
-      for (const key of expectedKeys) {
+      for (const key of keys) {
         const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
         if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
         Object.defineProperty(snapshot, key, {
@@ -63,13 +67,18 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
       const record = exactKeys(value, [
         'version', 'op', 'nonce', 'documentId', 'frameId', 'selector',
         'structuralSignature', 'kind', 'markerNumber',
-      ]);
+      ], ['signedDocumentId']);
       if (!record || record.version !== 1 || record.op !== 'install' ||
         typeof record.nonce !== 'string' || !/^[A-Za-z0-9_-]{22}$/u.test(record.nonce) ||
         typeof record.documentId !== 'string' || !/^[A-Za-z0-9._:-]{1,240}$/u.test(record.documentId) ||
         !Number.isSafeInteger(record.frameId) || record.frameId < 0 ||
         !['failed', 'manual'].includes(record.kind) ||
         !Number.isSafeInteger(record.markerNumber) || record.markerNumber < 1 || record.markerNumber > 5_000) return null;
+      // Documento recarregado: a estrutura registrada foi assinada contra o documento AUDITADO, então
+      // a assinatura tem de ser conferida contra esse id e não contra o id do documento de agora.
+      // Sem o campo, o comportamento é o de sempre (assina contra o próprio documento).
+      const signedDocumentId = record.signedDocumentId ?? record.documentId;
+      if (typeof signedDocumentId !== 'string' || !/^[A-Za-z0-9._:-]{1,240}$/u.test(signedDocumentId)) return null;
 
       const selector = exactKeys(record.selector, ['syntax', 'value', 'byteLength', 'complexity']);
       if (!selector || selector.syntax !== 'CSSSelectorV1' || typeof selector.value !== 'string' ||
@@ -164,6 +173,7 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
         op: 'install',
         nonce: record.nonce,
         documentId: record.documentId,
+        signedDocumentId,
         frameId: record.frameId,
         selector: Object.freeze({
           syntax: 'CSSSelectorV1',
@@ -462,7 +472,8 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
   function sameInstallCommand(left, right) {
     try {
       return Boolean(left && right && left.version === right.version && left.op === right.op &&
-        left.nonce === right.nonce && left.documentId === right.documentId && left.frameId === right.frameId &&
+        left.nonce === right.nonce && left.documentId === right.documentId &&
+        left.signedDocumentId === right.signedDocumentId && left.frameId === right.frameId &&
         left.kind === right.kind && left.markerNumber === right.markerNumber &&
         left.selector?.syntax === right.selector.syntax && left.selector?.value === right.selector.value &&
         left.selector?.byteLength === right.selector.byteLength && left.selector?.complexity === right.selector.complexity &&
@@ -877,8 +888,10 @@ export async function runAuditaHighlightCommand(command, environment = globalThi
     const target = queryExact(install.selector);
     if (target === null) return { ok: false, reason: 'target-not-unique' };
     const structure = snapshotStructure(target);
+    // `signedDocumentId` é o documento contra o qual a estrutura foi assinada: o documento auditado
+    // no caso de uma página recarregada, o próprio documento vivo em todos os outros casos.
     const canonical = await canonicalSignatureInput({
-      documentId: install.documentId,
+      documentId: install.signedDocumentId,
       frameId: install.frameId,
       structure,
     });

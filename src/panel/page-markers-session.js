@@ -6,10 +6,21 @@ const REMOVE_FAILED = 'Não foi possível confirmar a remoção dos sinais. Tent
 // Picking an occurrence whose element has no signal on the page right now (not found, inside an
 // iframe, or no longer in the page) is an expected answer, not a failure of the signals.
 const SELECTION_UNAVAILABLE = 'Esta ocorrência não tem sinal na página neste momento. Consulte a evidência registrada ou o relatório.';
+// A página recarregou depois da auditoria: o endereço confere e o trabalho registrado continua
+// valendo, então o painel convida a recolocar os sinais na versão de agora, por gesto explícito.
+const RELOAD_OFFER = 'A página foi recarregada depois da auditoria. Mostrar os sinais na versão atual?';
+// Depois de aceitar, o que está na tela são sinais reencontrados, não os sinais originais: o aviso
+// acompanha o estado enquanto eles estiverem visíveis.
+const RELOADED_NOTE = 'Sinais reencontrados na versão recarregada — confira se correspondem ao que foi auditado.';
+// Endereço diferente: repetir a projeção seria mostrar sinais de outra página, então a saída honesta
+// é refazer a auditoria.
+const CHANGED_ADDRESS = 'O endereço da página mudou depois da auditoria. Para ver os sinais na página de agora, refaça a auditoria.';
 // Matches the ceiling the worker, the controller, the projection and the page overlay share, so a
 // full inventory of 500 findings is never truncated by the panel.
 export const MAX_PAGE_MARKER_SIGNALS = 500;
-const empty = () => ({ status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, reasons: [], message: null });
+const empty = () => ({ status: 'idle', groups: [], counts: null, selectedOccurrenceId: null, reasons: [], message: null, relocated: false });
+// O painel não desenha nada nesses estados: não há sinais na página para remover.
+const NOTHING_DRAWN = ['idle', 'unavailable', 'reload-offer', 'changed-address'];
 function freeze(value) {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
   return value;
@@ -91,7 +102,7 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
           !Number.isSafeInteger(row.count) || row.count < 1 || row.count > MAX_PAGE_MARKER_SIGNALS) return null;
         reasons.push({ reason: row.reason, count: row.count });
       }
-      return { status: 'active', groups, counts, reasons,
+      return { status: 'active', groups, counts, reasons, relocated: false,
         selectedOccurrenceId: markers.selectedOrdinal === null ? null : captured.ids[markers.selectedOrdinal], message: null };
     } catch { return null; }
   }
@@ -99,21 +110,33 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
     try { return await requestIntent({ type, modelRevision: captured.revision, ...extras }); }
     catch { return null; }
   }
-  async function show() {
+  // `reloaded` é o modo aceito pelo gesto explícito: o mesmo pedido, com o aviso de que a página foi
+  // recarregada. Sem ele, o worker nunca recoloca sinais em um documento novo.
+  async function show(reloaded = false) {
+    if (typeof reloaded !== 'boolean') return false;
     if (!context || ['active', 'showing', 'hiding'].includes(state.status)) return false;
     const captured = context, version = ++generation, selected = selectionVersion;
     publish({ ...empty(), status: 'showing', message: 'Preparando sinais na página…' });
-    const response = await request('PANEL_SHOW_PAGE_MARKERS', {}, captured);
+    const response = await request(reloaded ? 'PANEL_SHOW_PAGE_MARKERS_RELOADED' : 'PANEL_SHOW_PAGE_MARKERS', {}, captured);
     if (context !== captured || version !== generation) return false;
     const next = responseState(response, captured);
     if (!next || next.status !== 'active') {
+      const code = exact(response, ['ok', 'code'])?.code;
+      if (code === 'PAGE_MARKERS_RELOADED_PAGE') {
+        publish({ ...empty(), status: 'reload-offer', message: RELOAD_OFFER }); return false;
+      }
+      if (code === 'PAGE_MARKERS_DOCUMENT_CHANGED') {
+        publish({ ...empty(), status: 'changed-address', message: CHANGED_ADDRESS }); return false;
+      }
       publish({ ...empty(), status: 'unavailable', message: UNAVAILABLE }); return false;
     }
+    if (reloaded) next.relocated = true;
     if (selected !== selectionVersion) next.selectedOccurrenceId = state.selectedOccurrenceId;
     publish(next); return true;
   }
+  const showReloaded = () => show(true);
   async function hide() {
-    if (!context || ['idle', 'unavailable'].includes(state.status)) return true;
+    if (!context || NOTHING_DRAWN.includes(state.status)) return true;
     if (state.status === 'hiding') return false;
     const captured = context, before = state, version = ++generation;
     publish({ ...state, status: 'hiding', message: 'Removendo sinais da página…' });
@@ -182,7 +205,9 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
   async function highlight(occurrenceId) {
     if (ordinal(occurrenceId) < 0 || ['showing', 'hiding'].includes(state.status)) return false;
     const captured = context;
-    if (state.status !== 'active' && !await show()) return false;
+    // O convite já estava na tela (região viva) quando a pessoa clicou em "Destacar elemento na
+    // página": o clique aceita a versão recarregada, do mesmo jeito que o botão do convite.
+    if (state.status !== 'active' && !await show(state.status === 'reload-offer')) return false;
     if (context !== captured || state.status !== 'active') return false;
     if (!state.groups.some(group => group.occurrenceIds.includes(occurrenceId))) {
       publish({ ...state, message: 'O elemento não foi localizado com segurança nesta página. Consulte a captura registrada ou refaça a auditoria.' });
@@ -197,5 +222,7 @@ export function createPanelPageMarkersSession({ requestIntent, onChange, onSelec
       visibleOrdinals: context.ids.flatMap((id, index) => visible.has(id) ? [index] : []).join(','),
     });
   }
-  return Object.freeze({ setResult, receive, show, hide, select, highlight, filter, reset, read: () => state });
+  return Object.freeze({
+    setResult, receive, show, showReloaded, hide, select, highlight, filter, reset, read: () => state,
+  });
 }

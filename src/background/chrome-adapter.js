@@ -51,16 +51,18 @@ const SENSITIVE_PROBE_ATTEMPTS = 4;
 const SENSITIVE_PROBE_RETRY_MS = 150;
 const ATTACHED_COPY_TARGET_KEYS = ObjectFreeze(['tabId', 'windowId', 'documentId', 'urlSessionDigest']);
 
-function exactHighlightRecord(value, expectedKeys) {
+function exactHighlightRecord(value, expectedKeys, optionalKeys = []) {
   try {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const prototype = Reflect.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) return null;
     const keys = Reflect.ownKeys(value);
-    if (keys.length !== expectedKeys.length || keys.some(key => typeof key !== 'string') ||
-      expectedKeys.some(key => !keys.includes(key))) return null;
+    if (keys.some(key => typeof key !== 'string') || keys.length < expectedKeys.length ||
+      keys.length > expectedKeys.length + optionalKeys.length ||
+      expectedKeys.some(key => !keys.includes(key)) ||
+      keys.some(key => !expectedKeys.includes(key) && !optionalKeys.includes(key))) return null;
     const output = Object.create(null);
-    for (const key of expectedKeys) {
+    for (const key of keys) {
       const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
       if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null;
       output[key] = descriptor.value;
@@ -227,12 +229,18 @@ function highlightCommandInput(value) {
     const install = exactHighlightRecord(record.command, [
       'version', 'op', 'nonce', 'documentId', 'frameId', 'selector',
       'structuralSignature', 'kind', 'markerNumber',
-    ]);
+    ], ['signedDocumentId']);
     const selector = install && highlightSelectorRecord(install.selector);
     const structuralSignature = install && highlightSignatureRecord(install.structuralSignature);
+    // Documento recarregado: a estrutura foi assinada no documento auditado, que não é o documento
+    // vivo; o id assinado, quando declarado, é conferido aqui antes de chegar à página.
+    const signedDocumentId = install?.signedDocumentId;
     if (!install || install.version !== 1 || install.op !== 'install' ||
       typeof install.nonce !== 'string' || !HIGHLIGHT_NONCE.test(install.nonce) ||
-      install.documentId !== record.documentId || !validHighlightChromeId(install.frameId) ||
+      install.documentId !== record.documentId ||
+      (signedDocumentId !== undefined &&
+        (typeof signedDocumentId !== 'string' || !HIGHLIGHT_DOCUMENT_ID.test(signedDocumentId))) ||
+      !validHighlightChromeId(install.frameId) ||
       !selector || !structuralSignature || !['failed', 'manual'].includes(install.kind) ||
       !Number.isSafeInteger(install.markerNumber) || install.markerNumber < 1 || install.markerNumber > 5_000) {
       return null;
@@ -242,6 +250,9 @@ function highlightCommandInput(value) {
       op: 'install',
       nonce: install.nonce,
       documentId: install.documentId,
+      // O campo só viaja quando o modo de recarga o declarou: o comando do caso de sempre continua
+      // com exatamente as mesmas chaves de antes.
+      ...(signedDocumentId === undefined ? {} : { signedDocumentId }),
       frameId: install.frameId,
       selector,
       structuralSignature,

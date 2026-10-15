@@ -122,6 +122,59 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
   const SIGNAL_ATTRIBUTES = Object.freeze(['name', 'alt', 'title', 'aria-label', 'data-testid', 'role']);
   const MAX_TARGETS = 500;
   const MAX_SIGNALS = 500;
+  const MAX_CORROBORATION_TEXT = 200;
+  const CORROBORATION_CONTROL = /[\u0000-\u001f\u007f]/u;
+
+  // Mesmo corte do worker (src/core/evidence/locator-corroboration.js). Copiado aqui porque este
+  // overlay é serializado e injetado como função: não pode importar nada.
+  function normalizeCorroborationText(value) {
+    if (typeof value !== 'string' || value.length > 4_000) return '';
+    const normalized = value.replace(/\s+/gu, ' ').trim();
+    return normalized.length === 0 || normalized.length > MAX_CORROBORATION_TEXT ||
+      CORROBORATION_CONTROL.test(normalized) ? '' : normalized;
+  }
+
+  // `{name?, text?}`: as duas chaves são opcionais e nenhuma outra é aceita.
+  function parseCorroboration(raw) {
+    if (raw === undefined) return null;
+    const record = subsetRecord(raw, [], ['name', 'text']);
+    if (!record) return null;
+    const keys = Object.keys(record);
+    if (keys.length === 0 || keys.length > 2) return null;
+    const parsed = {};
+    for (const key of keys) {
+      const normalized = normalizeCorroborationText(record[key]);
+      if (!normalized) return null;
+      parsed[key] = normalized;
+    }
+    return Object.freeze(parsed);
+  }
+
+  // Leitura viva do que a auditoria registrou: só o que o próprio DOM expõe sem árvore de
+  // acessibilidade — os atributos que nomeiam um controle e o texto renderizado do elemento. O nome
+  // registrado precisa ser IGUAL a um desses valores; o texto visível registrado pode estar dentro do
+  // texto atual, porque o mesmo elemento pode ter ganhado conteúdo em volta na nova versão da página.
+  function elementText(element) {
+    try { return typeof element.textContent === 'string' ? element.textContent : ''; } catch { return ''; }
+  }
+
+  function matchesCorroboration(corroboration, element) {
+    if (!corroboration) return true;
+    const recordedName = normalizeCorroborationText(corroboration.name).toLowerCase();
+    const recordedText = normalizeCorroborationText(corroboration.text).toLowerCase();
+    if (!recordedName && !recordedText) return true;
+    const candidates = [];
+    for (const attribute of ['aria-label', 'alt', 'title', 'value', 'placeholder']) {
+      let raw = null;
+      try { raw = element.getAttribute(attribute); } catch { raw = null; }
+      const normalized = normalizeCorroborationText(raw).toLowerCase();
+      if (normalized) candidates.push(normalized);
+    }
+    const liveText = normalizeCorroborationText(elementText(element)).toLowerCase();
+    if (liveText) candidates.push(liveText);
+    if (recordedName && candidates.includes(recordedName)) return true;
+    return Boolean(recordedText) && liveText.includes(recordedText);
+  }
 
   // Three shapes, each with a closed key set so nothing extra can travel in the envelope.
   function parseMatch(raw) {
@@ -181,12 +234,16 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       const parsedTargets = [];
       let signalCount = 0;
       for (const targetValue of targets) {
-        const target = exactRecord(targetValue, ['markerId', 'number', 'match', 'signals']);
+        const target = subsetRecord(targetValue, ['markerId', 'number', 'match', 'signals'], ['corroboration']);
         if (!target || !validOpaqueId(target.markerId, 'm') || markerIds.has(target.markerId) ||
           !Number.isSafeInteger(target.number) || target.number < 1 || target.number > 5_000) return null;
         markerIds.add(target.markerId);
         const parsedMatch = parseMatch(target.match);
         if (!parsedMatch) return null;
+        // A corroboração só viaja no modo "página recarregada". Presente e inválida, o comando
+        // inteiro é recusado: melhor não desenhar nada do que desenhar sobre outro elemento.
+        const corroboration = target.corroboration === undefined ? null : parseCorroboration(target.corroboration);
+        if (target.corroboration !== undefined && corroboration === null) return null;
         const signals = denseArray(target.signals, MAX_SIGNALS, 1);
         if (!signals) return null;
         const parsedSignals = [];
@@ -203,6 +260,7 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
           markerId: target.markerId,
           number: target.number,
           match: parsedMatch,
+          corroboration,
           signals: Object.freeze(parsedSignals),
         }));
       }
@@ -279,6 +337,11 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
     }
   }
 
+  function sameCorroboration(left, right) {
+    if (!left || !right) return !left && !right;
+    return left.name === right.name && left.text === right.text;
+  }
+
   function sameInstall(left, right) {
     if (!left || !right || left.installationId !== right.installationId || left.ttlMs !== right.ttlMs ||
       left.targets.length !== right.targets.length) return false;
@@ -286,7 +349,8 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
       const a = left.targets[index];
       const b = right.targets[index];
       if (a.markerId !== b.markerId || a.number !== b.number ||
-        !sameMatch(a.match, b.match) || a.signals.length !== b.signals.length) return false;
+        !sameMatch(a.match, b.match) || !sameCorroboration(a.corroboration, b.corroboration) ||
+        a.signals.length !== b.signals.length) return false;
       for (let signalIndex = 0; signalIndex < a.signals.length; signalIndex += 1) {
         if (a.signals[signalIndex].selectionId !== b.signals[signalIndex].selectionId ||
           a.signals[signalIndex].classification !== b.signals[signalIndex].classification) return false;
@@ -431,6 +495,12 @@ export function runAuditaPageMarkersCommand(command, environment = globalThis) {
     // element that cannot be found, or not found unambiguously, is reported as unlocated.
     for (const target of install.targets) {
       let resolution = resolveElement(target);
+      if (!resolution.reason && !matchesCorroboration(target.corroboration, resolution.element)) {
+        // Mesmo endereço, documento novo: o locator estrito achou UM elemento, mas o nome acessível
+        // ou o texto registrados não batem. Vale mais dizer que não foi reencontrado do que apontar
+        // para o elemento errado.
+        resolution = { reason: 'evidence-mismatch' };
+      }
       if (!resolution.reason) {
         // Hidden is fine; detached or inside another root (shadow tree, other document) is not.
         const reason = renderedReason(resolution.element);

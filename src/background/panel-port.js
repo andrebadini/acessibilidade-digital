@@ -46,10 +46,11 @@ const SENSITIVE_CATEGORIES = Object.freeze(['password', 'otp', 'payment', 'priva
 const PRIVACY_PAUSE_MESSAGE = 'A página contém conteúdo potencialmente sensível. Confirme para capturar imagens visíveis.';
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
 const HIGHLIGHT_INTENT_TYPES = new Set([
-  'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'CLEAR_HIGHLIGHT',
+  'GET_HIGHLIGHT_AVAILABILITY', 'HIGHLIGHT_OCCURRENCE', 'HIGHLIGHT_OCCURRENCE_RELOADED', 'CLEAR_HIGHLIGHT',
 ]);
 const PAGE_MARKERS_INTENT_TYPES = new Set([
-  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_HIDE_PAGE_MARKERS', 'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
+  'PANEL_SHOW_PAGE_MARKERS', 'PANEL_SHOW_PAGE_MARKERS_RELOADED', 'PANEL_HIDE_PAGE_MARKERS',
+  'PANEL_SELECT_PAGE_MARKER', 'PANEL_FILTER_PAGE_MARKERS',
 ]);
 const AUTHORIZED_SESSION_KEYS = Object.freeze([
   'version', 'sessionCapabilityId', 'auditId', 'windowId', 'mode', 'targetBinding',
@@ -297,30 +298,40 @@ function authorizedHighlightPublication(value, binding, actionAt) {
   const session = authorization && exact(authorization.session, AUTHORIZED_SESSION_KEYS, true);
   const attachedTarget = session && exact(session.targetBinding, ['kind', 'tabId', 'documentId', 'urlSessionDigest'], true);
   const disposableTarget = session && exact(session.targetBinding, ['kind', 'ownershipId', 'state'], true);
+  const viewOnlyTarget = session && exact(session.targetBinding, ['kind'], true);
   const target = attachedTarget?.kind === 'attached'
     ? attachedTarget
-    : disposableTarget?.kind === 'disposable' ? disposableTarget : null;
+    : disposableTarget?.kind === 'disposable' ? disposableTarget
+      : viewOnlyTarget?.kind === 'view-only' ? viewOnlyTarget : null;
   const intents = session && exact(session.intents, ['panel', 'review'], true);
   const panelIntents = intents && (
     exact(intents.panel, ['running', 'privacy-paused', 'result', 'view-only'], true) ??
     exact(intents.panel, ['running', 'result', 'view-only'], true)
   );
-  const resultIntents = panelIntents && safeStringArray(panelIntents.result);
+  // A lista de intenções é a do estado da própria sessão, como em authorizeSession. Uma sessão
+  // "view-only" — criada quando a página auditada é recarregada — autoriza pelo estado "view-only".
+  const stateIntents = session && safeStringArray(panelIntents?.[session.state]);
   const context = authorization && exact(authorization.context, ['issuer', 'windowId', 'tabId', 'contextType', 'documentUrl'], true);
   const issuer = context && exact(context.issuer, ['type', 'documentId', 'path'], true);
+  // A prova de documento de uma sessão "view-only" não mora aqui: ela é feita pelo controlador de
+  // destaque, que só recoloca o sinal depois de reconhecer o documento, o localizador estrito e as
+  // evidências registradas. A sessão prova janela, auditoria, consumidor e estado.
   const targetAuthorized = Boolean(
-    session?.mode === 'attached' && target?.kind === 'attached' && target.tabId === binding.admission?.tabId &&
+    session?.state === 'result' && session?.mode === 'attached' && target?.kind === 'attached' &&
+      target.tabId === binding.admission?.tabId &&
       typeof target.documentId === 'string' && target.documentId.length >= 1 && target.documentId.length <= 512 &&
       DIGEST.test(target.urlSessionDigest ?? '') ||
-    session?.mode === 'single' && target?.kind === 'disposable' && target.state === 'retained-for-review' &&
-      /^owner_[A-Za-z0-9_-]{22}$/u.test(target.ownershipId ?? ''),
+    session?.state === 'result' && session?.mode === 'single' && target?.kind === 'disposable' &&
+      target.state === 'retained-for-review' &&
+      /^owner_[A-Za-z0-9_-]{22}$/u.test(target.ownershipId ?? '') ||
+    session?.state === 'view-only' && session?.mode === 'attached' && target?.kind === 'view-only',
   );
-  return Boolean(authorization?.ok === true && session && target && targetAuthorized && resultIntents &&
+  return Boolean(authorization?.ok === true && session && target && targetAuthorized && stateIntents &&
     session.version === 1 && session.sessionCapabilityId === binding.sessionCapabilityId &&
     session.auditId === binding.auditId && session.windowId === binding.windowId &&
-    session.state === 'result' && safeEpoch(session.issuedAt) && safeEpoch(session.expiresAt) &&
+    safeEpoch(session.issuedAt) && safeEpoch(session.expiresAt) &&
     session.issuedAt <= actionAt && actionAt < session.expiresAt &&
-    resultIntents.includes('highlight') &&
+    stateIntents.includes('highlight') &&
     context.windowId === binding.windowId && context.tabId === null && context.contextType === 'SIDE_PANEL' &&
     context.documentUrl === binding.sender.url && issuer?.type === 'extension-document' &&
     issuer.documentId === binding.issuerDocumentId && issuer.path === '/src/panel/index.html');
