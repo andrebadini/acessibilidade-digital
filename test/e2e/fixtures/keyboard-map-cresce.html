@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Serviços que se montam aos poucos</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="keyboard-map-cresce.css">
+</head>
+<body>
+<h1>Serviços ao cidadão</h1>
+<!--
+  Página que se monta aos poucos (1.1.62). O aviso ilustrado NÃO tem tamanho na primeira leitura: a imagem
+  chega alguns segundos depois da carga, o aviso cresce ~600 px e empurra os controles para baixo. É o padrão
+  real que deixava o mapa do teclado sem caixa nenhuma — leitura estrutural de um leiaute, imagem de outro.
+
+  O atraso é do SERVIDOR de teste, não da página: numa aba escondida o Chrome adia temporizador e as
+  continuações de `fetch`, então quem cronometra o crescimento é a resposta da imagem (rede não é adiada). O
+  pedido sai no primeiro `resize`, que é o da captura de aquecimento: o tempo passa a ser contado a partir do
+  próprio evento que a auditoria provoca, e não de um relógio solto que dependeria da duração do axe.
+-->
+<div id="novidades"></div>
+<div id="catalogo" class="etiquetas"></div>
+<main id="controles">
+  <button type="button" id="alvo-protocolo" aria-label="Protocolo">Abrir protocolo</button>
+  <a id="alvo-segunda-via" href="#segunda-via">Segunda via</a>
+  <select id="alvo-agendamento" aria-label="Agendamento">
+    <option value="manha">Manhã</option>
+    <option value="tarde">Tarde</option>
+  </select>
+  <input id="alvo-busca" type="search" aria-label="Buscar">
+  <button type="button" id="alvo-contato" aria-label="Contato">Falar com a equipe</button>
+</main>
+<div class="rodape">Atendimento de segunda a sexta, das 8h às 18h.</div>
+<script src="keyboard-map-cresce.js"></script>
+</body>
+</html>

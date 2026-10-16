@@ -1,6 +1,7 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
-import { warmUpFullPageLayout } from './full-page-warm-up.js';
+import { establishWidenedLayout, warmUpFullPageLayout } from './full-page-warm-up.js';
 import { mapSourceGeometry } from '../core/evidence/map-source-geometry.js';
+import { domSnapshotRects, snapshotFrameId, withFreshRects } from '../core/evidence/fresh-geometry.js';
 import { measureElementTarget } from '../browser/measure-element.js';
 import { collectPage } from '../browser/collect-page.js';
 import { AXE_PROVENANCE, runAxeInTab } from '../browser/axe-adapter.js';
@@ -508,6 +509,19 @@ function probesTimedOut(raw, normalized) {
     .some(warning => typeof warning?.code === 'string' && /TIMEOUT/u.test(warning.code));
 }
 
+/**
+ * Tamanho em px CSS da imagem que a captura integral declarou (`metadata.width/height`).
+ *
+ * É a verdade da imagem: já vem com o teto de segurança aplicado quando a página era alta demais, e é por
+ * ele que os mapas convertem retângulo de documento em pixel de imagem. Sem números utilizáveis, os mapas
+ * voltam ao tamanho do documento lido antes da captura.
+ */
+function capturedImageSize(fullPage) {
+  const width = fullPage?.metadata?.width;
+  const height = fullPage?.metadata?.height;
+  return Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0 ? { width, height } : null;
+}
+
 function fallbackItems() {
   return NBR17225_ITEMS.map(item => ({ ...item, wcag: item.wcag.map(reference => ({ ...reference })), outcome: 'cantTell', ruleResults: [] }));
 }
@@ -941,16 +955,52 @@ async function runLegacyAudit({
       rethrowAbort(error, signal);
       pristineMetrics = {};
     }
-    // `mapSource` carrega a decisão "a imagem e os retângulos são do mesmo estado?" usada pelos dois mapas.
+    // `mapSource` carrega a decisão "as caixas podem ser desenhadas?" e a geometria que os dois mapas usam;
+    // `mapSnapshot` é o instantâneo com os retângulos medidos no mesmo estado da imagem (1.1.62).
     let mapSource = null;
-    // Captura integral com as métricas do próprio instante da captura. Antes (até 1.1.59) a imagem era
-    // tirada logo depois da navegação e a estrutura era lida segundos depois, após o axe: em páginas que
-    // crescem sozinhas (carregamento sob demanda, listas que se completam) a imagem ficava de um estado e os
-    // retângulos de outro. O resultado eram caixas de mapa deslocadas — pior, para quem não programa, do que
-    // caixa nenhuma. Agora a captura acontece no mesmo instante da leitura da estrutura e `mapSourceGeometry`
-    // confere se as duas concordam; quando não concordam, o mapa vai sem caixas.
+    let mapSnapshot = null;
+    /**
+     * Retângulos frescos: uma única chamada em lote, logo depois da captura, no leiaute que a imagem acabou
+     * de mostrar. Nada de uma ida por elemento, e nada de chamar isto em laço.
+     *
+     * A leitura estrutural acontece segundos antes (árvore DOM + acessibilidade) e em página que se monta
+     * aos poucos os retângulos dela já não valem; estes valem, e quem sumiu simplesmente fica sem caixa.
+     * Ver `src/core/evidence/fresh-geometry.js` para as medições que sustentam medir depois, e não antes.
+     */
+    async function measureFreshRects() {
+      try {
+        const capture = await awaitStep(() => cdp.command('DOMSnapshot.captureSnapshot', {
+          computedStyles: [],
+          includeDOMRects: true,
+        }, { timeoutMs: 45_000 }));
+        const rects = domSnapshotRects(capture, { frameId: snapshotFrameId(state.snapshot) });
+        // Métricas depois da medição: se a página cresceu enquanto os retângulos eram medidos, a própria
+        // medição é incoerente e o mapa sai sem caixa nenhuma.
+        let measurementMetrics = null;
+        try {
+          measurementMetrics = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
+        } catch (error) {
+          rethrowAbort(error, signal);
+        }
+        return { rects, measurementMetrics, count: rects?.size ?? 0 };
+      } catch (error) {
+        rethrowAbort(error, signal);
+        return { rects: null, measurementMetrics: null, count: 0 };
+      }
+    }
+    // Captura integral com as métricas do próprio instante da captura, seguida da medição fresca dos
+    // retângulos no mesmo leiaute. Antes (até 1.1.61) os retângulos vinham só da leitura estrutural e a
+    // comparação de altura entre os dois instantes, quando falhava, deixava o mapa inteiro sem caixa — o que
+    // em página que se monta sozinha (carrossel, carga preguiçosa, banner de consentimento) acontecia quase
+    // sempre. `mapSourceGeometry` continua recusando desenhar quando não há geometria fresca ou quando o
+    // leiaute se mexeu em volta dela.
     async function capturePristineFullPage() {
       try {
+        // O leiaute que a captura vai mostrar é o alargado (`captureBeyondViewport` tira a barra de rolagem).
+        // Fixá-lo ANTES da medida do instante é o que faz recorte, imagem e retângulos frescos descreverem o
+        // mesmo estado: ver `establishWidenedLayout`. Sem isso, a própria captura mexeria na largura entre
+        // uma medida e a outra e as comparações de leiaute acusariam a página por um rearranjo dela mesma.
+        await establishWidenedLayout({ cdp, step: awaitStep, signal });
         const captureMetrics = await awaitStep(() => cdp.command('Page.getLayoutMetrics', {}));
         state.fullPage = await awaitStep(() => (chromeAdapter.captureFullPage || captureFullPage)(cdp, captureMetrics));
         const artifact = {
@@ -976,16 +1026,21 @@ async function runLegacyAudit({
         } catch (error) {
           rethrowAbort(error, signal);
         }
+        const fresh = await measureFreshRects();
         mapSource = mapSourceGeometry({
           captureMetrics,
           captureMetricsAfter,
-          // Os retângulos vêm do instantâneo lido pela coleta, então o estado a comparar é o do instantâneo
-          // (`layoutMetricsAtSnapshot`), não o do fim da coleta: numa página que cresce sozinha, o fim da
-          // coleta já é outro leiaute e a comparação passaria batido.
-          observedMetrics: raw?.layoutMetricsAtSnapshot || state.snapshot?.document?.layoutMetrics,
+          measurementMetrics: fresh.measurementMetrics,
+          // A imagem manda na escala: é o tamanho declarado pela própria captura (px CSS do recorte), que já
+          // vem cortado quando o teto de segurança truncou a página.
+          imageSize: capturedImageSize(state.fullPage),
+          freshRectCount: fresh.count,
           capturedHeight: state.fullPageCapturedHeight,
           deviceScaleFactor: state.environment?.viewport?.deviceScaleFactor,
         });
+        // Instantâneo só para os mapas: os retângulos frescos no lugar dos lidos na coleta. O instantâneo da
+        // auditoria (`state.snapshot`) não é tocado — ele continua sendo a evidência estrutural.
+        mapSnapshot = withFreshRects(state.snapshot, fresh.rects).snapshot;
       } catch (error) {
         if (isPixelBoundaryInterruption(error, chromeAdapter)) {
           if (!canContinueWithoutFurtherPixels(error, chromeAdapter, signal)) throw error;
@@ -1298,7 +1353,9 @@ async function runLegacyAudit({
       try {
         const map = await awaitStep(() => chromeAdapter.composeAnnouncementMap({
           pageId: 'page-1',
-          snapshot: state.snapshot,
+          // Retângulos medidos no mesmo leiaute da imagem (1.1.62). Muda só a ENTRADA de geometria: o
+          // desenho deste mapa não é tocado aqui.
+          snapshot: mapSnapshot ?? state.snapshot,
           fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
           // Geometria do instante da captura: inclui o teto de segurança (`mapSource.truncated`) e o fator de
           // escala do dispositivo. Os dois mapas usam exatamente os mesmos números.
@@ -1335,7 +1392,8 @@ async function runLegacyAudit({
       try {
         const map = await awaitStep(() => chromeAdapter.composeKeyboardMap({
           pageId: 'page-1',
-          snapshot: state.snapshot,
+          // Mesma geometria fresca do mapa de anúncios: retângulos medidos no leiaute da imagem.
+          snapshot: mapSnapshot ?? state.snapshot,
           occurrences: state.occurrences,
           fullPageEvidence: structuredClone({ ...pristineArtifact, pageId: 'page-1' }),
           layoutMetrics: mapSource.layoutMetrics,

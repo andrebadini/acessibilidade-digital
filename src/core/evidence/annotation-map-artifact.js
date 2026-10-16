@@ -3,15 +3,17 @@ import { sha256Hex } from '../report/hash.js';
 import { decodePngDataUrl, pngDataUrlDecodedByteLength, validatePngRasterData } from './png.js';
 
 export const ANNOTATION_MAP_ALGORITHM = 'audita.annotation-map';
-export const ANNOTATION_MAP_VERSION = '1.2.0';
+export const ANNOTATION_MAP_VERSION = '1.3.0';
 
 /**
  * Versões do algoritmo que esta revisão sabe **ler**, além de escrever. A 1.0.0 é a publicada na
  * 1.1.56 e continua aceita porque há auditorias guardadas nela: recusá-la faria o relatório de quem já
  * auditou parar de abrir. A 1.1.0 nunca foi publicada, então não tem regra de leitura — mapas novos
- * saem sempre na versão atual.
+ * saem sempre na versão atual. A 1.2.0 (publicada na 1.1.61) é desenhada exatamente como a 1.3.0: o que
+ * mudou na 1.3.0 foi a ORIGEM dos retângulos, medidos no mesmo leiaute da imagem (`fresh-geometry.js`) em
+ * vez da leitura estrutural de segundos antes.
  */
-export const ANNOTATION_MAP_READABLE_VERSIONS = Object.freeze(['1.0.0', ANNOTATION_MAP_VERSION]);
+export const ANNOTATION_MAP_READABLE_VERSIONS = Object.freeze(['1.0.0', '1.2.0', ANNOTATION_MAP_VERSION]);
 
 /**
  * Comprimento mínimo da linha-guia, no mesmo sistema do retângulo recebido por `annotationLeaderPoint`
@@ -104,16 +106,21 @@ function centeredLeaderPoint(sourceRect) {
 
 /**
  * Regras de leitura por versão do algoritmo. A versão declarada no artefato escolhe o conjunto, e
- * nenhuma das duas é afrouxada para aceitar a outra: um mapa 1.0.0 com a ponta da linha-guia na borda
- * é tão inválido quanto um 1.2.0 com a ponta no centro. `omittedClipped` só existe a partir da 1.2.0,
+ * nenhuma delas é afrouxada para aceitar a outra: um mapa 1.0.0 com a ponta da linha-guia na borda
+ * é tão inválido quanto um 1.3.0 com a ponta no centro. `omittedClipped` só existe a partir da 1.2.0,
  * então na 1.0.0 o conjunto de contagens é fechado sem ela — e a contagem vale zero.
  */
+const MARKED_WITH_EDGE_LEADER = Object.freeze({
+  leader: (sourceRect, marker) => annotationLeaderPoint(sourceRect, marker.x, marker.y),
+  omittedClipped: true,
+});
+
 const READ_RULES = new Map([
   ['1.0.0', Object.freeze({ leader: (sourceRect) => centeredLeaderPoint(sourceRect), omittedClipped: false })],
-  [ANNOTATION_MAP_VERSION, Object.freeze({
-    leader: (sourceRect, marker) => annotationLeaderPoint(sourceRect, marker.x, marker.y),
-    omittedClipped: true,
-  })],
+  // A 1.2.0 e a 1.3.0 desenham igual; a diferença entre elas é de onde veio o retângulo, não o que o mapa
+  // faz com ele. As duas entram com as mesmas regras, e nenhuma delas afrouxa a 1.0.0.
+  ['1.2.0', MARKED_WITH_EDGE_LEADER],
+  [ANNOTATION_MAP_VERSION, MARKED_WITH_EDGE_LEADER],
 ]);
 
 function readRules(version) {

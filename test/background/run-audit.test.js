@@ -834,11 +834,43 @@ function pageWithFallbackInput(type) {
   return page;
 }
 
+/**
+ * Resposta de `DOMSnapshot.captureSnapshot` no formato colunar, montada a partir dos retângulos informados.
+ *
+ * A medição fresca da 1.1.62 (`fresh-geometry.js`) lê exatamente este formato, indexado por
+ * `backendNodeId`. Sem ele o mapa sairia sem caixa nenhuma por falta de geometria, e nenhum teste cobriria o
+ * caminho em que o mapa desenha. É o único jeito de o navegador simulado responder a essa pergunta sem
+ * repetir aqui a árvore inteira: cada entrada é um par `[backendNodeId, rect]`, e `rect` nulo é nó sem caixa.
+ */
+function domSnapshotFromRects(entries) {
+  const nodes = { nodeType: [9], nodeName: ['#document'], backendNodeId: [undefined] };
+  const nodeIndex = [];
+  const bounds = [];
+  entries.forEach(([backendNodeId, rect], offset) => {
+    const index = offset + 1;
+    nodes.nodeType.push(1);
+    nodes.nodeName.push('ELEMENT');
+    nodes.backendNodeId.push(backendNodeId);
+    if (rect) {
+      nodeIndex.push(index);
+      bounds.push([rect.x, rect.y, rect.width, rect.height]);
+    }
+  });
+  return { strings: [], documents: [{ frameId: 0, nodes, layout: { nodeIndex, bounds } }] };
+}
+
+/** Retângulos do próprio documento simulado: o leiaute fresco é igual ao lido, como numa página parada. */
+function domSnapshotOfPage(page) {
+  return domSnapshotFromRects((Array.isArray(page?.nodes) ? page.nodes : []).map(node => [node.backendNodeId, node.rect]));
+}
+
 function fakeAdapter(options = {}) {
   const events = [];
   const page = options.page || rawPage();
   let screenshots = 0;
   let warmUps = 0;
+  let widenings = 0;
+  let coletou = false;
   let fullPageCalls = 0;
   let elementCalls = 0;
   let disconnects = 0;
@@ -846,13 +878,23 @@ function fakeAdapter(options = {}) {
   const cdp = {
     async command(method, params = {}) {
       if (method === 'Page.getLayoutMetrics') return page.layoutMetrics;
+      // Medição fresca dos retângulos. `options.domSnapshot === null` simula o navegador que não responde, e
+      // uma função simula uma página cujo leiaute mudou entre a leitura estrutural e a captura.
+      if (method === 'DOMSnapshot.captureSnapshot') {
+        if (options.domSnapshot === null) return {};
+        return typeof options.domSnapshot === 'function' ? options.domSnapshot(page, params) : domSnapshotOfPage(page);
+      }
       if (method === 'Page.captureScreenshot') {
-        // O aquecimento descartável (1.1.60) é jpeg em escala pequena e NÃO é captura de evidência: não
-        // entra na contagem de raster nem na ordem das capturas que os testes observam. Os bytes são
-        // descartados pelo próprio módulo, então aqui basta devolver qualquer coisa — nada os lê.
+        // As capturas descartáveis — o aquecimento (1.1.60) e o alargamento do leiaute antes de medir o
+        // instante da captura (1.1.62), os dois jpeg em escala pequena — NÃO são captura de evidência: não
+        // entram na contagem de raster nem na ordem das capturas que os testes observam. Os bytes são
+        // descartados pelos próprios módulos, então aqui basta devolver qualquer coisa — nada os lê.
+        // Quem separa as duas é a FASE: o aquecimento vem antes da leitura da estrutura, o alargamento
+        // depois dela e imediatamente antes da captura de verdade.
         if (params.format === 'jpeg') {
-          warmUps += 1;
-          events.push('warm-up');
+          const descartavel = coletou ? 'widen' : 'warm-up';
+          if (coletou) widenings += 1; else warmUps += 1;
+          events.push(descartavel);
           return { data: 'AQUECIMENTO-DESCARTAVEL' };
         }
         screenshots += 1;
@@ -880,7 +922,7 @@ function fakeAdapter(options = {}) {
   let randomValue = 0;
   const adapter = {
     events,
-    get counts() { return { screenshots, warmUps, fullPageCalls, elementCalls, disconnects, removals }; },
+    get counts() { return { screenshots, warmUps, widenings, fullPageCalls, elementCalls, disconnects, removals }; },
     async createTab() {
       events.push('create-tab');
       if (options.createTabFailure) throw new Error('detalhe privado de criação');
@@ -911,6 +953,7 @@ function fakeAdapter(options = {}) {
       };
     },
     async collectPage() {
+      coletou = true;
       events.push('collect');
       options.afterCollect?.();
       if (options.collectError) throw options.collectError;
@@ -3168,6 +3211,14 @@ test('o aquecimento da captura integral só roda quando ela está permitida', as
   assert.ok(permitido.events.indexOf('axe') < permitido.events.indexOf('warm-up'));
   assert.ok(permitido.events.indexOf('warm-up') < permitido.events.indexOf('collect'),
     'o aquecimento precisa vir antes da leitura da estrutura — é isso que evita caixa desalinhada');
+  // Depois da leitura, uma captura descartável que fixa o leiaute ALARGADO (sem barra de rolagem) antes de
+  // a auditoria medir o instante da captura: é isso que faz recorte, imagem e retângulos frescos
+  // descreverem o mesmo estado. Ela é descartável como o aquecimento e não vira evidência.
+  assert.equal(permitido.counts.widenings, 1, 'o leiaute alargado é fixado uma vez, antes da captura');
+  assert.ok(permitido.events.indexOf('collect') < permitido.events.indexOf('widen'),
+    `o alargamento vem depois da leitura da estrutura: ${JSON.stringify(permitido.events)}`);
+  assert.ok(permitido.events.indexOf('widen') < permitido.events.indexOf('full-page'),
+    `o alargamento vem antes da captura de verdade: ${JSON.stringify(permitido.events)}`);
 
   // (b) modos sem captura integral: `captureFullPage` é falso e o aquecimento nem começa, para o resultado
   // de nenhum modo sem pixels poder mudar por causa dele.
@@ -3176,6 +3227,7 @@ test('o aquecimento da captura integral só roda quando ela está permitida', as
     const resultado = await auditarUrl(createCapturePolicyV1({ mode, includeQuery: false }), adapter, `audit-warm-up-${mode}`);
     assert.ok(['complete', 'partial'].includes(resultado.status), resultado.status);
     assert.equal(adapter.counts.warmUps, 0, `${mode} não pode aquecer`);
+    assert.equal(adapter.counts.widenings, 0, `${mode} não pode fixar leiaute alargado`);
     assert.equal(adapter.events.includes('warm-up'), false);
     // No modo sem pixels nenhum raster pode acontecer; no modo somente elementos as miniaturas continuam.
     if (mode === 'no-pixels') assert.equal(adapter.counts.screenshots, 0, 'sem pixels nenhum raster');
@@ -3191,6 +3243,7 @@ test('o aquecimento da captura integral só roda quando ela está permitida', as
   const anexadoResult = await attachedFullEvidence(anexado, 'audit-warm-up-attached');
   assert.equal(anexadoResult.state, 'model');
   assert.equal(anexado.counts.warmUps, 1, 'a página do próprio usuário também é aquecida, uma vez');
+  assert.equal(anexado.counts.widenings, 1, 'e o leiaute alargado é fixado antes da captura de evidência');
   assert.ok(anexado.events.indexOf('warm-up') < anexado.events.indexOf('collect'),
     'e o aquecimento vem antes da leitura da estrutura');
   assert.ok(anexado.counts.screenshots >= 1, 'a captura de evidência continua acontecendo');
@@ -4461,8 +4514,11 @@ test('a very tall page keeps a capped pristine capture, declares the truncation 
   assert.equal(result.failureCode, null);
   assert.ok(['complete', 'partial'].includes(result.model.session.status), result.model.session.status);
   assert.equal(clips[0].height, 16_384, 'the pristine capture never exceeds the safe device height');
-  assert.equal(aquecimentos.length, 1, 'a página é aquecida uma vez, e nenhum aquecimento vira evidência');
-  assert.ok(aquecimentos[0].scale <= 0.1, `o aquecimento sai em escala pequena: ${JSON.stringify(aquecimentos[0])}`);
+  // Duas capturas descartáveis, nenhuma delas evidência: o aquecimento (antes da leitura) e a que fixa o
+  // leiaute alargado (depois da leitura, antes da captura). As duas em escala pequena.
+  assert.equal(aquecimentos.length, 2, 'o aquecimento e o alargamento, e nenhum deles vira evidência');
+  assert.ok(aquecimentos.every(clip => clip.scale <= 0.1),
+    `as descartáveis saem em escala pequena: ${JSON.stringify(aquecimentos)}`);
   const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
   assert.ok(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'));
   assert.equal(codes.includes('FULL_PAGE_CAPTURE_FAILED'), false);
@@ -4470,20 +4526,11 @@ test('a very tall page keeps a capped pristine capture, declares the truncation 
   assert.equal(mapInput.layoutMetrics.cssContentSize.height, 16_384, 'the map geometry matches the captured area');
 });
 
-test('a page that grows while it is read gets maps without boxes and the geometry of the capture instant', async () => {
-  const page = rawPage();
-  // Leiaute no começo da leitura e leiaute quando a captura sai: a página ganhou 1.800 px de conteúdo no
-  // meio (carregamento sob demanda). Antes da 1.1.60 as caixas eram desenhadas com a escala do primeiro
-  // estado sobre a imagem do segundo, e cada caixa caía longe do item.
-  const collected = { cssContentSize: { width: 800, height: 1200 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
-  const grown = { cssContentSize: { width: 800, height: 3000 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
-  page.layoutMetrics = collected;
-  // O instantâneo mediu os retângulos com a página em 1.200 px; a coleta terminou e o leiaute já era outro.
-  page.layoutMetricsAtSnapshot = collected;
+/** Adaptador que entrega as duas listas de entrada dos mapas, na ordem em que são compostos. */
+function mappingAdapter(page, options = {}) {
   const inputs = [];
   const adapter = fakeAdapter({
-    page, trackCaptureCalls: true,
-    afterCollect: () => { page.layoutMetrics = grown; },
+    page, trackCaptureCalls: true, ...options,
     composeMap: async input => {
       inputs.push(input);
       return createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId });
@@ -4497,18 +4544,70 @@ test('a page that grows while it is read gets maps without boxes and the geometr
       });
     },
   });
+  return { adapter, inputs };
+}
+
+test('a page that grew between the read and the capture gets boxes measured in the image state', async () => {
+  const page = rawPage();
+  // Leiaute no começo da leitura e leiaute quando a captura sai: a página ganhou 1.800 px de conteúdo no
+  // meio (carregamento sob demanda) e o conteúdo desceu junto. Até a 1.1.61 isso bastava para o mapa inteiro
+  // sair sem caixa nenhuma, porque a comparação era com a altura da LEITURA; desde a 1.1.62 os retângulos
+  // são medidos de novo, já no leiaute que a imagem mostra.
+  const collected = { cssContentSize: { width: 800, height: 1200 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  const grown = { cssContentSize: { width: 800, height: 3000 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  page.layoutMetrics = collected;
+  page.layoutMetricsAtSnapshot = collected;
+  const { adapter, inputs } = mappingAdapter(page, {
+    afterCollect: () => { page.layoutMetrics = grown; },
+    // Medição fresca: os nós desceram 1.800 px, e o segundo botão saiu da página (o mesmo script que cresce
+    // a lista também troca o rodapé). Ele perde a caixa; os outros dois continuam.
+    domSnapshot: () => domSnapshotFromRects([
+      [1, { x: 10, y: 1820, width: 80, height: 30 }],
+      [3, { x: 10, y: 1900, width: 320, height: 180 }],
+    ]),
+  });
 
   const result = await attachedFullEvidence(adapter, 'audit-growing-page');
 
   assert.equal(result.state, 'model');
   assert.equal(inputs.length, 2, 'os dois mapas continuam sendo gerados');
   for (const input of inputs) {
-    assert.equal(input.sourceAligned, false, 'sem acordo de leiaute nenhuma caixa é desenhada');
-    assert.equal(input.layoutMetrics.cssContentSize.height, 3000, 'a geometria descreve o instante da captura');
+    assert.equal(input.sourceAligned, true, 'há geometria fresca e o leiaute parou em volta dela');
+    assert.equal(input.layoutMetrics.cssContentSize.height, 3000, 'a geometria descreve o instantâneo da captura');
+    const nodes = new Map(input.snapshot.nodes.map(node => [node.nodeId, node]));
+    assert.deepEqual(nodes.get('n-1').rect, { x: 10, y: 1820, width: 80, height: 30 }, 'a caixa sai do estado da imagem');
+    assert.deepEqual(nodes.get('n-3').rect, { x: 10, y: 1900, width: 320, height: 180 });
+    assert.equal(nodes.get('n-2').rect, undefined, 'nó que saiu da página perde só a própria caixa');
   }
   const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
   assert.equal(codes.includes('FULL_PAGE_CAPTURE_FAILED'), false);
   assert.equal(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'), false);
+});
+
+test('a page that grows while the rectangles are measured gets maps without boxes', async () => {
+  const page = rawPage();
+  const collected = { cssContentSize: { width: 800, height: 1200 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  const grown = { cssContentSize: { width: 800, height: 3000 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  page.layoutMetrics = collected;
+  const { adapter, inputs } = mappingAdapter(page, {
+    // A página cresce NO MEIO da medição fresca: a captura e o leiaute em volta dela concordam, mas os
+    // retângulos foram medidos enquanto a página se mexia — medir é esperar, e o que sai daí não é confiável.
+    domSnapshot: () => {
+      page.layoutMetrics = grown;
+      return domSnapshotOfPage(page);
+    },
+  });
+
+  const result = await attachedFullEvidence(adapter, 'audit-growing-while-measuring');
+
+  assert.equal(result.state, 'model');
+  assert.equal(inputs.length, 2);
+  for (const input of inputs) {
+    assert.equal(input.sourceAligned, false, 'medição incoerente não vira caixa');
+    assert.equal(input.layoutMetrics.cssContentSize.height, 1200, 'a geometria continua descrevendo a imagem capturada');
+  }
+  const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
+  assert.equal(codes.includes('FULL_PAGE_CAPTURE_FAILED'), false);
 });
 
 test('a page with more occurrences than the thumbnail budget keeps every occurrence and declares the budget', async () => {

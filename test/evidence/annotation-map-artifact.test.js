@@ -203,11 +203,27 @@ function geometryWithLeader(marker, sourceRect = { x: 10, y: 10, width: 100, hei
 
 test('declares the algorithm version that matches the drawn geometry', () => {
   // 1.0.0 → 1.1.0: contorno do alvo. 1.1.0 → 1.2.0: a linha-guia terminava no centro do elemento e
-  // riscava o conteúdo; agora termina na borda do contorno. O mapa guardado é versionado: um artefato
-  // com a versão anterior deixa de ser aceito, e o bump é a marca disso.
+  // riscava o conteúdo; agora termina na borda do contorno. 1.2.0 → 1.3.0: o desenho é o mesmo, mas os
+  // retângulos passaram a ser medidos no mesmo leiaute da imagem (`fresh-geometry.js`); o mapa guardado é
+  // versionado, e o bump é a marca de que a geometria mudou de origem.
   assert.equal(ANNOTATION_MAP_ALGORITHM, 'audita.annotation-map');
-  assert.equal(ANNOTATION_MAP_VERSION, '1.2.0');
+  assert.equal(ANNOTATION_MAP_VERSION, '1.3.0');
   assert.equal(ANNOTATION_MAP_LEADER_MIN_PX, 6);
+});
+
+test('keeps reading the 1.2.0 maps stored by an earlier revision', async () => {
+  const artifact = await completeArtifact();
+  const previous = structuredClone(artifact);
+  previous.derivation.version = '1.2.0';
+  previous.hash = await hashAnnotationMapArtifact(previous);
+
+  assert.equal(validateAnnotationMapArtifact(previous), previous);
+  assert.equal(await hashAnnotationMapArtifact(previous), previous.hash);
+  assert.equal(await hashEvidenceArtifact(previous), previous.hash);
+
+  const unknown = structuredClone(artifact);
+  unknown.derivation.version = '9.9.9';
+  await assert.rejects(hashAnnotationMapArtifact(unknown), /Derivação do mapa inválida/u);
 });
 
 test('ends the leader line on the nearest point of the element rect, never on its centre', async () => {
