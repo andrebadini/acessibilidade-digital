@@ -23,14 +23,22 @@ function emptyCanvas(width, height) {
   return { canvas, context: canvas.getContext('2d') };
 }
 
-/** Crop a document-space rect from a full-page raster into a self-contained PNG data URL. */
-export async function cropElementImage(fullPageDataUrl, bounds, { maxSide = THUMB_MAX, margin = THUMB_MARGIN } = {}) {
+/**
+ * Crop a document-space rect from a full-page raster into a self-contained PNG data URL. `bounds` are
+ * CSS px of the document; `scaleX`/`scaleY` say how many raster px each CSS px became in the capture, so
+ * the crop lands on the element even on a HiDPI screen (where the PNG is twice the CSS size).
+ */
+export async function cropElementImage(fullPageDataUrl, bounds, { maxSide = THUMB_MAX, margin = THUMB_MARGIN, scaleX = 1, scaleY = 1 } = {}) {
   if (!bounds || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(bounds[key])) || bounds.width <= 0 || bounds.height <= 0) return null;
   const source = await loadImage(fullPageDataUrl);
-  const left = Math.max(0, Math.floor(bounds.x - margin));
-  const top = Math.max(0, Math.floor(bounds.y - margin));
-  const right = Math.min(source.width, Math.ceil(bounds.x + bounds.width + margin));
-  const bottom = Math.min(source.height, Math.ceil(bounds.y + bounds.height + margin));
+  const x = bounds.x * scaleX;
+  const y = bounds.y * scaleY;
+  const scaledWidth = bounds.width * scaleX;
+  const scaledHeight = bounds.height * scaleY;
+  const left = Math.max(0, Math.floor(x - margin));
+  const top = Math.max(0, Math.floor(y - margin));
+  const right = Math.min(source.width, Math.ceil(x + scaledWidth + margin));
+  const bottom = Math.min(source.height, Math.ceil(y + scaledHeight + margin));
   const width = right - left;
   const height = bottom - top;
   if (width < 1 || height < 1) return null;
@@ -53,7 +61,7 @@ export async function captureReadingVisuals(chromeApi, { tabId, entries, metrics
   const elementImages = Object.create(null);
   if (!chromeApi?.debugger || !Number.isSafeInteger(tabId) || tabId < 0) {
     limitations.push('visual-capture-unavailable');
-    return { fullPage: null, elementImages, limitations };
+    return { fullPage: null, pageMapGeometry: null, elementImages, limitations };
   }
   const target = { tabId };
   const cdp = createCdpClient({ ...createChromeDebuggerTransport(chromeApi), commandTimeoutMs: 20_000 });
@@ -71,23 +79,32 @@ export async function captureReadingVisuals(chromeApi, { tabId, entries, metrics
     const fullPage = await captureFullPage(cdp, size);
     if (fullPage?.status !== 'captured' || !fullPage.dataUrl) {
       limitations.push('full-page-capture-unavailable');
-      return { fullPage: null, elementImages, limitations };
+      return { fullPage: null, pageMapGeometry: null, elementImages, limitations };
     }
-    const decode = decodePngDataUrl(fullPage.dataUrl);
-    void decode;
+    // A escala sai da própria captura: o PNG pode vir maior que o recorte em CSS (tela de alta
+    // densidade), e é essa razão que converte a medida do documento para o pixel da imagem.
+    const raster = decodePngDataUrl(fullPage.dataUrl);
+    const cssWidth = fullPage.metadata?.width ?? size.cssContentSize?.width;
+    const cssHeight = fullPage.metadata?.height ?? size.cssContentSize?.height;
+    const measured = Number.isFinite(cssWidth) && cssWidth > 0 && Number.isFinite(cssHeight) && cssHeight > 0;
+    const pageMapGeometry = measured
+      ? { pixelWidth: raster.width, pixelHeight: raster.height, cssWidth, cssHeight } : null;
+    if (!pageMapGeometry) limitations.push('page-map-geometry-unavailable');
+    const scaleX = measured ? raster.width / cssWidth : 1;
+    const scaleY = measured ? raster.height / cssHeight : 1;
     for (const entry of entries || []) {
       if (!entry?.bounds) continue;
       try {
-        const image = await cropElementImage(fullPage.dataUrl, entry.bounds);
+        const image = await cropElementImage(fullPage.dataUrl, entry.bounds, { scaleX, scaleY });
         if (image) elementImages[entry.id] = image;
       } catch {
         limitations.push('element-crop-failed');
       }
     }
-    return { fullPage: fullPage.dataUrl, elementImages, limitations };
+    return { fullPage: fullPage.dataUrl, pageMapGeometry, elementImages, limitations };
   } catch {
     limitations.push('visual-capture-unavailable');
-    return { fullPage: null, elementImages, limitations };
+    return { fullPage: null, pageMapGeometry: null, elementImages, limitations };
   } finally {
     if (attached) { try { await cdp.disconnect(target); } catch { /* already detached */ } }
   }

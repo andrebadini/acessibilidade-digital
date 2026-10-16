@@ -142,7 +142,8 @@ test('o modelo recusa apontamento que não existe no mapa ou que sai do document
   const inválido = /Modelo de auditoria inválido/u;
   await assert.rejects(marksAudit({ marks: markOf({ suspects: [2] }) }), inválido,
     'número que não está na lista de itens sem caixa');
-  await assert.rejects(marksAudit({ marks: markOf({ areas: [{ x: 0, y: 0, width: 4, height: 1 }] }) }), inválido,
+  // A captura de referência tem 160×100 CSS: a área abaixo é maior que a página inteira.
+  await assert.rejects(marksAudit({ marks: markOf({ areas: [{ x: 0, y: 0, width: 400, height: 100 }] }) }), inválido,
     'área que passa do documento observado');
   await assert.rejects(marksAudit({ marks: markOf({ suspects: [1] }), itemId: '5.1.4' }), inválido,
     'item que não é o do mapa do teclado');

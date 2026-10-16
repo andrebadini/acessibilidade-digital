@@ -3,17 +3,59 @@ import { sha256Hex } from '../report/hash.js';
 import { decodePngDataUrl, pngDataUrlDecodedByteLength, validatePngRasterData } from './png.js';
 
 export const ANNOTATION_MAP_ALGORITHM = 'audita.annotation-map';
+/**
+ * 1.3.0: o mapa de anúncios virou "mapa de leitura da página". A etiqueta passa a ser só o código curto
+ * (L1, L2…) numa caixa encostada ao elemento, e a legenda saiu da imagem: quem explica os códigos é a
+ * lista em texto ao lado do trecho, no relatório. Antes disso a imagem trazia a legenda raster e o
+ * desenho era um círculo com o número; ler um mapa antigo continua funcionando pelas regras da versão
+ * que ele próprio declara.
+ */
 export const ANNOTATION_MAP_VERSION = '1.3.0';
 
 /**
  * Versões do algoritmo que esta revisão sabe **ler**, além de escrever. A 1.0.0 é a publicada na
- * 1.1.56 e continua aceita porque há auditorias guardadas nela: recusá-la faria o relatório de quem já
- * auditou parar de abrir. A 1.1.0 nunca foi publicada, então não tem regra de leitura — mapas novos
- * saem sempre na versão atual. A 1.2.0 (publicada na 1.1.61) é desenhada exatamente como a 1.3.0: o que
- * mudou na 1.3.0 foi a ORIGEM dos retângulos, medidos no mesmo leiaute da imagem (`fresh-geometry.js`) em
- * vez da leitura estrutural de segundos antes.
+ * 1.1.56 e a 1.2.0 é a publicada na 1.1.60; as duas continuam aceitas porque há auditorias guardadas
+ * nelas: recusá-las faria o relatório de quem já auditou parar de abrir. A 1.1.0 nunca foi publicada,
+ * então não tem regra de leitura — mapas novos saem sempre na versão atual.
  */
 export const ANNOTATION_MAP_READABLE_VERSIONS = Object.freeze(['1.0.0', '1.2.0', ANNOTATION_MAP_VERSION]);
+
+/**
+ * Código curto que aparece na caixa: L1, L2, … A numeração é única no mapa inteiro e segue a ordem em
+ * que um leitor de tela leria, a mesma ordem da legenda.
+ */
+export function annotationCode(number) {
+  return `L${number}`;
+}
+
+export const ANNOTATION_MAP_BADGE_LIMITS = Object.freeze({ minHeightPx: 13, maxHeightPx: 48, widthDivisor: 44 });
+
+/**
+ * Altura da etiqueta em px de documento. Acompanha a largura da captura para a caixa continuar legível
+ * quando a imagem inteira é reduzida na folha A4 — mesma proporção da captura, nunca um tamanho fixo
+ * que some na impressão.
+ */
+export function annotationBadgeHeight(cssWidth) {
+  const raw = Math.round((Number.isFinite(cssWidth) ? cssWidth : 0) / ANNOTATION_MAP_BADGE_LIMITS.widthDivisor);
+  return Math.min(ANNOTATION_MAP_BADGE_LIMITS.maxHeightPx, Math.max(ANNOTATION_MAP_BADGE_LIMITS.minHeightPx, raw));
+}
+
+/** Corpo da letra da etiqueta, em px de documento, derivado da altura. */
+export function annotationBadgeFont(height) {
+  return Math.max(9, Math.round(height * 0.62));
+}
+
+/**
+ * Caixa da etiqueta em px de documento, derivada só do código e da largura da captura: o validador
+ * recalcula o mesmo número, então o tamanho da etiqueta também fica preso ao hash da geometria.
+ */
+export function annotationBadgeSize(number, cssWidth) {
+  const height = annotationBadgeHeight(cssWidth);
+  const font = annotationBadgeFont(height);
+  const label = annotationCode(number);
+  const text = Math.round(label.length * font * 0.62) + Math.round(font * 0.7);
+  return { width: Math.max(height, text), height };
+}
 
 /**
  * Comprimento mínimo da linha-guia, no mesmo sistema do retângulo recebido por `annotationLeaderPoint`
@@ -61,6 +103,8 @@ const GEOMETRY_KEYS = Object.freeze(['coordinateSpace', 'sourceCssSize', 'source
 const SIZE_KEYS = Object.freeze(['width', 'height']);
 const ANNOTATION_KEYS = Object.freeze(['number', 'nodeId', 'sourceRect', 'marker', 'segmentIndex']);
 const MARKER_KEYS = Object.freeze(['x', 'y', 'size', 'leaderX', 'leaderY']);
+/** Etiqueta do mapa de leitura (1.3.0): caixa com largura e altura próprias, no lugar do círculo. */
+const BADGE_KEYS = Object.freeze(['x', 'y', 'width', 'height', 'leaderX', 'leaderY']);
 const SEGMENT_KEYS = Object.freeze(['segmentId', 'index', 'count', 'role', 'sourceCssClip', 'width', 'height', 'dataUrl', 'contentHash']);
 const OMITTED_SEGMENT_KEYS = Object.freeze(SEGMENT_KEYS.filter(key => key !== 'dataUrl'));
 const LEGEND_KEYS = Object.freeze(['number', 'nodeId', 'selectorSummary', 'announcementPreview', 'nameSource', 'segmentIndex']);
@@ -106,28 +150,39 @@ function centeredLeaderPoint(sourceRect) {
 
 /**
  * Regras de leitura por versão do algoritmo. A versão declarada no artefato escolhe o conjunto, e
- * nenhuma delas é afrouxada para aceitar a outra: um mapa 1.0.0 com a ponta da linha-guia na borda
- * é tão inválido quanto um 1.3.0 com a ponta no centro. `omittedClipped` só existe a partir da 1.2.0,
+ * nenhuma delas é afrouxada para aceitar a outra: um mapa 1.0.0 com a ponta da linha-guia na borda é
+ * tão inválido quanto um 1.2.0 com a ponta no centro. `omittedClipped` só existe a partir da 1.2.0,
  * então na 1.0.0 o conjunto de contagens é fechado sem ela — e a contagem vale zero.
+ *
+ * `imageRole` e `continuationRole` dizem como os segmentos se chamam naquela versão: até a 1.2.0 a
+ * legenda era desenhada embaixo da imagem (`image-and-legend`, com continuações quando não cabia); na
+ * 1.3.0 o trecho é só imagem (`image`) e a legenda vive no texto ao lado.
  */
-const MARKED_WITH_EDGE_LEADER = Object.freeze({
-  leader: (sourceRect, marker) => annotationLeaderPoint(sourceRect, marker.x, marker.y),
-  omittedClipped: true,
+const LEGEND_IMAGE_RULES = Object.freeze({
+  imageRole: 'image-and-legend', continuationRole: 'legend-continuation', markerKeys: MARKER_KEYS, badge: false,
 });
-
 const READ_RULES = new Map([
-  ['1.0.0', Object.freeze({ leader: (sourceRect) => centeredLeaderPoint(sourceRect), omittedClipped: false })],
-  // A 1.2.0 e a 1.3.0 desenham igual; a diferença entre elas é de onde veio o retângulo, não o que o mapa
-  // faz com ele. As duas entram com as mesmas regras, e nenhuma delas afrouxa a 1.0.0.
-  ['1.2.0', MARKED_WITH_EDGE_LEADER],
-  [ANNOTATION_MAP_VERSION, MARKED_WITH_EDGE_LEADER],
+  ['1.0.0', Object.freeze({ leader: (sourceRect) => centeredLeaderPoint(sourceRect), omittedClipped: false, ...LEGEND_IMAGE_RULES })],
+  ['1.2.0', Object.freeze({
+    leader: (sourceRect, marker) => annotationLeaderPoint(sourceRect, marker.x, marker.y),
+    omittedClipped: true, ...LEGEND_IMAGE_RULES,
+  })],
+  [ANNOTATION_MAP_VERSION, Object.freeze({
+    leader: (sourceRect, marker) => annotationLeaderPoint(sourceRect, marker.x, marker.y),
+    omittedClipped: true, imageRole: 'image', continuationRole: null, markerKeys: BADGE_KEYS, badge: true,
+  })],
 ]);
 
-function readRules(version) {
+/**
+ * Regras da versão declarada. É a mesma leitura usada aqui e na conferência estrutural do relatório
+ * (`closed-schema`), para não existirem duas verdades sobre o que cada versão aceita.
+ */
+export function annotationMapReadRules(version) {
   const rules = typeof version === 'string' ? READ_RULES.get(version) : undefined;
   if (!rules) throw new TypeError(`Versão do algoritmo do mapa não reconhecida: ${String(version)}.`);
   return rules;
 }
+const readRules = annotationMapReadRules;
 
 function nearlyEqual(left, right) {
   return Math.abs(left - right) <= Math.max(1, Math.abs(left), Math.abs(right)) * 1e-9;
@@ -197,16 +252,19 @@ function validateGeometry(geometry, { imageSegmentCount = null, version = ANNOTA
   for (const [offset, annotation] of geometry.annotations.entries()) {
     const number = offset + 1;
     if (!exactKeys(annotation, ANNOTATION_KEYS) || annotation.number !== number ||
-      !canonicalId(annotation.nodeId, `Geometria ${number}.nodeId`) || !exactKeys(annotation.marker, MARKER_KEYS)) {
+      !canonicalId(annotation.nodeId, `Geometria ${number}.nodeId`) || !exactKeys(annotation.marker, rules.markerKeys)) {
       throw new TypeError(`Anotação geométrica ${number} inválida.`);
     }
     validateClip(annotation.sourceRect, `Geometria ${number}.sourceRect`);
-    for (const key of MARKER_KEYS) finiteNumber(annotation.marker[key], `Geometria ${number}.marker.${key}`, { positive: key === 'size' });
-    if (annotation.marker.size !== 28 || !Number.isSafeInteger(annotation.segmentIndex) || annotation.segmentIndex < 1 ||
+    for (const key of rules.markerKeys) finiteNumber(annotation.marker[key], `Geometria ${number}.marker.${key}`, { positive: key === 'size' });
+    if (!Number.isSafeInteger(annotation.segmentIndex) || annotation.segmentIndex < 1 ||
       (imageSegmentCount !== null && annotation.segmentIndex > imageSegmentCount)) {
       throw new TypeError(`Marcador geométrico ${number} inválido.`);
     }
     const { sourceRect, marker } = annotation;
+    if (!validateMarkerShape(marker, number, geometry.sourceCssSize, rules)) {
+      throw new TypeError(`Marcador geométrico ${number} inválido.`);
+    }
     const leader = rules.leader(sourceRect, marker);
     const within = (value, maximum) => value >= 0 && value <= maximum;
     if (!within(sourceRect.x, geometry.sourceCssSize.width) || !within(sourceRect.y, geometry.sourceCssSize.height) ||
@@ -217,6 +275,20 @@ function validateGeometry(geometry, { imageSegmentCount = null, version = ANNOTA
     }
   }
   return geometry;
+}
+
+/**
+ * Forma da marca por versão: o círculo de 28 px de diâmetro até a 1.2.0 e a caixa do código na 1.3.0 —
+ * cujo tamanho é recalculado de `annotationBadgeSize`, para a etiqueta desenhada e a etiqueta declarada
+ * nunca divergirem.
+ */
+function validateMarkerShape(marker, number, sourceCssSize, rules) {
+  if (!rules.badge) return marker.size === 28;
+  const size = annotationBadgeSize(number, sourceCssSize.width);
+  const half = { width: size.width / 2, height: size.height / 2 };
+  return marker.width === size.width && marker.height === size.height &&
+    marker.x - half.width >= -1e-9 && marker.x + half.width <= sourceCssSize.width + 1e-9 &&
+    marker.y - half.height >= -1e-9 && marker.y + half.height <= sourceCssSize.height + 1e-9;
 }
 
 export async function hashAnnotationMapGeometry(geometry, { version = ANNOTATION_MAP_VERSION } = {}) {
@@ -267,9 +339,12 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
     artifact.segments.length > ANNOTATION_MAP_LIMITS.maxSegments || !Array.isArray(artifact.legend)) {
     throw new TypeError('Estado ou coleções do mapa inválidos.');
   }
-  const imageSegmentCount = artifact.segments.findIndex(segment => segment.role === 'legend-continuation') === -1
-    ? artifact.segments.length
-    : artifact.segments.findIndex(segment => segment.role === 'legend-continuation');
+  // Nas versões com legenda raster as continuações vêm depois das imagens; na 1.3.0 todo segmento é
+  // imagem, então o total de segmentos de imagem é o total de segmentos.
+  const continuationIndex = rules.continuationRole === null
+    ? -1
+    : artifact.segments.findIndex(segment => segment.role === rules.continuationRole);
+  const imageSegmentCount = continuationIndex === -1 ? artifact.segments.length : continuationIndex;
   validateGeometry(artifact.derivation.geometry, { imageSegmentCount, version: artifact.derivation.version });
   const segmentIds = new Set();
   let declaredDerivedBytes = 0;
@@ -290,11 +365,11 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
     if (!exactKeys(segment, pixelsOmitted ? OMITTED_SEGMENT_KEYS : SEGMENT_KEYS) ||
       segment.index !== index || segment.count !== artifact.segments.length ||
       segment.segmentId !== `${artifact.evidenceId}-segment-${index}` || segmentIds.has(segment.segmentId) ||
-      !['image-and-legend', 'legend-continuation'].includes(segment.role) || !SHA256.test(segment.contentHash)) {
+      !(segment.role === rules.imageRole || segment.role === rules.continuationRole) || !SHA256.test(segment.contentHash)) {
       throw new TypeError(`Segmento ${index} do mapa inválido.`);
     }
     segmentIds.add(segment.segmentId);
-    if (segment.role === 'image-and-legend') {
+    if (segment.role === rules.imageRole) {
       if (sawContinuation) throw new TypeError('Segmento de imagem não pode suceder continuação de legenda.');
       validateClip(segment.sourceCssClip, `Segmento ${index}.sourceCssClip`);
       if (!nearlyEqual(segment.sourceCssClip.x, 0) || !nearlyEqual(segment.sourceCssClip.y, expectedClipY) ||
@@ -321,7 +396,7 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
       segment.width !== artifact.derivation.geometry.sourcePixelSize.width) {
       throw new TypeError(`Dimensões do segmento ${index} divergem do PNG ou da origem.`);
     }
-    if (segment.role === 'image-and-legend') {
+    if (segment.role === rules.imageRole) {
       const pixelTop = Math.round(segment.sourceCssClip.y * artifact.derivation.geometry.scaleY);
       const pixelBottom = index === imageSegmentCount
         ? artifact.derivation.geometry.sourcePixelSize.height
@@ -346,7 +421,7 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
     const centerY = annotation.sourceRect.y + annotation.sourceRect.height / 2;
     const clipBottom = clip ? clip.y + clip.height : null;
     const isFinalImageSegment = annotation.segmentIndex === imageSegmentCount;
-    if (segment?.role !== 'image-and-legend' || !clip ||
+    if (segment?.role !== rules.imageRole || !clip ||
       centerY < clip.y - 1e-9 || (isFinalImageSegment ? centerY > clipBottom + 1e-9 : centerY >= clipBottom) ||
       annotation.marker.x < clip.x - 1e-9 || annotation.marker.x > clip.x + clip.width + 1e-9 ||
       annotation.marker.y < clip.y - 1e-9 ||
@@ -366,7 +441,7 @@ export function validateAnnotationMapArtifact(artifact, { sourceArtifact } = {})
     }
     const annotation = artifact.derivation.geometry.annotations[offset];
     if (!annotation || annotation.number !== entry.number || annotation.nodeId !== entry.nodeId ||
-      annotation.segmentIndex !== entry.segmentIndex || artifact.segments[entry.segmentIndex - 1]?.role !== 'image-and-legend') {
+      annotation.segmentIndex !== entry.segmentIndex || artifact.segments[entry.segmentIndex - 1]?.role !== rules.imageRole) {
       throw new TypeError(`Legenda ${number} diverge da anotação geométrica.`);
     }
     legendCodePoints += [...entry.selectorSummary].length + [...entry.announcementPreview].length + [...entry.nameSource].length + 2;

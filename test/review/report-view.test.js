@@ -15,7 +15,9 @@ import { buildReportView, projectExecutive, projectLimitationClauses, renderRepo
 import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
-import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
+import {
+  createAnnotationMapFixture, createLegacyAnnotationMapFixture, createPristineMapSource, TEST_PNG,
+} from '../report/annotation-map-fixture.js';
 import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 import { hashKeyboardMapArtifact } from '../../src/core/keyboard/keyboard-map-artifact.js';
 import { REVIEW_MARKS_VERSION } from '../../src/core/review/review-marks.js';
@@ -593,20 +595,56 @@ test('the interactive reader map displays the derived PNG, numbered full announc
   const root = renderReportView({ view, document: new Document(), onExport() {} });
   const card = root.querySelector('[data-announcement-map-page="page-1"]');
   assert.ok(card, 'the reader map must render as a page-level visual, not just an artifact ID');
+  // O mapa abre com o cabeçalho que dá nome à seção: é por ele que quem usa leitor de tela encontra o
+  // mapa, e é o mesmo título da página de conferência por Tab.
+  const mapSection = card.parentNode;
+  const mapTitle = mapSection.children[1];
+  assert.equal(mapTitle.tagName, 'H3');
+  assert.equal(mapTitle.textContent, 'Mapa de leitura da página');
+  assert.match(mapSection.children[2].textContent, /^Cada caixa marca um elemento da página/u);
   assert.equal(card.getAttribute('data-map-status'), 'complete');
+  assert.equal(card.getAttribute('data-map-format'), 'reading-codes');
   const image = card.querySelector('img[data-map-segment-image]');
   assert.equal(image?.getAttribute('src'), TEST_PNG);
-  assert.match(image?.getAttribute('alt') ?? '', /Segmento 1 de 1.*marcador 1/u);
+  // O trecho do mapa de leitura é só imagem: a legenda vive na coluna ao lado, com o código do elemento.
+  assert.match(image?.getAttribute('alt') ?? '', /Segmento 1 de 1: códigos L1/u);
+  // A imagem e a lista de códigos ficam no mesmo contêiner: a coluna da direita acompanha o trecho.
+  assert.equal(image?.parentNode.getAttribute('class'), 'reader-map-image');
+  assert.equal(image?.parentNode.parentNode.getAttribute('class'), 'reader-map-columns');
   const entry = card.querySelector('li[data-map-marker="1"]');
+  assert.equal(entry?.parentNode.getAttribute('class'), 'reader-map-segment-legend');
   assert.equal(entry?.getAttribute('value'), '1');
+  assert.equal(entry.querySelector('.reader-map-code')?.textContent.trim(), 'L1');
   assert.ok(entry.textContent.includes('Salvar & continuar <agora>, botão'));
-  assert.match(entry.textContent, /segmento 1/u);
   const provenance = card.querySelector('details[data-map-provenance]');
   assert.ok(provenance.textContent.includes(view.readerMaps[0].hash));
   assert.ok(provenance.textContent.includes(view.readerMaps[0].derivation.sourceHash));
   assert.match(card.textContent, /1 de 1 elementos elegíveis/u);
   assert.equal(card.querySelectorAll('script').length, 0);
   assert.equal(JSON.stringify(model), before, 'presenting the map must not change original evidence or normative identity');
+});
+
+test('mapa guardado antes dos códigos de leitura abre com a apresentação com que foi gerado', async () => {
+  const legacyMap = await createLegacyAnnotationMapFixture();
+  const { model, summary } = await fixture({ mutateDraft(draft) {
+    draft.evidence[0] = createPristineMapSource();
+    draft.evidence.push(legacyMap);
+    return draft;
+  } });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-announcement-map-page="page-1"]');
+  assert.equal(card?.getAttribute('data-map-format'), 'numbered-preview');
+  // Legenda raster guardada: o trecho de imagem e a continuação seguem desenhando os dois PNGs.
+  assert.equal(card.querySelectorAll('img[data-map-segment-image]').length, 2);
+  assert.match(root.textContent, /Mapa visual da prévia de anúncios/u);
+  assert.doesNotMatch(root.textContent, /Mapa de leitura da página/u);
+  assert.ok(card.querySelector('li[data-map-marker="1"]'));
+  const html = renderHtmlReport(model, { reportView: view });
+  const markup = html.slice(html.indexOf('data-announcement-map-page="page-1"'));
+  assert.match(markup.slice(0, markup.indexOf('</article>')), /Legenda completa dos anúncios estimados/u);
+  assert.doesNotMatch(markup.slice(0, markup.indexOf('</article>')), /reader-map-code|reader-map-columns/u);
+  assert.match(html, /continuação da legenda/iu);
 });
 
 test('the exported ReportView includes map pixels and escaped untruncated legend for HTML and PDF', async () => {
@@ -616,8 +654,14 @@ test('the exported ReportView includes map pixels and escaped untruncated legend
   const html = renderHtmlReport(model, { reportView: view });
   assert.match(html, /data-announcement-map-page="page-1"/u);
   assert.match(html, /data-map-status="partial"/u);
+  assert.match(html, /data-map-format="reading-codes"/u);
+  // O HTML entregue (e o PDF gerado dele) abre o mapa com o título da seção e a explicação leiga.
+  assert.match(html, /<h3>Mapa de leitura da página<\/h3><p>Cada caixa marca um elemento da página/u);
   assert.match(html, /data-map-segment-image/u);
   assert.match(html, /data-map-marker="1"/u);
+  // A legenda fica na coluna da direita, junto do trecho: código na imagem, texto ao lado.
+  assert.match(html, /class="reader-map-columns"[\s\S]*class="reader-map-image"[\s\S]*class="reader-map-segment-legend"[\s\S]*reader-map-code">L1 </u);
+  assert.match(html, /<figcaption>Segmento 1 de 1: códigos L1\.<\/figcaption>/u);
   assert.ok(html.includes(TEST_PNG));
   assert.ok(html.includes(preview.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')));
   assert.ok(html.includes(view.readerMaps[0].hash));

@@ -6,7 +6,9 @@ import test from 'node:test';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { labelComparisonFixture } from './label-comparison-fixture.js';
 import { hashAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
-import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from './annotation-map-fixture.js';
+import {
+  createAnnotationMapFixture, createLegacyAnnotationMapFixture, createPristineMapSource, TEST_PNG,
+} from './annotation-map-fixture.js';
 import { pngDataUrl } from '../support/png-fixture.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
 import { renderHtmlReport, REPORT_OCCURRENCE_DETAIL_LIMIT, REPORT_REVIEW_DETAIL_LIMIT } from '../../src/core/report/html.js';
@@ -777,11 +779,13 @@ test('renders absent, empty, partial, complete and legend-continuation map state
   assert.match(absent, /data-map-status="absent"[\s\S]*Mapa indisponível nesta auditoria/u);
   assert.match(empty, /data-map-status="empty"[\s\S]*Nenhum elemento elegível/u);
   assert.match(partial, /data-map-status="partial"[\s\S]*cobertura parcial/iu);
-  assert.match(complete, /data-map-status="complete"[\s\S]*audita\.annotation-map[\s\S]*1\.0\.0/u);
+  assert.match(complete, /data-map-status="complete"[\s\S]*audita\.annotation-map[\s\S]*1\.3\.0/u);
   assert.match(complete, /200 nós[\s\S]*32.000.000 pixels[\s\S]*64 segmentos/u);
   assert.match(complete, /proporção raster imprimível[^.]*1,3:1/iu);
   assert.match(complete, /non-atomic-source-geometry — captura e geometria são lidas em passos separados/iu);
-  assert.match(complete, /com marcador 1/iu);
+  // No artefato da 1.3.0 a imagem traz o código, e não o número: o anexo técnico diz o mesmo.
+  assert.match(complete, /com o código L1/iu);
+  assert.doesNotMatch(complete, /com marcador 1/iu);
   assert.doesNotMatch(complete, /marcadores 1 a 1/iu);
   assert.match(complete, /Ordem observada DOM\/AX[\s\S]*não é ordem de foco/iu);
   assert.match(complete, /\.map-card,\.announcement-map-segment,\.announcement-map-legend\{min-width:0\}/u);
@@ -808,20 +812,16 @@ test('renders absent, empty, partial, complete and legend-continuation map state
   assert.match(clippedHtml, /2 escondidos por rolagem interna/u);
   assert.match(clippedHtml, /ancestor-clipped-elements-omitted — elementos escondidos por uma área com rolagem própria foram omitidos/u);
 
+  // Mapa guardado antes da 1.3.0: números dentro da imagem e continuação de legenda, sem a coluna da
+  // direita. A auditoria antiga continua abrindo com a apresentação com que foi gerada.
   const continued = structuredClone(SAMPLE_AUDIT);
   continued.evidence[0] = createPristineMapSource();
-  const map = await createAnnotationMapFixture();
-  map.segments[0].count = 2;
-  map.segments.push({
-    segmentId: 'ev-map-segment-2', index: 2, count: 2, role: 'legend-continuation', sourceCssClip: null,
-    width: 1, height: 1, dataUrl: TEST_PNG, contentHash: map.segments[0].contentHash,
-  });
-  map.hash = await hashAnnotationMapArtifact(map);
-  continued.evidence.push(map);
+  continued.evidence.push(await createLegacyAnnotationMapFixture());
   const continuedHtml = renderHtmlReport(continued);
   assert.equal((continuedHtml.match(/class="announcement-map-segment"/gu) || []).length, 2);
   assert.match(continuedHtml, /continuação da legenda/iu);
-  assert.equal((continuedHtml.match(/data:image\/png;base64,/gu) || []).length, 1);
+  assert.match(continuedHtml, /com marcador 1/iu);
+  assert.equal((continuedHtml.match(/data:image\/png;base64,/gu) || []).length, 2);
 });
 
 test('isolates and escapes hostile audited legend text, including bidi controls', async () => {

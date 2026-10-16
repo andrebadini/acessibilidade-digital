@@ -20,7 +20,7 @@ import {
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { listedLimitations, viewportSummary } from '../core/report/text-policy.js';
-import { readerMapPresentation, READER_MAP_INTRO } from '../core/report/reader-map-presentation.js';
+import { readerMapPresentation, READER_MAP_INTRO, READER_MAP_LEGACY_INTRO, READER_MAP_TITLE } from '../core/report/reader-map-presentation.js';
 import {
   keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO, KEYBOARD_MAP_TAB_HELP,
 } from '../core/report/keyboard-map-presentation.js';
@@ -538,6 +538,58 @@ function keyboardEntryList(document, entries, kind, describe) {
     item.setAttribute('value', entry.number);
     item.setAttribute(`data-keyboard-map-${kind}`, entry.number);
     item.append(element(document, 'bdi', describe(entry)), element(document, 'p', entry.location));
+    list.append(item);
+  }
+  return list;
+}
+
+/** Trecho do mapa até 1.2.0: só a imagem com os números, sem legenda ao lado. */
+function simpleMapFigure(document, segment) {
+  const figure = element(document, 'figure', undefined, 'announcement-map-segment');
+  figure.setAttribute('data-map-segment', segment.id);
+  figure.append(mapSegmentImage(document, segment));
+  figure.append(element(document, 'figcaption', segment.caption));
+  return figure;
+}
+
+/**
+ * Trecho do mapa de leitura: imagem com as caixas à esquerda e, na mesma linha, só os códigos daquele
+ * trecho com o texto que um leitor de tela falaria. Em tela estreita a legenda desce para baixo da imagem.
+ */
+function readerMapColumns(document, segment) {
+  const figure = element(document, 'figure', undefined, 'announcement-map-segment reader-map-segment');
+  figure.setAttribute('data-map-segment', segment.id);
+  const columns = element(document, 'div', undefined, 'reader-map-columns');
+  const image = element(document, 'div', undefined, 'reader-map-image');
+  image.append(mapSegmentImage(document, segment));
+  columns.append(image, readerMapEntries(document, segment.entries));
+  figure.append(columns, element(document, 'figcaption', segment.caption));
+  return figure;
+}
+
+function mapSegmentImage(document, segment) {
+  if (!segment.dataUrl) {
+    return element(document, 'p', 'PNG do segmento indisponível. A legenda e a proveniência foram preservadas.');
+  }
+  const image = element(document, 'img', undefined, 'evidence-media');
+  image.setAttribute('data-map-segment-image', '');
+  image.setAttribute('src', segment.dataUrl);
+  image.setAttribute('alt', segment.caption);
+  image.setAttribute('width', segment.width);
+  image.setAttribute('height', segment.height);
+  return image;
+}
+
+function readerMapEntries(document, entries) {
+  if (!entries.length) return element(document, 'p', 'Nenhum código neste trecho.', 'reader-map-empty');
+  const list = element(document, 'ol', undefined, 'reader-map-segment-legend');
+  for (const entry of entries) {
+    const item = element(document, 'li');
+    item.setAttribute('value', entry.number);
+    item.setAttribute('data-map-marker', entry.number);
+    // O espaço depois do código vai dentro do próprio rótulo: assim o texto lido em voz alta mantém a
+    // separação entre "L1" e o anúncio, sem depender de um nó de texto solto.
+    item.append(element(document, 'span', `${entry.code} `, 'reader-map-code'), element(document, 'bdi', entry.preview));
     list.append(item);
   }
   return list;
@@ -1552,30 +1604,37 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   root.append(review);
 
   const maps = section(document, 4);
-  maps.append(element(document, 'p', READER_MAP_INTRO));
-  for (const map of readerMapPresentation(view.executive.pages, view.readerMaps)) {
+  const readerMaps = readerMapPresentation(view.executive.pages, view.readerMaps);
+  // O mapa atual vem com título e explicação; até 1.2.0 o texto antigo nomeava o mapa na própria
+  // frase e não tinha cabeçalho, e é assim que a auditoria guardada continua abrindo.
+  if (readerMaps.some(map => map.format === 'reading-codes')) {
+    maps.append(element(document, 'h3', READER_MAP_TITLE), element(document, 'p', READER_MAP_INTRO));
+  } else {
+    maps.append(element(document, 'p', READER_MAP_LEGACY_INTRO));
+  }
+  for (const map of readerMaps) {
     const card = element(document, 'article', undefined, 'map-card');
     card.setAttribute('data-announcement-map-page', map.pageId);
     card.setAttribute('data-map-status', map.status);
+    card.setAttribute('data-map-format', map.format);
     card.append(element(document, 'h3', map.title), element(document, 'p', map.summary, `map-state map-state--${map.status}`));
     if (map.coverage) card.append(element(document, 'p', map.coverage));
     if (map.limitations.length) appendTextList(document, card, map.limitations);
     for (const segment of map.segments) {
-      const figure = element(document, 'figure', undefined, 'announcement-map-segment');
-      figure.setAttribute('data-map-segment', segment.id);
-      if (segment.dataUrl) {
-        const image = element(document, 'img', undefined, 'evidence-media');
-        image.setAttribute('data-map-segment-image', '');
-        image.setAttribute('src', segment.dataUrl);
-        image.setAttribute('alt', segment.caption);
-        image.setAttribute('width', segment.width);
-        image.setAttribute('height', segment.height);
-        figure.append(image);
-      } else figure.append(element(document, 'p', 'PNG do segmento indisponível. A legenda e a proveniência foram preservadas.'));
-      figure.append(element(document, 'figcaption', segment.caption));
-      card.append(figure);
+      card.append(map.format === 'reading-codes'
+        ? readerMapColumns(document, segment)
+        : simpleMapFigure(document, segment));
     }
-    if (map.legend.length) {
+    // Sem trecho de imagem a coluna da direita ainda faz sentido sozinha: é a lista de códigos que
+    // existiria se a página não tivesse mudado de tamanho durante a verificação.
+    if (map.format === 'reading-codes' && !map.segments.length && map.legend.length) {
+      const columns = element(document, 'div', undefined, 'reader-map-columns');
+      columns.append(readerMapEntries(document, map.legend));
+      card.append(columns);
+    }
+    // Até 1.2.0 os números vivem dentro do PNG e a legenda completa vem no fim do cartão; a auditoria
+    // guardada naquela versão continua abrindo com a apresentação com que foi gerada.
+    if (map.format !== 'reading-codes' && map.legend.length) {
       card.append(element(document, 'h4', 'Legenda completa dos anúncios estimados'));
       const legend = element(document, 'ol', undefined, 'announcement-map-legend');
       for (const entry of map.legend) {

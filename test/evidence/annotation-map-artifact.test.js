@@ -7,6 +7,8 @@ import {
   ANNOTATION_MAP_LEADER_MIN_PX,
   ANNOTATION_MAP_LIMITS,
   ANNOTATION_MAP_VERSION,
+  annotationBadgeSize,
+  annotationLeaderPoint,
   hashAnnotationMapArtifact,
   hashAnnotationMapGeometry,
   validateAnnotationMapArtifact,
@@ -14,8 +16,8 @@ import {
 import { hashEvidenceArtifact } from '../../src/core/evidence/artifact-hash.js';
 import { sha256Hex } from '../../src/core/report/hash.js';
 
-const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-const PNG_HASH = '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460';
+const PNG_1X1 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const PNG_1X1_HASH = '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460';
 
 function crc32(bytes) {
   let crc = 0xffffffff;
@@ -26,7 +28,7 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function inflateBombPng() {
+function inflateBombPng(width = 1, height = 1) {
   const chunk = (type, data) => {
     const typeBytes = Buffer.from(type, 'ascii');
     const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
@@ -34,7 +36,7 @@ function inflateBombPng() {
     return Buffer.concat([length, typeBytes, data, checksum]);
   };
   const header = Buffer.alloc(13);
-  header.writeUInt32BE(1, 0); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 6;
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
   return new Uint8Array(Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
     chunk('IHDR', header), chunk('IDAT', deflateSync(new Uint8Array(10 * 1024 * 1024))), chunk('IEND', Buffer.alloc(0)),
@@ -58,19 +60,40 @@ function rgbaPng(width, height) {
   ]));
 }
 
+// Captura de referência dos artefatos: 160×100 CSS na escala 1. A caixa do código mede 17×13 CSS, então a
+// página precisa comportar a etiqueta — na 1.3.0 o que fica desenhado sobre o elemento é o código (L1…).
+const PAGE = Object.freeze({ width: 160, height: 100 });
+const PAGE_PNG_BYTES = rgbaPng(PAGE.width, PAGE.height);
+const PNG = `data:image/png;base64,${Buffer.from(PAGE_PNG_BYTES).toString('base64')}`;
+const PNG_HASH = await sha256Hex(PAGE_PNG_BYTES);
+
+/** Marcador da 1.3.0 com a linha-guia derivada do próprio contorno, como o validador recalcula. */
+function markerFor(number, sourceRect, x, y, cssWidth = PAGE.width) {
+  const size = annotationBadgeSize(number, cssWidth);
+  const leader = annotationLeaderPoint(sourceRect, x, y);
+  return { x, y, width: size.width, height: size.height, leaderX: leader.x, leaderY: leader.y };
+}
+
+/** PNG de um trecho e a data URL correspondente, para os recortes que não são a página inteira. */
+function segmentRaster(width, height) {
+  const bytes = rgbaPng(width, height);
+  return { dataUrl: `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`, height };
+}
+
 async function completeArtifact() {
+  const sourceRect = { x: 8, y: 8, width: 40, height: 16 };
   const geometry = {
     coordinateSpace: 'document-css-px',
-    sourceCssSize: { width: 1, height: 1 },
-    sourcePixelSize: { width: 1, height: 1 },
+    sourceCssSize: { ...PAGE },
+    sourcePixelSize: { ...PAGE },
     scaleX: 1,
     scaleY: 1,
     deviceScaleFactor: 2,
     annotations: [{
       number: 1,
       nodeId: 'n-1',
-      sourceRect: { x: 0, y: 0, width: 1, height: 1 },
-      marker: { x: 0.5, y: 0.5, size: 28, leaderX: 0.5, leaderY: 0.5 },
+      sourceRect,
+      marker: markerFor(1, sourceRect, 16, 60),
       segmentIndex: 1,
     }],
   };
@@ -94,10 +117,10 @@ async function completeArtifact() {
       segmentId: 'announcement-map-test-segment-1',
       index: 1,
       count: 1,
-      role: 'image-and-legend',
-      sourceCssClip: { x: 0, y: 0, width: 1, height: 1 },
-      width: 1,
-      height: 1,
+      role: 'image',
+      sourceCssClip: { x: 0, y: 0, ...PAGE },
+      width: PAGE.width,
+      height: PAGE.height,
       dataUrl: PNG,
       contentHash: PNG_HASH,
     }],
@@ -165,8 +188,8 @@ test('enforces the aggregate legend budget and couples omission counts to their 
   const oversizedLegend = await completeArtifact();
   oversizedLegend.derivation.geometry.annotations = Array.from({ length: 65 }, (_, index) => ({
     number: index + 1, nodeId: `n-${index + 1}`,
-    sourceRect: { x: 0, y: 0, width: 1, height: 1 },
-    marker: { x: 0.5, y: 0.5, size: 28, leaderX: 0.5, leaderY: 0.5 }, segmentIndex: 1,
+    sourceRect: { x: 8, y: 8, width: 40, height: 16 },
+    marker: markerFor(index + 1, { x: 8, y: 8, width: 40, height: 16 }, 80, 50), segmentIndex: 1,
   }));
   oversizedLegend.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(oversizedLegend.derivation.geometry);
   oversizedLegend.legend = Array.from({ length: 65 }, (_, index) => ({
@@ -197,33 +220,23 @@ function geometryWithLeader(marker, sourceRect = { x: 10, y: 10, width: 100, hei
     scaleX: 1,
     scaleY: 1,
     deviceScaleFactor: null,
-    annotations: [{ number: 1, nodeId: 'n-1', sourceRect, marker: { size: 28, ...marker }, segmentIndex: 1 }],
+    annotations: [{
+      number: 1, nodeId: 'n-1', sourceRect,
+      marker: { ...markerFor(1, sourceRect, marker.x, marker.y, 300), ...marker },
+      segmentIndex: 1,
+    }],
   };
 }
 
 test('declares the algorithm version that matches the drawn geometry', () => {
   // 1.0.0 → 1.1.0: contorno do alvo. 1.1.0 → 1.2.0: a linha-guia terminava no centro do elemento e
-  // riscava o conteúdo; agora termina na borda do contorno. 1.2.0 → 1.3.0: o desenho é o mesmo, mas os
-  // retângulos passaram a ser medidos no mesmo leiaute da imagem (`fresh-geometry.js`); o mapa guardado é
-  // versionado, e o bump é a marca de que a geometria mudou de origem.
+  // riscava o conteúdo; agora termina na borda do contorno. 1.2.0 → 1.3.0: o círculo numerado e a
+  // legenda raster saem de cena e entram a caixa com o código (L1, L2…) e a legenda na coluna ao lado.
+  // O mapa guardado é versionado: um artefato com a versão anterior deixa de ser aceito, e o bump é a
+  // marca disso.
   assert.equal(ANNOTATION_MAP_ALGORITHM, 'audita.annotation-map');
   assert.equal(ANNOTATION_MAP_VERSION, '1.3.0');
   assert.equal(ANNOTATION_MAP_LEADER_MIN_PX, 6);
-});
-
-test('keeps reading the 1.2.0 maps stored by an earlier revision', async () => {
-  const artifact = await completeArtifact();
-  const previous = structuredClone(artifact);
-  previous.derivation.version = '1.2.0';
-  previous.hash = await hashAnnotationMapArtifact(previous);
-
-  assert.equal(validateAnnotationMapArtifact(previous), previous);
-  assert.equal(await hashAnnotationMapArtifact(previous), previous.hash);
-  assert.equal(await hashEvidenceArtifact(previous), previous.hash);
-
-  const unknown = structuredClone(artifact);
-  unknown.derivation.version = '9.9.9';
-  await assert.rejects(hashAnnotationMapArtifact(unknown), /Derivação do mapa inválida/u);
 });
 
 test('ends the leader line on the nearest point of the element rect, never on its centre', async () => {
@@ -323,54 +336,74 @@ test('rejects a persisted segment whose raster ratio exceeds the printable algor
 
 test('rejects a persisted image segment too short to contain its declared source raster clip', async () => {
   const artifact = await completeArtifact();
-  artifact.derivation.geometry.sourceCssSize.height = 100;
-  artifact.derivation.geometry.sourcePixelSize.height = 100;
-  artifact.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry);
+  // O recorte declara 100 px CSS de origem, mas o raster guardado tem só 40 linhas.
   artifact.segments[0].sourceCssClip.height = 100;
+  artifact.segments[0].height = 40;
+  artifact.segments[0].dataUrl = segmentRaster(PAGE.width, 40).dataUrl;
 
   await assert.rejects(hashAnnotationMapArtifact(artifact), /altura|raster|recorte|segmento/iu);
 });
 
-test('requires each annotation center and marker to belong to its declared image segment', async () => {
+/** Página partida em duas metades, para exercitar a que trecho cada anotação pertence. */
+function splitPage() {
+  const half = { dataUrl: segmentRaster(PAGE.width, PAGE.height / 2).dataUrl, height: PAGE.height / 2 };
+  return [
+    {
+      segmentId: 'announcement-map-test-segment-1', index: 1, count: 2, role: 'image',
+      sourceCssClip: { x: 0, y: 0, width: PAGE.width, height: 50 },
+      width: PAGE.width, height: half.height, dataUrl: half.dataUrl, contentHash: '0'.repeat(64),
+    },
+    {
+      segmentId: 'announcement-map-test-segment-2', index: 2, count: 2, role: 'image',
+      sourceCssClip: { x: 0, y: 50, width: PAGE.width, height: 50 },
+      width: PAGE.width, height: half.height, dataUrl: half.dataUrl, contentHash: '0'.repeat(64),
+    },
+  ];
+}
+
+async function splitArtifact() {
   const artifact = await completeArtifact();
-  artifact.derivation.geometry.sourceCssSize.height = 2;
-  artifact.derivation.geometry.sourcePixelSize.height = 2;
-  artifact.derivation.geometry.annotations[0].sourceRect = { x: 0, y: 1, width: 1, height: 1 };
-  artifact.derivation.geometry.annotations[0].marker = { x: 0.5, y: 1.5, size: 28, leaderX: 0.5, leaderY: 1.5 };
-  artifact.segments[0].sourceCssClip = { x: 0, y: 0, width: 1, height: 1 };
-  artifact.segments[0].count = 2;
-  artifact.segments.push({
-    ...structuredClone(artifact.segments[0]), segmentId: 'announcement-map-test-segment-2', index: 2,
-    sourceCssClip: { x: 0, y: 1, width: 1, height: 1 },
-  });
+  const segments = splitPage();
+  for (const segment of segments) segment.contentHash = await sha256Hex(Buffer.from(segment.dataUrl.split(',')[1], 'base64'));
+  artifact.segments = segments;
+  return artifact;
+}
+
+test('requires each annotation center and marker to belong to its declared image segment', async () => {
+  const artifact = await splitArtifact();
+  // A anotação declara o primeiro trecho, mas o centro e o marcador caem na segunda metade.
+  const rect = { x: 8, y: 60, width: 40, height: 16 };
+  artifact.derivation.geometry.annotations[0].sourceRect = rect;
+  artifact.derivation.geometry.annotations[0].marker = markerFor(1, rect, 16, 76);
   artifact.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry);
 
   assert.throws(() => validateAnnotationMapArtifact(artifact), /segmento|recorte|marcador|anotação/iu);
 });
 
 test('treats an exact non-final lower clip boundary as belonging to the next image segment', async () => {
-  const artifact = await completeArtifact();
-  artifact.derivation.geometry.sourceCssSize.height = 2;
-  artifact.derivation.geometry.sourcePixelSize.height = 2;
-  artifact.derivation.geometry.annotations[0].sourceRect = { x: 0, y: 0.5, width: 1, height: 1 };
-  artifact.derivation.geometry.annotations[0].marker = { x: 0.5, y: 1, size: 28, leaderX: 0.5, leaderY: 1 };
-  artifact.segments[0].sourceCssClip = { x: 0, y: 0, width: 1, height: 1 };
-  artifact.segments[0].count = 2;
-  artifact.segments.push({
-    ...structuredClone(artifact.segments[0]), segmentId: 'announcement-map-test-segment-2', index: 2,
-    sourceCssClip: { x: 0, y: 1, width: 1, height: 1 },
-  });
+  const artifact = await splitArtifact();
+  // O centro do alvo cai exatamente na fronteira: 50 pertence ao segundo trecho, nunca ao primeiro.
+  const rect = { x: 8, y: 42, width: 40, height: 16 };
+  artifact.derivation.geometry.annotations[0].sourceRect = rect;
+  artifact.derivation.geometry.annotations[0].marker = markerFor(1, rect, 16, 76);
+  artifact.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry);
 
   assert.throws(() => validateAnnotationMapArtifact(artifact), /segmento|recorte|marcador|anotação/iu);
 });
 
 test('accepts canonical fractional composer clips within numeric tolerance across many image segments', async () => {
   const artifact = await completeArtifact();
-  const cssHeight = 62 / 1.01;
+  // Cada trecho tem ~20 px CSS: espaço suficiente para a caixa do código caber dentro do recorte.
+  const cssHeight = 62 * 20 + 0.4;
   const segmentHeight = cssHeight / 62;
+  const raster = segmentRaster(PAGE.width, 24);
+  const rasterHash = await sha256Hex(Buffer.from(raster.dataUrl.split(',')[1], 'base64'));
   artifact.derivation.geometry.sourceCssSize.height = cssHeight;
-  artifact.derivation.geometry.sourcePixelSize.height = 62;
+  artifact.derivation.geometry.sourcePixelSize.height = 1253;
   artifact.derivation.geometry.scaleY = 1.01;
+  const rect = { x: 8, y: 8, width: 40, height: 4 };
+  artifact.derivation.geometry.annotations[0].sourceRect = rect;
+  artifact.derivation.geometry.annotations[0].marker = markerFor(1, rect, 16, 10);
   artifact.segments = Array.from({ length: 62 }, (_, offset) => {
     const y = offset * segmentHeight;
     return {
@@ -378,7 +411,10 @@ test('accepts canonical fractional composer clips within numeric tolerance acros
       segmentId: `announcement-map-test-segment-${offset + 1}`,
       index: offset + 1,
       count: 62,
-      sourceCssClip: { x: 0, y, width: 1, height: offset === 61 ? cssHeight - y : segmentHeight },
+      sourceCssClip: { x: 0, y, width: PAGE.width, height: offset === 61 ? cssHeight - y : segmentHeight },
+      height: raster.height,
+      dataUrl: raster.dataUrl,
+      contentHash: rasterHash,
     };
   });
   artifact.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry);
@@ -389,7 +425,7 @@ test('accepts canonical fractional composer clips within numeric tolerance acros
 
 test('rejects a structurally valid derived PNG inflate bomb during integrity hashing', async () => {
   const artifact = await completeArtifact();
-  const bytes = inflateBombPng();
+  const bytes = inflateBombPng(PAGE.width, PAGE.height);
   artifact.segments[0].dataUrl = `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
   artifact.segments[0].contentHash = await sha256Hex(bytes);
 

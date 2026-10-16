@@ -21,9 +21,9 @@ import {
   evidenceRasterMatchesCapture,
 } from './evidence-highlight.js';
 import { decodePngDataUrl } from '../evidence/png.js';
-import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO } from '../evidence/annotation-map-artifact.js';
+import { ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO, annotationCode, annotationMapReadRules } from '../evidence/annotation-map-artifact.js';
 import { createExportDeliveryIdentityV1 } from '../../export/export-formats.js';
-import { readerMapPresentation, READER_MAP_INTRO } from './reader-map-presentation.js';
+import { readerMapPresentation, READER_MAP_INTRO, READER_MAP_LEGACY_INTRO, READER_MAP_TITLE } from './reader-map-presentation.js';
 import {
   keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO, KEYBOARD_MAP_TAB_HELP,
 } from './keyboard-map-presentation.js';
@@ -406,16 +406,52 @@ function marksCropsHtml(record) {
 }
 
 function reportViewReaderMaps(view) {
-  return `<p>${escapeHtml(READER_MAP_INTRO)}</p>${readerMapPresentation(view.executive.pages, view.readerMaps).map(map => {
+  const maps = readerMapPresentation(view.executive.pages, view.readerMaps);
+  // O mapa atual abre com um cabeçalho próprio: é por ele que quem usa leitor de tela encontra a
+  // seção, e é o mesmo título que a página de conferência por Tab mostra. Até 1.2.0 o cartão abria
+  // direto no texto antigo, que nomeava o mapa na própria frase e não tinha cabeçalho.
+  const intro = maps.some(map => map.format === 'reading-codes')
+    ? `<h3>${escapeHtml(READER_MAP_TITLE)}</h3><p>${escapeHtml(READER_MAP_INTRO)}</p>`
+    : `<p>${escapeHtml(READER_MAP_LEGACY_INTRO)}</p>`;
+  return `${intro}${maps.map(map => {
     const figures = map.segments.map(segment => `<figure class="announcement-map-segment" data-map-segment="${escapeHtml(segment.id)}">${segment.dataUrl
       ? `<img class="evidence-media" data-map-segment-image src="${escapeHtml(segment.dataUrl)}" alt="${escapeHtml(segment.caption)}" width="${segment.width}" height="${segment.height}">`
       : '<p>PNG do segmento indisponível. A legenda e a proveniência foram preservadas.</p>'}<figcaption>${escapeHtml(segment.caption)}</figcaption></figure>`).join('');
-    const legend = map.legend.length ? `<h4>Legenda completa dos anúncios estimados</h4><ol class="announcement-map-legend">${map.legend.map(entry =>
-      `<li value="${entry.number}" data-map-marker="${entry.number}"><bdi>${escapeAuditedText(entry.preview)}</bdi><p>${escapeHtml(entry.location)}</p></li>`).join('')}</ol>` : '';
+    // Nos mapas até 1.2.0 os números vivem dentro do PNG e a legenda vem numa lista única no fim do
+    // cartão; é assim que a auditoria guardada foi gerada e é assim que ela continua abrindo.
+    const legend = map.format === 'reading-codes' || !map.legend.length ? '' : `<h4>Legenda completa dos anúncios estimados</h4><ol class="announcement-map-legend">${map.legend.map(entry =>
+      `<li value="${entry.number}" data-map-marker="${entry.number}"><bdi>${escapeAuditedText(entry.preview)}</bdi><p>${escapeHtml(entry.location)}</p></li>`).join('')}</ol>`;
     const provenance = map.provenance.length ? `<details data-map-provenance><summary>Consultar origem, integridade e limites do mapa</summary><dl class="meta map-meta">${map.provenance.map(([label, value]) =>
       `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl></details>` : '';
-    return `<article class="map-card" data-announcement-map-page="${escapeHtml(map.pageId)}" data-map-status="${escapeHtml(map.status)}"><h3>${escapeHtml(map.title)}</h3><p class="map-state map-state--${escapeHtml(map.status)}">${escapeHtml(map.summary)}</p>${map.coverage ? `<p>${escapeHtml(map.coverage)}</p>` : ''}${map.limitations.length ? `<ul>${map.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>` : ''}${figures}${legend}${provenance}</article>`;
+    const body = map.format === 'reading-codes' ? readerMapColumns(map) : figures;
+    return `<article class="map-card" data-announcement-map-page="${escapeHtml(map.pageId)}" data-map-status="${escapeHtml(map.status)}" data-map-format="${escapeHtml(map.format)}"><h3>${escapeHtml(map.title)}</h3><p class="map-state map-state--${escapeHtml(map.status)}">${escapeHtml(map.summary)}</p>${map.coverage ? `<p>${escapeHtml(map.coverage)}</p>` : ''}${map.limitations.length ? `<ul>${map.limitations.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul>` : ''}${body}${legend}${provenance}</article>`;
   }).join('')}`;
+}
+
+/**
+ * Trecho do mapa de leitura com a legenda ao lado: a imagem à esquerda e, à direita, os códigos daquele
+ * trecho com o texto que um leitor de tela falaria. É o mesmo par caixa ↔ texto que a pessoa vê na
+ * página; empilhar em tela estreita mantém linha e legenda juntas.
+ */
+function readerMapColumns(map) {
+  if (!map.segments.length) {
+    return map.legend.length
+      ? `<div class="reader-map-columns"><ol class="reader-map-segment-legend">${map.legend.map(entry =>
+        `<li value="${entry.number}" data-map-marker="${entry.number}"><span class="reader-map-code">${escapeHtml(entry.code)} </span><bdi>${escapeAuditedText(entry.preview)}</bdi></li>`).join('')}</ol></div>`
+      : '';
+  }
+  return map.segments.map(segment => {
+    const image = segment.dataUrl
+      ? `<img class="evidence-media" data-map-segment-image src="${escapeHtml(segment.dataUrl)}" alt="${escapeHtml(segment.caption)}" width="${segment.width}" height="${segment.height}">`
+      : '<p>PNG do segmento indisponível. A legenda e a proveniência foram preservadas.</p>';
+    const entries = segment.entries.length
+      ? `<ol class="reader-map-segment-legend">${segment.entries.map(entry =>
+        `<li value="${entry.number}" data-map-marker="${entry.number}"><span class="reader-map-code">${escapeHtml(entry.code)} </span><bdi>${escapeAuditedText(entry.preview)}</bdi></li>`).join('')}</ol>`
+      : '<p class="reader-map-empty">Nenhum código neste trecho.</p>';
+    return `<figure class="announcement-map-segment reader-map-segment" data-map-segment="${escapeHtml(segment.id)}">`
+      + `<div class="reader-map-columns"><div class="reader-map-image">${image}</div>${entries}</div>`
+      + `<figcaption>${escapeHtml(segment.caption)}</figcaption></figure>`;
+  }).join('');
 }
 
 function reportViewKeyboardMaps(view) {
@@ -678,12 +714,19 @@ function announcementMaps(model, imageByEvidenceId) {
         ? '<strong>Mapa gerado com cobertura parcial.</strong> Consulte as omissões e limitações antes de usar a correlação.'
         : '<strong>Mapa gerado.</strong> A correlação visual e a legenda semântica estão disponíveis abaixo.';
     const caption = `Página ${index + 1} (${page.pageId}); cobertura: ${coverage} Algoritmo ${artifact.derivation.algorithm} ${artifact.derivation.version}; limites: ${limits} Origem ${artifact.fullPageEvidenceId}, hash ${artifact.derivation.sourceHash}; hash derivado ${artifact.hash}; limitações: ${limitations}.`;
+    // A apresentação nova (códigos ao lado da imagem) vive no ReportView; aqui ficam os metadados
+    // técnicos do artefato, dizendo o que está realmente desenhado na imagem guardada.
+    const badgeMap = annotationMapReadRules(artifact.derivation.version).badge === true;
+    const codeOf = number => badgeMap ? annotationCode(number) : String(number);
     const figures = artifact.segments.map(segment => {
       const image = imageByEvidenceId.get(segment.segmentId);
       const markers = artifact.derivation.geometry.annotations.filter(annotation => annotation.segmentIndex === segment.index).map(annotation => annotation.number);
+      // Na 1.3.0 o que está desenhado sobre o elemento é o código L1, L2…; antes disso era o número.
       const markerText = markers.length === 1
-        ? `com marcador ${markers[0]}`
-        : markers.length > 1 ? `com marcadores ${markers.join(', ')}` : 'sem marcadores neste recorte';
+        ? `com ${badgeMap ? 'o código' : 'marcador'} ${codeOf(markers[0])}`
+        : markers.length > 1
+          ? `com ${badgeMap ? 'os códigos' : 'marcadores'} ${markers.map(codeOf).join(', ')}`
+          : 'sem marcadores neste recorte';
       const roleText = segment.role === 'legend-continuation' ? 'continuação da legenda' : markerText;
       const accessibleName = `Segmento ${segment.index} de ${segment.count} do mapa, ${roleText}`;
       return `<figure class="announcement-map-segment" data-map-segment="${escapeHtml(segment.segmentId)}">${image ? renderEvidenceImage(image, accessibleName) : '<p><strong>PNG do segmento indisponível.</strong> Os metadados e a legenda semântica foram preservados.</p>'}<figcaption>${escapeHtml(caption)} Segmento ${segment.index} de ${segment.count}: ${escapeHtml(roleText)}; hash do segmento <code>${escapeHtml(segment.contentHash)}</code>.</figcaption></figure>`;
