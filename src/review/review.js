@@ -983,7 +983,13 @@ function cardMediaUncached(card) {
     // Miniatura sem quadro confiável aparece crua, como no relatório, mas ainda é a imagem do elemento.
     return parts ? { ...parts, dataUrl: evidence.dataUrl, origin: 'element' } : { rawDataUrl: evidence.dataUrl, origin: 'element' };
   }
-  const source = elementCropSource({ evidence: modelLookups(auditModel).evidence, pageId: card.pageId, nodeId: card.nodeId });
+  // `elementEvidence` leva a posição gravada na captura integral (1.1.62) para dentro da derivação do
+  // recorte: sem ela, o cartão só saberia recortar pela geometria dos mapas, que as auditorias novas não
+  // têm mais.
+  const source = elementCropSource({
+    evidence: modelLookups(auditModel).evidence, pageId: card.pageId, nodeId: card.nodeId,
+    elementEvidence: evidence ?? null,
+  });
   const parts = source && evidenceMediaParts(source.artifact, GUIDED_REVIEW_TREATMENT_V1, source.view);
   return parts ? { ...parts, dataUrl: source.artifact.dataUrl, origin: 'page' } : null;
 }

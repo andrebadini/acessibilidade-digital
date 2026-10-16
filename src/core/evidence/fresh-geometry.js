@@ -114,6 +114,49 @@ export function domSnapshotRects(capture, { frameId = null } = {}) {
 }
 
 /**
+ * Folga aceita nas bordas da imagem, em px CSS. O retângulo fresco é medido em ponto flutuante e a
+ * imagem tem largura inteira; um elemento colado na borda direita pode ficar meio pixel fora sem que
+ * nada esteja errado. Meio pixel não move caixa nenhuma na tela.
+ */
+export const INTEGRAL_RECT_TOLERANCE_PX = 1;
+
+function round2(value) {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * Retângulo do elemento DENTRO da captura integral, em px CSS da imagem, ou `null`.
+ *
+ * É o que permite recortar a imagem já guardada em vez de tirar uma captura de tela por elemento
+ * (1.1.62): `rect` vem da medição fresca, no mesmo leiaute que a captura mostra, e `imageSize` é o
+ * tamanho declarado pela própria imagem (`metadata` da captura integral). Fora desses limites não há
+ * pixel guardado — a página pode ter sido truncada pelo teto de segurança, e nesse caso o recorte sai
+ * da captura do elemento, como antes.
+ *
+ * A tolerância só absorve o arredondamento de meio pixel nas bordas; o retângulo devolvido fica
+ * aparado na imagem, de modo que o consumidor nunca recebe coordenada fora do que existe.
+ *
+ * @returns {{x: number, y: number, width: number, height: number}|null}
+ */
+export function integralCaptureRect(rect, imageSize) {
+  if (!usableRect([rect?.x, rect?.y, rect?.width, rect?.height])) return null;
+  if (!finitePositive(imageSize?.width) || !finitePositive(imageSize?.height)) return null;
+  const x = round2(rect.x);
+  const y = round2(rect.y);
+  const width = round2(rect.width);
+  const height = round2(rect.height);
+  const tolerance = INTEGRAL_RECT_TOLERANCE_PX;
+  if (x < -tolerance || y < -tolerance) return null;
+  if (x + width > imageSize.width + tolerance || y + height > imageSize.height + tolerance) return null;
+  const left = Math.max(0, x);
+  const top = Math.max(0, y);
+  const right = Math.min(imageSize.width, x + width);
+  const bottom = Math.min(imageSize.height, y + height);
+  if (right - left <= 0 || bottom - top <= 0) return null;
+  return { x: left, y: top, width: round2(right - left), height: round2(bottom - top) };
+}
+
+/**
  * Cópia rasa do instantâneo com os retângulos trocados pelos frescos.
  *
  * Regras, na ordem:

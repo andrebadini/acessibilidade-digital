@@ -5,6 +5,7 @@ import test from 'node:test';
 import { AXE_PROVENANCE } from '../../src/browser/axe-adapter.js';
 import {
   ELEMENT_CAPTURE_BUDGET,
+  EVIDENCE_SNIPPET_CONCURRENCY,
   canonicalTime,
   createOwnershipId,
   runAttachedAuditExecution,
@@ -23,7 +24,7 @@ import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
 import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
 import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
-import { captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
+import { FULL_PAGE_CAPTURE_LIMITS, captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
 import { createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
 import { createScriptedPixelCommitClockV1 } from '../../src/background/pixel-commit-clock.js';
 import { runObservedTabAudit } from '../../src/background/observed-tab-runner.js';
@@ -449,7 +450,16 @@ test('single URL executes full-evidence and element-only without silently changi
 
     assert.equal(result.status, 'complete');
     assert.equal(adapter.counts.fullPageCalls, mode === 'full-evidence' ? 1 : 0);
-    assert.equal(adapter.counts.elementCalls > 0, true);
+    // 1.1.62: dentro do modo full-evidence o elemento que cai na captura integral não pede captura de tela
+    // própria — quem sustenta o recorte é a posição gravada no artefato. Sem captura integral (element-only)
+    // a captura por elemento continua sendo o caminho, e é isso que a contagem separa.
+    assert.equal(adapter.counts.elementCalls > 0, mode === 'element-only');
+    const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+    assert.ok(elements.length > 0);
+    assert.ok(elements.every(artifact => (mode === 'element-only'
+      ? Boolean(artifact.dataUrl) && !artifact.fullPageRect
+      : Boolean(artifact.fullPageRect) && !artifact.dataUrl)),
+    `${mode}: a evidência do elemento traz a posição na captura integral ou a miniatura, e nunca as duas`);
     assert.equal(calls.at(-1), 'after');
   });
 });
@@ -486,7 +496,13 @@ test('attached-copy executes both pixel modes in an inactive disposable tab and 
     assert.equal(result.observedTarget.cleanupMode, 'always');
     assert.deepEqual(createRequests, [{ url: 'about:blank', active: false, windowId: 9 }]);
     assert.equal(adapter.counts.fullPageCalls, mode === 'full-evidence' ? 1 : 0);
-    assert.equal(adapter.counts.elementCalls > 0, true);
+    // Mesma separação do modo único: com a captura integral, o elemento dentro dela não gera captura própria.
+    assert.equal(adapter.counts.elementCalls > 0, mode === 'element-only');
+    const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+    assert.ok(elements.length > 0);
+    assert.ok(elements.every(artifact => (mode === 'element-only'
+      ? Boolean(artifact.dataUrl) && !artifact.fullPageRect
+      : Boolean(artifact.fullPageRect) && !artifact.dataUrl)));
     assert.equal(calls.at(-1), 'after');
     assert.doesNotMatch(JSON.stringify({ result, sessionValues }), /secret=REMOVE/u);
   });
@@ -686,6 +702,24 @@ function rawPage() {
     ],
     axTree: { nodes: [] },
   };
+}
+
+/**
+ * Página cujos elementos ficam ABAIXO do teto da captura integral.
+ *
+ * O teto de segurança corta a imagem no meio da página: os pixels guardados cobrem só a parte de cima e
+ * tudo o que está embaixo fica FORA da captura integral. É o caso em que a captura por elemento
+ * continua sendo necessária (1.1.62) — e por isso a página serve aos testes que precisam da fileira de
+ * miniaturas: orçamento, gate de pixels por captura e a prova de documento antes de cada raster.
+ */
+function pageBelowCaptureCeiling(page = rawPage()) {
+  const top = FULL_PAGE_CAPTURE_LIMITS.maxDeviceHeight;
+  page.nodes = page.nodes.map((node, index) => ({ ...node, rect: { ...node.rect, y: top + 40 + index * 60 } }));
+  page.layoutMetrics = {
+    cssContentSize: { width: 800, height: top + 40 + page.nodes.length * 60 + 200 },
+    cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+  };
+  return page;
 }
 
 function pageWithAxName(name) {
@@ -1497,9 +1531,12 @@ test('attached full-evidence derives one map from the authorized pristine source
   const auditId = 'audit-attached-pixels';
   const policy = createCapturePolicyV1({ mode: 'full-evidence', includeQuery: false });
   const gateCalls = [];
-  const adapter = fakeAdapter({
+  let adapter = null;
+  adapter = fakeAdapter({
     trackCaptureCalls: true,
     composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+    // Marca o fim da fase de evidências: cada trecho de código lido é uma ida ao navegador dessa fase.
+    afterSnippet: () => adapter.events.push('snippet'),
   });
   let proof = 0;
   adapter.probeDocumentIdentity = async tabId => {
@@ -1522,8 +1559,17 @@ test('attached full-evidence derives one map from the authorized pristine source
   const original = result.model.evidence.find(artifact => artifact.kind === 'full-page');
   assert.equal(map?.derivation.sourceHash, original.hash);
   assert.equal(map?.fullPageEvidenceId, original.evidenceId);
-  assert.ok(adapter.counts.elementCalls > 0);
-  assert.ok(adapter.events.indexOf('map') > adapter.events.findLastIndex(event => event.startsWith('thumbnail:')));
+  // 1.1.62: os elementos desta página caem dentro da captura integral e por isso NÃO pedem captura de
+  // tela própria — a posição gravada no artefato é o que o relatório usa para recortar.
+  assert.equal(adapter.counts.elementCalls, 0, 'nenhuma captura por elemento dentro da captura integral');
+  const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+  assert.ok(elements.length > 0);
+  assert.ok(elements.every(artifact => artifact.fullPageRect && !artifact.dataUrl),
+    'a posição na captura integral entra no lugar da miniatura');
+  // O mapa continua sendo derivado depois de a fase de evidências terminar: a última ida ao navegador
+  // dessa fase é a leitura de um trecho de código (nenhuma miniatura é capturada nesta página).
+  assert.ok(adapter.events.includes('snippet'), 'a fase de evidências leu os trechos de código');
+  assert.ok(adapter.events.indexOf('map') > adapter.events.lastIndexOf('snippet'));
   const raster = adapter.events.indexOf('full-page');
   assert.deepEqual(adapter.events.slice(raster - 3, raster), ['proof-2', 'sensitive-probe', 'proof-3']);
   // A captura integral sai colada na leitura da estrutura (1.1.60): é o que faz a imagem e os retângulos
@@ -1679,6 +1725,9 @@ test('attached full-evidence re-proves the same document before every raster wit
   const gateCalls = [];
   let proofCount = 0;
   const adapter = fakeAdapter({
+    // Elementos abaixo do teto da captura integral: eles continuam pedindo captura própria — é isso que dá
+    // a ESTE teste mais de um raster para provar (ver `pageBelowCaptureCeiling`).
+    page: pageBelowCaptureCeiling(),
     trackCaptureCalls: true,
     sensitiveSignals: PASSWORD_SIGNALS,
     composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
@@ -1700,7 +1749,8 @@ test('attached full-evidence re-proves the same document before every raster wit
 
   assert.equal(result.state, 'model');
   assert.equal(adapter.counts.fullPageCalls, 1);
-  assert.equal(adapter.counts.elementCalls > 0, true);
+  assert.ok(adapter.counts.elementCalls > 0,
+    'os elementos abaixo do teto da captura integral continuam pedindo captura própria');
   const rasterIndexes = adapter.events
     .map((value, index) => /^(?:full-page|thumbnail:)/u.test(value) ? index : -1)
     .filter(index => index >= 0);
@@ -1832,6 +1882,9 @@ test('attached full-evidence abort immediately before a later raster starts no l
   const gateCalls = [];
   let proofCount = 0;
   const adapter = fakeAdapter({
+    // Elementos abaixo do teto da captura integral: a captura por elemento continua existindo e é ela que
+    // este teste aborta no meio do caminho (ver `pageBelowCaptureCeiling`).
+    page: pageBelowCaptureCeiling(),
     trackCaptureCalls: true,
     sensitiveSignals: PASSWORD_SIGNALS,
     composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
@@ -4526,6 +4579,104 @@ test('a very tall page keeps a capped pristine capture, declares the truncation 
   assert.equal(mapInput.layoutMetrics.cssContentSize.height, 16_384, 'the map geometry matches the captured area');
 });
 
+// --- recorte a partir da captura integral (1.1.62) ----------------------------------------------------
+
+/** Uma auditoria full-evidence da página dada, com a captura por elemento contada. */
+async function fullEvidenceOf(page, auditId) {
+  let adapter = null;
+  adapter = fakeAdapter({
+    page, trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const result = await attachedFullEvidence(adapter, auditId);
+  return { adapter, result };
+}
+
+test('the element inside the pristine capture records its position instead of a screenshot', async () => {
+  const page = rawPage();
+  const { adapter, result } = await fullEvidenceOf(page, 'audit-integral-position-inside');
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  assert.equal(adapter.counts.elementCalls, 0, 'nenhuma captura de tela por elemento dentro da captura integral');
+  assert.equal(adapter.events.some(event => event.startsWith('thumbnail:')), false);
+  const integral = result.model.evidence.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
+  const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+  assert.ok(elements.length > 0, 'toda ocorrência continua com a sua evidência de elemento');
+  for (const artifact of elements) {
+    assert.equal(artifact.fullPageEvidenceId, integral.evidenceId, 'a posição aponta para a captura que a contém');
+    assert.equal(artifact.dataUrl, undefined, 'o elemento localizado na captura integral não guarda pixels próprios');
+    assert.equal(artifact.metadata, undefined);
+    assert.ok(artifact.fullPageRect.width > 0 && artifact.fullPageRect.height > 0);
+  }
+  const guardadas = new Set(page.nodes.map(node => `${node.rect.x},${node.rect.y},${node.rect.width},${node.rect.height}`));
+  for (const artifact of elements) {
+    const { x, y, width, height } = artifact.fullPageRect;
+    assert.ok(guardadas.has(`${x},${y},${width},${height}`),
+      `a posição gravada é a do retângulo medido, sem remedir: ${JSON.stringify(artifact.fullPageRect)}`);
+  }
+  const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
+  assert.equal(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'), false);
+});
+
+test('the element below the captured area keeps asking for its own screenshot', async () => {
+  const page = pageBelowCaptureCeiling();
+  const { adapter, result } = await fullEvidenceOf(page, 'audit-integral-position-below');
+  assert.equal(result.state, 'model');
+  assert.equal(result.failureCode, null);
+  const codes = result.model.pages[0].diagnostics.map(entry => entry.code);
+  assert.ok(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'), 'a página truncada pelo teto é declarada');
+  const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+  assert.ok(elements.length > 0);
+  assert.equal(adapter.counts.elementCalls, elements.length, 'fora da captura integral cada elemento pede a sua captura');
+  assert.equal(adapter.events.filter(event => event.startsWith('thumbnail:')).length, elements.length);
+  for (const artifact of elements) {
+    assert.equal(artifact.fullPageRect, undefined, 'fora da imagem não há posição a gravar');
+    assert.ok(artifact.dataUrl, 'a miniatura do elemento é que sustenta o recorte');
+    assert.match(artifact.binarySha256 ?? '', /^[a-f0-9]{64}$/u, 'a miniatura guardada leva o SHA-256 do arquivo');
+  }
+});
+
+test('snippet reads overlap with a bounded number of CDP calls in flight', async () => {
+  const page = rawPage();
+  const count = 40;
+  page.nodes = Array.from({ length: count }, (_, index) => ({
+    backendNodeId: index + 1, tagName: 'img', attributes: { src: `/produto-${index}.png` }, text: '',
+    parentBackendNodeId: null, rect: { x: 10, y: 20 + index * 40, width: 32, height: 32 },
+  }));
+  page.layoutMetrics = { cssContentSize: { width: 800, height: 20 + count * 40 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  const adapter = fakeAdapter({
+    page, trackCaptureCalls: true,
+    composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),
+  });
+  const original = adapter.connectCdp;
+  let inFlight = 0;
+  let peak = 0;
+  let reads = 0;
+  adapter.connectCdp = async (...args) => {
+    const cdp = await original(...args);
+    return { ...cdp, async command(method, params) {
+      if (method !== 'DOM.getOuterHTML') return cdp.command(method, params);
+      reads += 1;
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      try {
+        // Uma ida e volta com espera de verdade: sem sobreposição, o pico ficaria em 1.
+        await new Promise(resolve => setTimeout(resolve, 1));
+        return await cdp.command(method, params);
+      } finally { inFlight -= 1; }
+    } };
+  };
+  const result = await attachedFullEvidence(adapter, 'audit-snippet-concurrency');
+  assert.equal(result.state, 'model');
+  assert.equal(adapter.counts.elementCalls, 0, 'esta página é recortada da captura integral: só os trechos vão ao navegador');
+  assert.ok(reads > EVIDENCE_SNIPPET_CONCURRENCY, `os ${count} elementos foram lidos em lotes: ${reads} leituras`);
+  assert.ok(peak > 1, 'as leituras dos trechos se sobrepõem em vez de esperar uma a uma');
+  assert.ok(peak <= EVIDENCE_SNIPPET_CONCURRENCY, `no máximo ${EVIDENCE_SNIPPET_CONCURRENCY} chamadas em voo, e o pico foi ${peak}`);
+  const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+  assert.equal(elements.length, count);
+  assert.equal(elements.filter(artifact => artifact.snippet).length, count, 'a sobreposição não custa nenhum trecho');
+});
+
 /** Adaptador que entrega as duas listas de entrada dos mapas, na ordem em que são compostos. */
 function mappingAdapter(page, options = {}) {
   const inputs = [];
@@ -4617,7 +4768,10 @@ test('a page with more occurrences than the thumbnail budget keeps every occurre
     backendNodeId: index + 1, tagName: 'img', attributes: { src: `/produto-${index}.png` }, text: '',
     parentBackendNodeId: null, rect: { x: 10, y: 20 + index * 40, width: 32, height: 32 },
   }));
-  page.layoutMetrics = { cssContentSize: { width: 800, height: 20 + count * 40 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+  // Todos os elementos abaixo do teto da captura integral: a página é mais alta do que o teto, a imagem
+  // guardada cobre só a parte de cima, e por isso a captura por elemento — e o orçamento que a limita —
+  // continua sendo o caminho (1.1.62).
+  pageBelowCaptureCeiling(page);
   const adapter = fakeAdapter({
     page, trackCaptureCalls: true,
     composeMap: async input => createAnnotationMapFixture({ sourceEvidenceId: input.fullPageEvidence.evidenceId }),

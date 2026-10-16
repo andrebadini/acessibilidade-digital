@@ -536,6 +536,10 @@ function projectV1Evidence(artifact, pageId) {
     // e o anexo do relatório ficavam sem o hash do arquivo, mesmo com os pixels guardados.
     'binarySha256',
     'nodeId', 'backendNodeId', 'snippet', 'fullPageEvidenceId', 'mediaUrl',
+    // Onde o elemento estava na captura integral (1.1.62), em px CSS da imagem. Sem estes dois na
+    // lista, a projeção apagava a posição em silêncio e o recorte do elemento sumia do relatório
+    // mesmo com a captura integral guardada.
+    'fullPageRect', 'fullPageParts',
     // `legend` são as entradas do mapa de anúncios; `stops`/`suspects` são as do mapa do teclado.
     // Sem eles na lista, a projeção do modelo apagava as duas listas em silêncio e o mapa do teclado
     // chegava ao relatório sem nenhuma parada — e sem nada para a caixa numerada do desenho conferir.

@@ -8,6 +8,7 @@ import { sha256Hex } from '../../src/core/report/hash.js';
 import { buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { buildReportView, evidenceDownloadTarget, renderReportView } from '../../src/review/report-view.js';
+import { pngDataUrl } from '../support/png-fixture.js';
 
 // A ficha de evidência é o lugar onde quem lê o relatório aberto no painel confere a imagem de que a
 // constatação fala: ID, os dois SHA-256 inteiros, data/hora e o arquivo original para baixar. Estes testes
@@ -247,4 +248,68 @@ test('sem pixels do elemento, a constatação diz o que existe em vez de mandar 
     'A imagem deste elemento não está nesta auditoria.');
   // O caminho para a ficha continua ali: é lá que a pessoa vê o que foi registrado no lugar da imagem.
   assert.ok(row.querySelector('a[data-report-consult-evidence]'));
+});
+
+// --- o recorte da captura integral nas telas do relatório vivo (1.1.62) -----------------------------
+//
+// O elemento que fica dentro da captura integral não tem miniatura própria: o que ele tem é a POSIÇÃO
+// dele na imagem de página inteira. A tela do relatório tem de mostrar essa imagem recortada onde hoje
+// mostra a miniatura — a constatação do quadro, a prévia da ocorrência e a ficha —, e as três apontam
+// para a MESMA captura registrada uma única vez.
+
+const INTEGRAL_WIDTH = 1280;
+const INTEGRAL_HEIGHT = 1600;
+const INTEGRAL_PNG = pngDataUrl(INTEGRAL_WIDTH / 16, INTEGRAL_HEIGHT / 16);
+const INTEGRAL_SHA256 = await sha256Hex(decodePngDataUrl(INTEGRAL_PNG).bytes);
+const ELEMENT_CROP_RECT = Object.freeze({ x: 100, y: 200, width: 320, height: 80 });
+
+/** Auditoria em que o elemento não tem pixels próprios: só a posição na captura integral. */
+function withoutOwnThumbnail(draft) {
+  const fullPage = draft.evidence.find(evidence => evidence.kind === 'full-page');
+  fullPage.dataUrl = INTEGRAL_PNG;
+  fullPage.metadata = { width: INTEGRAL_WIDTH, height: INTEGRAL_HEIGHT };
+  fullPage.hash = INTEGRAL_SHA256;
+  const element = draft.evidence.find(evidence => evidence.kind === 'element');
+  delete element.dataUrl;
+  delete element.metadata;
+  element.fullPageRect = { ...ELEMENT_CROP_RECT };
+  element.fullPageEvidenceId = fullPage.evidenceId;
+  return draft;
+}
+
+/** Todos os nós da árvore, para contar atributos que o seletor mínimo do teste não alcança. */
+function allNodes(node, output = []) {
+  output.push(node);
+  for (const child of node.children) allNodes(child, output);
+  return output;
+}
+
+const dataUrlImages = root => allNodes(root)
+  .filter(node => (node.getAttribute('href') ?? '').startsWith('data:image/png'));
+
+test('a constatação mostra o recorte da captura integral quando o elemento não tem miniatura', async () => {
+  const { model, summary } = await fixture({ mutateDraft: withoutOwnThumbnail });
+  const root = await panel(model, summary);
+  const figure = root.querySelector('[data-findings-board]').querySelector('[data-findings-evidence]');
+  assert.ok(figure, 'a constatação não pode ficar sem imagem só porque a miniatura própria não existe');
+  const svg = figure.querySelector('svg[data-evidence-crop-source="ev-full"]');
+  assert.ok(svg, 'a imagem mostrada é o recorte da captura integral, e a tela diz de qual captura ele saiu');
+  assert.ok(svg.querySelector('use'), 'os pixels vêm do registro compartilhado, referenciado por <use>');
+  assert.equal(svg.querySelector('image'), null, 'nenhum PNG é copiado para dentro da figura do recorte');
+  assert.match(figure.querySelector('figcaption').textContent,
+    /Recorte tirado da captura da página inteira desta auditoria/u);
+  assert.equal(dataUrlImages(root).length, 1, 'a captura integral entra uma vez no documento inteiro');
+});
+
+test('a prévia da ocorrência mostra o recorte em vez de dizer que não há captura', async () => {
+  const { model, summary } = await fixture({ mutateDraft: withoutOwnThumbnail });
+  const root = await panel(model, summary);
+  const previews = root.querySelectorAll('section[data-report-evidence-preview]');
+  const withCrop = previews.filter(preview => preview.querySelector('svg[data-evidence-crop-source="ev-full"]'));
+  assert.ok(withCrop.length > 0, 'a verificação que cita o elemento continua com a captura dele à vista');
+  for (const preview of previews) {
+    const element = preview.querySelector('figure[data-evidence-kind="element"]');
+    if (element) assert.ok(element.querySelector('use'), 'toda figura de elemento desta auditoria usa o recorte');
+  }
+  assert.equal(dataUrlImages(root).length, 1, 'o mesmo PNG não é repetido por figura');
 });

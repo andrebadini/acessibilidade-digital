@@ -309,7 +309,10 @@ async function measureOnce({ target, chromeBinary, journey, doExport, runIndex }
         try {
           clickedAt = Date.now();
           await click(panel, 'button[data-intent="OPEN_REPORT"]');
-          report = await launch.waitForReport({ auditId, timeoutMs: 120_000 });
+          // `waitForReport` recusa argumento a mais (contrato do arranque de teste, com a sua própria
+          // espera interna): passar `timeoutMs` aqui fazia a medição da jornada morrer em
+          // REPORT_CONTEXT_DENIED antes de medir qualquer coisa.
+          report = await launch.waitForReport({ auditId });
         } catch (error) {
           // O painel diz em texto por que não abriu (recusa, tempo esgotado, nova tentativa): sem isso a
           // negação do arranjo de teste não distingue "o produto recusou" de "o arranjo não achou a aba".

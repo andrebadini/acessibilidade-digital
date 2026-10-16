@@ -1,7 +1,7 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
 import { establishWidenedLayout, warmUpFullPageLayout } from './full-page-warm-up.js';
 import { mapSourceGeometry } from '../core/evidence/map-source-geometry.js';
-import { domSnapshotRects, snapshotFrameId, withFreshRects } from '../core/evidence/fresh-geometry.js';
+import { contentSizeOf, domSnapshotRects, integralCaptureRect, snapshotFrameId, withFreshRects } from '../core/evidence/fresh-geometry.js';
 import { measureElementTarget } from '../browser/measure-element.js';
 import { collectPage } from '../browser/collect-page.js';
 import { AXE_PROVENANCE, runAxeInTab } from '../browser/axe-adapter.js';
@@ -97,6 +97,11 @@ const KEYBOARD_MAP_DIAGNOSTIC_CODES = new Set([
 // injeções) e custa ~150 ms; uma vitrine com 1.800 ocorrências levava mais de 2 min só nisso e ainda mais para
 // finalizar. As ocorrências excedentes mantêm seletor, trecho e descrição; o limite vira limitação declarada.
 export const ELEMENT_CAPTURE_BUDGET = Object.freeze({ maxThumbnails: 150, maxMilliseconds: 45_000, maxEvidenceMilliseconds: 75_000 });
+// Chamadas `DOM.getOuterHTML` em voo ao mesmo tempo (1.1.62). Oito sobrepõem as idas e voltas de cada
+// trecho de código sem alterar o que cada um contém nem a sanitização; oito é o mesmo número de capturas
+// de tela que o navegador já atendia em série, e ir além disso enche a sessão CDP de pedidos concorrentes
+// que atrasam as capturas de pixel que ainda restam.
+export const EVIDENCE_SNIPPET_CONCURRENCY = 8;
 const PIXEL_BOUNDARY_INTERRUPTION = new WeakSet();
 const OBSERVED_LEGACY_RASTER_BOUNDARIES = new WeakMap();
 const PASSIVE_ATTACHED_ADAPTERS = new WeakSet();
@@ -959,6 +964,10 @@ async function runLegacyAudit({
     // `mapSnapshot` é o instantâneo com os retângulos medidos no mesmo estado da imagem (1.1.62).
     let mapSource = null;
     let mapSnapshot = null;
+    // Retângulos frescos guardados para a fase de evidências: é com eles que o artefato do elemento
+    // registra ONDE ele estava na captura integral (1.1.62), em vez de tirar uma captura de tela por
+    // elemento. Mesma medição em lote do mapa — nenhuma ida extra ao navegador.
+    let freshRects = null;
     /**
      * Retângulos frescos: uma única chamada em lote, logo depois da captura, no leiaute que a imagem acabou
      * de mostrar. Nada de uma ida por elemento, e nada de chamar isto em laço.
@@ -1027,6 +1036,7 @@ async function runLegacyAudit({
           rethrowAbort(error, signal);
         }
         const fresh = await measureFreshRects();
+        freshRects = fresh.rects;
         mapSource = mapSourceGeometry({
           captureMetrics,
           captureMetricsAfter,
@@ -1229,20 +1239,43 @@ async function runLegacyAudit({
     ];
     allocateOccurrenceIds(state);
     const indexes = buildSnapshotIndexes(state.snapshot);
-    const artifactByNode = new Map();
     const canCaptureElements = chromeAdapter.captureElementsEnabled !== false &&
       (Boolean(state.fullPage) || chromeAdapter.captureElementsWithoutFullPage === true);
     if (chromeAdapter.captureElementsEnabled !== false && !canCaptureElements &&
       state.occurrences.some(occurrence => occurrence.nodeId)) {
       recoverable('ELEMENT_CAPTURE_SKIPPED_NO_FULL_PAGE', 'As miniaturas de elementos não foram tentadas porque a captura original da página falhou.');
     }
-    const thumbnailBudget = { started: Date.now(), attempted: 0, reached: false };
+    const thumbnailBudget = { started: Date.now(), attempted: 0, reached: false, integral: 0, measured: 0 };
+    // A posição do elemento na captura integral substitui a captura de tela por elemento (1.1.62). Ela
+    // vale quando a captura integral existe, a geometria fresca foi aceita (`aligned` — a mesma decisão
+    // que autoriza o mapa a desenhar caixa), o elemento tem retângulo medido nesse leiaute, não está
+    // dentro de iframe (o retângulo de um nó de frame está no sistema de coordenadas do frame) e cai
+    // dentro da área que a imagem cobre — a página truncada pelo teto de segurança deixa o resto fora.
+    const integralImageSize = contentSizeOf(mapSource?.layoutMetrics);
+    const integralUsable = Boolean(state.fullPage) && mapSource?.aligned === true &&
+      freshRects instanceof Map && freshRects.size > 0 && integralImageSize !== null;
+    const integralPosition = node => {
+      if (!integralUsable) return null;
+      if (Array.isArray(node.framePath) && node.framePath.length > 0) return null;
+      return integralCaptureRect(freshRects.get(node.backendNodeId), integralImageSize);
+    };
+    const evidenceBudgetSpent = () => Date.now() - thumbnailBudget.started >= ELEMENT_CAPTURE_BUDGET.maxEvidenceMilliseconds;
+    const markBudgetReached = () => {
+      if (thumbnailBudget.reached) return;
+      thumbnailBudget.reached = true;
+      recoverable('ELEMENT_CAPTURE_BUDGET_REACHED', ELEMENT_CAPTURE_BUDGET_MESSAGE);
+    };
+    // Um trabalho por NÓ, na ordem das ocorrências: um elemento que responde a várias perguntas é
+    // capturado (ou localizado na integral) uma única vez e o mesmo artefato serve a todas elas.
+    const jobs = [];
+    const jobByNode = new Map();
     for (const occurrence of state.occurrences) {
       throwIfAborted(signal);
       if (state.fullPage) occurrence.evidenceIds.push(state.fullPage.evidenceId);
       if (!occurrence.nodeId) continue;
-      if (artifactByNode.has(occurrence.nodeId)) {
-        occurrence.evidenceIds.push(artifactByNode.get(occurrence.nodeId).evidenceId);
+      const running = jobByNode.get(occurrence.nodeId);
+      if (running) {
+        running.occurrences.push(occurrence);
         continue;
       }
       const node = indexes.byNodeId.get(occurrence.nodeId);
@@ -1250,80 +1283,108 @@ async function runLegacyAudit({
         recoverable('EVIDENCE_NODE_MISSING', 'Um elemento relacionado à ocorrência não estava mais disponível.', { occurrenceId: occurrence.occurrenceId });
         continue;
       }
-      try {
-        let snippet = '';
-        // Numa página com milhares de ocorrências, um trecho de código por elemento (uma chamada CDP cada)
-        // levava minutos. Passado o orçamento da fase, os elementos restantes ficam com seletor e descrição.
-        const evidenceBudgetSpent = Date.now() - thumbnailBudget.started >= ELEMENT_CAPTURE_BUDGET.maxEvidenceMilliseconds;
-        if (evidenceBudgetSpent && !thumbnailBudget.reached) {
-          thumbnailBudget.reached = true;
-          recoverable('ELEMENT_CAPTURE_BUDGET_REACHED', ELEMENT_CAPTURE_BUDGET_MESSAGE);
-        }
-        if (!evidenceBudgetSpent) try {
-          const response = await awaitStep(() => cdp.command('DOM.getOuterHTML', { backendNodeId: node.backendNodeId }));
-          snippet = sanitizeHtmlSnippetSource(typeof response?.outerHTML === 'string' ? response.outerHTML : '', {
-            privateTextDescendant: hasPrivateTextAncestor(node, indexes),
+      const job = {
+        node, occurrenceId: occurrence.occurrenceId, occurrences: [occurrence],
+        integralRect: integralPosition(node), snippet: '', thumbnail: null, artifact: null,
+      };
+      jobByNode.set(occurrence.nodeId, job);
+      jobs.push(job);
+    }
+    // Trechos de código em lotes: uma chamada CDP por elemento, feitas uma a uma, levavam minutos numa
+    // página com milhares de ocorrências. Oito em voo sobrepõem as idas e voltas sem inundar a sessão, e
+    // a sanitização (privacidade do texto e de valores) continua a mesma, elemento por elemento. O
+    // orçamento da fase é conferido entre lotes: passado ele, os elementos restantes ficam com seletor e
+    // descrição, como antes.
+    for (let start = 0; start < jobs.length; start += EVIDENCE_SNIPPET_CONCURRENCY) {
+      throwIfAborted(signal);
+      if (evidenceBudgetSpent()) {
+        markBudgetReached();
+        break;
+      }
+      await Promise.all(jobs.slice(start, start + EVIDENCE_SNIPPET_CONCURRENCY).map(async job => {
+        try {
+          const response = await awaitStep(() => cdp.command('DOM.getOuterHTML', { backendNodeId: job.node.backendNodeId }));
+          job.snippet = sanitizeHtmlSnippetSource(typeof response?.outerHTML === 'string' ? response.outerHTML : '', {
+            privateTextDescendant: hasPrivateTextAncestor(job.node, indexes),
           });
         } catch (error) {
           rethrowAbort(error, signal);
-          recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: occurrence.occurrenceId });
+          recoverable('SNIPPET_CAPTURE_FAILED', 'O trecho de código do elemento não pôde ser capturado.', { occurrenceId: job.occurrenceId });
         }
-        let thumbnail = null;
-        if (canCaptureElements && !furtherPixelCaptureSuppressed && !thumbnailBudget.reached &&
-          (thumbnailBudget.attempted >= ELEMENT_CAPTURE_BUDGET.maxThumbnails ||
-            Date.now() - thumbnailBudget.started >= ELEMENT_CAPTURE_BUDGET.maxMilliseconds)) {
-          thumbnailBudget.reached = true;
-          recoverable('ELEMENT_CAPTURE_BUDGET_REACHED', ELEMENT_CAPTURE_BUDGET_MESSAGE);
-        }
-        if (canCaptureElements && !furtherPixelCaptureSuppressed && !thumbnailBudget.reached) {
-          thumbnailBudget.attempted += 1;
-          try {
-            // Remedição do alvo no instante da captura. O rect do snapshot é medido muito antes desta
-            // fase; entre uma coisa e outra a página rola e troca de layout, e o inline multilinha vem
-            // como caixa envolvente. `DOM.getContentQuads` devolve um quadrilátero por fragmento de
-            // linha, em coordenadas da viewport, convertidas para o documento com as métricas tomadas
-            // no mesmo momento. Falhou? O rect do snapshot continua valendo, e a limitação é declarada.
-            let measurement = null;
-            if (!evidenceBudgetSpent) {
-              try {
-                measurement = await awaitStep(() => measureElementTarget(cdp, node));
-              } catch (error) {
-                rethrowAbort(error, signal);
-                measurement = null;
+      }));
+    }
+    for (const job of jobs) {
+      throwIfAborted(signal);
+      const node = job.node;
+      try {
+        if (job.integralRect) {
+          // Elemento dentro da captura integral: nenhuma captura de tela e nenhuma medição por elemento —
+          // o artefato registra a posição e quem recorta é o relatório, dos pixels que já estão guardados.
+          thumbnailBudget.integral += 1;
+        } else if (canCaptureElements && !furtherPixelCaptureSuppressed) {
+          const budgetSpent = evidenceBudgetSpent();
+          if (budgetSpent) markBudgetReached();
+          if (!thumbnailBudget.reached &&
+            (thumbnailBudget.attempted >= ELEMENT_CAPTURE_BUDGET.maxThumbnails ||
+              Date.now() - thumbnailBudget.started >= ELEMENT_CAPTURE_BUDGET.maxMilliseconds)) markBudgetReached();
+          if (!thumbnailBudget.reached) {
+            thumbnailBudget.attempted += 1;
+            try {
+              // Remedição do alvo no instante da captura. O rect do snapshot é medido muito antes desta
+              // fase; entre uma coisa e outra a página rola e troca de layout, e o inline multilinha vem
+              // como caixa envolvente. `DOM.getContentQuads` devolve um quadrilátero por fragmento de
+              // linha, em coordenadas da viewport, convertidas para o documento com as métricas tomadas
+              // no mesmo momento. Falhou? O rect do snapshot continua valendo, e a limitação é declarada.
+              let measurement = null;
+              if (!budgetSpent) {
+                try {
+                  measurement = await awaitStep(() => measureElementTarget(cdp, node));
+                } catch (error) {
+                  rethrowAbort(error, signal);
+                  measurement = null;
+                }
               }
+              if (measurement === null) {
+                appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
+              } else if (measurement.status === 'frame-context') {
+                appendDiagnosticOnce('ELEMENT_CAPTURE_FRAME_CONTEXT', ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE, true);
+              } else if (measurement.status !== 'measured') {
+                appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
+              }
+              thumbnailBudget.measured += 1;
+              job.thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
+                ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
+                ...(measurement?.status === 'measured' ? measurement.metrics : {}),
+                ...(measurement?.status === 'measured' ? { measuredRects: measurement.rects } : {}),
+                ...(Array.isArray(node.framePath) && node.framePath.length > 0 ? { framePath: node.framePath } : {}),
+                ...(state.fullPage ? { fullPageEvidenceId: state.fullPage.evidenceId } : {}),
+              }));
+              if (job.thumbnail.status !== 'captured' && job.thumbnail.reason !== 'frame-context') {
+                recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: job.occurrenceId });
+              }
+            } catch (error) {
+              if (isPixelBoundaryInterruption(error, chromeAdapter)) {
+                if (!canContinueWithoutFurtherPixels(error, chromeAdapter, signal)) throw error;
+                furtherPixelCaptureSuppressed = true;
+              }
+              rethrowAbort(error, signal);
+              recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: job.occurrenceId });
             }
-            if (measurement === null) {
-              appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
-            } else if (measurement.status === 'frame-context') {
-              appendDiagnosticOnce('ELEMENT_CAPTURE_FRAME_CONTEXT', ELEMENT_CAPTURE_FRAME_CONTEXT_MESSAGE, true);
-            } else if (measurement.status !== 'measured') {
-              appendDiagnosticOnce('ELEMENT_MEASUREMENT_FALLBACK', ELEMENT_MEASUREMENT_FALLBACK_MESSAGE, true);
-            }
-            thumbnail = await awaitStep(() => (chromeAdapter.captureElement || captureElement)(cdp, node.rect, {
-              ...(state.snapshot.document.layoutMetrics || raw.layoutMetrics || pristineMetrics),
-              ...(measurement?.status === 'measured' ? measurement.metrics : {}),
-              ...(measurement?.status === 'measured' ? { measuredRects: measurement.rects } : {}),
-              ...(Array.isArray(node.framePath) && node.framePath.length > 0 ? { framePath: node.framePath } : {}),
-              ...(state.fullPage ? { fullPageEvidenceId: state.fullPage.evidenceId } : {}),
-            }));
-            if (thumbnail.status !== 'captured' && thumbnail.reason !== 'frame-context') {
-              recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
-            }
-          } catch (error) {
-            if (isPixelBoundaryInterruption(error, chromeAdapter)) {
-              if (!canContinueWithoutFurtherPixels(error, chromeAdapter, signal)) throw error;
-              furtherPixelCaptureSuppressed = true;
-            }
-            rethrowAbort(error, signal);
-            recoverable('ELEMENT_CAPTURE_FAILED', 'A miniatura do elemento não pôde ser capturada.', { occurrenceId: occurrence.occurrenceId });
           }
         }
+        const thumbnail = job.thumbnail;
         const selector = buildStableSelector(node, indexes);
         const accessibility = projectElementAccessibility(node, indexes);
         const artifact = {
           evidenceId: `element-${stableHash(`${auditId}\u0000${node.nodeId}`)}`,
           kind: 'element', nodeId: node.nodeId, backendNodeId: node.backendNodeId,
-          selector, snippet, accessibility,
+          selector, snippet: job.snippet, accessibility,
+          // Onde o elemento estava na captura integral (1.1.62). Entra no hash do artefato como qualquer
+          // outro dado guardado; auditorias anteriores, sem o campo, continuam com o hash que tinham.
+          ...(job.integralRect ? {
+            fullPageRect: job.integralRect,
+            fullPageEvidenceId: state.fullPage.evidenceId,
+          } : {}),
           ...(thumbnail?.status === 'captured' ? {
             dataUrl: thumbnail.dataUrl,
             // SHA-256 do arquivo PNG capturado, já calculado na captura (`capture-evidence.js`). Fica
@@ -1337,20 +1398,24 @@ async function runLegacyAudit({
           } : {}),
           ...(node.media?.currentSrc ? { mediaUrl: safeUrl(node.media.currentSrc) } : {}),
         };
+        // `fullPageParts` (os fragmentos de linha de um inline multilinha) só é gravado quando alguma
+        // fonte os devolve: a medição fresca em lote devolve uma caixa por nó e o esquema fechado recusa
+        // lista vazia. Com o campo ausente o recorte desenha a caixa envolvente, como o mapa já faz.
         artifact.hash = await awaitStep(() => hashEvidenceArtifact(artifact));
-        artifactByNode.set(node.nodeId, artifact);
+        job.artifact = artifact;
         state.artifacts.push(artifact);
-        occurrence.evidenceIds.push(artifact.evidenceId);
+        for (const occurrence of job.occurrences) occurrence.evidenceIds.push(artifact.evidenceId);
       } catch (error) {
         if (isPixelBoundaryInterruption(error, chromeAdapter)) throw error;
         rethrowAbort(error, signal);
-        recoverable('EVIDENCE_CAPTURE_FAILED', 'As evidências de uma ocorrência não puderam ser preparadas.', { occurrenceId: occurrence.occurrenceId });
+        recoverable('EVIDENCE_CAPTURE_FAILED', 'As evidências de uma ocorrência não puderam ser preparadas.', { occurrenceId: job.occurrenceId });
       }
       throwIfAborted(signal);
     }
     perfMark('evidencias', perfEvidence, {
-      occurrences: state.occurrences.length, artifacts: state.artifacts.length,
-      thumbnails: thumbnailBudget.attempted, orcamentoAtingido: thumbnailBudget.reached,
+      occurrences: state.occurrences.length, artifacts: state.artifacts.length, elementos: jobs.length,
+      recortesDaIntegral: thumbnailBudget.integral, thumbnails: thumbnailBudget.attempted,
+      medicoes: thumbnailBudget.measured, orcamentoAtingido: thumbnailBudget.reached,
     });
     const perfAnnouncementMap = perfBegin();
     if (state.fullPage && mapSource && typeof chromeAdapter.composeAnnouncementMap === 'function') {

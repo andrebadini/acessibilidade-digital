@@ -33,6 +33,7 @@ import {
 } from '../core/report/findings-board.js';
 import { compareItemIds } from '../core/report/lay-review.js';
 import { EVIDENCE_SHA256_HELP, evidenceHashRows } from '../core/report/evidence-hash-presentation.js';
+import { EVIDENCE_CROP_REGION_LEGEND, evidenceMediaParts, integralCropSource } from '../core/report/evidence-crop.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -685,10 +686,135 @@ function downloadEvidencePng(document, evidence) {
   return true;
 }
 
-function appendEvidenceFicheImage(document, card, evidence) {
+/**
+ * Registro das imagens que os recortes compartilham.
+ *
+ * Desde a 1.1.62 as fichas de elementos sem miniatura própria mostram o recorte da captura integral. A
+ * captura integral já aparece inteira na ficha dela e no mapa; sem um registro compartilhado, o mesmo PNG
+ * de página inteira seria copiado no atributo de cada recorte — numa auditoria com centenas de elementos
+ * isso multiplicaria megabytes de base64 na memória da aba e no arquivo entregue. Cada imagem entra uma
+ * vez, com um `id`, e cada recorte a referencia por `<use>`.
+ */
+function createCropDefinitions(document) {
+  const svg = document.createElementNS(SVG_NAMESPACE, 'svg');
+  svg.setAttribute('class', 'evidence-definitions');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('width', '0');
+  svg.setAttribute('height', '0');
+  svg.setAttribute('focusable', 'false');
+  const defs = document.createElementNS(SVG_NAMESPACE, 'defs');
+  svg.append(defs);
+  const byKey = new Map();
+  let count = 0;
+  return {
+    node: svg,
+    count: () => count,
+    reference(dataUrl, size) {
+      const key = `${size.width}x${size.height}\u0000${dataUrl}`;
+      if (byKey.has(key)) return byKey.get(key);
+      const image = document.createElementNS(SVG_NAMESPACE, 'image');
+      const id = `report-crop-image-${count += 1}`;
+      image.setAttribute('id', id);
+      image.setAttribute('href', dataUrl);
+      image.setAttribute('width', String(size.width));
+      image.setAttribute('height', String(size.height));
+      image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      defs.append(image);
+      byKey.set(key, id);
+      return id;
+    },
+  };
+}
+
+/**
+ * Desenha o recorte da captura integral com as mesmas peças do resto do produto (`evidenceMediaParts`):
+ * a janela do recorte é o `viewBox`, o contorno é o do tratamento escolhido e os pixels vêm da imagem
+ * compartilhada, por `<use>`. Devolve a legenda do que foi desenhado e `null` quando não há como
+ * desenhar — quem chama segue para o texto que diz que não há imagem.
+ *
+ * A mesma peça serve à prévia de ocorrência (que recebe o tratamento do grupo) e à ficha (que recebe o
+ * tratamento próprio dela): o desenho é o mesmo, muda a moldura em volta.
+ */
+function appendIntegralCropSvg(document, parent, crop, definitions, treatment = EVIDENCE_FICHE_TREATMENT_V1,
+  accessibleName = null) {
+  const parts = evidenceMediaParts(crop.artifact, treatment, crop.view);
+  if (!parts) return null;
+  const svg = document.createElementNS(SVG_NAMESPACE, 'svg');
+  svg.setAttribute('class', 'evidence-media evidence-media--marked');
+  svg.setAttribute('data-evidence-treatment', treatment.tone);
+  svg.setAttribute('data-evidence-crop-source', crop.sourceEvidenceId);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `${treatment.aria} ${parts.legend}${accessibleName ? ` ${accessibleName}` : ''}`);
+  svg.setAttribute('viewBox', `${parts.view.x} ${parts.view.y} ${parts.view.width} ${parts.view.height}`);
+  svg.setAttribute('width', String(parts.display.width));
+  svg.setAttribute('height', String(parts.display.height));
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  svg.setAttribute('focusable', 'false');
+  const use = document.createElementNS(SVG_NAMESPACE, 'use');
+  use.setAttribute('href', `#${definitions.reference(crop.artifact.dataUrl, parts.image)}`);
+  use.setAttribute('width', String(parts.image.width));
+  use.setAttribute('height', String(parts.image.height));
+  svg.append(use);
+  for (const shape of parts.shapes) {
+    const node = document.createElementNS(SVG_NAMESPACE, shape.kind);
+    for (const [name, value] of Object.entries(shape.attributes)) node.setAttribute(name, String(value));
+    svg.append(node);
+  }
+  parent.append(svg);
+  return parts.legend;
+}
+
+/** O recorte como figura solta — a moldura da ficha. Devolve `false` quando não há como desenhar. */
+function appendEvidenceCrop(document, card, crop, definitions) {
+  const figure = document.createElement('figure');
+  figure.setAttribute('class', 'evidence-fiche-media');
+  const legend = appendIntegralCropSvg(document, figure, crop, definitions);
+  if (legend === null) return false;
+  figure.append(element(document, 'figcaption', `${legend} ${EVIDENCE_CROP_REGION_LEGEND}`));
+  card.append(figure);
+  return true;
+}
+
+/**
+ * Recortes da captura integral, por `evidenceId`, para cada elemento sem miniatura própria.
+ *
+ * Calculado uma vez por relatório: a MESMA posição serve à prévia de ocorrência e à ficha, e o mesmo
+ * `<use>` serve aos dois desenhos — nenhuma conta refeita e nenhum byte de PNG repetido. Auditorias
+ * anteriores à 1.1.62 (sem posição gravada) devolvem um mapa vazio, e tudo segue pelo caminho antigo.
+ */
+function buildIntegralCrops(evidence = []) {
+  const byEvidenceId = new Map();
+  for (const artifact of evidence) {
+    if (artifact?.kind !== 'element' || typeof artifact.evidenceId !== 'string') continue;
+    if (isSafePngDataUrl(artifact.dataUrl)) continue;
+    const crop = integralCropSource({ evidence, elementEvidence: artifact, targetImageSize: null });
+    if (crop) byEvidenceId.set(artifact.evidenceId, crop);
+  }
+  return byEvidenceId;
+}
+
+function appendEvidenceFicheImage(document, card, evidence, cropContext = null) {
   const hasPixels = isSafePngDataUrl(evidence.dataUrl);
   const highlight = evidence.kind === 'element' && hasPixels ? evidenceFrame(evidence) : null;
   if (!hasPixels) {
+    // Sem miniatura própria, a ficha mostra o recorte da captura integral quando a auditoria guardou a
+    // posição do elemento (1.1.62). O texto que diz "não disponível" passa a ser o último recurso.
+    const crop = cropContext?.crops?.get(evidence.evidenceId) ?? null;
+    if (crop && appendEvidenceCrop(document, card, crop, cropContext.definitions)) {
+      const anchor = cropContext.anchorById?.get(crop.sourceEvidenceId);
+      const note = element(document, 'p', `Este elemento não tem arquivo de imagem próprio: a imagem acima é um recorte da captura integral ${crop.sourceEvidenceId}`, 'evidence-fiche-crop-note');
+      if (anchor) {
+        note.append(document.createTextNode('. '));
+        const link = document.createElement('a');
+        link.setAttribute('href', `#${anchor}`);
+        link.textContent = 'Consultar a ficha dessa captura, com o arquivo e o SHA-256 dele';
+        note.append(link, document.createTextNode('.'));
+      } else {
+        note.append(document.createTextNode('.'));
+      }
+      card.append(note);
+      return;
+    }
     card.append(element(document, 'p', 'Imagem segura: PNG local não disponível nesta auditoria.', 'evidence-fiche-missing'));
     return;
   }
@@ -704,18 +830,24 @@ function appendEvidenceFicheImage(document, card, evidence) {
   card.append(figure);
 }
 
-/** Ficha de uma evidência: imagem, ID, os dois SHA-256 inteiros, data/hora e o download do arquivo. */
-function appendEvidenceFiche(document, card, evidence, anchorNumber) {
+/**
+ * Ficha de uma evidência: imagem, ID, os dois SHA-256 inteiros, data/hora e o download do arquivo.
+ *
+ * `cropContext` traz a lista de evidências (para achar a captura integral de onde sai o recorte de um
+ * elemento sem miniatura), o registro das imagens compartilhadas e os `id` das fichas, para o recorte
+ * apontar para a ficha da captura que o contém.
+ */
+function appendEvidenceFiche(document, card, evidence, anchorNumber, cropContext = null) {
   card.setAttribute('data-report-evidence', evidence.evidenceId);
   card.setAttribute('data-evidence-fiche', '');
   card.setAttribute('data-evidence-kind', evidence.kind);
   card.append(element(document, 'h4', `Evidência ${anchorNumber} — ${evidence.evidenceId} (${evidenceKindLabel(evidence.kind)})`));
-  appendEvidenceFicheImage(document, card, evidence);
+  appendEvidenceFicheImage(document, card, evidence, cropContext);
   const facts = document.createElement('dl');
   facts.setAttribute('class', 'evidence-fiche-facts');
   for (const [label, value, note] of [
     ['ID da evidência', evidence.evidenceId, null],
-    ...evidenceHashRows(evidence),
+    ...evidenceHashRows(evidence, cropContext?.evidence ?? null),
     ['Data e hora da captura', captureInstantLabel(evidence), null],
   ]) {
     facts.append(element(document, 'dt', label));
@@ -911,13 +1043,37 @@ function appendHumanHistory(document, parent, entries, evidenceAnchorById) {
   history.append(list); parent.append(history);
 }
 
+/**
+ * Prévia de um elemento sem miniatura própria: o recorte da captura integral, com o mesmo contorno e a
+ * mesma legenda da ficha, e uma frase que diz de qual captura a imagem veio.
+ *
+ * A frase é a da ficha e a do HTML entregue: quem lê a prévia sabe que a imagem não é um arquivo próprio
+ * do elemento e sabe onde conferir o arquivo e o SHA-256 de onde ela saiu.
+ */
+function appendIntegralCropPreview(document, figure, artifact, crop, cropContext, tone) {
+  const accessibleName = `${evidenceKindLabel(artifact.kind)} local da evidência ${artifact.evidenceId}`;
+  const treatment = (typeof tone === 'string' ? EVIDENCE_TREATMENTS_V1[tone] : null) ?? EVIDENCE_FICHE_TREATMENT_V1;
+  const legend = appendIntegralCropSvg(document, figure, crop, cropContext.definitions, treatment, accessibleName);
+  if (legend === null) {
+    // Sem como desenhar (posição fora da imagem guardada, por exemplo): o texto assume o lugar da imagem.
+    figure.append(element(document, 'p', `${accessibleName}. Captura sem imagens locais nesta auditoria.`));
+    return '';
+  }
+  return `${legend} ${EVIDENCE_CROP_REGION_LEGEND} A imagem original é a captura integral ${crop.sourceEvidenceId}.`;
+}
+
 function appendEvidencePreview(document, article, evidence, evidenceAnchorById, issue, highlightOptions = null,
-  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE) {
+  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE, cropContext = null) {
   const preview = document.createElement('section');
   preview.setAttribute('data-report-evidence-preview', '');
   preview.append(element(document, 'h4', 'Capturas registradas'));
+  const crops = cropContext?.crops ?? null;
+  // O elemento sem miniatura própria entra pela mesma porta da miniatura: o que ele tem é o recorte da
+  // captura integral, e a verificação não pode ficar sem imagem por causa disso. É a mesma decisão que o
+  // HTML entregue toma — a tela e o arquivo mostram as mesmas capturas.
   const selected = projectOccurrenceEvidencePreviews({
-    evidence: evidence.filter(item => isSafePngDataUrl(item.dataUrl)),
+    evidence: evidence.filter(item => isSafePngDataUrl(item.dataUrl) ||
+      (item.kind === 'element' && crops?.has(item.evidenceId) === true)),
     occurrences: issue.occurrences,
   });
   if (selected.length === 0) {
@@ -926,7 +1082,10 @@ function appendEvidencePreview(document, article, evidence, evidenceAnchorById, 
     for (const { artifact: item, tone } of selected) {
       const figure = document.createElement('figure');
       figure.setAttribute('data-evidence-kind', item.kind);
-      const caption = appendEvidenceMedia(document, figure, item, tone);
+      const crop = crops?.get(item.evidenceId) ?? null;
+      const caption = crop
+        ? appendIntegralCropPreview(document, figure, item, crop, cropContext, tone)
+        : appendEvidenceMedia(document, figure, item, tone);
       figure.append(element(document, 'figcaption', caption));
       preview.append(figure);
     }
@@ -997,7 +1156,7 @@ function itemCheckPresentation(issue, itemId) {
 }
 
 function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, highlightOptions = null,
-  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE, presentation) {
+  evidenceOnlyMessage = GENERIC_EVIDENCE_ONLY_MESSAGE, presentation, cropContext = null) {
   group = presentation.result;
   issue = presentation.issue;
   const article = document.createElement('article');
@@ -1057,7 +1216,7 @@ function issueArticle(document, issue, group, evidenceById, evidenceAnchorById, 
         ...highlightOptions, occurrenceIds: issue.occurrences.map(value => value.occurrenceId),
         issueTitle: issue.title, pageId: issue.pageId,
       }
-      : null, evidenceOnlyMessage);
+      : null, evidenceOnlyMessage, cropContext);
   appendTechnicalDetails(document, content, issue, evidence);
   return article;
 }
@@ -1239,18 +1398,32 @@ function copyText(text, button) {
 }
 
 /**
- * Miniatura da constatação: a mesma captura do elemento que o relatório estático mostra, com o contorno
- * por fora do elemento, mais o caminho até a ficha — onde estão os dois hashes e o download do arquivo.
- * Sem pixels do elemento, a frase diz o que existe (a ficha, quando houver) em vez de mandar a pessoa
- * procurar em outro lugar.
+ * Miniatura da constatação: a captura do elemento que o relatório estático mostra, com o contorno por
+ * fora do elemento, mais o caminho até a ficha — onde estão os dois hashes e o download do arquivo.
+ *
+ * Sem miniatura própria, o que existe é o recorte da captura integral (1.1.62): é ele que a constatação
+ * mostra, em vez de dizer que não há imagem. Só quando não há nenhuma das duas coisas a frase diz o que
+ * existe (a ficha, quando houver) em vez de mandar a pessoa procurar em outro lugar.
  */
-function appendFindingEvidence(document, row, finding, evidenceById, evidenceAnchorById) {
+function appendFindingEvidence(document, row, finding, evidenceById, evidenceAnchorById, cropContext = null) {
   const elementId = finding.elementEvidenceId;
   const artifact = elementId ? evidenceById.get(elementId) : null;
   const figure = document.createElement('figure');
   figure.setAttribute('class', 'findings-evidence');
   const hasPixels = Boolean(artifact) && isSafePngDataUrl(artifact.dataUrl);
-  if (hasPixels) {
+  const crop = elementId ? cropContext?.crops?.get(elementId) ?? null : null;
+  if (!hasPixels && crop) {
+    const accessibleName = `${evidenceKindLabel(artifact?.kind ?? 'element')} local da evidência ${elementId}`;
+    const legend = appendIntegralCropSvg(document, figure, crop, cropContext.definitions,
+      EVIDENCE_TREATMENTS_V1.failed, accessibleName);
+    if (legend !== null) {
+      figure.setAttribute('data-findings-evidence', elementId);
+      figure.append(element(document, 'figcaption', `${legend} ${EVIDENCE_CROP_REGION_LEGEND}`));
+      row.append(figure);
+    } else {
+      row.append(element(document, 'p', 'A imagem deste elemento não está nesta auditoria.', 'findings-evidence-missing'));
+    }
+  } else if (hasPixels) {
     figure.setAttribute('data-findings-evidence', elementId);
     figure.append(element(document, 'figcaption', appendEvidenceMedia(document, figure, artifact, 'failed')));
     row.append(figure);
@@ -1274,7 +1447,8 @@ function appendFindingEvidence(document, row, finding, evidenceById, evidenceAnc
   }
 }
 
-function appendFindingsBoard(document, parent, board, evidenceById = new Map(), evidenceAnchorById = new Map()) {
+function appendFindingsBoard(document, parent, board, evidenceById = new Map(), evidenceAnchorById = new Map(),
+  cropContext = null) {
   parent.append(element(document, 'p', FINDINGS_BOARD_INTRO));
   const score = document.createElement('dl');
   score.setAttribute('class', 'findings-score');
@@ -1316,7 +1490,7 @@ function appendFindingsBoard(document, parent, board, evidenceById = new Map(), 
       row.append(element(document, 'p', finding.source === 'human'
         ? `Constatação (revisão humana de ${finding.evaluator}, ${finding.decidedAtLabel}): ${finding.text}`
         : `Constatação (verificação automática): ${finding.text}`));
-      appendFindingEvidence(document, row, finding, evidenceById, evidenceAnchorById);
+      appendFindingEvidence(document, row, finding, evidenceById, evidenceAnchorById, cropContext);
       if (consolidated === null) {
         const citation = element(document, 'p', finding.citation, 'findings-citation');
         citation.setAttribute('data-findings-citation', '');
@@ -1492,6 +1666,17 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const coverage = section(document, 1);
   const evidenceById = new Map(view.technicalEvidence.map(evidence => [evidence.evidenceId, evidence]));
   const evidenceAnchorById = new Map(view.technicalEvidence.map((evidence, index) => [evidence.evidenceId, `report-evidence-${index + 1}`]));
+  // Uma captura integral para muitos recortes: o registro das imagens fica no topo do relatório (e não
+  // dentro do anexo, que abre fechado), para que as prévias de ocorrência e as fichas referenciem a mesma
+  // imagem por `<use>` — nenhum PNG de página inteira copiado por elemento. O `id` das fichas entra aqui
+  // para o recorte apontar para a captura que o contém.
+  const cropDefinitions = createCropDefinitions(document);
+  const cropContext = {
+    evidence: view.technicalEvidence,
+    crops: buildIntegralCrops(view.technicalEvidence),
+    definitions: cropDefinitions,
+    anchorById: evidenceAnchorById,
+  };
   coverage.append(renderFilters(document, view, root, live));
   for (const group of GROUPS) {
     const groupNode = document.createElement('div');
@@ -1527,7 +1712,8 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
     for (const { issue, result } of checks) {
       const presentation = itemCheckPresentation(issue, itemId);
       const card = issueArticle(document, issue, result, evidenceById, evidenceAnchorById,
-        onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null, evidenceOnlyMessage, presentation);
+        onHighlightIntent ? { enabled: true, onIntent: onHighlightIntent } : null, evidenceOnlyMessage, presentation,
+        cropContext);
       card.setAttribute('id', `report-check-${++cardOrdinal}`);
       card.setAttribute('data-report-check-key', issue.checkKey);
       item.append(card);
@@ -1538,7 +1724,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
 
   const failed = section(document, 2);
   failed.setAttribute('data-findings-board', '');
-  appendFindingsBoard(document, failed, view.findingsBoard, evidenceById, evidenceAnchorById);
+  appendFindingsBoard(document, failed, view.findingsBoard, evidenceById, evidenceAnchorById, cropContext);
   root.append(failed);
 
   const review = section(document, 3);
@@ -1714,15 +1900,18 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   sources.setAttribute('data-report-annex', '');
   sources.append(element(document, 'summary', `Consultar evidências técnicas e anexos (${view.technicalEvidence.length})`));
   sources.append(element(document, 'p', EVIDENCE_SHA256_HELP, 'evidence-fiche-help'));
+  // As fichas usam o mesmo registro de imagens das prévias (criado no topo do relatório): as que não
+  // desenham recorte nenhum não registram imagem, e o registro vazio não entra no documento.
   for (const [index, evidence] of view.technicalEvidence.entries()) {
     const card = document.createElement('article');
     card.setAttribute('data-evidence-kind', evidence.kind);
     card.setAttribute('id', evidenceAnchorById.get(evidence.evidenceId));
-    appendEvidenceFiche(document, card, evidence, index + 1);
+    appendEvidenceFiche(document, card, evidence, index + 1, cropContext);
     sources.append(card);
   }
   methodology.append(sources);
   root.append(methodology);
+  if (cropDefinitions.count() > 0) root.append(cropDefinitions.node);
   for (const link of root.querySelectorAll('[data-report-consult-evidence]')) {
     link.addEventListener('click', event => {
       const id = link.getAttribute('href')?.slice(1);
