@@ -21,7 +21,7 @@ import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule
 import { remapAuditPage } from '../../src/core/batch/remap-audit.js';
 import { renderTechnicalJson } from '../../src/core/report/earl-json.js';
 import { renderHtmlReport } from '../../src/core/report/html.js';
-import { createAnnotationMapFixture } from '../report/annotation-map-fixture.js';
+import { createAnnotationMapFixture, TEST_PNG_BYTES } from '../report/annotation-map-fixture.js';
 import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 import { captureElement as captureElementEvidence, captureFullPage as captureFullPageEvidence } from '../../src/browser/capture-evidence.js';
 import { createPixelPrivacyGateV1 } from '../../src/background/pixel-privacy-gate.js';
@@ -33,6 +33,11 @@ import { ATTACHED_COPY_RELOADED_MESSAGE } from '../../src/core/report/diagnostic
 import { createPanelResultBundleV1 } from '../../src/panel/panel-result-bundle.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+// Captura pristine dos testes que derivam mapa: é a mesma captura de 160×100 dos fixtures de mapa. O
+// mapa declara no artefato o hash da captura de origem, então a origem precisa ser exatamente a
+// captura que o navegador devolveu — com uma captura de 1×1 o mapa derivado seria recusado na
+// conferência de integridade.
+const MAP_PNG = TEST_PNG_BYTES.toString('base64');
 const TEST_EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const TEST_DIGEST = `hmac-sha256:${'A'.repeat(43)}`;
 const TEST_EVIDENCE_URL = sanitizeEvidenceUrlV1('https://example.test/final?secret=REMOVE', { includeQuery: false });
@@ -861,7 +866,7 @@ function fakeAdapter(options = {}) {
         if (options.fullPageFailure && pristine) {
           throw options.fullPageFailure instanceof Error ? options.fullPageFailure : new Error('capture unavailable');
         }
-        return { data: PNG };
+        return { data: pristine && (options.composeMap || options.composeKeyboardMap) ? MAP_PNG : PNG };
       }
       if (method === 'DOM.getOuterHTML') {
         if (options.snippetFailureNode === params.backendNodeId) throw new Error('node vanished');

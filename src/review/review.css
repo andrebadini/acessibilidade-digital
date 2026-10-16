@@ -104,6 +104,16 @@ button:hover, button:focus-visible, a:focus-visible, summary:focus-visible { bac
 code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; background: #eef1f3; }
 .evidence-media { display: block; width: 100%; max-width: 100%; height: auto; max-height: 28rem; object-fit: contain; border: 1px solid #65737e; background: #fff; }
 .evidence-media--marked { overflow: hidden; }
+/* Mapa de leitura (1.3.0): a imagem com as caixas à esquerda e, na mesma linha, os códigos daquele
+   trecho com o texto que um leitor de tela falaria. É o mesmo par caixa ↔ texto do HTML entregue e
+   do PDF; em tela estreita a coluna desce para baixo da imagem, sempre no mesmo trecho. */
+.reader-map-columns { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: .75rem; align-items: start; }
+.reader-map-image { min-width: 0; }
+.reader-map-image .evidence-media { margin-top: 0; }
+.reader-map-segment-legend { display: grid; gap: .5rem; margin: 0; padding-left: 0; list-style: none; font-size: .92rem; }
+.reader-map-segment-legend li { padding: .4rem .5rem; border-left: .25rem solid var(--danger); background: var(--surface); break-inside: avoid; }
+.reader-map-code { display: inline-block; min-width: 2.2em; padding: 0 .1em 0 .3em; border-radius: .2rem; background: var(--danger); color: #fff; font-weight: 750; text-align: center; white-space: pre; }
+.reader-map-empty { margin: 0; font-size: .92rem; }
 .evidence-spotlight { fill: #000; fill-opacity: .38; stroke: none; pointer-events: none; }
 .evidence-highlight, .evidence-halo { fill: none; vector-effect: non-scaling-stroke; pointer-events: none; }
 .evidence-halo { stroke: #fff; stroke-width: 5; }
@@ -128,6 +138,7 @@ dialog:not([open]) { display: none; }
 .dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
 @media (min-width: 48rem) { .report-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } [data-report-evidence-preview] { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 32rem) { main { padding: .75rem; } .dialog-actions { flex-direction: column; } .report-filters { grid-template-columns: 1fr; } .report-identity, .report-view > section { padding: .85rem; } .section-nav { align-items: flex-start; flex-direction: column; } .section-nav ul { width: 100%; } }
+@media (max-width: 40rem) { .reader-map-columns { grid-template-columns: minmax(0, 1fr); } }
 @media print {
   /* A aba imprime por esta folha, não pela do relatório entregue: sem estas duas regras o Ctrl+P da
      aba parte palavra no meio (medido: 198 na matriz e 2 no cabeçalho), que é a mesma classe de
@@ -165,6 +176,11 @@ dialog:not([open]) { display: none; }
   [data-evidence-kind="full-page"] > .evidence-media { display: block; width: 100%; max-height: 210mm; object-fit: contain; object-position: top center; }
   [data-report-issue], [data-report-technical], [data-report-limitations], [data-report-evidence] { break-inside: auto; }
   [data-report-issue-heading], [data-report-evidence] > h4, summary { break-after: avoid; }
+  /* O mapa de leitura impresso é o mesmo par imagem + coluna de códigos do PDF entregue: o trecho não
+     se parte no meio e a coluna continua ao lado da imagem, com o texto em corpo de impressão. */
+  .reader-map-segment { break-inside: avoid; }
+  .reader-map-columns { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: .5rem; }
+  .reader-map-segment-legend { font-size: 8pt; }
 }
 .report-checklist { margin-block: 1rem; padding: .9rem; border: 1px solid #738596; border-radius: .65rem; background: #f7f9fb; }
 .report-checklist > summary { font-weight: 700; cursor: pointer; min-height: 2.75rem; }

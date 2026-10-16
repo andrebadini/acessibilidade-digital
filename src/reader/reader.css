@@ -37,13 +37,25 @@ td p{margin:0 0 .4rem}
 .entry-image{display:block;max-width:100%;max-height:180px;width:auto;height:auto;border:1px solid #8195a8;border-radius:4px;background:#f4f7fa}
 .image-missing{color:#5a6b7a;font-size:.9em}
 .page-map{margin:1.6rem 0;border:1px solid #becbd6;border-radius:.65rem;background:#fff;padding:1.2rem}
-.map-frame{position:relative;display:block;width:100%;overflow:auto;border:1px solid #8195a8;background:#f4f7fa}
+.map-frame{position:relative;display:block;width:100%;margin:0;overflow:auto;border:1px solid #8195a8;background:#f4f7fa}
 .map-frame img.map-base{display:block;width:100%;height:auto}
 .map-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-.map-box{fill:rgba(255,191,71,.22);stroke:#b86b00;stroke-width:1.5}
-.map-label-bg{fill:rgba(16,41,58,.92);stroke:#ffbf47;stroke-width:1}
-.map-label{fill:#fff;font:12px system-ui,sans-serif}
-.map-label-num{fill:#ffbf47;font:700 12px system-ui,sans-serif}
+.map-box{fill:rgba(255,191,71,.22);stroke:#b86b00}
+.map-outline-halo{fill:none;stroke:#fff}
+.map-leader{stroke:#8b1e1e}
+.map-badge{fill:#8b1e1e;stroke:#fff}
+.map-badge-overlapped{fill:#6b4e00}
+.map-badge-text{fill:#fff;font:700 12px system-ui,sans-serif;text-anchor:middle}
+.reader-map-columns{display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap;margin-top:.8rem}
+.reader-map-columns .map-frame{flex:1 1 58%;min-width:min(100%,320px)}
+.reader-map-legend{flex:1 1 34%;min-width:min(100%,260px)}
+.reader-map-legend h3{margin:0 0 .4rem;font-size:1rem}
+.reader-map-list{list-style:none;margin:0;padding:0}
+.reader-map-list li{border-top:1px solid #d5dee6;padding:.45rem 0;line-height:1.45}
+.reader-map-list li:first-child{border-top:0}
+.reader-map-code{display:inline-block;min-width:2.4em;font-weight:700;color:#8b1e1e}
+.reader-map-tab{color:#40596d;font-weight:700;white-space:nowrap}
+.reader-map-empty,.map-note{color:#40596d;font-size:.94em}
 code{font-size:.8rem;color:#40596d}
 .entry-order{display:inline-block;background:#eaf0f6;border-radius:.3rem;padding:.1rem .4rem;font-weight:700}
 .entry-reasons{font-size:.92rem}
@@ -103,6 +115,13 @@ footer{font-size:.9rem;color:#40596d}
   thead{display:table-header-group}
   tr{break-inside:avoid}
   h2{break-after:avoid}
+  /* A imagem fica à esquerda e os códigos à direita, como na tela; a lista pode seguir na página
+     seguinte quando o mapa tem muitos elementos. O HTML exportado ajusta a largura pela proporção da
+     captura, o que a página da extensão não pode fazer por causa da política de estilo. */
+  .reader-map-columns{display:block}
+  .reader-map-columns .map-frame{float:left;width:58%;margin:0 2% .4rem 0;overflow:visible}
+  .reader-map-columns::after{content:"";display:block;clear:both}
+  .reader-map-list li{break-inside:avoid}
   details:not([open])>*:not(summary){display:block}
   code{font-size:8pt}
 }

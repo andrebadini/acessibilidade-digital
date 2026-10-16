@@ -1,5 +1,6 @@
 import { consumeReadingLaunch, createReadingController } from './controller.js';
 import { READING_CATEGORIES, READING_EXPLANATION, READING_PRIVACY, renderReadingHtml, renderReadingCsv } from './report-model.js';
+import { READING_MAP_INTRO, READING_MAP_TITLE, READING_MAP_UNAVAILABLE, readingMapPlan } from './reading-map-plan.js';
 import { TONE_LABELS, buildVerdict, entryFix, entryTone, laySummary, spokenAnnouncement, topIssues } from './plain-language.js';
 import { createSpeaker } from './speech.js';
 import { createTabWalk } from './tab-walk.js';
@@ -202,54 +203,90 @@ async function stopWalk() {
   updateControls();
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgElement(tag, attributes, content) {
+  const element = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, String(value));
+  if (content !== undefined) element.textContent = content;
+  return element;
+}
+
+/** Mesmo desenho do mapa do relatório: contorno no elemento, etiqueta encostada e linha-guia. */
+function pageMapOverlay(plan) {
+  const svg = svgElement('svg', {
+    class: 'map-overlay', viewBox: `0 0 ${plan.width} ${plan.height}`,
+    width: plan.width, height: plan.height, role: 'img',
+    'aria-label': `Mapa de leitura com ${plan.markers.length} elementos marcados. Os códigos estão listados ao lado.`,
+  });
+  // Como no relatório, os halos brancos de todos os contornos entram antes dos traços coloridos.
+  for (const marker of plan.markers) {
+    svg.append(svgElement('rect', {
+      class: 'map-outline-halo', x: marker.outline.x, y: marker.outline.y,
+      width: marker.outline.width, height: marker.outline.height, 'stroke-width': marker.strokeWidth + 4,
+    }));
+  }
+  for (const marker of plan.markers) {
+    if (marker.leader) {
+      svg.append(svgElement('line', {
+        class: 'map-leader', x1: marker.leader.x1, y1: marker.leader.y1,
+        x2: marker.leader.x2, y2: marker.leader.y2, 'stroke-width': marker.strokeWidth,
+      }));
+    }
+    svg.append(svgElement('rect', {
+      class: `map-box tone-${marker.tone}`, x: marker.outline.x, y: marker.outline.y,
+      width: marker.outline.width, height: marker.outline.height, 'stroke-width': marker.strokeWidth,
+    }), svgElement('rect', {
+      class: `map-badge${marker.overlapped ? ' map-badge-overlapped' : ''}`,
+      x: marker.badge.x, y: marker.badge.y, width: marker.badge.width, height: marker.badge.height,
+      rx: marker.badge.radius, 'stroke-width': marker.strokeWidth,
+    }), svgElement('text', {
+      class: 'map-badge-text', x: marker.badge.x + marker.badge.width / 2, y: marker.label.y,
+      'font-size': marker.label.size,
+    }, marker.code));
+  }
+  return svg;
+}
+
+function pageMapLegend(plan) {
+  const box = document.createElement('div'); box.className = 'reader-map-legend';
+  box.append(text('h3', 'Códigos e textos deste mapa'));
+  if (!plan.legend.length) {
+    box.append(text('p', 'Nenhum elemento da ordem de leitura foi marcado neste mapa.', 'reader-map-empty'));
+    return box;
+  }
+  const list = document.createElement('ul'); list.className = 'reader-map-list';
+  for (const item of plan.legend) {
+    const line = document.createElement('li');
+    line.id = `map-code-${item.code}`;
+    const code = text('span', item.code, 'reader-map-code');
+    const body = document.createElement('bdi'); body.textContent = item.text;
+    line.append(code, document.createTextNode(' '), body);
+    if (item.tabOrder) line.append(document.createTextNode(' '), text('span', `(Tab ${item.tabOrder})`, 'reader-map-tab'));
+    list.append(line);
+  }
+  box.append(list);
+  return box;
+}
+
 function renderPageMap() {
   const host = $('#page-map');
   if (!host) return;
   host.replaceChildren();
-  if (!report?.pageMap) {
-    host.append(text('p', 'Captura da página inteira não disponível nesta inspeção.', 'image-missing'));
-    return;
-  }
-  host.append(text('h2', 'Mapa de leitura da página'));
-  host.append(text('p', 'Cada caixa indica o trecho da página e o texto que seria lido, precedido do número de ordem de leitura (Tab) ou da marca de leitura estrutural (L). Serve para localizar o elemento sem ler o código.'));
-  const frame = document.createElement('div'); frame.className = 'map-frame';
+  const plan = readingMapPlan(report ?? {});
+  if (!plan) { host.append(text('p', READING_MAP_UNAVAILABLE, 'image-missing')); return; }
+  host.append(text('h2', READING_MAP_TITLE), text('p', READING_MAP_INTRO));
+  for (const note of plan.notes) host.append(text('p', note, 'map-note'));
+  const columns = document.createElement('div'); columns.className = 'reader-map-columns';
+  const frame = document.createElement('figure'); frame.className = 'map-frame';
   const base = document.createElement('img'); base.className = 'map-base'; base.src = report.pageMap;
-  base.alt = 'Captura da página inspecionada com caixas de anúncio';
+  base.alt = `Captura da página inspecionada com as caixas do mapa de leitura, ${plan.markers.length} elemento(s) marcado(s)`;
+  // Sem a medida da captura não há escala para converter a caixa: a imagem fica, o desenho não.
+  if (plan.width > 0) { base.width = plan.width; base.height = plan.height; }
   frame.append(base);
-  const mapped = report.entries.filter(entry => ['tab', 'reading'].includes(entry.category) && entry.bounds);
-  const width = Math.max(...mapped.map(entry => entry.bounds.x + entry.bounds.width), 800);
-  const height = Math.max(...mapped.map(entry => entry.bounds.y + entry.bounds.height), 600);
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('class', 'map-overlay');
-  svg.setAttribute('viewBox', `0 0 ${Math.round(width)} ${Math.round(height)}`);
-  svg.setAttribute('width', String(Math.round(width)));
-  svg.setAttribute('height', String(Math.round(height)));
-  svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', `Mapa de leitura com ${mapped.length} elementos anotados`);
-  for (const entry of mapped) {
-    const order = entry.tabOrder ?? `L${mapped.indexOf(entry) + 1}`;
-    const label = (entry.preview || entry.name || 'Sem texto acessível').replace(/\s+/gu, ' ').slice(0, 180);
-    const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    const box = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    box.setAttribute('class', `map-box tone-${entryTone(entry)}`);
-    for (const [key, value] of [['x', entry.bounds.x], ['y', entry.bounds.y], ['width', entry.bounds.width], ['height', entry.bounds.height]]) box.setAttribute(key, String(value));
-    const boxWidth = Math.min(360, Math.max(120, label.length * 6.4 + 36));
-    const boxHeight = 34;
-    const x = Math.max(0, Math.min(entry.bounds.x, width - boxWidth));
-    const y = Math.max(0, entry.bounds.y - boxHeight - 4);
-    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    bg.setAttribute('class', 'map-label-bg');
-    for (const [key, value] of [['x', x], ['y', y], ['width', boxWidth], ['height', boxHeight]]) bg.setAttribute(key, String(value));
-    bg.setAttribute('rx', '4');
-    const num = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    num.setAttribute('class', 'map-label-num'); num.setAttribute('x', String(x + 8)); num.setAttribute('y', String(y + 21));
-    num.textContent = `${order}.`;
-    const body = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    body.setAttribute('class', 'map-label'); body.setAttribute('x', String(x + 8 + String(order).length * 8 + 10)); body.setAttribute('y', String(y + 21));
-    body.textContent = label;
-    group.append(box, bg, num, body); svg.append(group);
-  }
-  frame.append(svg); host.append(frame);
+  if (plan.width > 0) frame.append(pageMapOverlay(plan));
+  columns.append(frame);
+  columns.append(pageMapLegend(plan));
+  host.append(columns);
 }
 
 function filter() {

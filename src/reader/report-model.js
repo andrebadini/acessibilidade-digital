@@ -1,6 +1,9 @@
 import { redactSensitiveText } from '../core/privacy.js';
 import { READING_REASON_TEXT } from './reading-reasons.js';
 import { entryTone, entryFix, laySummary, buildVerdict, topIssues, TONE_LABELS } from './plain-language.js';
+import {
+  READING_MAP_INTRO, READING_MAP_TITLE, READING_MAP_UNAVAILABLE, readingMapPlan, validPageMapGeometry,
+} from './reading-map-plan.js';
 
 export const READING_CATEGORIES = Object.freeze({
   tab: 'Sequência estimada de Tab',
@@ -85,16 +88,29 @@ const EXPORT_CSS = [
   'code{font-size:.85em}',
   '.entry-image{display:block;max-width:280px;max-height:180px;width:auto;height:auto;border:1px solid #8195a8;border-radius:4px;background:#f4f7fa}',
   '.image-missing{color:#5a6b7a;font-size:.9em}',
-  '.map-frame{position:relative;display:block;width:100%;overflow:auto;border:1px solid #8195a8;background:#f4f7fa}',
+  '.map-frame{position:relative;display:block;width:100%;margin:0;overflow:auto;border:1px solid #8195a8;background:#f4f7fa}',
   '.map-frame img.map-base{display:block;width:100%;height:auto}',
   '.map-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}',
-  '.map-box{fill:rgba(255,191,71,.22);stroke:#b86b00;stroke-width:1.5}',
+  '.map-box{fill:rgba(255,191,71,.22);stroke:#b86b00}',
   '.map-box.tone-problem{fill:rgba(198,40,40,.22);stroke:#c62828}',
-  '.map-box.tone-review{fill:rgba(249,168,37,.25);stroke:#f9a825}',
+  '.map-box.tone-review{fill:rgba(249,168,37,.25);stroke:#b07900}',
   '.map-box.tone-ok{fill:rgba(46,125,50,.18);stroke:#2e7d32}',
-  '.map-label-bg{fill:rgba(16,41,58,.92);stroke:#ffbf47;stroke-width:1}',
-  '.map-label{fill:#fff;font:12px system-ui,sans-serif}',
-  '.map-label-num{fill:#ffbf47;font:700 12px system-ui,sans-serif}',
+  '.map-box.tone-info{fill:rgba(96,112,128,.16);stroke:#607080}',
+  '.map-outline-halo{fill:none;stroke:#fff}',
+  '.map-leader{stroke:#8b1e1e}',
+  '.map-badge{fill:#8b1e1e;stroke:#fff}',
+  '.map-badge-overlapped{fill:#6b4e00}',
+  '.map-badge-text{fill:#fff;font:700 12px system-ui,sans-serif;text-anchor:middle;dominant-baseline:auto}',
+  '.reader-map-columns{display:flex;gap:1rem;align-items:flex-start;flex-wrap:wrap}',
+  '.reader-map-columns .map-frame{flex:1 1 58%;min-width:min(100%,320px)}',
+  '.reader-map-legend{flex:1 1 34%;min-width:min(100%,260px)}',
+  '.reader-map-legend h3{margin-top:0}',
+  '.reader-map-list{list-style:none;margin:0;padding:0}',
+  '.reader-map-list li{border-top:1px solid #d5dee6;padding:.45rem 0;line-height:1.45}',
+  '.reader-map-list li:first-child{border-top:0}',
+  '.reader-map-code{display:inline-block;min-width:2.4em;font-weight:700;color:#8b1e1e}',
+  '.reader-map-tab{color:#40596d;font-weight:700;white-space:nowrap}',
+  '.reader-map-empty,.map-note{color:#40596d;font-size:.94em}',
   '.verdict{border-radius:.65rem;padding:1.1rem 1.25rem;margin:1.2rem 0;border:1px solid}',
   '.verdict.tone-ok{background:#e8f5e9;border-color:#2e7d32}',
   '.verdict.tone-review{background:#fff8e1;border-color:#f9a825}',
@@ -120,7 +136,15 @@ const EXPORT_CSS = [
   '  body{margin:0;font-size:10pt}',
   '  h2{break-after:avoid}',
   '  th,td{padding:.4rem}',
+  // Na folha a imagem fica à esquerda e a legenda à direita, como na tela. A imagem é flutuante para a
+  // lista de códigos poder continuar na página seguinte quando o mapa tem muitos elementos, e cada item
+  // da lista evita a quebra no meio.
+  '  .reader-map-columns{display:block}',
+  '  .reader-map-columns .map-frame{float:left;width:58%;margin:0 2% .4rem 0;overflow:visible}',
+  '  .reader-map-columns::after{content:"";display:block;clear:both}',
   '  .map-frame{overflow:visible}',
+  '  .reader-map-list li{break-inside:avoid}',
+  '  .map-note{font-size:.9em}',
   '}',
 ].join('\n');
 
@@ -130,43 +154,64 @@ function safePngDataUrl(value) {
   return value;
 }
 
-function readingOrderNumber(entry, tabCount) {
-  if (entry.category === 'tab' && entry.tabOrder !== null) return entry.tabOrder;
-  return null;
+function mapRect(rect, className, strokeWidth, radius) {
+  return `<rect class="${className}" x="${rect.x}" y="${rect.y}" width="${rect.width}" height="${rect.height}"${radius ? ` rx="${radius}"` : ''} stroke-width="${strokeWidth}"></rect>`;
 }
 
-function mapEntries(report) {
-  return report.entries.filter(entry => ['tab', 'reading'].includes(entry.category) && entry.bounds);
+/**
+ * Um elemento do mapa: linha-guia, contorno na cor do semáforo e a caixa com o código. O tamanho da
+ * caixa sai do plano, na escala da captura — a etiqueta cresce junto com a imagem e continua legível na
+ * folha impressa.
+ */
+function mapMarkerHtml(marker) {
+  const leader = marker.leader
+    ? `<line class="map-leader" x1="${marker.leader.x1}" y1="${marker.leader.y1}" x2="${marker.leader.x2}" y2="${marker.leader.y2}" stroke-width="${marker.strokeWidth}"></line>`
+    : '';
+  return `${leader}<rect class="map-box ${TONE_CLASS[marker.tone]}" x="${marker.outline.x}" y="${marker.outline.y}" width="${marker.outline.width}" height="${marker.outline.height}" stroke-width="${marker.strokeWidth}"></rect>`
+    + mapRect(marker.badge, `map-badge${marker.overlapped ? ' map-badge-overlapped' : ''}`, marker.strokeWidth, marker.badge.radius)
+    + `<text class="map-badge-text" x="${marker.badge.x + marker.badge.width / 2}" y="${marker.label.y}" font-size="${marker.label.size}">${escapeHtml(marker.code)}</text>`;
 }
 
+function legendHtml(legend) {
+  if (!legend.length) return '<p class="reader-map-empty">Nenhum elemento da ordem de leitura foi marcado neste mapa.</p>';
+  return `<ul class="reader-map-list">${legend.map(item => `<li><span class="reader-map-code">${escapeHtml(item.code)}</span> `
+    + `<bdi>${escapeHtml(item.text)}</bdi>${item.tabOrder ? ` <span class="reader-map-tab">(Tab ${item.tabOrder})</span>` : ''}</li>`).join('')}</ul>`;
+}
+
+/**
+ * Mapa de leitura do relatório da conferência: a imagem à esquerda com as caixas e os códigos, e a
+ * coluna da direita com o texto que um leitor de tela falaria em cada código. O `viewBox` é o tamanho em
+ * pixel da própria captura, então cada caixa cai exatamente sobre o elemento.
+ */
 function renderPageMap(report) {
-  if (!report.pageMap) return '';
-  const rows = mapEntries(report);
-  const sample = report.entries.find(entry => entry.bounds) || { bounds: { x: 0, y: 0, width: 1, height: 1 } };
-  void sample;
-  let width = 0; let height = 0;
-  try {
-    // Prefer geometry implied by the raster when the report kept it; fall back to the furthest bound.
-    width = Math.max(...rows.map(entry => entry.bounds.x + entry.bounds.width), 800);
-    height = Math.max(...rows.map(entry => entry.bounds.y + entry.bounds.height), 600);
-  } catch { width = 800; height = 600; }
-  const labels = rows.map((entry, index) => {
-    const order = entry.tabOrder ?? (entry.category === 'reading' ? `L${index + 1}` : `${index + 1}`);
-    const textValue = entry.preview || entry.name || 'Sem texto acessível';
-    const label = String(textValue).replace(/\s+/gu, ' ').slice(0, 180);
-    const boxWidth = Math.min(360, Math.max(120, label.length * 6.4 + 36));
-    const boxHeight = 34;
-    const x = Math.max(0, Math.min(entry.bounds.x, width - boxWidth));
-    const y = Math.max(0, entry.bounds.y - boxHeight - 4);
-    return `<g><rect class="map-box ${TONE_CLASS[entryTone(entry)]}" x="${entry.bounds.x}" y="${entry.bounds.y}" width="${entry.bounds.width}" height="${entry.bounds.height}"></rect><rect class="map-label-bg" x="${x}" y="${y}" width="${boxWidth}" height="${boxHeight}" rx="4"></rect><text class="map-label-num" x="${x + 8}" y="${y + 21}">${escapeHtml(String(order))}.</text><text class="map-label" x="${x + 8 + String(order).length * 8 + 10}" y="${y + 21}">${escapeHtml(label)}</text></g>`;
-  }).join('');
-  return `<section class="page-map-section"><h2>Mapa de leitura da página</h2><p>Cada caixa indica o trecho da página e o texto que seria lido, precedido do número de ordem de leitura (Tab) ou da marca de leitura estrutural (L). Serve para localizar o elemento sem ler o código.</p><div class="map-frame"><img class="map-base" src="${escapeHtml(report.pageMap)}" alt="Captura da página inspecionada com caixas de anúncio" width="${Math.round(width)}" height="${Math.round(height)}"><svg class="map-overlay" viewBox="0 0 ${Math.round(width)} ${Math.round(height)}" width="${Math.round(width)}" height="${Math.round(height)}" role="img" aria-label="Mapa de leitura com ${rows.length} elementos anotados">${labels}</svg></div></section>`;
+  const plan = readingMapPlan(report);
+  if (!plan) return `<section class="page-map-section"><h2>${escapeHtml(READING_MAP_TITLE)}</h2><p>${escapeHtml(READING_MAP_UNAVAILABLE)}</p></section>`;
+  const notes = plan.notes.map(note => `<p class="map-note">${escapeHtml(note)}</p>`).join('');
+  // Sem a medida da captura a imagem continua no relatório (é a evidência), mas sem nenhuma caixa por
+  // cima: aí não existe escala para converter a medida do documento em pixel, e marcar seria chutar.
+  const overlay = plan.width > 0
+    ? `<svg class="map-overlay" viewBox="0 0 ${plan.width} ${plan.height}" width="${plan.width}" height="${plan.height}" role="img" aria-label="Caixas do mapa de leitura sobre a captura da página. Os códigos estão listados ao lado.">`
+      + `${plan.markers.map(marker => mapRect(marker.outline, 'map-outline-halo', marker.strokeWidth + 4)).join('')}`
+      + `${plan.markers.map(mapMarkerHtml).join('')}</svg>`
+    : '';
+  const size = plan.width > 0 ? ` width="${plan.width}" height="${plan.height}"` : '';
+  const frame = `<figure class="map-frame"><img class="map-base" src="${escapeHtml(report.pageMap)}" alt="Captura da página inspecionada com as caixas do mapa de leitura, ${plan.markers.length} elemento(s) marcado(s)"${size}>${overlay}</figure>`;
+  return `<section class="page-map-section"><h2>${escapeHtml(READING_MAP_TITLE)}</h2><p>${escapeHtml(READING_MAP_INTRO)}</p>${notes}`
+    + `<div class="reader-map-columns">${frame}<div class="reader-map-legend"><h3>Códigos e textos deste mapa</h3>${legendHtml(plan.legend)}</div></div></section>`;
 }
 
 export function attachReadingVisuals(report, visuals = {}) {
   if (!report || !Array.isArray(report.entries)) fail();
   const elementImages = visuals.elementImages && typeof visuals.elementImages === 'object' ? visuals.elementImages : {};
   const pageMap = safePngDataUrl(visuals.fullPage ?? visuals.pageMap ?? null);
+  // A medida da captura acompanha a imagem: sem ela o mapa não tem como converter a caixa medida no
+  // documento para o pixel da imagem, e aí não desenha nada em vez de apontar o lugar errado.
+  const rawGeometry = visuals.pageMapGeometry ?? null;
+  const measured = rawGeometry === null ? null : validPageMapGeometry(rawGeometry);
+  if (rawGeometry !== null && !measured) fail();
+  const pageMapGeometry = measured
+    ? { pixelWidth: measured.pixelWidth, pixelHeight: measured.pixelHeight, cssWidth: measured.cssWidth, cssHeight: measured.cssHeight }
+    : null;
   const extra = Array.isArray(visuals.limitations) ? visuals.limitations.map(explained).slice(0, 16) : [];
   const entries = report.entries.map(entry => ({
     ...entry,
@@ -176,6 +221,7 @@ export function attachReadingVisuals(report, visuals = {}) {
     ...report,
     entries,
     pageMap,
+    pageMapGeometry: pageMap ? pageMapGeometry : null,
     limitations: [...report.limitations, ...extra].slice(0, 80),
   };
 }
@@ -231,6 +277,15 @@ function renderEntryRow(entry) {
   return `<tr><td>${image}</td><td>${element}</td><td>${name}</td><td>${preview}</td><td>${review}</td></tr>`;
 }
 
+/**
+ * Largura máxima do mapa na folha: sai da proporção real da captura, para a imagem caber numa página A4
+ * em pé já com a legenda ao lado. Sem isso uma página longa empurraria a legenda para a folha seguinte.
+ */
+function printAspectRule(plan) {
+  if (!plan || plan.width <= 0 || plan.height <= 0) return '';
+  return `@media print{.reader-map-columns .map-frame{max-width:calc(210mm * ${plan.width} / ${plan.height})}}`;
+}
+
 export function renderReadingHtml(report) {
   const sections = Object.entries(READING_CATEGORIES).map(([category, label]) => {
     const rows = report.entries.filter(entry => entry.category === category);
@@ -244,7 +299,8 @@ export function renderReadingHtml(report) {
   const head = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'
     + '<meta name="viewport" content="width=device-width,initial-scale=1">'
     + `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">`
-    + `<title>Conferência de leitura por Tab — Audita Acessibilidade</title><style>${EXPORT_CSS}</style></head>`;
+    + `<title>Conferência de leitura por Tab — Audita Acessibilidade</title><style>${EXPORT_CSS}</style>`
+    + `<style>${printAspectRule(readingMapPlan(report))}</style></head>`;
   const intro = '<h1>Conferência de leitura por Tab</h1>'
     + `<p>Audita Acessibilidade · ${escapeHtml(report.origin)} · ${escapeHtml(report.generatedAt)}</p>`
     + `<p>${READING_EXPLANATION}</p><p>${READING_PRIVACY}</p>`

@@ -24,12 +24,17 @@
 //   07-evidencia-N.png     cada miniatura marcada isolada (o <figure> com o svg)
 //   08-mapa.png            mapa de anúncios, quando existe
 //   09-mapa-teclado.png    mapa do teclado, quando existe (caixas azuis numeradas e tracejadas)
+//   10-mapa-leitura.png    mapa da página de conferência por Tab (imagem à esquerda, códigos ao lado)
+//   11-mapa-impressao.png  o mapa do relatório no meio de impressão — o que a folha do PDF mostra
+//   11-relatorio.html/pdf  os arquivos que o produto entregou nesta auditoria (cópia para revisão)
+//   12-mapa-do-pdf.png/pdf a página do mapa como o motor de PDF a imprimiu (recorte de uma página)
 //   summary.json           o que foi medido: localizados, não localizados com motivo,
 //                          retângulo do alvo vs. retângulo do anel/botão, persistência e, com
 //                          --reload-check, o que o painel respondeu depois da recarga
 //
 // Um erro numa página é registrado no summary.json e não aborta as outras.
 
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -922,6 +927,10 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck 
       chromeBinary,
       expectedMajor: CHROME_MAJOR,
       viewport: { ...VIEWPORT },
+      // A exportação do relatório baixa os quatro arquivos pela API `chrome.downloads`, que **não**
+      // respeita `Browser.setDownloadBehavior` (modo `cdp`): sem o modo de perfil os arquivos caem na
+      // pasta de downloads do sistema e a prova do relatório entregue fica invisível para o roteiro.
+      downloadMode: 'profile',
     }));
     if (!launched.ok) { summary.errors.push({ stage: 'abrir-chrome', detail: 'sem navegador' }); return summary; }
     launch = launched.value;
@@ -1304,7 +1313,7 @@ function suspectContextExpression(suspects) {
 }
 
 async function captureReport({ launch, panel, page, directory, attempt, shot }) {
-  const report = { opened: false, screenshots: [], evidenceFigures: 0, evidenceCaptured: 0, launchMessage: null };
+  const report = { opened: false, screenshots: [], evidenceFigures: 0, evidenceCaptured: 0, launchMessage: null, reading: null, print: null };
   // A frase que o painel mostra depois do clique diz se a abertura foi feita: é ela que decide se
   // vale repetir o gesto, e não o tempo que a aba levou para aparecer.
   const launchMessage = async () => (await attempt('mensagem-do-relatorio', () => evaluate(panel,
@@ -1409,6 +1418,12 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
       report.keyboardSuspectContext = context.value ?? null;
     }
   }
+
+  // (i) mapa de leitura da página de conferência por Tab ----------------------------------------
+  report.reading = await captureReadingMap({ launch, page, panel, directory, attempt });
+  // (j) o PDF entregue e a página do mapa como o motor de impressão a desenha --------------------
+  report.print = await captureDeliveredPrint({ launch, panel, target, directory, attempt });
+
   return report;
 }
 
@@ -1416,6 +1431,375 @@ async function readAuditId(panel) {
   const value = await evaluate(panel, `document.querySelector('[data-screen="result"]')?.dataset.auditId ?? null`);
   if (typeof value !== 'string' || !value) throw new Error('AUDIT_ID_AUSENTE');
   return value;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mapa de leitura da conferência por Tab e PDF entregue
+// ---------------------------------------------------------------------------------------------
+
+/** A frase de estado do relatório e o que já existe no diretório de downloads quando nada chegou. */
+async function exportFailureReason(target, launch) {
+  const status = await evaluate(target, `document.querySelector('#review-status')?.textContent ?? null`).catch(() => null);
+  const names = await readdir(launch.downloadDirectory).catch(() => []);
+  return { status, downloads: names.filter(name => /audita/u.test(name)).slice(-6) };
+}
+
+const READER_PAGE_PATH = '/src/reader/index.html';
+const READER_STATUS = `document.querySelector('#status')?.textContent ?? ''`;
+
+// O que a própria página de conferência diz sobre o mapa: o tamanho do viewBox, os códigos desenhados
+// e a coluna da direita. A captura sozinha não responde à pergunta do produto — se cada caixa está
+// sobre o elemento certo e se cada código tem o texto correspondente ao lado.
+const READING_MAP_STATE = `(() => {
+  const section = document.querySelector('#page-map');
+  if (!section) return { present: false };
+  const image = section.querySelector('img.map-base');
+  const svg = section.querySelector('svg.map-overlay');
+  const number = value => { const parsed = Number.parseFloat(value); return Number.isFinite(parsed) ? parsed : null; };
+  const rectOf = node => node === null ? null : { x: number(node.getAttribute('x')), y: number(node.getAttribute('y')),
+    width: number(node.getAttribute('width')), height: number(node.getAttribute('height')) };
+  return {
+    present: true,
+    title: section.querySelector('h2')?.textContent ?? null,
+    intro: section.querySelector('p')?.textContent ?? null,
+    notes: [...section.querySelectorAll('.map-note')].map(node => node.textContent),
+    viewBox: svg?.getAttribute('viewBox') ?? null,
+    drawn: section.querySelectorAll('rect.map-box').length,
+    image: image ? { css: { width: image.width, height: image.height },
+      png: { width: image.naturalWidth, height: image.naturalHeight }, loaded: image.complete && image.naturalWidth > 0 } : null,
+    boxes: [...section.querySelectorAll('rect.map-box')].map(rectOf),
+    badges: [...section.querySelectorAll('rect.map-badge')].map(rectOf),
+    codes: [...section.querySelectorAll('text.map-badge-text')].map(node => node.textContent),
+    badgeFontSize: [...section.querySelectorAll('text.map-badge-text')].map(node => number(node.getAttribute('font-size'))),
+    legend: [...section.querySelectorAll('.reader-map-list > li')].map(item => ({
+      code: item.querySelector('.reader-map-code')?.textContent?.trim() ?? null,
+      text: (item.querySelector('bdi')?.textContent ?? '').slice(0, 200),
+      tab: item.querySelector('.reader-map-tab')?.textContent ?? null,
+    })),
+  };
+})()`;
+
+/** Abre a conferência de leitura por Tab pelo painel, mede o mapa e recorta a captura. */
+async function captureReadingMap({ launch, page, panel, directory, attempt }) {
+  const report = { opened: false, present: false, marks: null, precision: null, screenshots: [] };
+  // A conferência só pode ser aberta para a página ativa da janela: com a aba do relatório na frente,
+  // o painel recusa a abertura (a aba ativa deixou de ser a página auditada). Trazer a página auditada
+  // de volta é o mesmo gesto que a pessoa faria antes de clicar.
+  await attempt('leitura:focar-pagina', () => command(page, 'Page.bringToFront'));
+  const ready = await attempt('leitura:botao', () => waitForValue(panel,
+    `Boolean(document.querySelector('button[data-intent="OPEN_TAB_READING"]:not(:disabled)'))`, Boolean,
+    { timeoutMs: 20_000, intervalMs: 100 }));
+  if (!ready.ok) return report;
+  const clicked = await attempt('leitura:abrir', () => click(panel, 'button[data-intent="OPEN_TAB_READING"]'));
+  if (!clicked.ok) return report;
+  const tab = await attempt('leitura:aba', () => waitForReaderPage(launch));
+  if (!tab.ok || !tab.value) {
+    report.failure = await readerFailureReason(panel, launch);
+    return report;
+  }
+  report.opened = true;
+  const reader = tab.value.page;
+  const finished = await attempt('leitura:concluir', () => waitForValue(reader, READER_STATUS,
+    value => typeof value === 'string' && value.includes('Inspeção concluída'), { timeoutMs: 60_000, intervalMs: 200 }));
+  if (!finished.ok) return report;
+  await attempt('leitura:rolagem-instantanea', () => evaluate(reader, DISABLE_SMOOTH_SCROLL));
+  await sleep(600);
+  const state = await attempt('leitura:estado', () => evaluate(reader, READING_MAP_STATE));
+  report.present = state.value?.present === true;
+  report.marks = state.value ?? null;
+  // O mesmo mapa que a pessoa vê também sai no arquivo da conferência: o JSON guarda a medida em
+  // pixels CSS de cada elemento, e é com ela que a precisão das caixas desenhadas é conferida.
+  const exported = await attempt('leitura:exportar-json', async () => {
+    const file = await deliveredFile(launch, 'leitura-json', /^audita-leitura-tab-.*\.json$/u,
+      () => click(reader, '#export-json'));
+    return { ...file, report: JSON.parse(file.bytes.toString('utf8')) };
+  });
+  report.precision = precisionOfMap(report.marks, { ok: exported.ok, value: exported.value?.report ?? null });
+  const saved = await attempt('captura:10-mapa-leitura.png', () => captureElementClip(reader, directory,
+    '10-mapa-leitura.png', '#page-map', 0, { maxHeight: 1_600 }));
+  if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
+  // A conferência fica aberta numa aba própria: fechá-la devolve a página auditada ao estado em que o
+  // roteiro a deixou, antes das medições de persistência que vêm depois.
+  await attempt('leitura:fechar', () => launch.browser.command('Target.closeTarget', { targetId: tab.value.targetId }));
+  return report;
+}
+
+/** Por que a conferência não abriu: a frase do painel e as abas da extensão que existiam na hora. */
+async function readerFailureReason(panel, launch) {
+  const message = await evaluate(panel, `(() => {
+    const text = document.body.innerText ?? '';
+    const line = text.split('\\n').find(row => /conferência|simulação|encerre/iu.test(row));
+    return line ?? null;
+  })()`).catch(() => null);
+  const listed = await launch.browser.command('Target.getTargets').catch(() => null);
+  const pages = (listed?.targetInfos ?? []).filter(info => info.type === 'page')
+    .map(info => info.url.replace(/^chrome-extension:\/\/[a-p]{32}/u, 'chrome-extension://…'));
+  return { message, pages };
+}
+
+async function waitForReaderPage(launch, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const listed = await launch.browser.command('Target.getTargets');
+    const found = (listed?.targetInfos ?? []).filter(info => {
+      try {
+        const url = new URL(info.url);
+        return info.type === 'page' && url.protocol === 'chrome-extension:' &&
+          url.hostname === launch.extensionId && url.pathname === READER_PAGE_PATH;
+      } catch { return false; }
+    });
+    if (found.length > 1) throw new Error('LEITOR_DUPLICADO');
+    if (found.length === 1) {
+      return { targetId: found[0].targetId, page: await launch.attachPage(found[0].targetId) };
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(50);
+  } while (true);
+  throw new Error('LEITOR_NAO_ABRIU');
+}
+
+/**
+ * Confere a precisão das caixas desenhadas: cada retângulo do mapa tem de ser a medida do documento
+ * do próprio elemento (`bounds`, em pixel CSS) multiplicada pela escala da captura. Sem esta conta a
+ * revisão humana só veria "a caixa parece estar no lugar" — que é exatamente o defeito do item 6.
+ */
+function precisionOfMap(marks, exported) {
+  const entries = exported?.value?.entries;
+  const scale = exported?.value?.pageMapGeometry;
+  if (!marks?.present || !Array.isArray(entries) || !scale || marks.boxes.length === 0) {
+    return { checked: false, reason: exported?.error ?? 'sem medida exportada da conferência' };
+  }
+  const scaleX = scale.pixelWidth / scale.cssWidth;
+  const scaleY = scale.pixelHeight / scale.cssHeight;
+  // O mapa recorta a caixa na borda da imagem: um elemento que começa acima do topo capturado perde
+  // essa parte, e cobrar a medida inteira dele acusaria um erro que o desenho não comete.
+  const clipped = box => {
+    const x = Math.max(0, Math.min(box.x, scale.pixelWidth));
+    const y = Math.max(0, Math.min(box.y, scale.pixelHeight));
+    const right = Math.max(x, Math.min(box.x + box.width, scale.pixelWidth));
+    const bottom = Math.max(y, Math.min(box.y + box.height, scale.pixelHeight));
+    return { x, y, width: right - x, height: bottom - y };
+  };
+  const boxes = entries.filter(entry => entry.bounds).map(entry => ({
+    id: entry.id, x: entry.bounds.x * scaleX, y: entry.bounds.y * scaleY,
+    width: entry.bounds.width * scaleX, height: entry.bounds.height * scaleY,
+  }));
+  const inside = boxes.map(box => clipped(box)).filter(box => box.width > 0 && box.height > 0);
+  const clippedElements = boxes.length - inside.length;
+  const expected = inside.map(box => ({
+    id: box.id, x: Math.round(box.x), y: Math.round(box.y),
+    width: Math.round(box.width), height: Math.round(box.height),
+  }));
+  const close = (left, right) => Math.abs(left.x - right.x) <= 2 && Math.abs(left.y - right.y) <= 2 &&
+    Math.abs(left.width - right.width) <= 3 && Math.abs(left.height - right.height) <= 3;
+  // Nas duas direções, e sem casar "o primeiro que serve": numa página com elementos encaixados (um link
+  // dentro de um cartão) dois elementos podem ter a mesma medida, e casar pelo primeiro faria uma caixa
+  // certa contar como repetida. O que interessa é: toda caixa caiu sobre algum elemento, e quantos
+  // elementos elegíveis ficaram sem caixa (o mapa tem teto).
+  const boxesOnElement = marks.boxes.filter(box => expected.some(candidate => close(candidate, box))).length;
+  return {
+    checked: true, boxes: marks.boxes.length, scale: { x: Number(scaleX.toFixed(4)), y: Number(scaleY.toFixed(4)) },
+    measuredElements: expected.length, clippedElements,
+    boxesOnElement,
+    boxesWithoutElement: marks.boxes.length - boxesOnElement,
+    elementsWithoutBox: expected.filter(candidate => !marks.boxes.some(box => close(candidate, box))).length,
+    title: marks.title, viewBox: marks.viewBox,
+  };
+}
+
+/** Espera os arquivos de um download que entrega mais de um formato de uma vez (HTML e PDF juntos). */
+async function waitForDelivered(launch, before, patterns, timeoutMs = 90_000) {
+  const found = {};
+  const deadline = Date.now() + timeoutMs;
+  // Um relatório grande leva minutos entre o pedido aceito e o último arquivo. Sem esta linha, uma
+  // entrega lenta e uma entrega que nunca começou aparecem iguais no resumo da execução.
+  let lastNote = 0;
+  do {
+    const names = (await readdir(launch.downloadDirectory))
+      .filter(name => !before.has(name) && !name.endsWith('.crdownload'));
+    for (const [kind, pattern] of Object.entries(patterns)) {
+      if (found[kind]) continue;
+      const match = names.filter(name => pattern.test(name));
+      if (match.length > 1) throw new Error(`ARQUIVO_AMBIGUO:${kind}`);
+      if (match.length === 1) {
+        found[kind] = { kind, name: match[0], bytes: await readFile(join(launch.downloadDirectory, match[0])) };
+      }
+    }
+    if (Object.keys(found).length === Object.keys(patterns).length) return found;
+    if (Date.now() >= deadline) break;
+    if (Date.now() - lastNote > 20_000) {
+      lastNote = Date.now();
+      const partial = (await readdir(launch.downloadDirectory)).filter(name => !before.has(name));
+      const opening = (await launch.browser.command('Target.getTargets').catch(() => null))?.targetInfos
+        ?.some(info => String(info.url).includes('/src/export/index.html')) ?? false;
+      process.stderr.write(`    … esperando a entrega há ${Math.round((Date.now() + timeoutMs - deadline) / 1000)}s: ` +
+        `aba de exportação ${opening ? 'aberta' : 'ausente'}, arquivos novos: ${partial.join(', ') || 'nenhum'}\n`);
+    }
+    await sleep(200);
+  } while (true);
+  throw new Error(`ARQUIVO_AUSENTE:${Object.keys(patterns).filter(kind => !found[kind]).join(',')}`);
+}
+
+/** Arquivo entregue por um botão da própria página (download real do Chrome, não um valor de teste). */
+async function deliveredFile(launch, kind, pattern, trigger, timeoutMs = 60_000) {
+  const before = new Set(await readdir(launch.downloadDirectory));
+  await trigger();
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const names = (await readdir(launch.downloadDirectory)).filter(name => pattern.test(name) &&
+      !before.has(name) && !name.endsWith('.crdownload'));
+    if (names.length === 1) return { kind, name: names[0], bytes: await readFile(join(launch.downloadDirectory, names[0])) };
+    if (names.length > 1) throw new Error(`ARQUIVO_AMBIGUO:${kind}`);
+    if (Date.now() >= deadline) break;
+    await sleep(100);
+  } while (true);
+  throw new Error(`ARQUIVO_AUSENTE:${kind}`);
+}
+
+/** O HTML entregue e o PDF entregue, o mapa no meio de impressão e a página do mapa no motor de PDF. */
+async function captureDeliveredPrint({ launch, target, directory, attempt }) {
+  const report = { exported: [], pdfPages: null, html: null, printScreenshot: null, mapPage: null };
+  // O passo da conferência deixou a página auditada na frente; o relatório volta a ser a aba ativa
+  // para o clique de exportação acontecer na mesma situação da jornada real (e da dos testes de ponta).
+  await attempt('pdf:focar-relatorio', () => command(target, 'Page.bringToFront'));
+  // Um clique no botão de exportação entrega os quatro arquivos: o HTML e o PDF são lidos do mesmo
+  // download, então a espera é uma só — esperar dois downloads separados perderia o que já chegou.
+  const before = new Set(await readdir(launch.downloadDirectory));
+  const exported = await attempt('pdf:exportar', async () => {
+    await click(target, 'button[data-report-export]');
+    return waitForDelivered(launch, before, { html: /\.html$/u, pdf: /\.pdf$/u }, 300_000);
+  });
+  // Sem esta frase, "nenhum arquivo baixado" não distingue um pedido recusado de uma entrega lenta:
+  // é ela que o próprio relatório usa para dizer em que ponto a geração parou.
+  if (!exported.ok) report.exportFailure = await exportFailureReason(target, launch);
+  const html = { ok: exported.ok, value: exported.value?.html ?? null };
+  const pdf = { ok: exported.ok, value: exported.value?.pdf ?? null };
+  for (const [file, name] of [[html, '11-relatorio.html'], [pdf, '11-relatorio.pdf']]) {
+    if (!file.value) continue;
+    await writeShot(directory, name, file.value.bytes);
+    report.exported.push({ name, byteLength: file.value.bytes.length });
+  }
+  if (pdf.value) report.pdfPages = [...pdf.value.bytes.toString('latin1').matchAll(/\/Type\s*\/Page\b/gu)].length;
+  if (html.value) {
+    const markup = html.value.bytes.toString('utf8');
+    report.html = {
+      name: '11-relatorio.html',
+      bytes: html.value.bytes.length,
+      mapSections: (markup.match(/data-announcement-map-page=/gu) ?? []).length,
+      mapSegments: (markup.match(/data-map-segment-image/gu) ?? []).length,
+      twoColumns: (markup.match(/class="reader-map-columns"/gu) ?? []).length,
+      codes: (markup.match(/class="reader-map-code"/gu) ?? []).length,
+      sectionTitle: markup.includes('<h3>Mapa de leitura da página</h3>'),
+    };
+  }
+  // O meio de impressão do próprio relatório: é a folha do PDF, medida na largura de A4.
+  const shot = await attempt('captura:11-mapa-impressao.png', async () => {
+    await command(target, 'Emulation.setEmulatedMedia', { media: 'print' });
+    try {
+      return await captureElementClip(target, directory, '11-mapa-impressao.png',
+        'article.map-card:not(.keyboard-map-card)', 0, { maxHeight: 1_600 });
+    } finally {
+      await command(target, 'Emulation.setEmulatedMedia', { media: '' });
+    }
+  });
+  if (shot.ok && shot.value) { report.printScreenshot = shot.value.name; }
+  // A página do mapa como o motor de PDF a imprime: o mesmo documento entregue, com o resto da folha
+  // removido no DOM (a remoção não é estilo embutido, então a política de conteúdo da página não
+  // interfere). É a prova visual de que a imagem e a coluna cabem juntas na largura de A4.
+  const page = await attempt('pdf:pagina-do-mapa', () => printMapPage({ launch, directory, artifact: html }));
+  if (page.ok && page.value) report.mapPage = page.value;
+  else report.mapPage = { rendered: false, reason: 'leitura da página do mapa não concluída' };
+  return report;
+}
+
+async function printMapPage({ launch, directory, artifact }) {
+  if (!artifact.ok || !artifact.value) return { rendered: false, reason: 'sem HTML entregue' };
+  const source = join(directory, '11-relatorio.html');
+  const created = await launch.browser.command('Target.createTarget', { url: `file://${source}` });
+  if (typeof created?.targetId !== 'string') throw new Error('ABA_DE_IMPRESSAO_SEM_ID');
+  const targetId = created.targetId;
+  try {
+    const page = await launch.attachPage(targetId);
+    // Esperar pelo `readyState` do documento **novo**: a aba nasce em `about:blank`, que já está
+    // "complete", e medir nesse instante devolveria uma página vazia como se o mapa faltasse.
+    const loaded = await waitForValue(page,
+      `document.querySelectorAll('[data-announcement-map-page]').length`,
+      value => typeof value === 'number' && value > 0,
+      { timeoutMs: 30_000, intervalMs: 100 }).then(() => true, () => false);
+    if (!loaded) return { rendered: false, reason: 'mapa ausente no HTML entregue' };
+    const isolated = await evaluate(page, `(() => {
+      const section = document.querySelector('[data-announcement-map-page]')?.closest('section');
+      const main = document.querySelector('main');
+      if (!section || !main) return false;
+      for (const child of [...main.children]) if (child !== section) child.remove();
+      for (const node of [...document.body.children]) if (node !== main) node.remove();
+      return document.querySelectorAll('[data-announcement-map-page]').length;
+    })()`);
+    if (isolated === false) return { rendered: false, reason: 'mapa sem seção no HTML entregue' };
+    // A folha do PDF vista de perto: largura de A4 (794 px a 96 dpi) no meio de impressão. O PDF
+    // entregue pelo motor tem 100+ páginas e nenhum rasterizador do sistema abre a página do mapa, então
+    // é esta captura que mostra o que o motor desenha na folha — a imagem e a coluna na mesma linha.
+    // `deviceScaleFactor: 1` mantém pixel da imagem igual a pixel CSS: o recorte da captura é medido em
+    // px CSS e, com a tela em 2×, o recorte cairia na metade do lugar.
+    const a4 = { width: 794, height: 1123, deviceScaleFactor: 1, mobile: false };
+    await command(page, 'Emulation.setDeviceMetricsOverride', a4);
+    await command(page, 'Emulation.setEmulatedMedia', { media: 'print' });
+    let mapShot = null;
+    try {
+      const saved = await captureElementClip(page, directory, '12-mapa-impressao-a4.png',
+        '.reader-map-columns', 0, { maxHeight: 1_400 });
+      mapShot = saved?.name ?? null;
+    } catch { /* a captura da folha é acessória: o PDF e a captura do meio de impressão continuam */ }
+    await command(page, 'Emulation.setEmulatedMedia', { media: '' });
+    await command(page, 'Emulation.clearDeviceMetricsOverride', {});
+    const printed = await command(page, 'Page.printToPDF',
+      { preferCSSPageSize: true, printBackground: true, displayHeaderFooter: false });
+    const bytes = Buffer.from(printed.data, 'base64');
+    await writeShot(directory, '12-mapa-do-pdf.pdf', bytes);
+    const pages = [...bytes.toString('latin1').matchAll(/\/Type\s*\/Page\b/gu)].length;
+    const raster = await rasterizePdfPage(join(directory, '12-mapa-do-pdf.pdf'), join(directory, '12-mapa-do-pdf.png'));
+    // O rasterizador do sistema só abre a primeira página, e na primeira página da seção cabem o título,
+    // a explicação e as ressalvas — a imagem e a coluna só aparecem na segunda. Então imprime-se de novo,
+    // agora com a seção reduzida à primeira figura: a página 1 desse PDF é a folha do mapa, com a imagem
+    // à esquerda e os textos à direita, como o motor de PDF desenha. Não há o que restaurar: a aba fecha
+    // logo depois.
+    const result = { rendered: true, maps: isolated, pages, byteLength: bytes.length, raster, mapShot,
+      screenshot: mapShot ?? (raster ? '12-mapa-do-pdf.png' : null) };
+    const figureOnly = await evaluate(page, `(() => {
+      const figure = document.querySelector('.reader-map-segment');
+      if (!figure) return 0;
+      // Fica só o caminho até a figura: os irmãos dela no cartão (título da página, estado, ressalvas)
+      // e os irmãos do cartão na seção (título da seção, explicação) saem, senão a página 1 do PDF
+      // impresso é esse texto e a figura começa na página 2 — e o rasterizador do sistema só abre a 1.
+      for (const node of [figure.parentElement, figure.closest('section')]) {
+        if (!node) continue;
+        for (const child of [...node.children]) if (child !== figure && !child.contains(figure)) child.remove();
+      }
+      return 1;
+    })()`);
+    if (figureOnly === 1) {
+      const sheet = await command(page, 'Page.printToPDF',
+        { preferCSSPageSize: true, printBackground: true, displayHeaderFooter: false });
+      const sheetBytes = Buffer.from(sheet.data, 'base64');
+      await writeShot(directory, '12-mapa-impressao-folha.pdf', sheetBytes);
+      result.sheetPages = [...sheetBytes.toString('latin1').matchAll(/\/Type\s*\/Page\b/gu)].length;
+      result.sheetRaster = await rasterizePdfPage(join(directory, '12-mapa-impressao-folha.pdf'),
+        join(directory, '12-mapa-impressao-folha.png'));
+    }
+    return result;
+  } finally {
+    await launch.browser.command('Target.closeTarget', { targetId });
+  }
+}
+
+/** Rasteriza a primeira página do PDF com o renderizador do sistema (macOS). É acessório: sem ele a
+ *  captura do meio de impressão continua valendo, e o PDF fica no diretório para conferência. */
+async function rasterizePdfPage(pdfPath, pngPath) {
+  if (process.platform !== 'darwin') return null;
+  const result = await new Promise(resolvePromise => {
+    execFile('sips', ['-s', 'format', 'png', pdfPath, '--out', pngPath], error => resolvePromise(error === null));
+  }).catch(() => false);
+  return result ? 'sips' : null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1575,6 +1959,49 @@ function printPageSummary(summary) {
       `(${summary.report.evidenceVisibleBefore ?? 0} visíveis antes de abrir as seções), ` +
       `${summary.report.evidenceCaptured} capturada(s)` +
       (summary.report.map?.present ? `, mapa: ${(summary.report.map.statuses ?? []).join('/')}` : ', mapa: ausente'));
+  }
+  if (summary.report?.reading) {
+    const reading = summary.report.reading;
+    lines.push(`  mapa de leitura da conferência por Tab: ${reading.present ? 'presente' : (reading.opened ? 'sem mapa' : 'não abriu')}` +
+      (reading.marks ? `; ${reading.marks.drawn} caixa(s), códigos ${(reading.marks.codes ?? []).join(', ') || '—'}, ` +
+        `${(reading.marks.legend ?? []).length} linha(s) na coluna da direita, viewBox ${reading.marks.viewBox ?? '—'}` : ''));
+    if (reading.failure) {
+      lines.push(`    motivo provável: ${reading.failure.message ?? 'sem frase no painel'}` +
+        `; abas abertas: ${(reading.failure.pages ?? []).join(', ') || '—'}`);
+    }
+    for (const note of reading.marks?.notes ?? []) lines.push(`    limitação declarada: ${note}`);
+    if (reading.precision?.checked) {
+      lines.push(`    precisão: ${reading.precision.boxesOnElement} de ${reading.precision.boxes} caixa(s) batem com a medida do ` +
+        `elemento na escala da captura (${reading.precision.scale.x}× / ${reading.precision.scale.y}×); ` +
+        `fora da medida: ${reading.precision.boxesWithoutElement}; ` +
+        `elementos elegíveis sem caixa: ${reading.precision.elementsWithoutBox ?? 0}; ` +
+        `elementos recortados na borda da imagem: ${reading.precision.clippedElements ?? 0}`);
+    } else if (reading.precision) {
+      lines.push(`    precisão: não medida — ${reading.precision.reason}`);
+    }
+    if ((reading.screenshots ?? []).length) lines.push(`    captura: ${reading.screenshots.join(', ')}`);
+  }
+  if (summary.report?.print) {
+    const print = summary.report.print;
+    lines.push(`  arquivos entregues: ${print.exported.map(file => `${file.name} (${Math.round(file.byteLength / 1024)} KiB)`).join(', ') || 'nenhum'}` +
+      (print.pdfPages === null ? '' : `; PDF com ${print.pdfPages} página(s)`));
+    if (print.exportFailure) {
+      lines.push(`    o relatório disse: ${print.exportFailure.status ?? 'sem frase de estado'}` +
+        `; auditorias no diretório de downloads: ${(print.exportFailure.downloads ?? []).join(', ') || 'nenhuma'}`);
+    }
+    if (print.html) {
+      lines.push(`    no HTML entregue: ${print.html.mapSegments} trecho(s) de imagem, ${print.html.twoColumns} bloco(s) de duas colunas, ` +
+        `${print.html.codes} código(s) na coluna da direita, título próprio: ${print.html.sectionTitle ? 'sim' : 'NÃO'}`);
+    }
+    if (print.mapPage) {
+      lines.push(`    página do mapa no motor de PDF: ${print.mapPage.rendered
+        ? `${print.mapPage.maps} mapa(s), ${print.mapPage.pages} página(s)` +
+          `; imagem renderizada: ${print.mapPage.raster ?? 'sem rasterizador do sistema'}` +
+          `; folha da imagem e da coluna: ${print.mapPage.sheetRaster
+            ? `${print.mapPage.sheetPages} página(s), renderizada`
+            : 'não rasterizada'}`
+        : `não reproduzida — ${print.mapPage.reason}`}`);
+    }
   }
   if (summary.report?.keyboardSuspects?.present) {
     // A lista crua, uma linha por item: é o que a revisão humana classifica em verdadeiro ou falso.

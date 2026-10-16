@@ -1,3 +1,4 @@
+import { annotationMapReadRules } from '../evidence/annotation-map-artifact.js';
 import { validateKeyboardMapArtifact } from '../keyboard/keyboard-map-artifact.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
@@ -36,6 +37,8 @@ const MAP_DERIVATION_KEYS = set('type algorithm version sourceEvidenceId sourceH
 const MAP_GEOMETRY_KEYS = set('coordinateSpace sourceCssSize sourcePixelSize scaleX scaleY deviceScaleFactor annotations');
 const MAP_ANNOTATION_KEYS = set('number nodeId sourceRect marker segmentIndex');
 const MAP_MARKER_KEYS = set('x y size leaderX leaderY');
+// Etiqueta do mapa de leitura (1.3.0): caixa com largura e altura próprias, no lugar do círculo.
+const MAP_BADGE_KEYS = set('x y width height leaderX leaderY');
 const MAP_SEGMENT_KEYS = set('segmentId index count role sourceCssClip width height dataUrl contentHash');
 const MAP_LEGEND_KEYS = set('number nodeId selectorSummary announcementPreview nameSource segmentIndex');
 const MAP_COUNT_KEYS = set('eligible annotated omittedNoRect omittedFrame omittedLimit unresolvedOverlap');
@@ -453,6 +456,15 @@ function assertKeyboardMap(artifact) {
   validateKeyboardMapArtifact(artifact);
 }
 
+/** A partir da 1.3.0 a marca é a caixa do código; antes dela era o círculo numerado. */
+function annotationMapUsesBadge(artifact) {
+  try {
+    return annotationMapReadRules(artifact?.derivation?.version).badge === true;
+  } catch {
+    return false;
+  }
+}
+
 function assertAnnotationMap(artifact) {
   const expectedMapKeys = artifact.pixelState === 'omitted-budget'
     ? MAP_EVIDENCE_KEYS
@@ -466,7 +478,9 @@ function assertAnnotationMap(artifact) {
   for (const annotation of artifact.derivation.geometry.annotations) {
     assertExact(annotation, MAP_ANNOTATION_KEYS);
     assertExact(annotation.sourceRect, set('x y width height'));
-    assertExact(annotation.marker, MAP_MARKER_KEYS);
+    // A chave da etiqueta depende da versão declarada: círculo numerado até a 1.2.0, caixa com o código
+    // curto (L1, L2…) na 1.3.0. Auditorias antigas continuam abrindo com o conjunto da própria versão.
+    assertExact(annotation.marker, annotationMapUsesBadge(artifact) ? MAP_BADGE_KEYS : MAP_MARKER_KEYS);
   }
   assertArray(artifact.segments);
   for (const segment of artifact.segments) {
