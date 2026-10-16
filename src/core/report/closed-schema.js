@@ -31,7 +31,17 @@ const ELEMENT_EVIDENCE_KEYS = new Set([
   // recálculo o sobrescreve a partir dos próprios pixels, `artifact-hash.js`), então auditorias
   // anteriores continuam válidas sem ele e nenhum hash guardado muda por causa dele.
   'binarySha256',
+  // Opcionais desde a 1.1.62: onde o elemento estava na captura integral, em px CSS da própria imagem
+  // (`fullPageRect` é a caixa; `fullPageParts`, quando existir, são os fragmentos de linha do inline
+  // multilinha). Com eles o recorte do elemento sai da captura que já está guardada, sem uma captura de
+  // tela por elemento. Entram no hash do artefato como qualquer outro dado guardado — o recálculo usa o
+  // mesmo JSON canônico, então o hash de uma auditoria antiga, sem os campos, não muda.
+  'fullPageRect', 'fullPageParts',
 ]);
+/** Retângulo em px CSS de imagem. Todos os quatro números são exigidos, e largura/altura são positivas. */
+const EVIDENCE_RECT_KEYS = set('x y width height');
+/** Teto de fragmentos de linha guardados por elemento, o mesmo da marcação desenhada (`evidence-highlight`). */
+const ELEMENT_FULL_PAGE_PART_LIMIT = 8;
 const ACCESSIBILITY_EVIDENCE_KEYS = set(
   'announcementPreview description descriptionSource name nameSource role states valueStatus visibleText',
 );
@@ -414,6 +424,24 @@ function assertEvidence(artifact) {
     assertStringArray(artifact.accessibility.states);
   }
   if (artifact.metadata !== undefined) assertEvidenceMetadata(artifact.metadata);
+  if (artifact.fullPageRect !== undefined) {
+    // A posição só vale presa à captura integral que a contém: um retângulo solto não teria imagem de
+    // onde ser recortado nem como ser conferido depois.
+    if (typeof artifact.fullPageEvidenceId !== 'string') throw new TypeError();
+    assertEvidenceRect(artifact.fullPageRect);
+  }
+  if (artifact.fullPageParts !== undefined) {
+    if (typeof artifact.fullPageEvidenceId !== 'string') throw new TypeError();
+    assertArray(artifact.fullPageParts);
+    if (artifact.fullPageParts.length === 0 || artifact.fullPageParts.length > ELEMENT_FULL_PAGE_PART_LIMIT) throw new TypeError();
+    for (const part of artifact.fullPageParts) assertEvidenceRect(part);
+  }
+}
+
+function assertEvidenceRect(rect) {
+  assertExact(rect, EVIDENCE_RECT_KEYS);
+  for (const key of ['x', 'y']) if (!Number.isFinite(rect[key])) throw new TypeError();
+  for (const key of ['width', 'height']) if (!Number.isFinite(rect[key]) || rect[key] <= 0) throw new TypeError();
 }
 
 // Teto da escala de pixels da miniatura de elemento. Acompanha `ELEMENT_CAPTURE_PIXEL_LIMITS.maxScale`

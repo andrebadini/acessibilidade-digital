@@ -421,22 +421,37 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
       `o item do anexo precisa nomear a evidência ${evidenceId}`);
   }
   // O SHA-256 do arquivo anunciado no anexo é o dos bytes do PNG guardado: recalculado aqui, byte a byte.
+  // 1.1.62: nesta página estável os elementos caem DENTRO da captura integral e não pedem captura de tela
+  // própria — o recorte do cartão sai daquela imagem, e o arquivo que a ficha do elemento anuncia é o PNG
+  // dela. O teste recalcula o hash do arquivo que a evidência realmente usa: a miniatura do elemento quando
+  // existe, e a captura integral quando é ela que sustenta o recorte.
   const hashProof = await extension.evaluate(extension.harnessPage, `(async()=>{
     const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
     const model=await store.getAudit(${JSON.stringify(auditId)});
-    const artifact=model.evidence.find(item=>item.kind==='element'&&typeof item.binarySha256==='string');
-    if(!artifact) return {found:false,inventory:model.evidence.map(item=>({kind:item.kind,
+    const elements=model.evidence.filter(item=>item.kind==='element');
+    const artifact=elements.find(item=>typeof item.binarySha256==='string')??null;
+    const source=artifact??model.evidence.find(item=>item.kind==='full-page'&&typeof item.dataUrl==='string');
+    if(!source) return {found:false,inventory:model.evidence.map(item=>({kind:item.kind,
       pixels:typeof item.dataUrl==='string',binary:typeof item.binarySha256,
       metadata:Object.keys(item.metadata??{}).join('|')}))};
-    const bytes=Uint8Array.from(atob(artifact.dataUrl.slice('data:image/png;base64,'.length)),c=>c.charCodeAt(0));
+    const bytes=Uint8Array.from(atob(source.dataUrl.slice('data:image/png;base64,'.length)),c=>c.charCodeAt(0));
     const digest=await crypto.subtle.digest('SHA-256',bytes);
     const hex=[...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('');
-    return {found:true,evidenceId:artifact.evidenceId,stored:artifact.binarySha256,computed:hex};
+    return {found:true,evidenceId:source.evidenceId,stored:source.binarySha256??source.hash,computed:hex,
+      // A posição gravada é o que permite recortar sem captura nova: sem ela, o cartão não teria recorte.
+      elements:elements.length,
+      positioned:elements.filter(item=>item.fullPageRect!==undefined).length,
+      withOwnPixels:elements.filter(item=>typeof item.dataUrl==='string').length,
+      croppedFrom:elements[0]?.fullPageEvidenceId??null};
   })()`, { awaitPromise: true });
   assert.equal(hashProof.found, true,
-    `a auditoria precisa guardar o SHA-256 do arquivo da evidência de elemento: ${JSON.stringify(hashProof.inventory ?? [])}`);
+    `a auditoria precisa guardar o SHA-256 do arquivo da evidência: ${JSON.stringify(hashProof.inventory ?? [])}`);
   assert.equal(hashProof.stored, hashProof.computed,
     'o hash guardado precisa ser o dos bytes do PNG, e não um valor qualquer');
+  assert.equal(hashProof.withOwnPixels, 0,
+    `nenhum elemento desta página precisa de captura própria: ${JSON.stringify(hashProof)}`);
+  assert.equal(hashProof.positioned, hashProof.elements,
+    `toda evidência de elemento guarda a posição na captura integral: ${JSON.stringify(hashProof)}`);
   assert.ok(html.includes(hashProof.stored),
     `o Anexo de evidências precisa mostrar o SHA-256 do arquivo ${hashProof.evidenceId}`);
   assert.ok(jsonBytes.includes(hashProof.stored), 'o JSON entregue carrega o mesmo hash do arquivo');
