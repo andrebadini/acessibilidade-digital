@@ -197,7 +197,7 @@ function renderReportViewDocument(model, view, options = {}) {
   const statusLabels = Object.freeze({ pending: 'Pendente', complete: 'Concluída', partial: 'Concluída com limitações', cancelled: 'Cancelada', failed: 'Falhou' });
   const classificationLabels = Object.freeze({ failed: 'Não conformidade identificada', alerts: 'Alerta', 'manual-review': 'Revisão humana necessária', passed: 'Resultado positivo', requirement: 'Requisito ABNT', recommendation: 'Recomendação ABNT', 'best-practice': 'Boa prática suplementar', editorial: 'Alerta editorial' });
   const evidenceKindLabels = Object.freeze({
-    'full-page': 'Página completa', element: 'Elemento', 'announcement-map': 'Mapa de anúncios',
+    'full-page': 'Página completa', element: 'Elemento', 'announcement-map': 'Mapa de leitura',
     'keyboard-map': 'Mapa do teclado',
   });
   const countLabel = (count, singular, plural) => `${count} ${count === 1 ? singular : plural}`;
@@ -302,7 +302,7 @@ function renderReportViewDocument(model, view, options = {}) {
   }).join('');
   const section = (index, body) => `<section id="report-section-${index + 1}" aria-labelledby="report-heading-${index + 1}"><h2 id="report-heading-${index + 1}">${escapeHtml(viewSectionTitle(index))}</h2>${body}</section>`;
   const delivery = deliveryIdentity === null ? '' : `<p><strong>ExportDeliveryIdentityV1:</strong> auditoria ${escapeHtml(deliveryIdentity.auditId)}; revisão ${deliveryIdentity.modelRevision}; hash ${escapeHtml(deliveryIdentity.modelHash)}; tentativa ${escapeHtml(deliveryIdentity.attemptId)}.</p>`;
-  const navigationLabels = ['Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios', 'Teclado', 'Matriz ABNT', 'Metodologia e evidências'];
+  const navigationLabels = ['Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Mapa de leitura', 'Teclado', 'Matriz ABNT', 'Metodologia e evidências'];
   const navigation = `<div data-report-navigation><nav class="section-nav" aria-label="Seções do relatório"><strong>Ir para</strong><ul>${navigationLabels.map((navigationLabel, index) => `<li><a href="#report-section-${index + 1}">${escapeHtml(navigationLabel)}</a></li>`).join('')}</ul></nav></div>`;
   const coverage = view.executive.coverage.status === 'available' ? view.executive.coverage.percent : 'indisponível';
   const limitationsList = listedLimitations(view.executive.limitations);
@@ -383,7 +383,7 @@ function viewSectionTitle(index) {
     'Cobertura e quatro grupos de resultado',
     FINDINGS_BOARD_TITLE,
     'Revisão humana guiada e conclusões registradas',
-    'Mapas de anúncios',
+    'Mapa de leitura da página',
     'Mapa do teclado',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
@@ -407,11 +407,12 @@ function marksCropsHtml(record) {
 
 function reportViewReaderMaps(view) {
   const maps = readerMapPresentation(view.executive.pages, view.readerMaps);
-  // O mapa atual abre com um cabeçalho próprio: é por ele que quem usa leitor de tela encontra a
-  // seção, e é o mesmo título que a página de conferência por Tab mostra. Até 1.2.0 o cartão abria
-  // direto no texto antigo, que nomeava o mapa na própria frase e não tinha cabeçalho.
+  // O mapa atual abre com a explicação leiga logo abaixo do título da própria seção (`h2`, o mesmo
+  // nome do índice): repetir o título num `h3` logo em seguida faria o relatório dizer duas vezes
+  // seguidas a mesma coisa, em tela e na navegação por cabeçalhos. Até 1.2.0 o cartão abria no texto
+  // antigo, que nomeava o mapa na própria frase e não tinha cabeçalho.
   const intro = maps.some(map => map.format === 'reading-codes')
-    ? `<h3>${escapeHtml(READER_MAP_TITLE)}</h3><p>${escapeHtml(READER_MAP_INTRO)}</p>`
+    ? `<p>${escapeHtml(READER_MAP_INTRO)}</p>`
     : `<p>${escapeHtml(READER_MAP_LEGACY_INTRO)}</p>`;
   return `${intro}${maps.map(map => {
     const figures = map.segments.map(segment => `<figure class="announcement-map-segment" data-map-segment="${escapeHtml(segment.id)}">${segment.dataUrl
@@ -484,7 +485,7 @@ function header() {
 
 function sectionNavigation() {
   return `<nav class="section-nav" aria-label="Seções do relatório"><strong>Navegue pelo relatório</strong><ul>
-<li><a href="#ocorrencias">Ocorrências</a></li><li><a href="#revisao">Revisão humana</a></li><li><a href="#mapas">Mapas de anúncios</a></li><li><a href="#mapa-teclado">Mapa do teclado</a></li><li><a href="#matriz">Matriz ABNT</a></li><li><a href="#anexos">Evidências</a></li><li><a href="#metodologia">Metodologia</a></li>
+<li><a href="#ocorrencias">Ocorrências</a></li><li><a href="#revisao">Revisão humana</a></li><li><a href="#mapas">Mapa de leitura da página</a></li><li><a href="#mapa-teclado">Mapa do teclado</a></li><li><a href="#matriz">Matriz ABNT</a></li><li><a href="#anexos">Evidências</a></li><li><a href="#metodologia">Metodologia</a></li>
 </ul></nav>`;
 }
 
@@ -698,8 +699,8 @@ function occurrenceEvidence(occurrence, artifactById, imageByEvidenceId, outcome
 
 function announcementMaps(model, imageByEvidenceId) {
   const maps = model.evidence.filter(artifact => artifact.kind === 'announcement-map');
-  return `<section id="mapas" class="major-section" aria-labelledby="mapas-titulo"><h2 id="mapas-titulo">Mapa visual da prévia de anúncios</h2>
-<p class="section-intro">Evidência derivada para relacionar marcadores aos elementos e às prévias calculadas. Ordem observada DOM/AX não é ordem de foco, e a prévia não é transcrição literal de tecnologia assistiva.</p><div class="map-list">${model.pages.map((page, index) => {
+  return `<section id="mapas" class="major-section" aria-labelledby="mapas-titulo"><h2 id="mapas-titulo">${escapeHtml(READER_MAP_TITLE)}</h2>
+<p class="section-intro">Evidência derivada para relacionar as caixas aos elementos e às prévias calculadas. Ordem observada DOM/AX não é ordem de foco, e a prévia não é transcrição literal de tecnologia assistiva.</p><div class="map-list">${model.pages.map((page, index) => {
     const artifact = maps.find(value => value.pageId === page.pageId);
     if (!artifact) return `<article id="mapa-${index + 1}" class="map-card" data-announcement-map-page="${escapeHtml(page.pageId)}" data-map-status="absent"><h3>Página ${index + 1} — ${escapeHtml(page.pageId)}</h3><div class="map-unavailable"><p><strong>Mapa indisponível nesta auditoria.</strong></p><p>Nenhum artefato derivado validado foi registrado; a captura original permanece separada no anexo quando disponível.</p></div></article>`;
     const coverage = `${artifact.counts.annotated} de ${artifact.counts.eligible} elementos elegíveis anotados; ${artifact.counts.omittedFrame} contextos de frame, ${artifact.counts.omittedNoRect} elementos sem geometria, ${artifact.counts.omittedClipped ?? 0} escondidos por rolagem interna, ${artifact.counts.omittedLimit} por limite e ${artifact.counts.unresolvedOverlap} sobreposições não resolvidas.`;
@@ -814,7 +815,7 @@ function evidenceCard(artifact, allEvidence, imageByEvidenceId, pages) {
   const provenance = evidenceProvenanceHtml({ ...artifact, provenance: projectEvidenceProvenance(artifact, pages) });
   if (artifact.kind === 'announcement-map') {
     const coverage = `${artifact.counts.annotated}/${artifact.counts.eligible} elegíveis anotados; ${artifact.segments.length} segmentos.`;
-    return `<article id="evidencia-${index + 1}" class="evidence-card evidence-card--derived" aria-labelledby="evidencia-${index + 1}-titulo"><h4 id="evidencia-${index + 1}-titulo">${escapeHtml(artifact.evidenceId)}</h4>${provenance}<dl class="meta"><dt>Tipo</dt><dd>announcement-map</dd><dt>Estado</dt><dd>${escapeHtml(artifact.status)}</dd><dt>Hash derivado</dt><dd><code>${escapeHtml(artifact.hash)}</code></dd><dt>Algoritmo</dt><dd><code>${escapeHtml(artifact.derivation.algorithm)}</code> ${escapeHtml(artifact.derivation.version)}</dd><dt>Origem pristine</dt><dd><code>${escapeHtml(artifact.fullPageEvidenceId)}</code> — <code>${escapeHtml(artifact.derivation.sourceHash)}</code></dd><dt>Cobertura</dt><dd>${escapeHtml(coverage)}</dd></dl><p class="evidence-relation">Artefato derivado localmente; os PNGs segmentados, a legenda completa, os limites e as limitações estão na seção <a href="#mapas">Mapa visual da prévia de anúncios</a>. A captura original permanece separada.</p></article>`;
+    return `<article id="evidencia-${index + 1}" class="evidence-card evidence-card--derived" aria-labelledby="evidencia-${index + 1}-titulo"><h4 id="evidencia-${index + 1}-titulo">${escapeHtml(artifact.evidenceId)}</h4>${provenance}<dl class="meta"><dt>Tipo</dt><dd>announcement-map</dd><dt>Estado</dt><dd>${escapeHtml(artifact.status)}</dd><dt>Hash derivado</dt><dd><code>${escapeHtml(artifact.hash)}</code></dd><dt>Algoritmo</dt><dd><code>${escapeHtml(artifact.derivation.algorithm)}</code> ${escapeHtml(artifact.derivation.version)}</dd><dt>Origem pristine</dt><dd><code>${escapeHtml(artifact.fullPageEvidenceId)}</code> — <code>${escapeHtml(artifact.derivation.sourceHash)}</code></dd><dt>Cobertura</dt><dd>${escapeHtml(coverage)}</dd></dl><p class="evidence-relation">Artefato derivado localmente; os PNGs segmentados, a legenda completa, os limites e as limitações estão na seção <a href="#mapas">Mapa de leitura da página</a>. A captura original permanece separada.</p></article>`;
   }
   const image = imageByEvidenceId.get(artifact.evidenceId);
   const relation = artifact.fullPageEvidenceId ? `Deriva ou localiza conteúdo da captura integral ${artifact.fullPageEvidenceId}.` : artifact.kind === 'full-page' ? 'Captura integral original do estado observado.' : 'Evidência elementar original, quando disponível.';
@@ -965,7 +966,7 @@ function accessibility(value) {
 
 function evidenceAlt(artifact) {
   if (artifact.kind === 'full-page') return 'Captura integral original da página auditada';
-  if (artifact.kind === 'announcement-map') return 'Mapa visual derivado da prévia de anúncios';
+  if (artifact.kind === 'announcement-map') return 'Mapa de leitura da página: imagem derivada, com as caixas dos elementos marcados';
   if (artifact.kind === 'keyboard-map') return 'Mapa do teclado derivado da captura integral: caixas azuis numeradas onde o Tab para e caixas laranja tracejadas de itens que o Tab não alcança';
   return `Captura original do elemento auditado ${artifact.nodeId || ''}`;
 }

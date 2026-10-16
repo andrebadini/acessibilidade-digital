@@ -1878,7 +1878,33 @@ function precisionOfMap(marks, exported) {
     boxesOnElement,
     boxesWithoutElement: marks.boxes.length - boxesOnElement,
     elementsWithoutBox: expected.filter(candidate => !marks.boxes.some(box => close(candidate, box))).length,
+    badges: badgeClearances(marks),
     title: marks.title, viewBox: marks.viewBox,
+  };
+}
+
+/**
+ * Folga entre a etiqueta do código (L1, L2…) e a caixa do elemento a que ela pertence, em px da imagem.
+ * `marks.boxes` e `marks.badges` saem do mesmo laço de marcadores, então o índice liga os dois. A folga
+ * é do retângulo ao retângulo (zero quando se encostam): é a medida de "o código ficou no seu elemento".
+ */
+function badgeClearances(marks) {
+  if (!Array.isArray(marks?.badges) || marks.badges.length !== marks.boxes.length) return null;
+  const gaps = marks.boxes.map((box, index) => {
+    const badge = marks.badges[index];
+    return Math.hypot(
+      Math.max(box.x - (badge.x + badge.width), badge.x - (box.x + box.width), 0),
+      Math.max(box.y - (badge.y + badge.height), badge.y - (box.y + box.height), 0),
+    );
+  }).sort((left, right) => left - right);
+  const at = quantile => gaps[Math.min(gaps.length - 1, Math.floor(gaps.length * quantile))];
+  const round = value => Number(value.toFixed(1));
+  return {
+    codes: gaps.length,
+    touching: gaps.filter(gap => gap <= 4).length,
+    beyond40: gaps.filter(gap => gap > 40).length,
+    mean: round(gaps.reduce((total, gap) => total + gap, 0) / gaps.length),
+    median: round(at(0.5)), p90: round(at(0.9)), max: round(gaps[gaps.length - 1]),
   };
 }
 
@@ -1964,7 +1990,10 @@ async function captureDeliveredPrint({ launch, target, directory, attempt }) {
       mapSegments: (markup.match(/data-map-segment-image/gu) ?? []).length,
       twoColumns: (markup.match(/class="reader-map-columns"/gu) ?? []).length,
       codes: (markup.match(/class="reader-map-code"/gu) ?? []).length,
-      sectionTitle: markup.includes('<h3>Mapa de leitura da página</h3>'),
+      // O nome do mapa vive no `h2` da própria seção (é o mesmo nome do índice). Antes havia também um
+      // `h3` com o mesmo texto logo abaixo, e o relatório dizia duas vezes seguidas a mesma coisa.
+      sectionTitle: /<h2[^>]*>Mapa de leitura da página<\/h2>/u.test(markup),
+      repeatedTitle: /<h3>Mapa de leitura da página<\/h3>/u.test(markup),
     };
   }
   // O meio de impressão do próprio relatório: é a folha do PDF, medida na largura de A4.
@@ -2255,6 +2284,12 @@ function printPageSummary(summary) {
         `fora da medida: ${reading.precision.boxesWithoutElement}; ` +
         `elementos elegíveis sem caixa: ${reading.precision.elementsWithoutBox ?? 0}; ` +
         `elementos recortados na borda da imagem: ${reading.precision.clippedElements ?? 0}`);
+      const clearance = reading.precision.badges;
+      if (clearance) {
+        lines.push(`    códigos no próprio elemento: ${clearance.touching} de ${clearance.codes} encostados (folga ≤ 4 px), ` +
+          `${clearance.beyond40} acima de 40 px; folga média ${clearance.mean} px, mediana ${clearance.median} px, ` +
+          `p90 ${clearance.p90} px, maior ${clearance.max} px`);
+      }
     } else if (reading.precision) {
       lines.push(`    precisão: não medida — ${reading.precision.reason}`);
     }
@@ -2270,7 +2305,8 @@ function printPageSummary(summary) {
     }
     if (print.html) {
       lines.push(`    no HTML entregue: ${print.html.mapSegments} trecho(s) de imagem, ${print.html.twoColumns} bloco(s) de duas colunas, ` +
-        `${print.html.codes} código(s) na coluna da direita, título próprio: ${print.html.sectionTitle ? 'sim' : 'NÃO'}`);
+        `${print.html.codes} código(s) na coluna da direita, título próprio: ${print.html.sectionTitle ? 'sim' : 'NÃO'}` +
+        `, título repetido em h3: ${print.html.repeatedTitle ? 'SIM' : 'não'}`);
     }
     if (print.mapPage) {
       lines.push(`    página do mapa no motor de PDF: ${print.mapPage.rendered

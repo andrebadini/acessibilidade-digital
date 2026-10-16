@@ -14,13 +14,32 @@ function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-function distanceSquared(a, b) {
-  return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
-}
-
 function overlapping(a, b) {
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
+
+/**
+ * Duas etiquetas não podem ficar a menos da folga uma da outra. O teste é o do retângulo **de verdade**,
+ * com a folga: medir a distância entre centros reprovava duas etiquetas empilhadas que não se encostavam
+ * (a altura da caixa é maior que a folga), e era isso que empurrava os códigos de um canto cheio para
+ * longe dos seus elementos.
+ */
+function badgesConflict(a, b) {
+  const gap = ANNOTATION_BADGE_GAP_PX;
+  return a.x - gap < b.x + b.width && a.x + a.width + gap > b.x &&
+    a.y - gap < b.y + b.height && a.y + a.height + gap > b.y;
+}
+
+/**
+ * Pesos do custo. A colisão entre etiquetas domina: um código sobre o outro é o que impede a leitura.
+ * Depois vem cobrir a **própria** caixa (a etiqueta esconderia o alvo) e, por último, cobrir a caixa de
+ * outro elemento — desde que as caixas passaram a ser só contorno, encostar na linha de um vizinho
+ * atrapalha muito menos do que sair de perto do próprio alvo. A distância entra em px no mesmo passo do
+ * custo, então uma etiqueta só anda se o lugar onde ela estava escondia o alvo ou encostava noutra.
+ */
+const BADGE_COLLISION_COST = 100;
+const BADGE_OWN_BOX_COST = 3;
+const BADGE_OTHER_BOX_COST = 1;
 
 function boundedSpiralTrail(bounds, size, width, height) {
   const originX = clamp(bounds.x, 0, Math.max(0, width - size.width));
@@ -48,9 +67,40 @@ function boundedSpiralTrail(bounds, size, width, height) {
 }
 
 /**
+ * Passos curtos ao longo da borda da caixa. Numa coluna apertada — menu, lista, tabela, grade de
+ * cartões — o lugar encostado já está tomado pela etiqueta do vizinho; sem estas posições o código
+ * pulava direto para o anel, dezenas de px longe do próprio alvo (medido numa página real: até 86 px de
+ * folga). Andar uma etiqueta de altura (nas laterais) ou de largura (em cima e embaixo) mantém o código
+ * encostado no seu elemento, desviando só de quem ocupa aquele lugar.
+ */
+const BADGE_NUDGE_LIMIT = 1;
+
+function nudgedCandidates(bounds, size) {
+  const stepX = size.width + ANNOTATION_BADGE_GAP_PX;
+  const stepY = size.height + ANNOTATION_BADGE_GAP_PX;
+  const centreX = bounds.x + bounds.width / 2 - size.width / 2;
+  const centreY = bounds.y + bounds.height / 2 - size.height / 2;
+  const left = bounds.x - size.width - ANNOTATION_BADGE_GAP_PX;
+  const right = bounds.x + bounds.width + ANNOTATION_BADGE_GAP_PX;
+  const above = bounds.y - size.height - ANNOTATION_BADGE_GAP_PX;
+  const below = bounds.y + bounds.height + ANNOTATION_BADGE_GAP_PX;
+  const points = [];
+  for (let step = 1; step <= BADGE_NUDGE_LIMIT; step += 1) {
+    points.push(
+      [left, centreY - step * stepY], [left, centreY + step * stepY],
+      [right, centreY - step * stepY], [right, centreY + step * stepY],
+      [centreX - step * stepX, above], [centreX + step * stepX, above],
+      [centreX - step * stepX, below], [centreX + step * stepX, below],
+    );
+  }
+  return points;
+}
+
+/**
  * Posições candidatas da etiqueta, começando encostada na própria caixa — à esquerda, acima, à direita
- * e abaixo —, e só depois abrindo em anel. O código encosta no alvo antes de procurar lugar livre: a
- * caixa do elemento é o que a pessoa precisa ver para comparar com a página.
+ * e abaixo —, depois deslocada um passo ao longo dessas bordas e só então abrindo em anel. O código
+ * encosta no alvo antes de procurar lugar livre: a caixa do elemento é o que a pessoa precisa ver para
+ * comparar com a página.
  */
 function badgeCandidates(bounds, size, width, height) {
   const clampPoint = (x, y) => ({
@@ -69,6 +119,7 @@ function badgeCandidates(bounds, size, width, height) {
     [bounds.x, bounds.y + bounds.height - size.height], [bounds.x + bounds.width - size.width, bounds.y + bounds.height - size.height],
   ];
   const candidates = points.map(([x, y]) => clampPoint(x, y));
+  candidates.push(...nudgedCandidates(bounds, size).map(([x, y]) => clampPoint(x, y)));
   candidates.push(...boundedSpiralTrail(bounds, size, width, height));
   const seen = new Set();
   return candidates.filter(candidate => {
@@ -80,11 +131,11 @@ function badgeCandidates(bounds, size, width, height) {
 }
 
 /**
- * Coloca as etiquetas de um trecho: custo = outra etiqueta (peso dominante, para a anticolisão
- * continuar mandando) + cobrir a caixa de outro elemento + cobrir a própria caixa. A primeira candidata
- * sem custo vence — o que mantém o trabalho baixo numa página com centenas de anotações —, e quando
- * nenhuma zera fica a de menor custo, com a limitação de sobreposição declarada. A distância até o
- * canto de encaixe desempata: entre duas posições livres, fica a que encosta no alvo.
+ * Coloca as etiquetas de um trecho: custo = colisão com outra etiqueta (peso dominante, para a
+ * anticolisão continuar mandando) + cobrir a própria caixa + cobrir a caixa de outro elemento +
+ * distância até o encaixe. A primeira candidata sem custo vence — o que mantém o trabalho baixo numa
+ * página com centenas de anotações —, e quando nenhuma zera fica a de menor custo, com a limitação de
+ * sobreposição declarada. A distância desempata: entre duas posições livres, fica a que encosta no alvo.
  *
  * `entries` traz `number` e `bounds` na mesma medida usada para desenhar (px do documento no relatório,
  * px da imagem no mapa da conferência) e `cssWidth`, a largura usada no tamanho da etiqueta — assim a
@@ -98,18 +149,13 @@ export function annotationMarkerLayout(entries, { width, height, cssWidth } = {}
   for (const [index, { entry, size }] of sized.entries()) {
     const candidates = badgeCandidates(entry.bounds, size, width, height);
     const anchor = candidates[0] ?? { x: entry.bounds.x, y: entry.bounds.y };
-    const clearance = Math.max(size.width, size.height) * 0.9;
     let selected = null;
     for (const [offset, candidate] of candidates.entries()) {
       const box = { x: candidate.x, y: candidate.y, width: size.width, height: size.height };
-      const center = { x: box.x + size.width / 2, y: box.y + size.height / 2 };
-      // `placed.x`/`placed.y` já são o centro da etiqueta publicada: a distância é entre centros. Somar
-      // meia caixa aqui comparava um centro com uma borda deslocada e deixava passar etiquetas coladas.
-      const collisions = placements.reduce((total, placed) => total +
-        (distanceSquared(center, { x: placed.x, y: placed.y }) < clearance ** 2 ? 1 : 0), 0);
-      let cost = collisions * 100 + Math.hypot(box.x - anchor.x, box.y - anchor.y);
+      const collisions = placements.reduce((total, placed) => total + (badgesConflict(box, placed.badge) ? 1 : 0), 0);
+      let cost = collisions * BADGE_COLLISION_COST + Math.hypot(box.x - anchor.x, box.y - anchor.y);
       for (const [otherIndex, other] of elementBoxes.entries()) {
-        if (overlapping(box, other)) cost += otherIndex === index ? 2 : 5;
+        if (overlapping(box, other)) cost += otherIndex === index ? BADGE_OWN_BOX_COST : BADGE_OTHER_BOX_COST;
       }
       if (!selected || cost < selected.cost || cost === selected.cost && offset < selected.offset) {
         selected = { box, collisions, cost, offset };
@@ -126,6 +172,9 @@ export function annotationMarkerLayout(entries, { width, height, cssWidth } = {}
       number: entry.number, code: annotationCode(entry.number),
       x: center.x, y: center.y, width: size.width, height: size.height,
       leaderX: leader.x, leaderY: leader.y,
+      // `badge` é o retângulo da etiqueta (x/y do canto): a anticolisão das próximas etiquetas mede
+      // contra ele, e `x`/`y` continuam sendo o centro publicado no desenho.
+      badge: { ...selected.box },
       bounds: entry.bounds, overlapped: selected.collisions > 0,
     });
   }

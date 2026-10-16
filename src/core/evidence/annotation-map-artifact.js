@@ -9,6 +9,11 @@ export const ANNOTATION_MAP_ALGORITHM = 'audita.annotation-map';
  * lista em texto ao lado do trecho, no relatório. Antes disso a imagem trazia a legenda raster e o
  * desenho era um círculo com o número; ler um mapa antigo continua funcionando pelas regras da versão
  * que ele próprio declara.
+ *
+ * A 1.3.0 ainda vale pela segunda mudança que entrou junto: o retângulo de cada elemento vem do leiaute
+ * medido no momento da captura (a mesma medida que gerou a imagem), e não de uma leitura posterior do
+ * documento, que podia discordar da imagem. Quando as duas discordam, o mapa declara a limitação e a
+ * medida publicada continua sendo a da imagem.
  */
 export const ANNOTATION_MAP_VERSION = '1.3.0';
 
