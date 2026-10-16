@@ -936,7 +936,7 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   assert.deepEqual(Object.keys(view), [
     'version', 'auditId', 'modelRevision', 'modelHash', 'filters', 'executive', 'issues',
     'checklist', 'technicalEvidence', 'readerMaps', 'keyboardMaps', 'methodology', 'exports', 'matrix',
-    'reviewHistory', 'findingsBoard',
+    'reviewHistory', 'tabReading', 'findingsBoard',
   ]);
   assert.deepEqual(Object.keys(view.filters), ['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
   assert.deepEqual(Object.keys(view.issues), ['failed', 'alerts', 'humanReview', 'passed']);

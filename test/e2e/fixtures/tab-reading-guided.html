@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Consulta de protocolo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 40rem; }
+    a, button, input { display: block; margin-block: .75rem; padding: .5rem .75rem; font-size: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Consulta de protocolo</h1>
+  <p>Página de teste da conferência da leitura por Tab.</p>
+  <!-- Quatro paradas de Tab, cada uma com um problema diferente de anúncio: o nome dito não é o texto
+       visível (link), o nome está certo (botão), não há nome nenhum (botão vazio) e o nome vem do
+       exemplo dentro do campo (caixa de texto). -->
+  <a id="tab-link" href="#resultado" aria-label="Pesquisar">Saiba mais</a>
+  <button id="tab-named" type="button">Buscar</button>
+  <button id="tab-nameless" type="button"></button>
+  <input id="tab-field" type="text" placeholder="Número do protocolo">
+  <p id="resultado">Resultado da consulta.</p>
+</body>
+</html>

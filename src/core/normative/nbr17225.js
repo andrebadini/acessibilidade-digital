@@ -180,7 +180,10 @@ const SOURCE_ITEMS = [
   ['5.13.7', 'Texto visível no nome acessível', REQUIREMENT, ['2.5.3'], AUTOMATED, ['visible-label-in-name']],
   ['5.13.8', 'Mensagens de status', REQUIREMENT, ['4.1.3'], AUTOMATED, ['status-message-semantics']],
   ['5.13.9', 'Propósito identificável', RECOMMENDATION, ['1.3.6'], ASSISTED, ['programmatic-purpose'], HUMAN_REASON.context],
-  ['5.13.10', 'Componentes com nome acessível', REQUIREMENT, ['4.1.2'], AUTOMATED, ['accessible-component-name']],
+  // O item 5.13.10 declara duas regras: a automática de nome acessível e a leitura por Tab, que
+  // pergunta, parada por parada, se o que o leitor de tela anuncia corresponde ao elemento. A
+  // segunda é sempre inconclusiva (cantTell) — o anúncio só se confere ouvindo.
+  ['5.13.10', 'Componentes com nome acessível', REQUIREMENT, ['4.1.2'], AUTOMATED, ['accessible-component-name', 'tab-reading-announcement']],
   ['5.13.11', 'Elementos nativos', RECOMMENDATION, ['1.3.1'], ASSISTED, ['native-elements'], HUMAN_REASON.context],
   ['5.13.12', 'Semântica de componentes customizados', REQUIREMENT, ['1.3.1', '4.1.2'], AUTOMATED, ['custom-component-semantics']],
   ['5.13.13', 'Estados, propriedades e valores de componentes customizados', REQUIREMENT, ['4.1.2'], AUTOMATED, ['custom-component-state']],

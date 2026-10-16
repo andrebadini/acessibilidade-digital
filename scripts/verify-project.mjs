@@ -67,7 +67,7 @@ assert.deepEqual(KEYBOARD_MAP_MV3_GATE, {
 }, 'mapa do teclado exige a prova pública de composição e exportação aprovada');
 assert.doesNotMatch(JSON.stringify(AXE_RUN_CONFIG), /experimental|section508/iu);
 
-assert.equal(CORE_RULES.length, 131);
+assert.equal(CORE_RULES.length, 132);
 assert.equal(NBR17225_ITEMS.length, 146);
 assert.equal(NBR17225_ITEMS.filter(item => item.classification === 'requirement').length, 96);
 assert.equal(NBR17225_ITEMS.filter(item => item.classification === 'recommendation').length, 50);
@@ -106,7 +106,7 @@ if (process.env.AUDITA_VERIFY_SKIP_TESTS !== '1') {
   assert.equal(suite.status, 0, 'npm test precisa passar');
 }
 
-console.log('verify-project: manifest/CSP e axe 4.13.0 aprovados no Chrome for Testing 152.0.7977.64; mapa numerado aprovado; 131/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures e privacidade GREEN');
+console.log('verify-project: manifest/CSP e axe 4.13.0 aprovados no Chrome for Testing 152.0.7977.64; mapa numerado aprovado; 132/146 (96/50), identidade neutra, HTML/JSON/PDF, fixtures e privacidade GREEN');
 
 async function sourceFiles(directoryUrl) {
   const directory = directoryUrl.pathname;

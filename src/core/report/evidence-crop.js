@@ -43,6 +43,14 @@ export const EVIDENCE_CROP_MAX_DECODED_BYTES = 8 * 1024 * 1024;
 /** Frase que diz de onde o recorte veio, quando ele não é a própria miniatura do elemento. */
 export const EVIDENCE_CROP_REGION_LEGEND = 'Recorte tirado da captura da página inteira desta auditoria.';
 
+/**
+ * Primeira frase do texto alternativo do recorte: onde ele fica na página. Fica aqui, e não em cada
+ * tela, porque a página de conferência e o relatório exportado mostram a MESMA imagem e precisam dizer
+ * a mesma coisa a quem usa leitor de tela.
+ */
+export const EVIDENCE_CROP_PAGE_ORIGIN_ARIA = 'Recorte da captura da página inteira, na região do elemento desta pergunta.';
+export const EVIDENCE_CROP_ELEMENT_ORIGIN_ARIA = 'Recorte da captura do elemento desta pergunta.';
+
 const CROP_SOURCE_KINDS = Object.freeze(['announcement-map', 'keyboard-map']);
 const PNG_PREFIX = 'data:image/png;base64,';
 

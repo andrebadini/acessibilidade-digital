@@ -26,7 +26,7 @@ export function createBatchReportTemplate({ timezone, manifestVersion, rulesVers
     versions: { extension: manifestVersion, rules: rulesVersion, browser: browserVersion },
     methodology: {
       name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2',
-      version: rulesVersion, ruleCount: 131, coreRuleCount: 131,
+      version: rulesVersion, ruleCount: 132, coreRuleCount: 132,
       supplementalRuleCount: 0, itemCount: 146,
     },
     environment: {
@@ -133,7 +133,7 @@ export function aggregateBatchAudits({
     scope: canonicalScope('batch', pages.length),
     methodology: {
       ...structuredClone(template.methodology),
-      coreRuleCount: 131,
+      coreRuleCount: 132,
       supplementalRuleCount,
       ruleCount: ruleResults.length,
       itemCount: 146,

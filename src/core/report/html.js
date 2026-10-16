@@ -32,6 +32,10 @@ import { humanReviewHeading, humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMA
 import { FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence } from './findings-board.js';
 import { EVIDENCE_SHA256_HELP, evidenceHashRows, evidenceFileHashPresentation, EVIDENCE_RECORD_HASH_LABEL, EVIDENCE_FILE_HASH_LABEL } from './evidence-hash-presentation.js';
 import { marksCropSvg, reviewMarksRecords } from './review-marks-presentation.js';
+import { EVIDENCE_CROP_PAGE_ORIGIN_ARIA, EVIDENCE_CROP_REGION_LEGEND, elementCropSource, evidenceMediaParts } from './evidence-crop.js';
+import { GUIDED_REVIEW_TREATMENT_V1 } from './evidence-treatment.js';
+import { TAB_READING_INTRO, TAB_READING_QUESTION, TAB_READING_SECTION_TITLE } from './tab-reading-text.js';
+import { projectTabReading } from './tab-reading-plan.js';
 
 const OUTCOME = Object.freeze({
   passed: { label: 'Atendido no escopo observado', icon: '✓' },
@@ -344,7 +348,7 @@ ${forPrint ? '<p data-print-reading-note><strong>PDF de leitura:</strong> verifi
 ${navigation}<div class="filter-actions"><button type="button" data-report-clear-filters>Mostrar todos os resultados</button><p role="status" data-report-filter-status></p></div><noscript><p>Os filtros exigem JavaScript local. Todos os registros continuam disponíveis nos expansores abaixo.</p></noscript>
 ${section(1, itemGroups)}
 ${section(2, findingsBoardHtml(view.findingsBoard))}
-${section(3, reportHumanHistory(view.reviewHistory ?? [], evidenceAnchorById) + '<p>Indícios e sinais inconclusivos dos motores estão agrupados por item; não são barreiras confirmadas. Quando falta a correlação com um elemento, é necessário localizar e reproduzir a situação antes de concluir. Perguntas gerais ficam no checklist separado do HTML.</p>')}
+${section(3, reportTabReadingHtml(view.tabReading, model) + reportHumanHistory(view.reviewHistory ?? [], evidenceAnchorById) + '<p>Indícios e sinais inconclusivos dos motores estão agrupados por item; não são barreiras confirmadas. Quando falta a correlação com um elemento, é necessário localizar e reproduzir a situação antes de concluir. Perguntas gerais ficam no checklist separado do HTML.</p>')}
 ${section(4, reportViewReaderMaps(view))}
 ${section(5, reportViewKeyboardMaps(view))}
 ${section(6, `<details data-report-matrix><summary>Consultar a matriz completa dos 146 itens</summary><div class="matrix-scroll" role="region" aria-label="Matriz completa dos 146 itens ABNT" tabindex="0"><table><caption>Matriz completa da ABNT NBR 17225</caption><thead><tr><th scope="col">Item</th><th scope="col">Título</th><th scope="col">Classificação</th><th scope="col">Resultado</th><th scope="col">WCAG</th></tr></thead><tbody>${view.matrix.map(row => `<tr><th scope="row">${escapeHtml(row.id)}</th><td>${escapeHtml(row.title)}</td><td>${escapeHtml(label(row.classification, classificationLabels))}</td><td>${escapeHtml(label(row.outcome, outcomeLabels))}</td><td>${escapeHtml(row.wcag.map(ref => `${ref.id} ${ref.level}`).join(', '))}</td></tr>`).join('')}</tbody></table></div></details>`)}
@@ -375,6 +379,54 @@ function findingsBoardHtml(board) {
     `<details data-findings-group="others"><summary>Não aplicáveis (${board.groups.notApplicable.length}) e sem conclusão (${board.groups.pending.length})</summary><h4>Não aplicáveis</h4><ul>${list(board.groups.notApplicable)}</ul><h4>Sem conclusão (dependem de revisão humana ou de condições não observadas)</h4><ul>${list(board.groups.pending)}</ul></details>` +
     `<p class="findings-recommendations">${escapeHtml(`Recomendações (contam só para a conformidade plena): ${recommendations.failed} não atendidas, ${recommendations.passed} atendidas, ${recommendations.inapplicable} não aplicáveis e ${recommendations.pending} sem conclusão.`)}</p>` +
     `<details data-findings-legal><summary>Base consumerista padronizada (opcional, para quem analisa relações de consumo)</summary><p>${escapeHtml(board.legalParagraph)}</p></details>`;
+}
+
+/**
+ * Tabela de respostas da leitura por Tab na seção de revisão humana do relatório entregue, e o texto
+ * único da constatação deste tema.
+ *
+ * O recorte usa a mesma imagem guardada dos mapas, recortada por `viewBox` — nunca um pixel novo — e cada
+ * PNG entra no documento uma vez (`<defs>` + `<use>`), como na tela da revisão: uma sequência de Tab de
+ * uma página grande repete os mesmos trechos de captura em dezenas de linhas.
+ *
+ * A constatação é UM texto só, com todos os pontos nomeados. É a exceção deliberada à regra de uma
+ * citação por elemento, válida apenas para este tema: a pergunta é a mesma em todas as paradas de Tab e
+ * repetir o item normativo a cada parada inflaria a citação sem acrescentar informação. Quem lê a
+ * citação continua vendo a fundamentação uma vez, no quadro de constatações.
+ */
+function reportTabReadingHtml(tab, model) {
+  const rows = (tab?.rows ?? []).filter(row => row.answer);
+  const finding = typeof tab?.findingText === 'string' ? tab.findingText : '';
+  if (rows.length === 0 && !finding) return '';
+  const artifacts = [];
+  const crops = new Map();
+  for (const row of rows) {
+    const source = elementCropSource({ evidence: model.evidence, pageId: row.pageId, nodeId: row.nodeId });
+    if (!source) continue;
+    crops.set(row.occurrenceId, source);
+    artifacts.push({ ...source.artifact, evidenceId: source.sourceEvidenceId });
+  }
+  const registry = createImageRegistry(artifacts);
+  const progress = tab?.progress ?? { total: rows.length, answered: rows.length };
+  const answers = rows.map(row => {
+    const source = crops.get(row.occurrenceId);
+    const image = source ? registry.byEvidenceId.get(source.sourceEvidenceId) : null;
+    // Mesmas peças da tela da revisão: legenda e contorno saem de `evidenceMediaParts`, para o texto
+    // alternativo e a legenda desta tabela não divergirem do cartão que a pessoa viu ao responder.
+    const parts = source ? evidenceMediaParts(source.artifact, GUIDED_REVIEW_TREATMENT_V1, source.view) : null;
+    const partsWithImage = parts && image ? { ...parts, image: { width: image.width, height: image.height } } : null;
+    const media = partsWithImage
+      ? `<svg class="evidence-media evidence-media--marked" data-evidence-treatment="${escapeHtml(GUIDED_REVIEW_TREATMENT_V1.tone)}" role="img" aria-label="${escapeHtml(`${EVIDENCE_CROP_PAGE_ORIGIN_ARIA} ${partsWithImage.legend}`)}" viewBox="${escapeHtml(`${partsWithImage.view.x} ${partsWithImage.view.y} ${partsWithImage.view.width} ${partsWithImage.view.height}`)}" width="${partsWithImage.display.width}" height="${partsWithImage.display.height}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}" width="${partsWithImage.image.width}" height="${partsWithImage.image.height}"></use>${evidenceShapesMarkup(partsWithImage.shapes)}</svg><figcaption>${escapeHtml(`${partsWithImage.legend} ${EVIDENCE_CROP_REGION_LEGEND}`)}</figcaption>`
+      : '<p>A auditoria não guardou imagem deste elemento.</p>';
+    const decision = [`<strong>Resposta:</strong> ${escapeHtml(row.answerLabel ?? row.answer)}`, row.evaluator ? escapeHtml(row.evaluator) : '', row.decidedAtLabel ? escapeHtml(row.decidedAtLabel) : '']
+      .filter(Boolean).join(' · ');
+    return `<tr data-tab-reading-row="${escapeHtml(row.occurrenceId)}" data-tab-reading-answer="${escapeHtml(row.answer)}"><td><figure class="marks-crop">${media}</figure></td><td>${escapeHtml(`Tab ${row.number} · ${row.kind ?? 'elemento'}`)}</td><td>${escapeHtml(row.name ? `“${row.name}”` : 'Sem nome acessível')}<br>${escapeHtml(row.kind ?? 'elemento')}</td><td>${escapeHtml(row.announcement ?? 'Prévia não disponível')}</td><td><p>${escapeHtml(TAB_READING_QUESTION)}</p><p>${decision}</p>${row.note ? `<p><strong>O que deveria dizer:</strong> ${escapeHtml(row.note)}</p>` : ''}</td></tr>`;
+  }).join('');
+  const table = rows.length === 0 ? '<p>Nenhuma resposta foi registrada na leitura por Tab desta auditoria.</p>'
+    : `<div class="matrix-scroll" role="region" aria-label="Respostas registradas na leitura por Tab" tabindex="0"><table><caption>Leitura por Tab: ${escapeHtml(`${progress.answered} de ${progress.total} pontos conferidos`)}</caption><thead><tr><th scope="col">Imagem do elemento</th><th scope="col">Ordem / elemento</th><th scope="col">Nome e função</th><th scope="col">Anúncio estimado</th><th scope="col">Pergunta e resposta</th></tr></thead><tbody>${answers}</tbody></table></div>`;
+  return `<section data-report-tab-reading><h3>${escapeHtml(TAB_READING_SECTION_TITLE)}</h3><p>${escapeHtml(TAB_READING_INTRO)}</p><p>${escapeHtml(`${progress.answered} de ${progress.total} conferidos`)}</p>${imageDefinitions(registry.definitions)}${table}`
+    + (finding ? `<p data-report-tab-reading-finding><strong>Constatação deste tema (um único texto, com todos os pontos):</strong> ${escapeHtml(finding)}</p>` : '')
+    + `</section>`;
 }
 
 function viewSectionTitle(index) {
@@ -764,13 +816,16 @@ function humanReviewSection(model, itemById, decisionByOccurrence, orderedOccurr
   const reviewEntries = model.manualReview.slice(0, REPORT_REVIEW_DETAIL_LIMIT);
   const omittedReviews = model.manualReview.length - reviewEntries.length;
   const marksByDecision = new Map(reviewMarksRecords(model).map(record => [record.decisionId, record]));
+  // A leitura por Tab entra na revisão humana do relatório completo com a mesma tabela e a mesma
+  // constatação do documento entregue: as duas superfícies descrevem as mesmas respostas registradas.
+  const tabReading = reportTabReadingHtml(projectTabReading(model), model);
   const cards = reviewEntries.map((entry, index) => {
     const item = itemById.get(entry.itemId);
     const occurrence = occurrenceById.get(entry.occurrenceId);
     const decision = decisionByOccurrence.get(entry.occurrenceId);
     return `<article class="review-card" data-review-state="${escapeHtml(entry.status)}" aria-labelledby="revisao-${index + 1}"><h3 id="revisao-${index + 1}">${escapeHtml(item?.title || entry.itemId)}</h3><p><strong>Item:</strong> ${escapeHtml(entry.itemId)} (${escapeHtml(item ? CLASSIFICATION[item.classification] : 'sem classificação')}).</p><p><strong>Resultado original do motor:</strong> ${escapeHtml(outcomeLabel(occurrence?.outcome || 'cantTell'))}.</p><p><strong>Pergunta:</strong> ${escapeHtml(entry.question)}</p><p><strong>Justificativa:</strong> ${escapeHtml(entry.reason)}</p><p><strong>Decisão humana:</strong> ${escapeHtml(decision ? reviewAnswerLabel(decision.answer) : 'Pendente')}.</p>${decision ? `<p><strong>Avaliador e instante:</strong> ${escapeHtml(decision.evaluator)}, ${escapeHtml(decision.decidedAt)}.</p>${decision.revisions?.length ? `<p><strong>Respostas anteriores substituídas:</strong> ${escapeHtml(decision.revisions.map(revision => `${reviewAnswerLabel(revision.answer)} (${revision.evaluator}, ${revision.decidedAt})`).join('; '))}.</p>` : ''}<p class="human-review-note"><strong>Nota registrada:</strong> ${escapeHtml(decision.note || 'Nenhuma nota registrada.')}</p>${marksByDecision.get(decision.decisionId)?.text ? `<p><strong>Apontamento no mapa do teclado:</strong> ${escapeHtml(marksByDecision.get(decision.decisionId).text)}</p>${marksCropsHtml(marksByDecision.get(decision.decisionId))}` : ''}` : ''}<p><a href="#${escapeHtml(anchorByOccurrence.get(entry.occurrenceId) ?? 'ocorrencias')}">Ir para a ocorrência relacionada</a></p></article>`;
   }).join('');
-  return `<section id="revisao" class="major-section" aria-labelledby="revisao-titulo"><h2 id="revisao-titulo">Revisão humana</h2><p>${escapeHtml(reviewSummary)} Respostas pendentes nunca são tratadas como conformidade. Resultado do motor e decisão humana permanecem separados.</p>${omittedReviews > 0 ? omittedNote(omittedReviews, 'revisão humana', 'revisões humanas') : ''}<div class="review-list">${cards || '<p>Nenhuma revisão humana foi registrada para este escopo.</p>'}</div></section>`;
+  return `<section id="revisao" class="major-section" aria-labelledby="revisao-titulo"><h2 id="revisao-titulo">Revisão humana</h2><p>${escapeHtml(reviewSummary)} Respostas pendentes nunca são tratadas como conformidade. Resultado do motor e decisão humana permanecem separados.</p>${tabReading}${omittedReviews > 0 ? omittedNote(omittedReviews, 'revisão humana', 'revisões humanas') : ''}<div class="review-list">${cards || '<p>Nenhuma revisão humana foi registrada para este escopo.</p>'}</div></section>`;
 }
 
 function widgetInventory(model) {

@@ -12,6 +12,7 @@ import { MEDIA_RULES } from '../../src/core/rules/media.js';
 import { aggregateItems } from '../../src/core/rules/aggregate-items.js';
 import { runRules } from '../../src/core/rules/run-rules.js';
 import { STRUCTURE_RULES } from '../../src/core/rules/structure.js';
+import { TAB_READING_RULES } from '../../src/core/rules/tab-reading.js';
 import { VISUAL_RULES } from '../../src/core/rules/visual.js';
 import { validateCoreRuleTargetInventory } from '../../src/core/report/remediation-policy.js';
 
@@ -496,11 +497,11 @@ test('invalid text-block measurements remain cantTell instead of false failures'
 });
 
 test('complete normative composition registers every catalog rule exactly once with exact metadata', () => {
-  const rules = [...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES, ...HOVER_ONLY_RULES, ...MANUAL_REVIEW_RULES];
+  const rules = [...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES, ...HOVER_ONLY_RULES, ...MANUAL_REVIEW_RULES, ...TAB_READING_RULES];
   const expectedIds = NBR17225_ITEMS.flatMap(item => item.ruleIds);
-  assert.equal(new Set(expectedIds).size, 131);
-  assert.equal(rules.length, 131);
-  assert.equal(new Set(rules.map(rule => rule.id)).size, 131);
+  assert.equal(new Set(expectedIds).size, 132);
+  assert.equal(rules.length, 132);
+  assert.equal(new Set(rules.map(rule => rule.id)).size, 132);
   assert.deepEqual(new Set(rules.map(rule => rule.id)), new Set(expectedIds));
   for (const rule of rules) {
     const items = NBR17225_ITEMS.filter(item => item.ruleIds.includes(rule.id));
@@ -512,9 +513,9 @@ test('complete normative composition registers every catalog rule exactly once w
 });
 
 test('complete normative composition executes safely and aggregates all 146 items', async () => {
-  const rules = [...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES, ...HOVER_ONLY_RULES, ...MANUAL_REVIEW_RULES];
+  const rules = [...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES, ...HOVER_ONLY_RULES, ...MANUAL_REVIEW_RULES, ...TAB_READING_RULES];
   const results = await runRules(snapshot(), {}, rules);
-  assert.equal(results.length, 131);
+  assert.equal(results.length, 132);
   assert.ok(results.every(value => value.outcome !== 'untested'));
   const items = aggregateItems(results, NBR17225_ITEMS);
   assert.equal(items.length, 146);

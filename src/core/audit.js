@@ -8,6 +8,7 @@ import { MANUAL_REVIEW_RULES } from './rules/manual-review.js';
 import { MEDIA_RULES } from './rules/media.js';
 import { runRules } from './rules/run-rules.js';
 import { STRUCTURE_RULES } from './rules/structure.js';
+import { TAB_READING_RULES } from './rules/tab-reading.js';
 import { VISUAL_RULES } from './rules/visual.js';
 import { assertSnapshotV1 } from './snapshot-schema.js';
 import { validateNormalizedAxeSupplemental } from './axe/validate-supplemental.js';
@@ -20,6 +21,7 @@ const RULE_FAMILIES = Object.freeze([
   VISUAL_RULES,
   MEDIA_RULES,
   HOVER_ONLY_RULES,
+  TAB_READING_RULES,
   MANUAL_REVIEW_RULES
 ]);
 

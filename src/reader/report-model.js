@@ -1,4 +1,5 @@
 import { redactSensitiveText } from '../core/privacy.js';
+import { TAB_READING_QUESTION, TAB_READING_READER_NOTICE } from '../core/report/tab-reading-text.js';
 import { READING_REASON_TEXT } from './reading-reasons.js';
 import { entryTone, entryFix, laySummary, buildVerdict, topIssues, TONE_LABELS } from './plain-language.js';
 import {
@@ -275,7 +276,8 @@ function renderEntryRow(entry) {
   const preview = `${escapeHtml(entry.preview || 'Prévia não disponível')}<small>${escapeHtml(entry.description)}</small>`
     + `<small>${escapeHtml(entry.states.join(', '))}</small>`;
   const review = `${toneChip(entry)}<small>${escapeHtml(laySummary(entry))}</small>`
-    + `<small>${escapeHtml(entry.reasons.join('; ') || 'Confira se o anúncio representa o elemento.')}</small>`;
+    + `<small class="entry-question">${escapeHtml(TAB_READING_QUESTION)}</small>`
+    + (entry.reasons.length ? `<small>${escapeHtml(entry.reasons.join('; '))}</small>` : '');
   return `<tr><td>${image}</td><td>${element}</td><td>${name}</td><td>${preview}</td><td>${review}</td></tr>`;
 }
 
@@ -292,8 +294,10 @@ export function renderReadingHtml(report) {
   const sections = Object.entries(READING_CATEGORIES).map(([category, label]) => {
     const rows = report.entries.filter(entry => entry.category === category);
     const table = rows.length
-      ? '<table><thead><tr><th scope="col">Imagem do elemento</th><th scope="col">Ordem / elemento</th>'
-        + '<th scope="col">Nome e função</th><th scope="col">Anúncio estimado</th><th scope="col">Conferir</th></tr></thead>'
+      // O aviso vai uma vez por tabela, não em cada linha: repetido 40 vezes só atrapalharia a leitura.
+      ? `<p class="reading-notice">${escapeHtml(TAB_READING_READER_NOTICE)}</p>`
+        + '<table><thead><tr><th scope="col">Imagem do elemento</th><th scope="col">Ordem / elemento</th>'
+        + '<th scope="col">Nome e função</th><th scope="col">Anúncio estimado</th><th scope="col">Pergunta</th></tr></thead>'
         + `<tbody>${rows.map(renderEntryRow).join('')}</tbody></table>`
       : '<p>Nenhum elemento registrado nesta categoria.</p>';
     return `<section><h2>${label} (${rows.length})</h2>${table}</section>`;

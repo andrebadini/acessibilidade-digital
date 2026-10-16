@@ -1274,15 +1274,15 @@ test('keeps diagnostics and evidence correlated when two new findings have the s
   }
 });
 
-test('runs the 131→146 pipeline through the canonical no-pixels boundary before collection, probes and rules', async () => {
+test('runs the 132→146 pipeline through the canonical no-pixels boundary before collection, probes and rules', async () => {
   const adapter = fakeAdapter();
   const model = await runAudit({
     url: ' example.test/start?password=REMOVE&view=public ', chromeAdapter: adapter,
     now: clock, idFactory: () => 'audit-1', closeAuditTab: true,
   });
   assert.equal(model.auditId, 'audit-1');
-  assert.equal(model.ruleResults.length, 132);
-  assert.equal(model.methodology.coreRuleCount, 131);
+  assert.equal(model.ruleResults.length, 133);
+  assert.equal(model.methodology.coreRuleCount, 132);
   assert.equal(model.methodology.supplementalRuleCount, 1);
   assert.equal(model.ruleResults.find(rule => rule.ruleId === 'editorial.placeholder-text').outcome, 'inapplicable');
   assert.equal(model.itemResults.length, 146);
@@ -3501,7 +3501,7 @@ test('integrates the recommendation failure, editorial occurrence and informatio
     now: clock, idFactory: () => 'audit-complementary',
   });
 
-  assert.equal(model.methodology.coreRuleCount, 131);
+  assert.equal(model.methodology.coreRuleCount, 132);
   assert.equal(model.itemResults.length, 146);
   assert.equal(model.itemResults.find(item => item.id === '5.7.6').outcome, 'failed');
   assert.deepEqual(model.accessibilityWidgets, {
@@ -3592,7 +3592,7 @@ test('integrates a confirmed top-frame axe violation with provenance, ABNT outco
   const axeOccurrence = model.occurrences.find(occurrence => occurrence.source?.engine === 'axe-core');
   const coreOccurrence = model.occurrences.find(occurrence => occurrence.ruleId === 'page-language');
 
-  assert.equal(model.ruleResults.length, 133);
+  assert.equal(model.ruleResults.length, 134);
   assert.equal(model.itemResults.find(item => item.id === '5.13.2').outcome, 'failed');
   assert.equal(axeOccurrence.outcome, 'failed');
   assert.equal(axeOccurrence.itemId, '5.13.2');
@@ -3806,7 +3806,7 @@ test('keeps the Audita core running when axe throws and records a bounded partia
 
   assert.equal(model.session.status, 'partial');
   assert.equal(model.axe.status, 'partial', 'partial supplemental coverage deterministically marks the audit recoverable/partial');
-  assert.equal(model.ruleResults.length, 132);
+  assert.equal(model.ruleResults.length, 133);
   assert.equal(model.itemResults.length, 146);
   assert.ok(model.session.diagnostics.some(entry => entry.code === 'AXE_EXECUTION_FAILED'));
   assert.doesNotMatch(JSON.stringify(model), /PRIVATE axe failure details/iu);

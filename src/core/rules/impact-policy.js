@@ -34,6 +34,9 @@ export const DEFAULT_CORE_IMPACT = 'minor';
 const TABLE = Object.freeze({
   // Nome acessível e rótulo: sem eles o controle não é identificado nem operado.
   'accessible-component-name': 'critical',
+  // Leitura por Tab: um anúncio que não corresponde ao elemento bloqueia a tarefa de quem usa
+  // leitor de tela tanto quanto um controle sem nome — o item normativo é o mesmo (5.13.10).
+  'tab-reading-announcement': 'critical',
   'form-field-label': 'critical',
   'form-label-association': 'critical',
 

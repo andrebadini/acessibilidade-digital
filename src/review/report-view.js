@@ -31,7 +31,8 @@ import { marksCropParts } from '../core/report/review-marks-presentation.js';
 import {
   buildFindingsBoard, consolidatedCitationParagraph, FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence,
 } from '../core/report/findings-board.js';
-import { compareItemIds } from '../core/report/lay-review.js';
+import { ANSWER_LABELS, compareItemIds, formatLocalInstant } from '../core/report/lay-review.js';
+import { projectTabReading } from '../core/report/tab-reading-plan.js';
 import { EVIDENCE_SHA256_HELP, evidenceHashRows } from '../core/report/evidence-hash-presentation.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
@@ -508,6 +509,7 @@ export function buildReportView({ model: inputModel, summary: inputSummary, mode
       exports: projectExports(model),
       matrix: projectMatrix(model),
       reviewHistory: projectReviewHistory(model),
+      tabReading: projectTabReading(model),
       findingsBoard: buildFindingsBoard(model),
     });
   } catch (error) {

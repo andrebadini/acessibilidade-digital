@@ -15,7 +15,8 @@ import {
   keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO,
 } from '../core/report/keyboard-map-presentation.js';
 import {
-  EVIDENCE_CROP_REGION_LEGEND, elementCropSource, evidenceCropDisplaySize, evidenceMediaParts,
+  EVIDENCE_CROP_ELEMENT_ORIGIN_ARIA, EVIDENCE_CROP_PAGE_ORIGIN_ARIA, EVIDENCE_CROP_REGION_LEGEND,
+  elementCropSource, evidenceCropDisplaySize, evidenceMediaParts,
 } from '../core/report/evidence-crop.js';
 import { EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND } from '../core/report/evidence-highlight.js';
 import { GUIDED_REVIEW_TREATMENT_V1 } from '../core/report/evidence-treatment.js';
@@ -26,6 +27,12 @@ import { canonicalReviewMarks, describeReviewAreaPosition, REVIEW_MARKS_LIMITS, 
 import { applyReportSourceControls, buildReportView, renderReportView, updateReportHighlightAction } from './report-view.js';
 import { REPORT_PORT_NAME } from '../background/report-port.js';
 import { createReportHighlightPolicy } from './report-highlight-policy.js';
+import {
+  buildTabReadingPlan, tabReadingProgress, tabReadingRowLabel,
+  TAB_READING_ANSWERS, TAB_READING_HINT_LABEL, TAB_READING_INTRO, TAB_READING_LISTEN_LABEL,
+  TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_SECTION_TITLE,
+} from '../core/report/tab-reading-plan.js';
+import { createSpeaker } from '../reader/speech.js';
 
 // Respostas canônicas: conforme, não conforme, não foi possível determinar e não se aplica. A tela as
 // oferece em linguagem simples (LAY_ANSWERS): Sim, Não, Não consegui verificar, Não existe nesta página.
@@ -45,6 +52,13 @@ const deleteAuditDialogStatus = document.querySelector('#delete-audit-dialog-sta
 const zoomDialog = document.querySelector('#lay-zoom-dialog');
 const zoomBody = document.querySelector('#lay-zoom-body');
 const zoomClose = document.querySelector('#lay-zoom-close');
+// Confirmação da marcação em bloco da leitura por Tab. É uma caixa de diálogo nativa, como a da
+// exclusão: quem responde 20 pontos de uma vez precisa confirmar de forma explícita o que vai gravar.
+const tabBulkDialog = document.querySelector('#lay-tab-bulk-dialog');
+const tabBulkSummary = document.querySelector('#lay-tab-bulk-summary');
+const tabBulkCancel = document.querySelector('#lay-tab-bulk-cancel');
+const tabBulkConfirm = document.querySelector('#lay-tab-bulk-confirm');
+const tabBulkDialogStatus = document.querySelector('#lay-tab-bulk-dialog-status');
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 // Ajuda "keyboard-map" do item 5.1.13: a pergunta olha o mapa, não o código. As três respostas abaixo
 // são as mesmas respostas canônicas, com o rótulo que a pessoa entende sem conhecer ABNT nem WCAG.
@@ -392,6 +406,21 @@ const deleteAuditController = createDestructiveDialog({
 
 deleteAudit.addEventListener('click', () => deleteAuditController.open(deleteAudit));
 
+// Marcar em bloco a leitura por Tab: a confirmação é uma caixa de diálogo própria e o trabalho de
+// gravação fica em `tabBulkRun`, trocado a cada abertura — a caixa não conhece a seção nem o modelo.
+let tabBulkRun = null;
+const tabBulkController = createDestructiveDialog({
+  dialog: tabBulkDialog,
+  cancelButton: tabBulkCancel,
+  confirmButton: tabBulkConfirm,
+  status,
+  dialogStatus: tabBulkDialogStatus,
+  stableFocus: status,
+  onConfirm: () => (typeof tabBulkRun === 'function' ? tabBulkRun() : { ok: false, error: 'Não há nada para marcar nesta seção.' }),
+  successMessage: 'Respostas em bloco registradas.',
+  failureMessage: 'Não foi possível registrar as respostas em bloco.',
+});
+
 // A imagem ampliada sai do documento ao fechar: a mesma captura de página inteira não fica pendurada na
 // aba depois que a pessoa já olhou o recorte. O `<dialog>` nativo fecha no Escape e no botão Fechar, e
 // devolve o foco ao botão do cartão que o abriu.
@@ -487,6 +516,10 @@ function safeAuditId() {
 // calculados uma vez por modelo e a revisão guiada mostra um lote limitado de cartões por parte; o botão
 // "Mostrar mais" carrega o lote seguinte.
 const REVIEW_CARD_LIMIT = 40;
+// Leitura por Tab: a seção mostra blocos de 20 pontos, com "Mostrar mais" para o bloco seguinte. Uma
+// sequência de Tab de uma página grande tem centenas de paradas; desenhar todas de uma vez deixaria a
+// aba pesada por causa dos recortes.
+const TAB_READING_BLOCK = 20;
 const MODEL_LOOKUPS = new WeakMap();
 function modelLookups(model) {
   let lookups = MODEL_LOOKUPS.get(model);
@@ -700,6 +733,15 @@ const layState = {
   activeAids: new Set(),
   header: null,
   aidBar: null,
+  // Leitura por Tab: a seção é remontada a cada resposta, então o que é do estado (não do desenho) mora
+  // aqui — a janela de linhas, o filtro, o que a pessoa digitou e o ponto aberto para "o que deveria
+  // dizer". Sem isto, cada resposta apagaria o texto ainda não registrado das outras linhas.
+  tab: { visible: 0, onlyPending: false },
+  tabNodes: new Map(),
+  tabDrafts: new Map(),
+  tabAsking: new Set(),
+  tabRevising: new Set(),
+  tabSection: null,
 };
 
 function el(tag, text, className) {
@@ -1046,9 +1088,7 @@ function cropSvg(media, display) {
 }
 
 function cropAriaLabel(media) {
-  const origin = media.origin === 'page'
-    ? 'Recorte da captura da página inteira, na região do elemento desta pergunta.'
-    : 'Recorte da captura do elemento desta pergunta.';
+  const origin = media.origin === 'page' ? EVIDENCE_CROP_PAGE_ORIGIN_ARIA : EVIDENCE_CROP_ELEMENT_ORIGIN_ARIA;
   return `${origin} ${media.legend}`;
 }
 
@@ -1905,6 +1945,7 @@ function renderLayHeader() {
     'Responda “Sim”, “Não”, “Não consegui verificar” ou “Não existe nesta página” (nos elementos, “Não se aplica a este elemento”). Na dúvida, “Não consegui verificar”: ela não aprova nem reprova.',
     'Ao responder “Não”, descreva o que constatou. A frase vai para o quadro de constatações, pronta para citar.',
     'Errou? Use “Rever resposta”. A resposta anterior fica guardada no histórico.',
+    'Na seção “Leitura por Tab”, mais abaixo, você confere ponto por ponto se o que o leitor de tela fala corresponde a cada elemento onde a tecla Tab para.',
   ]) howto.append(el('li', step));
   header.append(howto);
   const progress = el('div', undefined, 'lay-progress');
@@ -1940,8 +1981,10 @@ function renderLayHeader() {
 function renderLayReview() {
   layState.cardNodes.clear();
   const plan = currentPlan();
+  const tabRows = tabReadingRows();
   list.replaceChildren();
-  if (!plan.length) {
+  layState.tabSection = null;
+  if (!plan.length && !tabRows.length) {
     list.append(el('p', 'Não há perguntas de revisão humana nesta auditoria.'));
     return;
   }
@@ -1952,9 +1995,421 @@ function renderLayReview() {
     if (part === 'recommendation') node.hidden = !layState.showRecommendations;
     list.append(node);
   }
-  renderProgress(plan);
-  updateGroupCounts(plan);
+  if (plan.length) {
+    renderProgress(plan);
+    updateGroupCounts(plan);
+  }
   updateAidBar();
+  if (tabRows.length) {
+    const section = tabReadingSection(tabRows);
+    layState.tabSection = section;
+    list.append(section);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Leitura por Tab — seção própria da verificação guiada.
+//
+// Uma linha por parada da sequência estimada de Tab: o recorte do elemento, o nome e a função, o que o
+// leitor de tela falaria e a pergunta. A pergunta é a mesma em todas as paradas e por isso NÃO aparece
+// nos cartões comuns deste item (`buildLayReviewPlan` a deixa fora): aqui o ponto da sequência e o
+// anúncio a comparar ficam lado a lado, que é exatamente o que a pergunta pede.
+//
+// Nada aqui decide nem altera o modelo: cada resposta grava uma decisão canônica pelo mesmo canal
+// autorizado dos cartões. A seção é remontada a cada resposta, então o texto digitado, o ponto com o
+// campo "o que deveria dizer" aberto e o tamanho da janela de linhas vivem em `layState.tab*`.
+// ---------------------------------------------------------------------------------------------
+
+const TAB_READING_BULK_NOTE = 'Conferido em bloco: o anúncio estimado corresponde ao elemento.';
+
+function tabReadingRows() {
+  return auditModel ? buildTabReadingPlan(auditModel) : [];
+}
+
+function tabReadingProgressText(progress) {
+  return `${progress.answered} de ${progress.total} conferidos`;
+}
+
+// O leitor em voz alta nasce no primeiro clique e só liga com voz local em português; sem voz local, o
+// botão avisa que a extensão não manda texto para serviço de voz on-line (ver `src/reader/speech.js`).
+let tabReadingSpeaker = null;
+let tabReadingSpeakerReady = null;
+
+function prepareTabReadingSpeaker() {
+  if (!tabReadingSpeaker) {
+    tabReadingSpeaker = createSpeaker();
+    tabReadingSpeakerReady = tabReadingSpeaker.prepare()
+      .then(() => tabReadingSpeaker.setEnabled(Boolean(tabReadingSpeaker.voice())))
+      .catch(() => false);
+  }
+  return tabReadingSpeakerReady;
+}
+
+async function speakTabReadingRow(row) {
+  if (!row.announcement) {
+    status.textContent = 'Este ponto não tem prévia de anúncio para ler em voz alta.';
+    return;
+  }
+  const enabled = await prepareTabReadingSpeaker();
+  if (!enabled) {
+    status.textContent = TAB_READING_NO_VOICE_MESSAGE;
+    return;
+  }
+  status.textContent = `Lendo em voz alta: ${row.announcement}`;
+  await tabReadingSpeaker.speak(row.announcement);
+}
+
+function tabReadingStateTone(answer) {
+  if (answer === 'conforme') return 'sim';
+  if (answer === 'não conforme') return 'nao';
+  return 'nao-sei';
+}
+
+function tabReadingImageCell(row) {
+  const cell = document.createElement('td');
+  // O rótulo da coluna vai em cada célula: em tela estreita a tabela se empilha e cada célula precisa
+  // dizer a que coluna pertence sem depender do cabeçalho, que sai de vista.
+  cell.setAttribute('data-tab-cell', 'Imagem do elemento');
+  const media = cardMedia(row);
+  if (media) cell.append(cropBlock(media, row));
+  else cell.append(el('p', 'A auditoria não guardou imagem deste elemento.', 'lay-crop-caption'));
+  return cell;
+}
+
+function tabReadingElementCell(row) {
+  const cell = document.createElement('td');
+  cell.setAttribute('data-tab-cell', 'Ordem / elemento');
+  cell.append(el('p', `Tab ${row.number} · ${row.element?.roleWord ?? 'elemento'}`, 'lay-tab-order'));
+  const selector = row.evidence?.selector?.css;
+  if (typeof selector === 'string' && selector) cell.append(el('code', selector, 'lay-tab-selector'));
+  return cell;
+}
+
+function tabReadingNameCell(row) {
+  const cell = document.createElement('td');
+  cell.setAttribute('data-tab-cell', 'Nome e função');
+  const name = row.element?.name;
+  cell.append(el('p', name ? `“${name}”` : 'Sem nome acessível', name ? '' : 'no-name'));
+  cell.append(el('p', capitalized(row.element?.roleWord ?? 'elemento'), 'lay-meta'));
+  return cell;
+}
+
+function tabReadingAnnouncementCell(row) {
+  const cell = document.createElement('td');
+  cell.setAttribute('data-tab-cell', 'Anúncio estimado');
+  cell.append(el('p', row.announcement ?? 'Prévia não disponível'));
+  if (row.announcement) {
+    const listen = button(TAB_READING_LISTEN_LABEL, 'lay-tab-listen', () => { void speakTabReadingRow(row); });
+    listen.setAttribute('aria-label', `${TAB_READING_LISTEN_LABEL} o anúncio estimado de ${tabReadingRowLabel(row)}`);
+    cell.append(listen);
+  }
+  return cell;
+}
+
+function tabReadingAnsweredLine(row) {
+  const decision = row.decision;
+  const wrap = el('div', undefined, 'lay-answered');
+  wrap.setAttribute('data-tab-reading-answer', decision.answer);
+  const revisions = decision.revisions?.length ? ` · revista ${decision.revisions.length} ${decision.revisions.length === 1 ? 'vez' : 'vezes'}` : '';
+  wrap.append(el('p', `Resposta registrada: ${ANSWER_LABELS[decision.answer]} — ${decision.evaluator}, ${formatLocalInstant(decision.decidedAt, auditModel.timezone)}${revisions}.`));
+  if (decision.note) {
+    wrap.append(el('p', `${decision.answer === 'não conforme' ? 'O que deveria dizer' : 'Observação'}: ${decision.note}`, 'lay-answered-note'));
+  }
+  wrap.append(button('Rever resposta', 'lay-revise', () => {
+    layState.tabRevising.add(row.occurrenceId);
+    const fresh = refreshTabReading();
+    focusTabReadingRow(fresh, row.occurrenceId, 'answers');
+  }));
+  return wrap;
+}
+
+function tabReadingAnswerForm(row) {
+  const form = el('div', undefined, 'lay-answer-form');
+  const answers = el('div', undefined, 'lay-answers');
+  answers.setAttribute('role', 'group');
+  answers.setAttribute('aria-label', `${TAB_READING_QUESTION} ${tabReadingRowLabel(row)}.`);
+  const asking = layState.tabAsking.has(row.occurrenceId);
+  const finding = el('div', undefined, 'lay-finding');
+  finding.hidden = !asking;
+  const findingLabel = el('label', 'O que deveria dizer? (opcional)');
+  const findingText = document.createElement('textarea');
+  findingText.rows = 3;
+  findingText.maxLength = 4000;
+  findingText.value = layState.tabDrafts.get(row.occurrenceId) ?? '';
+  findingText.setAttribute('aria-label', `O que deveria dizer no lugar do anúncio atual — ${tabReadingRowLabel(row)}`);
+  findingText.addEventListener('input', () => layState.tabDrafts.set(row.occurrenceId, findingText.value));
+  findingLabel.append(findingText);
+  const actions = el('div', undefined, 'lay-finding-actions');
+  actions.append(
+    button('Registrar “Não”', 'lay-confirm-fail', event => {
+      void saveTabReadingAnswer(row, 'não conforme', findingText.value, event.currentTarget);
+    }),
+    button('Cancelar', 'lay-cancel', () => {
+      layState.tabAsking.delete(row.occurrenceId);
+      const fresh = refreshTabReading();
+      focusTabReadingRow(fresh, row.occurrenceId, 'answers');
+    }),
+  );
+  finding.append(findingLabel, el('p', 'Deixando em branco, a constatação diz apenas que o anúncio não corresponde ao elemento.', 'lay-hint'), actions);
+  for (const option of TAB_READING_ANSWERS) {
+    const choice = button(option.label, `lay-answer lay-answer--${option.tone}`, event => {
+      if (option.answer === 'não conforme') {
+        layState.tabAsking.add(row.occurrenceId);
+        const fresh = refreshTabReading();
+        focusTabReadingRow(fresh, row.occurrenceId, 'note');
+        return;
+      }
+      void saveTabReadingAnswer(row, option.answer, '', event.currentTarget);
+    });
+    choice.setAttribute('data-tab-reading-answer', option.answer);
+    // O rótulo de cada botão nomeia o elemento: quem navega por leitor de tela ouve "Sim — Tab 3, botão
+    // “Buscar”" em vez de três "Sim" soltos pelo documento inteiro.
+    choice.setAttribute('aria-label', `${option.label} — ${tabReadingRowLabel(row)}`);
+    answers.append(choice);
+  }
+  form.append(answers, finding);
+  return form;
+}
+
+function tabReadingQuestionCell(row) {
+  const cell = document.createElement('td');
+  cell.className = 'lay-tab-question';
+  cell.setAttribute('data-tab-cell', 'Pergunta');
+  cell.append(el('p', TAB_READING_QUESTION, 'lay-q'));
+  for (const hint of row.hints) cell.append(el('p', `${TAB_READING_HINT_LABEL}: ${hint}`, 'lay-hint'));
+  if (row.answered && !layState.tabRevising.has(row.occurrenceId)) cell.append(tabReadingAnsweredLine(row));
+  else {
+    if (layState.tabRevising.has(row.occurrenceId)) cell.append(el('p', 'Revendo a resposta. A anterior continua registrada no histórico.', 'lay-hint'));
+    cell.append(tabReadingAnswerForm(row));
+  }
+  return cell;
+}
+
+function tabReadingRowNode(row) {
+  const tr = document.createElement('tr');
+  tr.className = 'lay-tab-row';
+  tr.setAttribute('data-tab-reading-row', row.occurrenceId);
+  if (row.answered) tr.setAttribute('data-tab-reading-state', tabReadingStateTone(row.decision.answer));
+  tr.append(tabReadingImageCell(row), tabReadingElementCell(row), tabReadingNameCell(row),
+    tabReadingAnnouncementCell(row), tabReadingQuestionCell(row));
+  return tr;
+}
+
+/** Janela de linhas: blocos de 20, com o filtro de pendentes por cima. */
+function tabReadingWindow(rows) {
+  const state = layState.tab;
+  if (!Number.isSafeInteger(state.visible) || state.visible <= 0) state.visible = TAB_READING_BLOCK;
+  const filtered = state.onlyPending ? rows.filter(row => !row.answered) : rows;
+  return {
+    filtered,
+    shown: filtered.slice(0, state.visible),
+    hidden: Math.max(0, filtered.length - state.visible),
+  };
+}
+
+function nextPendingTabReadingRow(rows, occurrenceId) {
+  const state = layState.tab;
+  const filtered = state.onlyPending ? rows.filter(row => !row.answered) : rows;
+  const index = filtered.findIndex(row => row.occurrenceId === occurrenceId);
+  return filtered.slice(index + 1).find(row => !row.answered) ?? filtered.find(row => !row.answered) ?? null;
+}
+
+/** O próximo ponto pode estar fora da janela: sem isto o foco iria para uma linha que não está na tela. */
+function ensureTabReadingRowVisible(row) {
+  if (!row || !layState.tabSection) return;
+  const rows = tabReadingRows();
+  const state = layState.tab;
+  const filtered = state.onlyPending ? rows.filter(value => !value.answered) : rows;
+  const index = filtered.findIndex(value => value.occurrenceId === row.occurrenceId);
+  if (index >= state.visible) state.visible = Math.ceil((index + 1) / TAB_READING_BLOCK) * TAB_READING_BLOCK;
+}
+
+/**
+ * Foco depois de responder, filtrar ou ampliar: a linha seguinte ainda sem resposta. Sem isto a pessoa
+ * teria que voltar ao começo da tabela a cada resposta — e a sequência de Tab é o que está sendo
+ * conferido, então perder o lugar é perder o fio.
+ */
+function focusTabReadingRow(section, occurrenceId, target = 'answers') {
+  const scope = section ?? layState.tabSection;
+  if (!scope || typeof scope.querySelectorAll !== 'function') return;
+  const nodes = [...scope.querySelectorAll('tr[data-tab-reading-row]')];
+  const index = nodes.findIndex(node => node.getAttribute?.('data-tab-reading-row') === occurrenceId);
+  const pending = nodes.filter(node => !node.getAttribute?.('data-tab-reading-state'));
+  const next = nodes.slice(index + 1).find(node => !node.getAttribute?.('data-tab-reading-state')) ?? pending[0] ?? null;
+  const selector = target === 'note' ? '.lay-tab-question textarea' : target === 'answers' ? '.lay-tab-question .lay-answers button' : '.lay-tab-question button';
+  const targetNode = next
+    ? next.querySelector?.(selector) ?? next.querySelector?.('button')
+    : scope.querySelector?.('[data-tab-reading-done]');
+  try { targetNode?.focus?.(); } catch { /* foco é conveniência: perder ele não invalida a resposta */ }
+}
+
+async function saveTabReadingAnswer(row, answer, note, trigger) {
+  if (!auditModel || !reportSessionCapabilityId) return false;
+  if (!evaluatorNameOrWarn()) return false;
+  const problem = noteProblem(note, false);
+  if (problem) { status.textContent = problem; return false; }
+  const occurrence = reportOccurrence(row.occurrenceId);
+  const auditId = auditModel.auditId;
+  if (!occurrence) { status.textContent = 'Este ponto da sequência de Tab não está mais nesta auditoria.'; return false; }
+  const node = layState.tabNodes.get(row.occurrenceId) ?? layState.tabSection ?? list;
+  const text = typeof note === 'string' ? note.trim() : '';
+  let saved = false;
+  try {
+    saved = await saveDecisionBatch([{ occurrence, answer, note: text, revise: Boolean(row.decision) }], node, trigger);
+  } catch (error) {
+    node.removeAttribute?.('aria-busy');
+    status.textContent = describeSaveFailure(error);
+    refreshTabReading();
+    return false;
+  }
+  if (!auditModel || auditModel.auditId !== auditId) return false;
+  layState.tabDrafts.delete(row.occurrenceId);
+  layState.tabAsking.delete(row.occurrenceId);
+  layState.tabRevising.delete(row.occurrenceId);
+  if (saved) {
+    const next = nextPendingTabReadingRow(tabReadingRows(), row.occurrenceId);
+    ensureTabReadingRowVisible(next);
+    status.textContent = next
+      ? `Resposta salva. Próximo ponto da sequência: ${tabReadingRowLabel(next)}.`
+      : 'Resposta salva. Todos os pontos desta lista foram conferidos.';
+  } else status.textContent = 'Nada a salvar: essa resposta já estava registrada.';
+  const fresh = refreshTabReading();
+  focusTabReadingRow(fresh, row.occurrenceId);
+  return saved;
+}
+
+function openTabBulkConfirmation(rows, trigger) {
+  if (!rows.length || !evaluatorNameOrWarn()) return;
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const points = rows.length === 1 ? '1 ponto' : `${rows.length} pontos`;
+  tabBulkSummary.textContent = `Isto grava “Sim” (o anúncio corresponde ao elemento) em ${points}, de Tab ${first.number} a Tab ${last.number}. Cada ponto vira uma resposta registrada em seu nome no item 5.13.10 e pode ser revisto depois, um por um.`;
+  tabBulkRun = () => runTabBulkMarking(rows);
+  tabBulkController.open(trigger);
+}
+
+/** Grava "Sim" nos pontos pendentes do bloco, em lotes (o envelope aceita até 64 decisões por vez). */
+async function runTabBulkMarking(rows) {
+  if (!auditModel || !reportSessionCapabilityId) return { ok: false, error: 'A revisão não está ativa nesta auditoria.' };
+  if (!evaluatorNameOrWarn()) return { ok: false, error: 'Informe o nome da pessoa avaliadora antes de responder.' };
+  const auditId = auditModel.auditId;
+  const entries = [];
+  for (const row of rows) {
+    const occurrence = reportOccurrence(row.occurrenceId);
+    if (occurrence && !row.answered) entries.push({ occurrence, answer: 'conforme', note: TAB_READING_BULK_NOTE });
+  }
+  if (!entries.length) return { ok: false, error: 'Nenhum ponto pendente neste bloco.' };
+  const node = layState.tabSection ?? list;
+  try {
+    for (let start = 0; start < entries.length; start += 64) {
+      await saveDecisionBatch(entries.slice(start, start + 64), node, tabBulkConfirm);
+      if (!auditModel || auditModel.auditId !== auditId) break;
+    }
+  } catch (error) {
+    status.textContent = describeSaveFailure(error);
+    refreshTabReading();
+    return { ok: false, error: describeSaveFailure(error) };
+  }
+  if (!auditModel || auditModel.auditId !== auditId) return { ok: false, error: 'A auditoria mudou durante o salvamento. Tente de novo.' };
+  layState.tabDrafts.clear();
+  const fresh = refreshTabReading();
+  focusTabReadingRow(fresh, entries.at(-1).occurrence.occurrenceId);
+  return { ok: true };
+}
+
+function tabReadingSection(rows) {
+  const state = layState.tab;
+  const section = el('section', undefined, 'lay-tab-reading');
+  section.id = 'lay-tab-reading';
+  const heading = el('h3', TAB_READING_SECTION_TITLE);
+  heading.id = 'lay-tab-reading-title';
+  section.setAttribute('aria-labelledby', heading.id);
+  section.append(heading);
+  section.append(el('p', TAB_READING_INTRO, 'lay-meta'));
+  const progress = tabReadingProgress(rows);
+  const progressLine = el('p', tabReadingProgressText(progress), 'lay-tab-progress');
+  progressLine.setAttribute('data-tab-reading-progress', `${progress.answered}/${progress.total}`);
+  section.append(progressLine);
+  const meter = document.createElement('progress');
+  meter.max = progress.total;
+  meter.value = progress.answered;
+  meter.setAttribute('aria-label', 'Pontos da sequência de Tab conferidos');
+  section.append(meter);
+  const controls = el('div', undefined, 'lay-tab-controls');
+  const onlyPendingLabel = el('label', undefined, 'lay-toggle');
+  const onlyPending = document.createElement('input');
+  onlyPending.type = 'checkbox';
+  onlyPending.checked = state.onlyPending;
+  onlyPending.addEventListener('change', () => {
+    state.onlyPending = onlyPending.checked;
+    state.visible = TAB_READING_BLOCK;
+    refreshTabReading()?.querySelector?.('input[type="checkbox"]')?.focus?.();
+  });
+  onlyPendingLabel.append(onlyPending, document.createTextNode(' Só pendentes'));
+  controls.append(onlyPendingLabel);
+  section.append(controls);
+
+  const { filtered, shown, hidden } = tabReadingWindow(rows);
+  layState.tabNodes.clear();
+  if (!filtered.length) {
+    const done = el('p', 'Todos os pontos desta sequência foram conferidos.', 'lay-tab-progress');
+    done.setAttribute('data-tab-reading-done', '');
+    done.tabIndex = -1;
+    section.append(done);
+    return section;
+  }
+  const scroll = el('div', undefined, 'lay-tab-scroll');
+  scroll.tabIndex = 0;
+  scroll.setAttribute('role', 'region');
+  scroll.setAttribute('aria-label', `${TAB_READING_SECTION_TITLE}: tabela dos pontos conferidos`);
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  for (const name of ['Imagem do elemento', 'Ordem / elemento', 'Nome e função', 'Anúncio estimado', 'Pergunta']) {
+    const th = el('th', name);
+    th.scope = 'col';
+    headerRow.append(th);
+  }
+  thead.append(headerRow);
+  table.append(thead);
+  const tbody = document.createElement('tbody');
+  for (const row of shown) {
+    const node = tabReadingRowNode(row);
+    layState.tabNodes.set(row.occurrenceId, node);
+    tbody.append(node);
+  }
+  table.append(tbody);
+  scroll.append(table);
+  section.append(scroll);
+
+  const bulk = button('Marcar todos os pendentes deste bloco como “Sim”', 'lay-tab-bulk', event => {
+    openTabBulkConfirmation(shown.filter(row => !row.answered), event.currentTarget);
+  });
+  const pendingInBlock = shown.filter(row => !row.answered).length;
+  bulk.disabled = pendingInBlock === 0;
+  if (pendingInBlock === 0) bulk.title = 'Nenhum ponto pendente nas linhas mostradas.';
+  section.append(bulk);
+  if (hidden > 0) {
+    const step = Math.min(TAB_READING_BLOCK, hidden);
+    const more = button(`Mostrar mais ${step} de ${hidden} ${hidden === 1 ? 'ponto' : 'pontos'}`, 'lay-more', () => {
+      state.visible += TAB_READING_BLOCK;
+      const fresh = refreshTabReading();
+      focusTabReadingRow(fresh, shown.at(-1)?.occurrenceId ?? '', 'answers');
+    });
+    more.setAttribute('data-tab-reading-more', String(hidden));
+    section.append(more);
+  }
+  return section;
+}
+
+function refreshTabReading() {
+  const current = layState.tabSection;
+  const rows = tabReadingRows();
+  const fresh = rows.length ? tabReadingSection(rows) : null;
+  if (fresh && current && typeof current.replaceWith === 'function') current.replaceWith(fresh);
+  else if (fresh && !current) list.append(fresh);
+  if (fresh) layState.tabSection = fresh;
+  return fresh ?? current;
 }
 
 async function start() {
