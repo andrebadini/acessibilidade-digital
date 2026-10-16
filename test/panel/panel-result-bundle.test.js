@@ -365,3 +365,21 @@ test('copy rejects hostile graphs, correlation drift, cycles and fixed budget ex
   assert.throws(() => copyPanelResultBundleV1(accessor), /PANEL_RESULT_BUNDLE_DENIED/u);
   assert.equal(reads, 0);
 });
+
+test('the string ceiling counts code points exactly: surrogate pairs, lone surrogates and the boundary', async () => {
+  const bundle = await createPanelResultBundleV1(await fixture());
+  const withUrl = finalUrl => {
+    const copy = structuredClone(bundle);
+    copy.summary.identity.finalUrl = finalUrl;
+    return copy;
+  };
+
+  // Par substituto: 2 unidades UTF-16 por ponto de código. No teto passa (4 MiB de UTF-8), um acima não.
+  assert.equal('𝄞'.length, 2, 'fixture exercises the difference between units and code points');
+  assert.doesNotThrow(() => copyPanelResultBundleV1(withUrl('𝄞'.repeat(1_048_576))));
+  assert.throws(() => copyPanelResultBundleV1(withUrl('𝄞'.repeat(1_048_577))), /PANEL_RESULT_BUNDLE_DENIED/u);
+
+  // Substituto solto conta como um ponto de código cada, como no espalhamento anterior.
+  assert.doesNotThrow(() => copyPanelResultBundleV1(withUrl('\ud800'.repeat(1_048_576))));
+  assert.throws(() => copyPanelResultBundleV1(withUrl('\ud800'.repeat(1_048_577))), /PANEL_RESULT_BUNDLE_DENIED/u);
+});

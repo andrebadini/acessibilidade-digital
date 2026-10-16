@@ -19,6 +19,21 @@ function denied() { throw new TypeError('PANEL_RESULT_BUNDLE_DENIED'); }
 
 function graphDenied() { denied(); }
 
+// Mesmo número de pontos de código de `[...value].length`, sem materializar um array com um item por
+// caractere (o espalhamento de um data URL de 1 MB custava dezenas de ms por string do bundle).
+function countCodePoints(value) {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) index += 1;
+    }
+    count += 1;
+  }
+  return count;
+}
+
 function copyGraph(root) {
   const seen = new WeakSet();
   const budget = { nodes: 0, bytes: 0 };
@@ -30,7 +45,7 @@ function copyGraph(root) {
       return value;
     }
     if (typeof value === 'string') {
-      if ([...value].length > MAX_STRING_CODE_POINTS) graphDenied('string-length');
+      if (value.length > MAX_STRING_CODE_POINTS && countCodePoints(value) > MAX_STRING_CODE_POINTS) graphDenied('string-length');
       budget.bytes += new TextEncoder().encode(value).byteLength;
       if (budget.bytes > MAX_STRING_BYTES) graphDenied('string-budget');
       return value;
