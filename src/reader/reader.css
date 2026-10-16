@@ -40,7 +40,10 @@ td p{margin:0 0 .4rem}
 .map-frame{position:relative;display:block;width:100%;margin:0;overflow:auto;border:1px solid #8195a8;background:#f4f7fa}
 .map-frame img.map-base{display:block;width:100%;height:auto}
 .map-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-.map-box{fill:rgba(255,191,71,.22);stroke:#b86b00}
+/* O contorno é só contorno: sem preenchimento a página continua legível, e caixas encaixadas (um
+   contêiner e o que está dentro dele) não somam opacidade nem escurecem o conteúdo. O tom do semáforo
+   fica no traço e na etiqueta, nunca numa área preenchida. */
+.map-box{fill:none;stroke:#b86b00}
 .map-outline-halo{fill:none;stroke:#fff}
 .map-leader{stroke:#8b1e1e}
 .map-badge{fill:#8b1e1e;stroke:#fff}
@@ -90,10 +93,10 @@ footer{font-size:.9rem;color:#40596d}
 .tone-chip.tone-ok{background:#e8f5e9;color:#1b5e20}
 .tone-chip.tone-info{background:#eef1f4;color:#3c4a57}
 .lay-summary{font-size:.92rem}
-.map-box.tone-problem{fill:rgba(198,40,40,.22);stroke:#c62828}
-.map-box.tone-review{fill:rgba(249,168,37,.25);stroke:#b07900}
-.map-box.tone-ok{fill:rgba(46,125,50,.18);stroke:#2e7d32}
-.map-box.tone-info{fill:rgba(96,112,128,.16);stroke:#607080}
+.map-box.tone-problem{fill:none;stroke:#c62828}
+.map-box.tone-review{fill:none;stroke:#b07900}
+.map-box.tone-ok{fill:none;stroke:#2e7d32}
+.map-box.tone-info{fill:none;stroke:#607080}
 @media(max-width:600px) {
   main{padding:1rem .7rem}
   .intro,.export,.reading-section{padding:.9rem}

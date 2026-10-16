@@ -12,9 +12,10 @@ export const READER_MAP_INTRO = 'Cada caixa marca um elemento da página e o có
 
 /**
  * Apresentação do mapa anterior à 1.3.0: os números ficavam dentro da imagem, junto da legenda raster.
- * Auditorias guardadas naquela versão continuam abrindo exatamente como foram geradas.
+ * Auditorias guardadas naquela versão continuam abrindo com o desenho com que foram geradas — só o
+ * nome do mapa acompanha o do mapa atual, porque para quem lê é a mesma seção.
  */
-export const READER_MAP_LEGACY_INTRO = 'Mapa visual da prévia de anúncios: os números ligam cada elemento à legenda. As prévias são estimativas, não transcrições literais de tecnologia assistiva; a ordem DOM/AX observada não é a ordem de foco.';
+export const READER_MAP_LEGACY_INTRO = 'Mapa guardado de uma revisão anterior: os números ligam cada elemento à legenda. As prévias são estimativas, não transcrições literais de tecnologia assistiva; a ordem DOM/AX observada não é a ordem de foco.';
 
 const LIMITATIONS = Object.freeze({
   'observed-dom-ax-order-not-literal-assistive-technology': 'A ordem e os anúncios são estimativas do estado observado, não uma reprodução de leitor de tela.',
@@ -90,7 +91,7 @@ function summaryText(map, imageAnnotated, format) {
   if (!imageAnnotated) {
     return format === 'reading-codes'
       ? 'A página mudou de tamanho enquanto era verificada. Para não apontar o lugar errado, nenhum elemento foi marcado nesta página.'
-      : 'A página mudou de tamanho enquanto era verificada. Para não apontar o lugar errado, nenhum anúncio foi marcado nesta página.';
+      : 'A página mudou de tamanho enquanto era verificada. Para não apontar o lugar errado, nenhum número foi marcado nesta página.';
   }
   if (map.status === 'empty') return 'Nenhum elemento elegível foi encontrado. Isso não significa conformidade da página.';
   if (map.status === 'partial') return 'Mapa gerado com cobertura parcial. Consulte as omissões registradas.';

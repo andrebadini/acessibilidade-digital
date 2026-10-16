@@ -17,6 +17,11 @@ const report = (entries, geometry = GEOMETRY) => ({ pageMap: PNG, pageMapGeometr
 const badgeBox = marker => ({ x: marker.badge.x, y: marker.badge.y, width: marker.badge.width, height: marker.badge.height });
 const boxesOverlap = (left, right) => left.x < right.x + right.width && left.x + left.width > right.x &&
   left.y < right.y + right.height && left.y + left.height > right.y;
+/** Folga entre a etiqueta e a caixa do elemento: 0 quando os dois retângulos se encostam ou se cruzam. */
+const gapBetween = (badge, box) => Math.hypot(
+  Math.max(box.x - (badge.x + badge.width), badge.x - (box.x + box.width), 0),
+  Math.max(box.y - (badge.y + badge.height), badge.y - (box.y + box.height), 0),
+);
 
 test('sem captura não existe mapa e sem medida não existe marcação', () => {
   assert.equal(readingMapPlan({ entries: [] }), null, 'relatório sem captura não tem mapa');
@@ -66,6 +71,21 @@ test('etiquetas do mesmo lugar não se sobrepõem: cada código fica numa caixa 
     for (const other of boxes.slice(index + 1)) assert.equal(boxesOverlap(box, other), false, 'duas etiquetas não podem ocupar o mesmo lugar');
   }
   assert.equal(plan.notes.includes(READING_MAP_OVERLAP_NOTE), false, 'com lugar livre a limitação não é declarada');
+});
+
+test('numa coluna apertada o código continua encostado na própria caixa', () => {
+  // Cento e dez elementos empilhados de 25 em 25 px — a forma de um menu, de uma lista de resultados ou
+  // de uma tabela —, com códigos que chegam a L110. A anticolisão já mediu a distância entre os CENTROS
+  // das etiquetas: duas etiquetas de 36 px de largura empilhadas com a folga de 2 px eram tratadas como
+  // colisão, e o código era empurrado para o anel, dezenas de px longe do alvo (medido: até 27 px de
+  // folga, média 7 px). Agora a colisão é a do retângulo de verdade, e a etiqueta fica onde encosta.
+  const entries = Array.from({ length: 110 }, (unused, index) =>
+    entry(`e${index}`, { x: 20, y: 30 + index * 25, width: 600, height: 20 }, { tabOrder: index + 1 }));
+  const plan = readingMapPlan(report(entries, { pixelWidth: 1000, pixelHeight: 3000, cssWidth: 1000, cssHeight: 3000 }));
+  assert.equal(plan.markers.length, 110);
+  const gaps = plan.markers.map(marker => gapBetween(badgeBox(marker), marker.outline));
+  assert.ok(Math.max(...gaps) <= 4, `todo código encosta na própria caixa (maior folga: ${Math.max(...gaps).toFixed(1)} px)`);
+  assert.equal(plan.markers.filter(marker => marker.overlapped).length, 0, 'sem aperto de verdade nenhuma etiqueta é declarada sobreposta');
 });
 
 test('declara a limitação quando as etiquetas ficam sobrepostas e quando o mapa é cortado no limite', () => {

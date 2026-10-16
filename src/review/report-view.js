@@ -20,7 +20,7 @@ import {
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { listedLimitations, viewportSummary } from '../core/report/text-policy.js';
-import { readerMapPresentation, READER_MAP_INTRO, READER_MAP_LEGACY_INTRO, READER_MAP_TITLE } from '../core/report/reader-map-presentation.js';
+import { readerMapPresentation, READER_MAP_INTRO, READER_MAP_LEGACY_INTRO } from '../core/report/reader-map-presentation.js';
 import {
   keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO, KEYBOARD_MAP_TAB_HELP,
 } from '../core/report/keyboard-map-presentation.js';
@@ -48,7 +48,7 @@ const CLASSIFICATION_LABELS = Object.freeze({
 });
 const STATUS_LABELS = Object.freeze({ pending: 'Pendente', complete: 'Concluída', partial: 'Concluída com limitações', cancelled: 'Cancelada', failed: 'Falhou' });
 const EVIDENCE_KIND_LABELS = Object.freeze({
-  'full-page': 'Página completa', element: 'Elemento', 'announcement-map': 'Mapa de anúncios',
+  'full-page': 'Página completa', element: 'Elemento', 'announcement-map': 'Mapa de leitura',
   'keyboard-map': 'Mapa do teclado',
 });
 const FILTERS = Object.freeze(['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
@@ -69,13 +69,13 @@ const SECTION_TITLES = Object.freeze([
   'Cobertura e quatro grupos de resultado',
   FINDINGS_BOARD_TITLE,
   'Revisão humana guiada e conclusões registradas',
-  'Mapas de anúncios',
+  'Mapa de leitura da página',
   'Mapa do teclado',
   'Matriz completa dos 146 itens',
   'Metodologia, fontes, integridade, evidências técnicas e anexos',
 ]);
 const SECTION_NAV_LABELS = Object.freeze([
-  'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
+  'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Mapa de leitura',
   'Teclado', 'Matriz ABNT', 'Metodologia e evidências',
 ]);
 // Mesmo teto do modelo de auditoria (audit-input.js, 1.1.53).
@@ -1605,10 +1605,11 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
 
   const maps = section(document, 4);
   const readerMaps = readerMapPresentation(view.executive.pages, view.readerMaps);
-  // O mapa atual vem com título e explicação; até 1.2.0 o texto antigo nomeava o mapa na própria
-  // frase e não tinha cabeçalho, e é assim que a auditoria guardada continua abrindo.
+  // O mapa atual vem com a explicação leiga logo abaixo do título da seção: repetir o mesmo título num
+  // `h3` faria o relatório dizer duas vezes seguidas a mesma coisa. Até 1.2.0 o texto antigo nomeava o
+  // mapa na própria frase e não tinha cabeçalho, e é assim que a auditoria guardada continua abrindo.
   if (readerMaps.some(map => map.format === 'reading-codes')) {
-    maps.append(element(document, 'h3', READER_MAP_TITLE), element(document, 'p', READER_MAP_INTRO));
+    maps.append(element(document, 'p', READER_MAP_INTRO));
   } else {
     maps.append(element(document, 'p', READER_MAP_LEGACY_INTRO));
   }

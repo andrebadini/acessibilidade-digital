@@ -294,7 +294,7 @@ test('renders all report sections, 146 items, occurrences and evidence records',
   const html = renderHtmlReport(SAMPLE_AUDIT);
   for (const label of [
     'Identidade, escopo e estado da auditoria', 'Sumário executivo', 'Ações e filtros', 'Ocorrências priorizadas',
-    'Mapa visual da prévia de anúncios', 'Revisão humana', 'Inventário de recursos de acessibilidade',
+    'Mapa de leitura da página', 'Revisão humana', 'Inventário de recursos de acessibilidade',
     'Matriz completa dos 146 itens', 'Anexo de evidências', 'Metodologia, proveniência e integridade',
   ]) assert.match(html, new RegExp(label, 'u'));
   assert.equal((html.match(/data-report-item=/gu) || []).length, 146);
@@ -565,7 +565,7 @@ test('renders the approved ten-section information hierarchy before technical me
     'Sumário executivo',
     'Ações e filtros',
     'Ocorrências priorizadas',
-    'Mapa visual da prévia de anúncios',
+    'Mapa de leitura da página',
     'Revisão humana',
     'Inventário de recursos de acessibilidade',
     'Matriz completa dos 146 itens',

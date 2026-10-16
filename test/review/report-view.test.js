@@ -595,13 +595,12 @@ test('the interactive reader map displays the derived PNG, numbered full announc
   const root = renderReportView({ view, document: new Document(), onExport() {} });
   const card = root.querySelector('[data-announcement-map-page="page-1"]');
   assert.ok(card, 'the reader map must render as a page-level visual, not just an artifact ID');
-  // O mapa abre com o cabeçalho que dá nome à seção: é por ele que quem usa leitor de tela encontra o
-  // mapa, e é o mesmo título da página de conferência por Tab.
+  // A seção é que dá nome ao mapa (`h2`, o mesmo nome do índice e da página de conferência por Tab):
+  // o mapa abre direto na explicação leiga, sem repetir o título num `h3` logo abaixo.
   const mapSection = card.parentNode;
-  const mapTitle = mapSection.children[1];
-  assert.equal(mapTitle.tagName, 'H3');
-  assert.equal(mapTitle.textContent, 'Mapa de leitura da página');
-  assert.match(mapSection.children[2].textContent, /^Cada caixa marca um elemento da página/u);
+  const intro = mapSection.children[1];
+  assert.equal(intro.tagName, 'P');
+  assert.match(intro.textContent, /^Cada caixa marca um elemento da página/u);
   assert.equal(card.getAttribute('data-map-status'), 'complete');
   assert.equal(card.getAttribute('data-map-format'), 'reading-codes');
   const image = card.querySelector('img[data-map-segment-image]');
@@ -637,8 +636,12 @@ test('mapa guardado antes dos códigos de leitura abre com a apresentação com 
   assert.equal(card?.getAttribute('data-map-format'), 'numbered-preview');
   // Legenda raster guardada: o trecho de imagem e a continuação seguem desenhando os dois PNGs.
   assert.equal(card.querySelectorAll('img[data-map-segment-image]').length, 2);
-  assert.match(root.textContent, /Mapa visual da prévia de anúncios/u);
-  assert.doesNotMatch(root.textContent, /Mapa de leitura da página/u);
+  // O desenho guardado continua abrindo como foi gerado (números dentro da imagem, legenda raster); o
+  // que acompanha o mapa atual é só o nome da seção, porque para quem lê é a mesma seção.
+  assert.match(root.textContent, /Mapa guardado de uma revisão anterior/u);
+  // O DOM do teste é um esboço sem seletor de classe: a ausência da apresentação nova se prova pelo
+  // HTML entregue, abaixo, onde `reader-map-*` existe como texto.
+  assert.doesNotMatch(root.textContent, /Códigos e textos deste mapa/u);
   assert.ok(card.querySelector('li[data-map-marker="1"]'));
   const html = renderHtmlReport(model, { reportView: view });
   const markup = html.slice(html.indexOf('data-announcement-map-page="page-1"'));
@@ -655,8 +658,10 @@ test('the exported ReportView includes map pixels and escaped untruncated legend
   assert.match(html, /data-announcement-map-page="page-1"/u);
   assert.match(html, /data-map-status="partial"/u);
   assert.match(html, /data-map-format="reading-codes"/u);
-  // O HTML entregue (e o PDF gerado dele) abre o mapa com o título da seção e a explicação leiga.
-  assert.match(html, /<h3>Mapa de leitura da página<\/h3><p>Cada caixa marca um elemento da página/u);
+  // O HTML entregue (e o PDF gerado dele) abre o mapa com o título da seção e a explicação leiga — o
+  // título aparece uma vez só, no `h2` da seção (antes dele havia um `h3` com o mesmo texto).
+  assert.match(html, /<h2 id="report-heading-5">Mapa de leitura da página<\/h2><p>Cada caixa marca um elemento da página/u);
+  assert.doesNotMatch(html, /<h3>Mapa de leitura da página<\/h3>/u);
   assert.match(html, /data-map-segment-image/u);
   assert.match(html, /data-map-marker="1"/u);
   // A legenda fica na coluna da direita, junto do trecho: código na imagem, texto ao lado.
@@ -1144,7 +1149,7 @@ test('live report puts the decision summary before compact navigation and expose
     'Cobertura e quatro grupos de resultado',
     'Quadro de constatações (requisitos da ABNT NBR 17225:2025)',
     'Revisão humana guiada e conclusões registradas',
-    'Mapas de anúncios',
+    'Mapa de leitura da página',
     'Mapa do teclado',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
@@ -1173,7 +1178,7 @@ test('live report puts the decision summary before compact navigation and expose
     '#report-section-5', '#report-section-6', '#report-section-7', '#report-section-8',
   ]);
   assert.deepEqual(navigation.querySelectorAll('a').map(link => link.textContent), [
-    'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
+    'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Mapa de leitura',
     'Teclado', 'Matriz ABNT', 'Metodologia e evidências',
   ]);
   assert.ok(firstSection.querySelector('[data-report-outcome]'));
