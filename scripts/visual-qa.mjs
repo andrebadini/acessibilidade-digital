@@ -622,6 +622,10 @@ async function revealElement(target, selector, index) {
 // para o summary.json dizer onde o elemento está no enquadramento.
 async function captureElementClip(target, directory, name, selector, index, options = {}) {
   const maxHeight = options.maxHeight ?? 1_400;
+  // Folga acima do alvo. Os 12 px de sempre bastam numa página sem barra fixa; onde a barra de estado do
+  // relatório fica colada no topo, ela cobre a primeira faixa do elemento e o recorte sai com o começo
+  // cortado — foi o que aconteceu com a seção da leitura por Tab, cujo título aparecia pela metade.
+  const gap = Math.max(0, Math.round(options.topOffset ?? 12));
   await evaluate(target, DISABLE_SMOOTH_SCROLL);
   const revealed = await revealElement(target, selector, index);
   if (!revealed) return null;
@@ -629,7 +633,7 @@ async function captureElementClip(target, directory, name, selector, index, opti
     const node = [...document.querySelectorAll(${JSON.stringify(selector)})][${index}];
     if (!node) return null;
     const rect = node.getBoundingClientRect();
-    window.scrollTo({ top: Math.max(0, Math.round(rect.top + scrollY - 12)), left: 0, behavior: 'instant' });
+    window.scrollTo({ top: Math.max(0, Math.round(rect.top + scrollY - ${gap})), left: 0, behavior: 'instant' });
     return true;
   })()`);
   if (box !== true) return null;
@@ -1547,6 +1551,13 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
     if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
   }
 
+  // (l) leitura por Tab: a seção da conferência guiada antes e depois da primeira resposta ---------
+  // A pergunta do produto é sobre a TELA da conferência: a pessoa vê o recorte, lê o anúncio estimado e
+  // responde sem sair da seção? A captura é a única prova. Uma resposta "Não" é registrada de verdade
+  // aqui — é ela que pinta a linha, move o foco para o próximo ponto pendente e faz nascer a constatação
+  // única no arquivo entregue, que o passo (j) recorta depois.
+  report.tabReading = await captureTabReading({ target, directory, attempt });
+
   // (k) os quatro arquivos entregues: o que a pessoa leva e assina -------------------------------
   // O pedido do produto é sobre o ARQUIVO, não sobre a tela: cada evidência citada aparece UMA vez no
   // anexo, com a imagem, o ID e os dois SHA-256. Os testes de unidade conferem o HTML; o que nenhum
@@ -1882,6 +1893,247 @@ function precisionOfMap(marks, exported) {
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Leitura por Tab: a seção da conferência guiada e o texto único no arquivo entregue
+// ---------------------------------------------------------------------------------------------
+
+// O que a seção da conferência diz de si mesma: o andamento, as colunas, o recorte de cada linha e os
+// três botões de resposta. A imagem sozinha não responde ao pedido do produto — se cada linha traz o
+// recorte com contorno sobre o elemento desta pergunta, o anúncio estimado e a pergunta certa.
+// A barra de estado do relatório fica colada no topo e cobre a primeira faixa da página. Recortar sem
+// contar com ela devolveria o título da seção pela metade — 84 px é a altura dela mais a folga do
+// recorte, medidos nesta versão do relatório.
+const TAB_BAR_OFFSET = 84;
+
+const TAB_READING_STATE = `(() => {
+  const section = document.querySelector('#lay-tab-reading');
+  if (!section) return { present: false };
+  const rows = [...section.querySelectorAll('tr[data-tab-reading-row]')];
+  const cell = (row, name) => row.querySelector('[data-tab-cell="' + name + '"]');
+  const flat = node => (node?.innerText ?? '').replace(/\\s+/gu, ' ').trim();
+  return {
+    present: true,
+    title: section.querySelector('#lay-tab-reading-title')?.textContent ?? null,
+    labels: section.getAttribute('aria-labelledby'),
+    intro: flat(section.querySelector('.lay-meta')),
+    progress: section.querySelector('[data-tab-reading-progress]')?.textContent ?? null,
+    meterValue: section.querySelector('progress')?.value ?? null,
+    headers: [...section.querySelectorAll('thead th')].map(node => node.textContent),
+    onlyPending: section.querySelector('.lay-toggle input')?.checked ?? null,
+    rows: rows.length,
+    pending: rows.filter(row => !row.getAttribute('data-tab-reading-state')).length,
+    states: rows.map(row => row.getAttribute('data-tab-reading-state')),
+    bulkDisabled: section.querySelector('.lay-tab-bulk')?.disabled ?? null,
+    more: section.querySelector('[data-tab-reading-more]')?.getAttribute('data-tab-reading-more') ?? null,
+    done: Boolean(section.querySelector('[data-tab-reading-done]')),
+    // As três primeiras linhas bastam para a revisão humana conferir as cinco colunas: a ordem dita pelo
+    // teclado, o seletor, o nome e a função, o anúncio estimado e a pergunta com os botões.
+    columns: rows.slice(0, 3).map(row => ({
+      id: row.getAttribute('data-tab-reading-row'),
+      order: flat(cell(row, 'Ordem / elemento')),
+      selector: cell(row, 'Ordem / elemento')?.querySelector('code')?.textContent ?? null,
+      name: flat(cell(row, 'Nome e função')),
+      announcement: flat(cell(row, 'Anúncio estimado')),
+      question: flat(cell(row, 'Pergunta')),
+      legend: flat(cell(row, 'Imagem do elemento')?.querySelector('figcaption')),
+      crop: Boolean(cell(row, 'Imagem do elemento')?.querySelector('svg')),
+      outlined: Boolean(cell(row, 'Imagem do elemento')?.querySelector('rect[data-evidence-highlight]')),
+      listen: cell(row, 'Anúncio estimado')?.querySelector('.lay-tab-listen')?.getAttribute('aria-label') ?? null,
+      answers: [...(cell(row, 'Pergunta')?.querySelectorAll('[data-tab-reading-answer]') ?? [])]
+        .map(button => button.getAttribute('aria-label')),
+    })),
+  };
+})()`;
+
+// A resposta "Não" na primeira linha pendente, como a pessoa faz: nome de quem avalia, o botão "Não",
+// o campo do que deveria dizer e o registro. Tudo dentro da página e com sondagem, porque a gravação
+// passa pelo trabalhador da extensão e o botão só responde quando ela volta.
+const TAB_READING_ANSWER = `(async () => {
+  const field = document.querySelector('#review-evaluator');
+  if (!field) return { answered: false, reason: 'campo do nome de quem avalia ausente na página' };
+  if (!field.value) {
+    field.value = 'Fiscal de teste';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const row = [...document.querySelectorAll('#lay-tab-reading tr[data-tab-reading-row]')]
+    .find(node => !node.getAttribute('data-tab-reading-state'));
+  if (!row) return { answered: false, reason: 'nenhum ponto pendente na seção' };
+  const id = row.getAttribute('data-tab-reading-row');
+  const wait = async (test, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const value = test();
+      if (value) return value;
+      if (Date.now() >= deadline) return null;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  const choice = row.querySelector('[data-tab-reading-answer="não conforme"]');
+  if (!choice) return { answered: false, reason: 'botão "Não" ausente na primeira linha pendente', id };
+  choice.click();
+  const textarea = await wait(() => row.querySelector('textarea'));
+  if (!textarea) return { answered: false, reason: 'campo do que deveria dizer não abriu', id };
+  textarea.value = 'O anúncio deveria dizer o mesmo que o texto visível.';
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  const confirm = await wait(() => row.querySelector('.lay-confirm-fail'));
+  if (!confirm) return { answered: false, reason: 'botão de registrar a resposta não abriu', id };
+  confirm.click();
+  const fresh = await wait(() => {
+    const node = document.querySelector('[data-tab-reading-row="' + id + '"]');
+    return node?.getAttribute('data-tab-reading-state') === 'nao' ? node : null;
+  }, 30_000);
+  if (!fresh) return { answered: false, reason: 'a resposta não foi aceita no prazo', id };
+  return { answered: true, id,
+    progress: document.querySelector('[data-tab-reading-progress]')?.textContent ?? null,
+    focused: document.activeElement?.getAttribute?.('data-tab-reading-answer') ?? document.activeElement?.tagName ?? null,
+    text: (fresh.innerText ?? '').replace(/\\s+/gu, ' ').trim().slice(0, 240) };
+})()`;
+
+/** A seção da leitura por Tab na conferência: o estado inicial, a primeira linha respondida e o bloco
+ *  seguinte. Devolve também o que a própria seção diz, porque a captura não conta quantas linhas há. */
+async function captureTabReading({ target, directory, attempt }) {
+  const report = { present: false, screenshots: [], failure: null };
+  const start = await attempt('leitura-tab:estado-inicial', () => evaluate(target, TAB_READING_STATE));
+  report.start = start.value ?? null;
+  report.present = start.value?.present === true;
+  if (!report.present) {
+    report.failure = start.error ?? 'seção da leitura por Tab ausente nesta página';
+    return report;
+  }
+  await attempt('leitura-tab:rolar', () => evaluate(target,
+    `document.querySelector('#lay-tab-reading')?.scrollIntoView({ behavior: 'instant', block: 'start' })`));
+  await sleep(400);
+  const initial = await attempt('captura:14-leitura-tab-inicio.png', () => captureElementClip(target, directory,
+    '14-leitura-tab-inicio.png', '#lay-tab-reading', 0, { maxHeight: 1_600, topOffset: TAB_BAR_OFFSET }));
+  if (initial.ok && initial.value) report.screenshots.push(initial.value.name);
+
+  const answered = await attempt('leitura-tab:responder-nao', () => evaluate(target, TAB_READING_ANSWER,
+    { awaitPromise: true, userGesture: true }));
+  report.answer = answered.value ?? { answered: false, reason: answered.error ?? 'resposta não registrada' };
+  if (report.answer.answered !== true) {
+    report.failure = report.answer.reason;
+    return report;
+  }
+  const after = await attempt('leitura-tab:estado-respondido', () => evaluate(target, TAB_READING_STATE));
+  report.answered = after.value ?? null;
+  const index = await attempt('leitura-tab:indice-da-linha', () => evaluate(target,
+    `[...document.querySelectorAll('#lay-tab-reading tr[data-tab-reading-row]')]
+      .findIndex(node => node.getAttribute('data-tab-reading-row') === ${JSON.stringify(report.answer.id)})`));
+  const position = Number.isInteger(index.value) && index.value >= 0 ? index.value : 0;
+  const rowShot = await attempt('captura:15-leitura-tab-resposta-nao.png', () => captureElementClip(target, directory,
+    '15-leitura-tab-resposta-nao.png', '#lay-tab-reading tr[data-tab-reading-row]', position,
+    { maxHeight: 900, topOffset: TAB_BAR_OFFSET }));
+  if (rowShot.ok && rowShot.value) report.screenshots.push(rowShot.value.name);
+
+  // "Mostrar mais": numa página com mais paradas do que o bloco, o botão abre o bloco seguinte — e é a
+  // única forma de a revisão humana comparar o segundo bloco com o primeiro. Numa página curta ele não
+  // existe, e isso fica registrado em vez de virar uma captura vazia.
+  const more = await attempt('leitura-tab:mostrar-mais', () => evaluate(target, `(() => {
+    const button = document.querySelector('#lay-tab-reading [data-tab-reading-more]');
+    const before = document.querySelectorAll('#lay-tab-reading tr[data-tab-reading-row]').length;
+    if (!button) return { clicked: false, reason: 'a página tem um bloco só', before };
+    const hidden = Number(button.getAttribute('data-tab-reading-more'));
+    button.click();
+    return { clicked: true, hidden, before };
+  })()`, { userGesture: true }));
+  report.more = more.value ?? null;
+  if (more.value?.clicked) {
+    const grown = await attempt('leitura-tab:bloco-seguinte', () => waitForValue(target,
+      `document.querySelectorAll('#lay-tab-reading tr[data-tab-reading-row]').length`,
+      value => typeof value === 'number' && value > (more.value.before ?? 0), { timeoutMs: 10_000, intervalMs: 100 }));
+    report.block = { ...more.value, shown: grown.value ?? null };
+    const blockShot = await attempt('captura:16-leitura-tab-bloco-seguinte.png', () => captureElementClip(target, directory,
+      '16-leitura-tab-bloco-seguinte.png', '#lay-tab-reading', 0, { maxHeight: 1_600, topOffset: TAB_BAR_OFFSET }));
+    if (blockShot.ok && blockShot.value) report.screenshots.push(blockShot.value.name);
+  }
+  return report;
+}
+
+/**
+ * Conta, no HTML entregue, o que a seção da leitura por Tab tem: respostas, recortes com contorno e o
+ * texto único da constatação. A medida é feita entre a abertura e o fim da PRÓPRIA seção — os mesmos
+ * atributos aparecem em outras partes do documento, e a contagem global dava número errado.
+ */
+function tabReadingMarkupCounts(markup) {
+  const start = markup.indexOf('<section data-report-tab-reading>');
+  if (start < 0) return { sections: 0, answers: 0, crops: 0, findings: 0 };
+  const end = markup.indexOf('</section>', start);
+  const scope = markup.slice(start, end < 0 ? undefined : end);
+  return {
+    sections: 1,
+    answers: (scope.match(/data-tab-reading-answer=/gu) ?? []).length,
+    crops: (scope.match(/evidence-media--marked/gu) ?? []).length,
+    findings: (scope.match(/data-report-tab-reading-finding/gu) ?? []).length,
+  };
+}
+
+// O que a seção do ARQUIVO entregue traz: as respostas com o recorte e o texto ÚNICO da constatação.
+const TAB_READING_ARTIFACT_STATE = `(() => {
+  const section = document.querySelector('[data-report-tab-reading]');
+  if (!section) return { present: false };
+  const rows = [...section.querySelectorAll('tr[data-tab-reading-row]')];
+  const finding = section.querySelector('[data-report-tab-reading-finding]');
+  return {
+    present: true,
+    title: section.querySelector('h3')?.textContent ?? null,
+    caption: section.querySelector('caption')?.textContent ?? null,
+    headers: [...section.querySelectorAll('thead th')].map(node => node.textContent),
+    rows: rows.length,
+    answers: rows.map(row => row.getAttribute('data-tab-reading-answer')),
+    states: rows.map(row => (row.innerText ?? '').replace(/\\s+/gu, ' ').trim().slice(0, 120)),
+    crops: section.querySelectorAll('svg.evidence-media--marked').length,
+    outlines: section.querySelectorAll('rect[data-evidence-highlight]').length,
+    definitions: section.querySelectorAll('svg.evidence-definitions image').length,
+    legends: [...section.querySelectorAll('figcaption')].length,
+    questions: section.querySelectorAll('tbody p').length,
+    // A citação normativa NÃO entra aqui: por decisão registrada, esta seção cita a evidência uma vez e a
+    // fundamentação fica no quadro de constatações. Contar as duas coisas separadas é o que prova isso.
+    citations: section.querySelectorAll('[data-findings-citation]').length,
+    finding: finding ? { present: true, text: (finding.innerText ?? '').replace(/\\s+/gu, ' ').trim() } : { present: false },
+  };
+})()`;
+
+/** A seção da leitura por Tab no HTML entregue: a tabela das respostas com o recorte, o texto único da
+ *  constatação e a mesma seção no meio de impressão, na largura de A4. */
+async function captureTabReadingArtifact({ launch, directory, attempt }) {
+  const source = join(directory, '11-relatorio.html');
+  const created = await launch.browser.command('Target.createTarget', { url: `file://${source}` });
+  if (typeof created?.targetId !== 'string') throw new Error('ABA_DO_ARQUIVO_SEM_ID');
+  const targetId = created.targetId;
+  try {
+    const page = await launch.attachPage(targetId);
+    const loaded = await waitForValue(page, `document.querySelectorAll('[data-report-tab-reading]').length`,
+      value => typeof value === 'number' && value > 0, { timeoutMs: 30_000, intervalMs: 100 }).then(() => true, () => false);
+    if (!loaded) return { rendered: false, reason: 'seção da leitura por Tab ausente no HTML entregue' };
+    const state = await evaluate(page, TAB_READING_ARTIFACT_STATE);
+    await attempt('arquivo:rolagem-instantanea', () => evaluate(page, DISABLE_SMOOTH_SCROLL));
+    await sleep(500);
+    const screenshots = [];
+    const section = await attempt('captura:17-leitura-tab-no-arquivo.png', () => captureElementClip(page, directory,
+      '17-leitura-tab-no-arquivo.png', '[data-report-tab-reading]', 0, { maxHeight: 1_800 }));
+    if (section.ok && section.value) screenshots.push(section.value.name);
+    const finding = await attempt('captura:18-leitura-tab-constatacao-unica.png', () => captureElementClip(page, directory,
+      '18-leitura-tab-constatacao-unica.png', '[data-report-tab-reading-finding]', 0, { maxHeight: 600 }));
+    if (finding.ok && finding.value) screenshots.push(finding.value.name);
+    // A folha do PDF: a mesma seção em meio de impressão, na largura de A4 (794 px a 96 dpi). É o que o
+    // motor de impressão desenha — a conferência que o pedido exige deixa de ser uma dedução.
+    await command(page, 'Emulation.setDeviceMetricsOverride',
+      { width: 794, height: 1123, deviceScaleFactor: 1, mobile: false });
+    await command(page, 'Emulation.setEmulatedMedia', { media: 'print' });
+    try {
+      const printed = await attempt('captura:19-leitura-tab-impressao.png', () => captureElementClip(page, directory,
+        '19-leitura-tab-impressao.png', '[data-report-tab-reading]', 0, { maxHeight: 1_600 }));
+      if (printed.ok && printed.value) screenshots.push(printed.value.name);
+    } finally {
+      await command(page, 'Emulation.setEmulatedMedia', { media: '' });
+      await command(page, 'Emulation.clearDeviceMetricsOverride', {});
+    }
+    return { rendered: true, ...state, screenshots };
+  } finally {
+    await launch.browser.command('Target.closeTarget', { targetId });
+  }
+}
+
 /** Espera os arquivos de um download que entrega mais de um formato de uma vez (HTML e PDF juntos). */
 async function waitForDelivered(launch, before, patterns, timeoutMs = 90_000) {
   const found = {};
@@ -1965,6 +2217,10 @@ async function captureDeliveredPrint({ launch, target, directory, attempt }) {
       twoColumns: (markup.match(/class="reader-map-columns"/gu) ?? []).length,
       codes: (markup.match(/class="reader-map-code"/gu) ?? []).length,
       sectionTitle: markup.includes('<h3>Mapa de leitura da página</h3>'),
+      // A seção da leitura por Tab no ARQUIVO, medida DENTRO do próprio trecho: `evidence-media--marked` e
+      // os atributos de resposta aparecem em outras partes do documento (histórico da revisão, por
+      // exemplo), e uma contagem global diria que a seção tem mais respostas do que ela tem.
+      tabReading: tabReadingMarkupCounts(markup),
     };
   }
   // O meio de impressão do próprio relatório: é a folha do PDF, medida na largura de A4.
@@ -1984,6 +2240,13 @@ async function captureDeliveredPrint({ launch, target, directory, attempt }) {
   const page = await attempt('pdf:pagina-do-mapa', () => printMapPage({ launch, directory, artifact: html }));
   if (page.ok && page.value) report.mapPage = page.value;
   else report.mapPage = { rendered: false, reason: 'leitura da página do mapa não concluída' };
+  // A seção da leitura por Tab no arquivo entregue — com o recorte, a resposta registrada e o texto
+  // único da constatação — e a mesma seção em meio de impressão, na largura de A4. A tela da
+  // conferência (passo l) mostra a resposta; só o arquivo mostra o que a pessoa leva e assina.
+  if (html.value) {
+    const tab = await attempt('pdf:leitura-tab-no-arquivo', () => captureTabReadingArtifact({ launch, directory, attempt }));
+    report.tabReadingArtifact = tab.value ?? { rendered: false, reason: tab.error ?? 'seção não lida' };
+  }
   return report;
 }
 
@@ -2260,6 +2523,36 @@ function printPageSummary(summary) {
     }
     if ((reading.screenshots ?? []).length) lines.push(`    captura: ${reading.screenshots.join(', ')}`);
   }
+  if (summary.report?.tabReading) {
+    const tab = summary.report.tabReading;
+    const answered = tab.answer?.answered === true;
+    lines.push(`  leitura por Tab na conferência: ${tab.present
+      ? `${tab.start?.rows ?? 0} ponto(s), ${tab.start?.pending ?? 0} pendente(s), colunas ${(tab.start?.headers ?? []).length}` +
+        `; recortes com contorno: ${(tab.start?.columns ?? []).filter(row => row.outlined).length} de ` +
+        `${(tab.start?.columns ?? []).length} linha(s) medidas`
+      : 'seção ausente'}`);
+    if (tab.present) {
+      lines.push(`    resposta registrada: ${answered ? `linha ${tab.answer.id} → ${tab.answer.progress ?? '—'}` +
+        `; foco depois de responder: ${tab.answer.focused ?? '—'}` : `não — ${tab.answer?.reason ?? 'sem motivo'}`}`);
+    }
+    if (tab.more) {
+      lines.push(`    bloco seguinte: ${tab.more.clicked
+        ? `mostrou mais (${tab.more.before} → ${tab.block?.shown ?? '?'} linha(s), ${tab.more.hidden} escondida(s))`
+        : `não abriu — ${tab.more.reason ?? 'sem botão'}`}`);
+    }
+    if ((tab.screenshots ?? []).length) lines.push(`    captura: ${tab.screenshots.join(', ')}`);
+  }
+  if (summary.report?.print?.tabReadingArtifact) {
+    const artifact = summary.report.print.tabReadingArtifact;
+    lines.push(`  leitura por Tab no arquivo entregue: ${artifact.rendered
+      ? `${artifact.rows} resposta(s) ${(artifact.answers ?? []).join('/')}, ` +
+        `${artifact.crops} recorte(s) com contorno (${artifact.outlines} contorno(s) desenhado(s)), ` +
+        `constatação única: ${artifact.finding?.present ? 'presente' : 'AUSENTE'}` +
+        `; citação normativa dentro da seção: ${artifact.citations} (fica no quadro de constatações)`
+      : `não lida — ${artifact.reason}`}`);
+    if (artifact.finding?.present) lines.push(`    texto único: ${artifact.finding.text.slice(0, 300)}`);
+    if ((artifact.screenshots ?? []).length) lines.push(`    captura: ${artifact.screenshots.join(', ')}`);
+  }
   if (summary.report?.print) {
     const print = summary.report.print;
     lines.push(`  arquivos entregues: ${print.exported.map(file => `${file.name} (${Math.round(file.byteLength / 1024)} KiB)`).join(', ') || 'nenhum'}` +
@@ -2271,6 +2564,10 @@ function printPageSummary(summary) {
     if (print.html) {
       lines.push(`    no HTML entregue: ${print.html.mapSegments} trecho(s) de imagem, ${print.html.twoColumns} bloco(s) de duas colunas, ` +
         `${print.html.codes} código(s) na coluna da direita, título próprio: ${print.html.sectionTitle ? 'sim' : 'NÃO'}`);
+      const tab = print.html.tabReading ?? { sections: 0 };
+      lines.push(`    no HTML entregue (leitura por Tab): ${tab.sections} seção(ões), ` +
+        `${tab.answers ?? 0} resposta(s), ${tab.crops ?? 0} recorte(s) com contorno, ` +
+        `constatações: ${tab.findings ?? 0}`);
     }
     if (print.mapPage) {
       lines.push(`    página do mapa no motor de PDF: ${print.mapPage.rendered

@@ -35,7 +35,7 @@ export function reportInput(overrides = {}) {
     versions: { extension: '0.1.0', rules: '1.0.0', browser: 'Chrome/147.0.0.0' },
     environment: { chromeVersion: 'Chrome/147.0.0.0', viewport: { width: 1280, height: 720, deviceScaleFactor: 1 } },
     scope: { kind: 'single-page', description: 'Página e estado observado após carregamento.' },
-    methodology: { name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 131, itemCount: 146 },
+    methodology: { name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 132, itemCount: 146 },
     session: { status: 'partial', diagnostics: [{
       code: 'DYNAMIC_PROBES_INCOMPLETE',
       message: 'As verificações dinâmicas atingiram o tempo limite.',

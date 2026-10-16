@@ -64,7 +64,7 @@ import {
 } from './pixel-privacy-gate.js';
 
 const SCHEMA_VERSION = 1;
-const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 131, itemCount: 146 });
+const METHODOLOGY = Object.freeze({ name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', ruleCount: 132, itemCount: 146 });
 const ANNOTATION_MAP_DIAGNOSTIC_CODES = new Set([
   'ANNOTATION_MAP_MV3_E2E_UNAVAILABLE',
   'ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE',

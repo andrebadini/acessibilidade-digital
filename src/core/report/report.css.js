@@ -86,6 +86,9 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .evidence-halo{stroke:#fff;stroke-width:5}
 .evidence-highlight{stroke-width:2.5}
 .evidence-highlight--failed{stroke:#8b1e1e}.evidence-highlight--advisory{stroke:#986000}.evidence-highlight--review{stroke:#6b4e00;stroke-dasharray:14 9}.evidence-highlight--passed{stroke:#003b71}
+/* Contorno de localização (revisão guiada e tabela de leitura por Tab): responde "onde está o
+   elemento?", não "qual foi o veredito" — por isso não reaproveita os tons acima. */
+.evidence-highlight--target{stroke:#b00020}
 .marks-crop{display:block;max-width:100%;height:auto;border:1px solid #738596;border-radius:.3rem;background:#eef4f8}
 .marks-area-outline{fill:none;stroke:#b00020;stroke-width:3;vector-effect:non-scaling-stroke}
 .occurrence-evidence{margin:1rem 0 0}
@@ -125,6 +128,16 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .widget-state{font-weight:750}.widget-card[data-widget-state="present"]{border-left:.4rem solid #003b71}.widget-card[data-widget-state="absent"]{border-left:.4rem double #738596}.widget-card[data-widget-state="unknown"]{border-left:.4rem dashed #6b4e00}
 .matrix-scroll{overflow-x:auto;border:1px solid #738596;border-radius:.3rem}
 .matrix-scroll table{min-width:58rem}
+/* A tabela da leitura por Tab tem cinco colunas e a primeira carrega o recorte: sem largura declarada, o
+   navegador entrega quase toda a largura à imagem e os títulos das outras colunas quebram no meio da
+   palavra ("elemen|to"). O table-layout fixo abaixo cabe igual na tela e na folha A4. */
+[data-report-tab-reading] table{table-layout:fixed}
+[data-report-tab-reading] th:nth-child(1),[data-report-tab-reading] td:nth-child(1){width:30%}
+[data-report-tab-reading] th:nth-child(2),[data-report-tab-reading] td:nth-child(2){width:14%}
+[data-report-tab-reading] th:nth-child(3),[data-report-tab-reading] td:nth-child(3){width:14%}
+[data-report-tab-reading] th:nth-child(4),[data-report-tab-reading] td:nth-child(4){width:13%}
+[data-report-tab-reading] th:nth-child(5),[data-report-tab-reading] td:nth-child(5){width:29%}
+[data-report-tab-reading] table td,[data-report-tab-reading] table th{overflow-wrap:anywhere}
 table{width:100%;border-collapse:collapse}
 th,td{border:1px solid #738596;padding:.55rem;text-align:left;vertical-align:top}
 th{background:#eef4f8;color:#14212b}
@@ -246,4 +259,4 @@ th{background:#eef4f8;color:#14212b}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-Vv9/mdmh+ISZxeuzNueJ9NjHNOiyk9gN6lypvfoCakU=';
+export const REPORT_CSS_CSP_HASH = 'sha256-wfXBGadBA33ZS1nO6SNTo2vDSm+VTSZnWNa80Dp1b3U=';

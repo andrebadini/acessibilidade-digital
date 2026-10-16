@@ -3,6 +3,7 @@ import {
   ANSWER_LABELS, compareItemIds, describeEvidenceElement, formatLocalInstant, layHint, withArticle,
 } from './lay-review.js';
 import { marksText } from './review-marks-presentation.js';
+import { buildTabReadingPlan, tabReadingDecisionSummary, tabReadingFindingText } from './tab-reading-plan.js';
 
 // Quadro de constatações: a situação de cada REQUISITO da ABNT NBR 17225:2025 depois da revisão humana,
 // com frases prontas para citação. Só apresenta o que o modelo canônico já afirma: o resultado de cada
@@ -71,6 +72,9 @@ export function buildFindingsBoard(model) {
   const evidenceById = evidenceIndex(model);
   const keyboardMapByPage = keyboardMapIndex(model);
   const ruleById = new Map((model.ruleResults ?? []).map(rule => [rule.ruleId, rule]));
+  const occurrenceById = new Map((model.occurrences ?? []).map(value => [value.occurrenceId, value]));
+  const tabRows = buildTabReadingPlan(model);
+  const tabRowIds = new Set(tabRows.map(row => row.occurrenceId));
   const decisionByOccurrence = new Map((model.reviewDecisions ?? []).map(decision => [decision.occurrenceId, decision]));
   const occurrencesByItem = new Map();
   for (const occurrence of model.occurrences ?? []) {
@@ -98,7 +102,16 @@ export function buildFindingsBoard(model) {
     };
     if (entry.decidedAt) entry.decidedAtLabel = formatLocalInstant(entry.decidedAt, timezone);
     if (group === 'notMet') {
+      // Leitura por Tab: as respostas "Não" desta seção viram UMA constatação do item, com todos os
+      // pontos nomeados num texto só. É a exceção deliberada à regra de uma citação por elemento, e vale
+      // só para este tema: a pergunta é a mesma em cada parada de Tab, e quem contesta não deve repetir o
+      // mesmo item da norma a cada parada. As constatações dos outros motores para o mesmo item (por
+      // exemplo, o controle sem nome detectado automaticamente) continuam sendo constatações próprias.
+      const tabOccurrences = occurrences.filter(occurrence => tabRowIds.has(occurrence.occurrenceId) &&
+        occurrence.outcome === 'cantTell' && decisionByOccurrence.get(occurrence.occurrenceId)?.answer === 'não conforme');
+      const tabOccurrenceIds = new Set(tabOccurrences.map(occurrence => occurrence.occurrenceId));
       for (const occurrence of occurrences) {
+        if (tabOccurrenceIds.has(occurrence.occurrenceId)) continue;
         const decision = decisionByOccurrence.get(occurrence.occurrenceId);
         const human = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme';
         if (occurrence.outcome !== 'failed' && !human) continue;
@@ -153,6 +166,10 @@ export function buildFindingsBoard(model) {
         finding.citation = citationParagraph({ item, finding });
         entry.findings.push(finding);
       }
+      const tabFinding = tabReadingEntryFinding({
+        item, occurrences: tabOccurrences, model, timezone, evidenceById, pageById, tabRows,
+      });
+      if (tabFinding) entry.findings.push(tabFinding);
     }
     groups[group].push(entry);
   }
@@ -166,6 +183,65 @@ export function buildFindingsBoard(model) {
     groups, recommendations,
     legalParagraph: `${CONSUMER_ACCESSIBILITY_FIXED_BASIS.sentencePrefix}. ${CONSUMER_ACCESSIBILITY_FIXED_BASIS.qualification}`,
   };
+}
+
+/**
+ * A constatação única da leitura por Tab: uma só frase nomeia todos os pontos respondidos com “Não”,
+ * com o que a pessoa escreveu em “O que deveria dizer?” e com as evidências citadas uma vez. Fora daqui
+ * nada muda no quadro: a exceção vale só para o tema da leitura por Tab.
+ */
+function tabReadingEntryFinding({ item, occurrences, model, timezone, evidenceById, pageById, tabRows }) {
+  const ids = new Set(occurrences.map(occurrence => occurrence.occurrenceId));
+  const rows = tabRows.filter(row => ids.has(row.occurrenceId));
+  if (rows.length === 0) return null;
+  const pages = new Set(rows.map(row => row.pageId));
+  const pageLabel = pages.size > 1
+    ? row => `página ${(model.pages ?? []).findIndex(page => page.pageId === row.pageId) + 1}`
+    : null;
+  const text = tabReadingFindingText(rows, { pageLabel });
+  const summary = tabReadingDecisionSummary(rows, timezone);
+  const evidenceIds = [];
+  const evidence = [];
+  let elementEvidenceId = null;
+  for (const occurrence of occurrences) {
+    for (const reference of occurrence.evidenceRefs ?? []) {
+      if (!evidenceIds.includes(reference)) evidenceIds.push(reference);
+    }
+    for (const reference of evidenceSummary(occurrence, evidenceById)) {
+      if (!evidence.includes(reference)) evidence.push(reference);
+    }
+    elementEvidenceId ??= elementEvidence(occurrence, evidenceById)?.evidenceId ?? null;
+  }
+  const first = rows[0];
+  const page = pageById.get(first.pageId);
+  const observedAt = pages.size === 1
+    ? page?.timestamps?.endedAt ?? model.timestamps?.endedAt
+    : model.timestamps?.endedAt;
+  const legalBasis = rows.some(row => Boolean(row.decision?.note)) ||
+    occurrences.some(occurrence => occurrence.legalAnalysis?.basisRef === CONSUMER_ACCESSIBILITY_FIXED_BASIS.id);
+  const finding = {
+    occurrenceId: first.occurrenceId,
+    source: 'human',
+    pageUrl: pages.size === 1 ? page?.finalUrl ?? model.finalUrl : model.finalUrl,
+    pageId: first.pageId,
+    evidenceIds,
+    elementEvidenceId,
+    // O texto nomeia cada ponto; um único "Elemento:" aqui sugeriria que só ele está em causa.
+    element: null,
+    subject: 'à página',
+    text,
+    observedAtLabel: formatLocalInstant(observedAt, timezone),
+    evaluator: summary.evaluators.join(', '),
+    decidedAtLabel: summary.decidedAtLabel,
+    evidence,
+    marks: null,
+    marksText: '',
+    legalBasis,
+    nodeKey: `tab-reading|${first.pageId}`,
+    occurrenceIds: [...ids],
+  };
+  finding.citation = citationParagraph({ item, finding });
+  return finding;
 }
 
 /** Parágrafo pronto para citação; quem usa confere e adapta. */

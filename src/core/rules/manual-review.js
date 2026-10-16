@@ -22,6 +22,7 @@ import {
   target
 } from './snapshot.js';
 import { STRUCTURE_RULES } from './structure.js';
+import { TAB_READING_RULES } from './tab-reading.js';
 import { VISUAL_RULES } from './visual.js';
 
 function definition(item, evaluate, ruleId = item.ruleIds[0]) {
@@ -173,7 +174,8 @@ function assistedReview(snapshot, item, ruleId = item.ruleIds[0]) {
 }
 
 const IMPLEMENTED_IDS = new Set([
-  ...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES, ...HOVER_ONLY_RULES
+  ...STRUCTURE_RULES, ...INTERACTIVE_RULES, ...FORM_RULES, ...VISUAL_RULES, ...MEDIA_RULES, ...HOVER_ONLY_RULES,
+  ...TAB_READING_RULES
 ].map(rule => rule.id));
 
 // Um item pode declarar mais de uma regra (5.1.13 declara a revisão humana e a detecção automática de

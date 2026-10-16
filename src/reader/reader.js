@@ -2,6 +2,7 @@ import { consumeReadingLaunch, createReadingController } from './controller.js';
 import { READING_CATEGORIES, READING_EXPLANATION, READING_PRIVACY, renderReadingHtml, renderReadingCsv } from './report-model.js';
 import { READING_MAP_INTRO, READING_MAP_TITLE, READING_MAP_UNAVAILABLE, readingMapPlan } from './reading-map-plan.js';
 import { TONE_LABELS, buildVerdict, entryFix, entryTone, laySummary, spokenAnnouncement, topIssues } from './plain-language.js';
+import { TAB_READING_QUESTION, TAB_READING_READER_NOTICE } from '../core/report/tab-reading-text.js';
 import { createSpeaker } from './speech.js';
 import { createTabWalk } from './tab-walk.js';
 
@@ -69,10 +70,13 @@ function render() {
     if (category === 'reading') section.append(text('p', 'Títulos, textos e imagens podem ser lidos no modo de navegação de um leitor de tela sem receber foco por Tab.'));
     if (category === 'hidden') section.append(text('p', 'Itens ocultos podem estar intencionalmente indisponíveis neste estado. Confira se algo que deveria estar disponível foi escondido.'));
     if (!rows.length) { section.append(text('p', 'Nenhum elemento registrado nesta categoria.')); return section; }
+    // O aviso aparece uma vez por tabela, não em cada linha: repetir a mesma frase 40 vezes atrapalharia
+    // quem lê a lista com leitor de tela.
+    section.append(text('p', TAB_READING_READER_NOTICE, 'reading-notice'));
     const wrapper = document.createElement('div'); wrapper.className = 'table-scroll'; wrapper.tabIndex = 0; wrapper.setAttribute('role', 'region'); wrapper.setAttribute('aria-label', label);
     const table = document.createElement('table');
     const thead = document.createElement('thead'); const headers = document.createElement('tr');
-    for (const name of ['Imagem do elemento', 'Ordem / elemento', 'Nome e função', 'Anúncio estimado', 'O que conferir']) { const th = text('th', name); th.scope = 'col'; headers.append(th); }
+    for (const name of ['Imagem do elemento', 'Ordem / elemento', 'Nome e função', 'Anúncio estimado', 'Pergunta']) { const th = text('th', name); th.scope = 'col'; headers.append(th); }
     thead.append(headers); table.append(thead);
     const tbody = document.createElement('tbody');
     for (const entry of rows) {
@@ -93,7 +97,10 @@ function render() {
       const tone = entryTone(entry);
       const review = document.createElement('td');
       review.append(text('p', TONE_LABELS[tone], `tone-chip tone-${tone}`), text('p', laySummary(entry), 'lay-summary'));
-      review.append(text('p', entry.reasons.join('; ') || 'Confira se o anúncio representa o elemento.', 'entry-reasons'));
+      // A pergunta desta página é a mesma da seção própria da verificação guiada; aqui ela aparece sem
+      // botões, porque nesta página nada é registrado: quem responde faz isso na verificação guiada.
+      review.append(text('p', TAB_READING_QUESTION, 'entry-question'));
+      if (entry.reasons.length) review.append(text('p', entry.reasons.join('; '), 'entry-reasons'));
       const actions = document.createElement('div'); actions.className = 'entry-actions';
       const who = `${entry.name || entry.role || entry.tag}${entry.tabOrder ? `, posição ${entry.tabOrder}` : ''}`;
       if (category !== 'hidden') {

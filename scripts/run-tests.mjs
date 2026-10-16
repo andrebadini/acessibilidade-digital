@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REAL_CHROME_E2E = new Set([
   'test/e2e/tab-reading-mv3.test.mjs',
+  'test/e2e/tab-reading-guided-mv3.test.mjs',
   'test/e2e/axe-mv3-csp.test.mjs',
   'test/e2e/batch-audit-mv3.test.mjs',
   'test/e2e/batch-pixel-consent-mv3.test.mjs',

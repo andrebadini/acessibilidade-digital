@@ -1,4 +1,5 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
+import { TAB_READING_MESSAGE, TAB_READING_RULE_ID } from '../rules/tab-reading.js';
 
 // Teto de defesa por regra. O antigo (10.240) era alcançável por uma vitrine grande (milhares de
 // produtos, cada um com botões e links do mesmo tipo) e um único excesso invalidava a auditoria inteira.
@@ -163,6 +164,7 @@ const MESSAGE = Object.freeze({
   'table-title-not-associated': 'Associe programaticamente o título a esta tabela.',
   'missing-submit-button': 'Forneça um botão explícito para submeter este formulário.',
   'missing-custom-component-state': 'Exponha os estados, propriedades e valores necessários deste componente.',
+  'tab-reading-announcement': TAB_READING_MESSAGE,
 });
 
 function register(ruleIds, reason, parameters = [], message = MESSAGE[reason], refine = null) {
@@ -308,6 +310,9 @@ register(['updating-content-control'], 'missing-updating-content-control');
 register(['table-title-association'], 'table-title-not-associated');
 register(['form-submit-button'], 'missing-submit-button');
 register(['custom-component-state'], 'missing-custom-component-state', ['states']);
+// Leitura por Tab (item 5.13.10): o alvo não acusa falha — pede que a pessoa confira o anúncio no
+// ponto exato da sequência de Tab. O texto vem da própria regra, para os dois nunca divergirem.
+register([TAB_READING_RULE_ID], 'tab-reading-announcement');
 
 // 5.1.13 / WCAG 2.1.1 — conteúdo que só aparece com o mouse. O texto é a explicação que a pessoa lê
 // na ocorrência, então diz o que acontece e o que fazer, sem jargão.
@@ -402,6 +407,9 @@ export function validateCoreRuleTargetInventory(ruleId, outcome, targets) {
     if (target.data?.reason === 'inactive-component-unconfirmed' && outcome !== 'cantTell') return false;
     if (target.data?.reason === 'alignment-essentiality-unconfirmed' && outcome !== 'cantTell') return false;
     if (target.data?.reason === 'text-width-configuration-unconfirmed' && outcome !== 'cantTell') return false;
+    // O alvo da leitura por Tab pede conferência ("confira se o anúncio corresponde"), nunca acusa
+    // falha: um anúncio só é incorreto depois que a pessoa responde “Não”.
+    if (target.data?.reason === 'tab-reading-announcement' && outcome !== 'cantTell') return false;
     const message = canonicalCoreRemediation(ruleId, target.data);
     if (!message || target.message !== message || !codepointLength(target.message, MAX_TARGET_TEXT)) return false;
   }
