@@ -105,6 +105,8 @@ function hasPixelPayload(artifact) {
 
 function omitArtifactPixels(artifact) {
   delete artifact.dataUrl;
+  // Sem os pixels não há arquivo de imagem a que o hash se refira; o esquema recusa o campo sozinho.
+  delete artifact.binarySha256;
   if (DERIVED_MAP_KINDS.has(artifact.kind)) {
     for (const segment of artifact.segments ?? []) delete segment.dataUrl;
   }

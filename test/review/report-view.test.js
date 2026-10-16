@@ -1562,7 +1562,14 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   assert.equal(root.querySelectorAll('svg[data-evidence-treatment="review"]').length, 0);
 
   assert.equal(failed.querySelector('[data-evidence-kind="full-page"]').querySelector('svg'), null);
-  assert.equal(root.querySelector('[data-report-evidence="ev-control"]').querySelector('img').getAttribute('src'), original.dataUrl);
+  // A ficha de evidência mostra o ELEMENTO com o contorno por fora (antes dela só havia o PNG cru): o
+  // contorno é o mesmo desenho derivado usado nas ocorrências, e a legenda diz que o arquivo baixado não
+  // o contém. O PNG original continua embutido, byte a byte, dentro do SVG.
+  const fiche = root.querySelector('[data-report-evidence="ev-control"]');
+  const ficheVisual = fiche.querySelector('svg[data-evidence-treatment="target"]');
+  assert.equal(ficheVisual.querySelector('image').getAttribute('href'), original.dataUrl);
+  assert.match(fiche.querySelector('figcaption').textContent, /Contorno vermelho: o elemento desta evidência\./u);
+  assert.match(fiche.querySelector('figcaption').textContent, /não tem contorno/u);
   assert.deepEqual(model.evidence.find(evidence => evidence.kind === 'element'), originalSnapshot);
 
   const html = renderHtmlReport(model, { reportView: view });

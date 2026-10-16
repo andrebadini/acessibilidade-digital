@@ -24,6 +24,15 @@
 //   07-evidencia-N.png     cada miniatura marcada isolada (o <figure> com o svg)
 //   08-mapa.png            mapa de anúncios, quando existe
 //   09-mapa-teclado.png    mapa do teclado, quando existe (caixas azuis numeradas e tracejadas)
+//   10-revisao-cartao.png  cartão da revisão guiada com o recorte do elemento e o contorno
+//   10b-recorte-ampliado.png o mesmo recorte ampliado na caixa de diálogo (clique na imagem)
+//   11-ficha-evidencia.png ficha da evidência aberta no relatório: imagem com contorno, ID e os dois
+//                          SHA-256 inteiros, com o botão de download do PNG
+//   12-anexo-impresso.png  o anexo do HTML ENTREGUE (só ele visível, mídia de impressão) no quadro em
+//                          que o PDF o imprime — a imagem, o ID e os dois SHA-256 de cada evidência
+//   13-anexo-impresso.pdf  o mesmo anexo passado pelo `Page.printToPDF`, o mesmo caminho do PDF entregue
+//   <auditId>.html/.pdf    os arquivos que a exportação realmente entregou (copiados do perfil do Chrome),
+//                          com a contagem de imagens embutidas no PDF no summary.json
 //   summary.json           o que foi medido: localizados, não localizados com motivo,
 //                          retângulo do alvo vs. retângulo do anel/botão, persistência e, com
 //                          --reload-check, o que o painel respondeu depois da recarga
@@ -31,6 +40,7 @@
 // Um erro numa página é registrado no summary.json e não aborta as outras.
 
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync, inflateSync } from 'node:zlib';
@@ -38,8 +48,10 @@ import { deflateSync, inflateSync } from 'node:zlib';
 import {
   click,
   command,
+  createRealPage,
   evaluate,
   launchUnpackedExtension,
+  removeRealTab,
   resolveRealChromeTestBinary,
   startFixtureServer,
   waitForValue,
@@ -922,6 +934,10 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck 
       chromeBinary,
       expectedMajor: CHROME_MAJOR,
       viewport: { ...VIEWPORT },
+      // Os quatro arquivos entregues são lidos do disco (bloco k). O modo `profile` grava a pasta de
+      // download nas preferências do perfil, o mesmo caminho que a exportação real usa nas provas de
+      // Entrega — sem isso o download iniciado pela extensão não chega a um arquivo para conferir.
+      downloadMode: 'profile',
     }));
     if (!launched.ok) { summary.errors.push({ stage: 'abrir-chrome', detail: 'sem navegador' }); return summary; }
     launch = launched.value;
@@ -1409,7 +1425,239 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
       report.keyboardSuspectContext = context.value ?? null;
     }
   }
+
+  // (i) revisão guiada: o recorte do elemento DENTRO do cartão da pergunta ------------------------
+  // É a prova visual do pedido do produto: quem responde vê o contorno sobre o elemento sem sair do
+  // cartão. A captura isola o primeiro cartão que traz contorno e registra a legenda, o `viewBox` do
+  // recorte e o retângulo desenhado, para conferir depois se a caixa caiu sobre o elemento.
+  const guided = await attempt('revisao-cartao', () => evaluate(target, `(() => {
+    const controls = document.querySelector('[data-review-controls-target]');
+    if (controls) controls.open = true;
+    const cards = [...document.querySelectorAll('#review-list details.lay-card')];
+    // Cartões que declaram não ter imagem (a frase honesta do pedido) ou que só conseguem indicar texto e
+    // tipo: a contagem vale nos dois caminhos, com ou sem recorte à vista.
+    const withoutImage = document.querySelectorAll('#review-list .lay-locate-note').length;
+    for (const [index, card] of cards.entries()) {
+      card.open = true;
+      const svg = card.querySelector('figure.lay-crop svg');
+      const box = svg?.querySelector('rect[data-evidence-highlight]');
+      if (!svg || !box) continue;
+      card.scrollIntoView({ block: 'start' });
+      const figure = card.querySelector('figure.lay-crop');
+      return { present: true, index, cards: cards.length, withoutImage,
+        caption: figure.querySelector('figcaption')?.textContent ?? '',
+        viewBox: svg.getAttribute('viewBox'),
+        box: ['x', 'y', 'width', 'height'].map(name => Number(box.getAttribute(name))),
+        image: (svg.querySelector('image')?.getAttribute('href') ?? '').slice(0, 24) };
+    }
+    return { present: false, cards: cards.length, withoutImage };
+  })()`));
+  report.guidedCard = guided.value ?? null;
+  if (guided.value?.present) {
+    await sleep(300);
+    const saved = await attempt('captura:10-revisao-cartao.png', () => captureElementClip(target, directory,
+      '10-revisao-cartao.png', '#review-list details.lay-card', guided.value.index, { maxHeight: 1_200 }));
+    if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
+    // O recorte ampliado (clique na imagem) é a segunda metade do pedido: mesma marcação, tamanho grande.
+    const zoomed = await attempt('revisao-cartao-ampliado', () => evaluate(target, `(() => {
+      const button = document.querySelectorAll('#review-list details.lay-card')[${guided.value.index}]
+        ?.querySelector('figure.lay-crop button.lay-crop-zoom');
+      if (!button) return { opened: false };
+      button.click();
+      const dialog = document.querySelector('#lay-zoom-dialog');
+      const figure = dialog.querySelector('figure.lay-crop--zoom');
+      return { opened: dialog.open === true, modal: dialog.matches(':modal'),
+        outline: Boolean(figure?.querySelector('rect[data-evidence-highlight]')),
+        viewBox: figure?.querySelector('svg')?.getAttribute('viewBox') ?? null };
+    })()`, { userGesture: true }));
+    report.guidedZoom = zoomed.value ?? null;
+    if (zoomed.value?.opened) {
+      await sleep(300);
+      const savedZoom = await attempt('captura:10b-recorte-ampliado.png', () => captureElementClip(target, directory,
+        '10b-recorte-ampliado.png', '#lay-zoom-dialog figure.lay-crop--zoom', 0, { maxHeight: 900 }));
+      if (savedZoom.ok && savedZoom.value) report.screenshots.push(savedZoom.value.name);
+      await attempt('fechar-recorte-ampliado', () => evaluate(target, `(() => {
+        document.querySelector('#lay-zoom-close')?.click();
+        return document.querySelector('#lay-zoom-dialog')?.open === false;
+      })()`));
+    }
+  }
+
+  // (j) ficha da evidência: imagem com contorno, ID, os dois SHA-256 inteiros e o download do PNG ---
+  // Sem esta captura, a conferência do hash anunciado e da imagem que ele identifica dependeria de
+  // abrir o HTML exportado à mão.
+  const fiche = await attempt('ficha-de-evidencia', () => evaluate(target, `(() => {
+    const annex = document.querySelector('details[data-report-annex]');
+    if (annex) annex.open = true;
+    const cards = [...document.querySelectorAll('[data-evidence-fiche]')];
+    const index = cards.findIndex(card => card.querySelector('svg rect[data-evidence-highlight]'));
+    const chosen = index < 0 ? 0 : index;
+    const card = cards[chosen];
+    if (!card) return { present: false, cards: cards.length };
+    card.scrollIntoView({ block: 'start' });
+    return { present: true, index: chosen, cards: cards.length,
+      id: card.getAttribute('data-report-evidence'),
+      hashes: [...card.querySelectorAll('code')].map(node => node.textContent)
+        .filter(value => /^[a-f0-9]{64}$/u.test(value)).length,
+      download: Boolean(card.querySelector('button[data-evidence-download]')),
+      outlined: Boolean(card.querySelector('svg rect[data-evidence-highlight]')) };
+  })()`));
+  report.evidenceFiche = fiche.value ?? null;
+  if (fiche.value?.present) {
+    await sleep(300);
+    const saved = await attempt('captura:11-ficha-evidencia.png', () => captureElementClip(target, directory,
+      '11-ficha-evidencia.png', '[data-evidence-fiche]', fiche.value.index, { maxHeight: 1_400 }));
+    if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
+  }
+
+  // (k) os quatro arquivos entregues: o que a pessoa leva e assina -------------------------------
+  // O pedido do produto é sobre o ARQUIVO, não sobre a tela: cada evidência citada aparece UMA vez no
+  // anexo, com a imagem, o ID e os dois SHA-256. Os testes de unidade conferem o HTML; o que nenhum
+  // deles enxerga é o PDF — se o navegador realmente imprimiu aquelas imagens. Aqui a exportação é
+  // pedida pelo botão de verdade, os quatro arquivos são lidos do disco e cada fluxo `stream…endstream`
+  // do PDF é descomprimido para contar as imagens embutidas.
+  const exported = await attempt('exportar-quatro-formatos', async () => {
+    const auditId = await readAuditId(panel);
+    await click(target, 'button[data-report-export]');
+    // Em página grande a exportação leva minutos: são quatro arquivos, um deles com todas as
+    // miniaturas dentro e um PDF impresso numa aba à parte. O prazo acompanha o tamanho da página
+    // (145 capturas na fixture) e a frase do próprio relatório diz o que está acontecendo.
+    const deadline = Date.now() + 600_000;
+    let names = [];
+    let statusText = null;
+    while (Date.now() < deadline) {
+      names = (await readdir(launch.downloadDirectory)).filter(name => !name.endsWith('.crdownload'));
+      statusText = (await evaluate(target, `document.querySelector('#review-status')?.textContent ?? null`).catch(() => null)) ?? statusText;
+      if (['.html', '.pdf', '.csv', '.json'].every(extension => names.some(name => name.endsWith(extension)))) break;
+      // Recusa declarada pelo próprio relatório: esperar o prazo inteiro só atrasaria o resumo. A frase
+      // de "geração não confirmada" NÃO entra aqui — numa página grande a confirmação pode chegar depois
+      // do aviso, e os arquivos ainda aparecem.
+      if (/Não foi possível gerar o relatório atualizado/u.test(statusText ?? '')) break;
+      await sleep(1_000);
+    }
+    const byExtension = extension => names.find(name => name.endsWith(extension)) ?? null;
+    const base = { auditId, names, statusText, html: byExtension('.html'), pdf: byExtension('.pdf'),
+      csv: byExtension('.csv'), json: byExtension('.json') };
+    if (!base.pdf) return base;
+    const bytes = await readFile(join(launch.downloadDirectory, base.pdf));
+    return { ...base, pdfByteLength: bytes.length, ...countPdfImages(bytes) };
+  });
+  report.exportedFiles = exported.value ?? null;
+  // Os dois arquivos grandes ficam junto das capturas: é o que permite reabrir o HTML entregue (e o PDF
+  // do anexo) depois da corrida, sem depender do perfil temporário do Chrome.
+  for (const name of [exported.value?.html, exported.value?.pdf].filter(Boolean)) {
+    const copied = await attempt(`copiar:${name}`, async () => {
+      await writeShot(directory, name, await readFile(join(launch.downloadDirectory, name)));
+      return name;
+    });
+    if (copied.ok && copied.value) report.screenshots.push(copied.value);
+  }
+
+  // (l) o anexo impresso: o HTML entregue, só com o anexo visível, passa pelo mesmo `Page.printToPDF`
+  // que a extensão usa. Assim o anexo cai na primeira página e dá para OLHAR o PDF renderizado —
+  // a conferência que o pedido exige ("as imagens aparecem no PDF") deixa de ser uma dedução.
+  if (exported.value?.html) {
+    const annex = await attempt('anexo-impresso', async () => {
+      const htmlPath = join(launch.downloadDirectory, exported.value.html);
+      const html = await readFile(htmlPath, 'utf8');
+      const server = createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(html);
+      });
+      await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
+      const origin = `http://127.0.0.1:${server.address().port}/relatorio.html`;
+      const annexPage = await createRealPage(launch, { url: origin, active: false, operationId: 'w162-anexo' });
+      try {
+        await command(annexPage.page, 'Emulation.setEmulatedMedia', { media: 'print' });
+        const structure = await evaluate(annexPage.page, `(() => {
+          const section = document.querySelector('section#anexos') ?? document.querySelector('[data-report-annex]') ??
+            [...document.querySelectorAll('h2')].find(node => /Anexo de evidências/u.test(node.textContent))?.closest('section');
+          if (!section) return { present: false, sections: document.querySelectorAll('section').length };
+          // O relatório inteiro vive dentro de UM elemento (a raiz da visão), então esconder os filhos do
+          // body não esconde nada. O que esconde é percorrer a cadeia até a raiz e apagar os IRMÃOS fora
+          // dela: sobra a seção do anexo e os ancestrais que a contêm.
+          const chain = new Set();
+          for (let node = section; node; node = node.parentElement) chain.add(node);
+          for (const node of chain) {
+            for (const sibling of [...(node.parentElement?.children ?? [])]) {
+              if (!chain.has(sibling) && sibling.style) sibling.style.display = 'none';
+            }
+          }
+          if (section.tagName === 'DETAILS') section.open = true;
+          for (const extra of section.querySelectorAll('details[data-report-annex], details[data-print-observation-scope]')) {
+            extra.style.display = 'none';
+          }
+          const cards = [...section.querySelectorAll('[data-report-evidence]')];
+          // A ficha mostra o PNG por um svg.evidence-media com use apontando para o defs (a imagem entra
+          // UMA vez no arquivo) OU aponta para a captura já apresentada. Contar "svg image" devolvia zero
+          // justamente porque o image fica no defs, fora da lista do anexo.
+          const media = [...section.querySelectorAll('.evidence-media')];
+          // Teto de imagens no PDF do anexo: o quadro do CDP aguenta 16 MB e um anexo de página real passa
+          // disso, derrubando a conexão inteira (CDP_FRAME_TOO_LARGE é fatal no transporte). As primeiras
+          // figuras bastam para responder à pergunta do pedido — "as imagens entram no PDF?" — e o resto da
+          // seção continua impresso, com ID e os dois hashes. A seção inteira segue no HTML entregue.
+          const MAX_PRINTED = 6;
+          for (const [index, node] of media.entries()) if (index >= MAX_PRINTED) node.style.display = 'none';
+          section.scrollIntoView({ block: 'start' });
+          const outlined = [...section.querySelectorAll('svg[data-evidence-treatment], svg.evidence-media--marked')];
+          return { present: true, title: section.querySelector('h2, h3')?.textContent ?? null,
+            cards: cards.length, images: media.length, printedImages: Math.min(media.length, MAX_PRINTED),
+            outlined: outlined.length,
+            ids: cards.map(card => card.getAttribute('data-report-evidence')),
+            recordHashes: section.textContent.includes('Impressão digital (SHA-256) do registro'),
+            fileHashes: section.textContent.includes('SHA-256 do arquivo de imagem (PNG)'),
+            pointers: [...section.querySelectorAll('a[href^="#report-preview-"]')].length };
+        })()`, { awaitPromise: false }).catch(() => ({ present: false }));
+        await sleep(400);
+        const savedAnnex = await attempt('captura:12-anexo-impresso.png',
+          () => captureViewport(annexPage.page, directory, '12-anexo-impresso.png'));
+        if (savedAnnex.ok && savedAnnex.value) report.screenshots.push(savedAnnex.value.name);
+        const printed = await attempt('pdf-do-anexo', async () => {
+          const result = await command(annexPage.page, 'Page.printToPDF', {
+            printBackground: true, preferCSSPageSize: true, generateTaggedPDF: true, generateDocumentOutline: true,
+          });
+          if (typeof result?.data !== 'string') throw new Error('PDF_SEM_DADOS');
+          const bytes = Buffer.from(result.data, 'base64');
+          await writeShot(directory, '13-anexo-impresso.pdf', bytes);
+          return { byteLength: bytes.length, ...countPdfImages(bytes) };
+        });
+        if (printed.ok && printed.value) report.screenshots.push('13-anexo-impresso.pdf');
+        return { ...structure, pdf: printed.value ?? null };
+      } finally {
+        await attempt('fechar-aba-do-anexo', () => removeRealTab(launch, annexPage, { operationId: 'w162-anexo-close' }));
+        await new Promise(resolvePromise => server.close(resolvePromise));
+      }
+    });
+    report.printedAnnex = annex.value ?? null;
+  }
   return report;
+}
+
+/**
+ * Conta as imagens embutidas num PDF.
+ *
+ * Cada imagem é um objeto de fluxo (`/Subtype /Image`) com FlateDecode. Os dicionários do Chrome saem
+ * no corpo do arquivo, NÃO dentro de fluxos de objetos comprimidos (`/ObjStm` ausente) — por isso a
+ * contagem lê o texto do arquivo inteiro e soma o que aparece nos fluxos descomprimidos, que é onde
+ * objetos comprimidos apareceriam. Contar só dentro dos fluxos, como a primeira versão fazia, devolvia
+ * `images: 0` para um PDF cheio de imagens. Um PDF de verdade sem imagens continua devolvendo 0.
+ */
+function countPdfImages(bytes) {
+  const latin = bytes.toString('latin1');
+  let streams = 0;
+  let images = (latin.match(/\/Subtype\s*\/Image/gu) ?? []).length;
+  const pattern = /stream\r?\n([\s\S]*?)endstream/gu;
+  for (const match of latin.matchAll(pattern)) {
+    streams += 1;
+    const raw = Buffer.from(match[1], 'latin1');
+    for (const candidate of [raw, raw.subarray(0, Math.max(0, raw.length - 2))]) {
+      let inflated;
+      try { inflated = inflateSync(candidate); } catch { continue; }
+      images += (inflated.toString('latin1').match(/\/Subtype\s*\/Image/gu) ?? []).length;
+      break;
+    }
+  }
+  return { streams, images };
 }
 
 async function readAuditId(panel) {

@@ -15,6 +15,11 @@ import {
   keyboardMapCountsText, keyboardMapPresentation, KEYBOARD_MAP_INTRO,
 } from '../core/report/keyboard-map-presentation.js';
 import {
+  EVIDENCE_CROP_REGION_LEGEND, elementCropSource, evidenceCropDisplaySize, evidenceMediaParts,
+} from '../core/report/evidence-crop.js';
+import { EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND } from '../core/report/evidence-highlight.js';
+import { GUIDED_REVIEW_TREATMENT_V1 } from '../core/report/evidence-treatment.js';
+import {
   documentRectToSegmentPixels, integerDocumentArea, segmentPixelsToDocumentRect,
 } from '../core/keyboard/keyboard-map-geometry.js';
 import { canonicalReviewMarks, describeReviewAreaPosition, REVIEW_MARKS_LIMITS, REVIEW_MARKS_VERSION } from '../core/review/review-marks.js';
@@ -37,6 +42,9 @@ const deleteAuditDialog = document.querySelector('#delete-audit-dialog');
 const deleteAuditCancel = document.querySelector('#delete-audit-cancel');
 const deleteAuditConfirm = document.querySelector('#delete-audit-confirm');
 const deleteAuditDialogStatus = document.querySelector('#delete-audit-dialog-status');
+const zoomDialog = document.querySelector('#lay-zoom-dialog');
+const zoomBody = document.querySelector('#lay-zoom-body');
+const zoomClose = document.querySelector('#lay-zoom-close');
 const EXPORT_CLEANUP_MESSAGE = 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.';
 // Ajuda "keyboard-map" do item 5.1.13: a pergunta olha o mapa, não o código. As três respostas abaixo
 // são as mesmas respostas canônicas, com o rótulo que a pessoa entende sem conhecer ABNT nem WCAG.
@@ -129,7 +137,9 @@ function applyReportSessionState(previousState) {
     reportHighlightPort = null;
     for (const node of list.querySelectorAll('button.lay-show')) node.hidden = true;
   } else {
-    for (const node of list.querySelectorAll('button.lay-show')) node.hidden = Boolean(node.nextElementSibling?.classList.contains('lay-show-note'));
+    // O botão só volta a aparecer se a nota ao lado dele não for a explicação de "sem localização":
+    // toda nota do cartão usa a mesma classe, e só ela recebe a marca `data-lay-no-binding`.
+    for (const node of list.querySelectorAll('button.lay-show')) node.hidden = Boolean(node.nextElementSibling?.hasAttribute?.('data-lay-no-binding'));
     reportReconnectAttempts = 0;
     connectReportHighlightState();
   }
@@ -381,6 +391,12 @@ const deleteAuditController = createDestructiveDialog({
 });
 
 deleteAudit.addEventListener('click', () => deleteAuditController.open(deleteAudit));
+
+// A imagem ampliada sai do documento ao fechar: a mesma captura de página inteira não fica pendurada na
+// aba depois que a pessoa já olhou o recorte. O `<dialog>` nativo fecha no Escape e no botão Fechar, e
+// devolve o foco ao botão do cartão que o abriu.
+zoomClose?.addEventListener('click', () => zoomDialog.close());
+zoomDialog?.addEventListener('close', () => zoomBody.replaceChildren());
 
 // The worker acknowledges the request before the files exist, and the export tab closes
 // itself on failure without telling this page. Without a deadline the screen would keep
@@ -876,14 +892,31 @@ function highlightableOccurrence(card) {
   return usable?.occurrence.occurrenceId ?? null;
 }
 
+/**
+ * Onde a pessoa encontra o elemento: a imagem deste mesmo cartão quando ela existe; sem imagem, o tipo
+ * e o nome do elemento, que é o que sobra para reconhecê-lo na página. Nenhuma frase aponta para outro
+ * lugar — a imagem, quando existe, está logo acima, no cartão que a pessoa tem aberto.
+ */
+function locateSentence(card, hasImage) {
+  if (hasImage) return 'A imagem deste elemento está no recorte acima, neste mesmo cartão.';
+  const label = card?.element?.label;
+  return `${label ? `Elemento desta pergunta: ${label}. ` : ''}Esta auditoria não guardou imagem deste elemento.`;
+}
+
+function cardHasImage(node) {
+  const scope = typeof node?.closest === 'function' ? node.closest('.lay-card') ?? node : node;
+  return Boolean(scope?.querySelector?.('.lay-crop'));
+}
+
 async function showOnPage(card, trigger) {
   const occurrenceId = highlightableOccurrence(card);
+  const locate = locateSentence(card, cardHasImage(trigger));
   if (!occurrenceId) {
-    status.textContent = 'O destaque ao vivo vale para perguntas pendentes ou respondidas com “Não”. Use a captura registrada no cartão.';
+    status.textContent = `O destaque ao vivo vale para perguntas pendentes ou respondidas com “Não”. ${locate}`;
     return;
   }
   if (reportSessionState !== 'result') {
-    status.textContent = 'A página auditada mudou ou foi fechada, então o destaque ao vivo não está mais disponível. Use a captura registrada no cartão.';
+    status.textContent = `A página auditada mudou ou foi fechada, então o destaque ao vivo não está mais disponível. ${locate}`;
     return;
   }
   trigger.disabled = true;
@@ -892,8 +925,8 @@ async function showOnPage(card, trigger) {
     if (!available || highlightAvailability.get(occurrenceId)?.state !== 'available') {
       const reason = highlightAvailability.get(occurrenceId)?.reason;
       status.textContent = reason === 'no-binding'
-        ? 'Este elemento não tem localização registrada para destaque nesta auditoria. Use a captura registrada no cartão.'
-        : 'Não é possível destacar este elemento agora (a página auditada pode ter mudado). Use a captura registrada no cartão.';
+        ? `Este elemento não tem localização registrada nesta auditoria, então não dá para destacá-lo na página. ${locate}`
+        : `Não é possível destacar este elemento agora (a página auditada pode ter mudado). ${locate}`;
       return;
     }
     if (await handleReportHighlightIntent({ type: 'HIGHLIGHT_OCCURRENCE', occurrenceId }, { announce: false })) {
@@ -905,6 +938,7 @@ async function showOnPage(card, trigger) {
 // Nem todo elemento tem localização registrada para destaque (por exemplo, além do limite de
 // miniaturas). Ao abrir o cartão, a disponibilidade é consultada (é barata) e, sem localização, o botão
 // dá lugar a uma explicação, em vez de oferecer um destaque que só seria recusado depois do clique.
+// A explicação ocupa a mesma nota do cartão (`lay-locate-note`), para não repetir a frase que já está lá.
 async function checkShowOnPage(card, node) {
   const show = node.querySelector('button.lay-show');
   const occurrenceId = highlightableOccurrence(card);
@@ -913,22 +947,156 @@ async function checkShowOnPage(card, node) {
   if (!await handleReportHighlightIntent({ type: 'GET_HIGHLIGHT_AVAILABILITY', occurrenceId }, { announce: false })) return;
   const availability = highlightAvailability.get(occurrenceId);
   if (availability?.state !== 'unavailable' || availability.reason !== 'no-binding' || !show.isConnected) return;
+  const explanation = `Este elemento não tem localização registrada nesta auditoria, então não dá para destacá-lo na página. ${locateSentence(card, cardHasImage(node))}`;
+  const note = node.querySelector('.lay-locate-note');
   show.hidden = true;
-  if (!node.querySelector('.lay-show-note')) {
-    show.after(el('p', 'Este elemento não tem localização registrada para destaque nesta auditoria. Use a captura registrada no cartão.', 'lay-show-note'));
+  if (note) {
+    note.textContent = explanation;
+    note.setAttribute('data-lay-no-binding', '');
+  } else {
+    const created = el('p', explanation, 'lay-locate-note');
+    created.setAttribute('data-lay-no-binding', '');
+    show.after(created);
   }
+}
+
+/**
+ * Imagem do elemento para o cartão. A ordem é a mesma do produto: a miniatura do elemento quando ela
+ * foi guardada; sem ela, o recorte da captura da página inteira na região do elemento, quando a
+ * geometria dos mapas permite posicioná-lo; sem nenhuma das duas, nenhuma imagem — e o cartão diz isso
+ * com todas as letras. Nenhuma posição é adivinhada: `elementCropSource` devolve `null` sem geometria.
+ */
+const CARD_MEDIA = new WeakMap();
+
+function cardMedia(card) {
+  if (!card.elementLevel) return null;
+  if (CARD_MEDIA.has(card)) return CARD_MEDIA.get(card);
+  const media = cardMediaUncached(card);
+  CARD_MEDIA.set(card, media);
+  return media;
+}
+
+function cardMediaUncached(card) {
+  const evidence = card.evidence;
+  if (evidence && isSafeEvidenceImageUrl(evidence.dataUrl, chrome.runtime.getURL('/'))) {
+    const parts = evidenceMediaParts(evidence, GUIDED_REVIEW_TREATMENT_V1);
+    // Miniatura sem quadro confiável aparece crua, como no relatório, mas ainda é a imagem do elemento.
+    return parts ? { ...parts, dataUrl: evidence.dataUrl, origin: 'element' } : { rawDataUrl: evidence.dataUrl, origin: 'element' };
+  }
+  const source = elementCropSource({ evidence: modelLookups(auditModel).evidence, pageId: card.pageId, nodeId: card.nodeId });
+  const parts = source && evidenceMediaParts(source.artifact, GUIDED_REVIEW_TREATMENT_V1, source.view);
+  return parts ? { ...parts, dataUrl: source.artifact.dataUrl, origin: 'page' } : null;
+}
+
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+// Cada PNG entra uma vez no documento e os recortes o referenciam por `<use>`: sem isto, a mesma captura
+// de página inteira seria copiada na marcação de cada cartão que a usa.
+const CROP_IMAGE_DEFINITIONS = new Map();
+let cropDefinitions = null;
+let cropImageCount = 0;
+
+function cropImageReference(dataUrl, size) {
+  if (!cropDefinitions) {
+    cropDefinitions = document.createElementNS(SVG_NAMESPACE, 'svg');
+    cropDefinitions.setAttribute('class', 'evidence-definitions');
+    cropDefinitions.setAttribute('aria-hidden', 'true');
+    cropDefinitions.setAttribute('width', '0');
+    cropDefinitions.setAttribute('height', '0');
+    cropDefinitions.setAttribute('focusable', 'false');
+    cropDefinitions.append(document.createElementNS(SVG_NAMESPACE, 'defs'));
+    document.body.append(cropDefinitions);
+  }
+  const bySize = CROP_IMAGE_DEFINITIONS.get(dataUrl) ?? new Map();
+  CROP_IMAGE_DEFINITIONS.set(dataUrl, bySize);
+  const key = `${size.width}x${size.height}`;
+  if (!bySize.has(key)) {
+    const image = document.createElementNS(SVG_NAMESPACE, 'image');
+    image.setAttribute('id', `lay-crop-image-${cropImageCount += 1}`);
+    image.setAttribute('href', dataUrl);
+    image.setAttribute('width', String(size.width));
+    image.setAttribute('height', String(size.height));
+    image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    cropDefinitions.firstChild.append(image);
+    bySize.set(key, image.getAttribute('id'));
+  }
+  return bySize.get(key);
+}
+
+function cropSvg(media, display) {
+  const svg = document.createElementNS(SVG_NAMESPACE, 'svg');
+  svg.setAttribute('class', 'lay-crop-svg');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', cropAriaLabel(media));
+  svg.setAttribute('viewBox', `${media.view.x} ${media.view.y} ${media.view.width} ${media.view.height}`);
+  svg.setAttribute('width', String(display.width));
+  svg.setAttribute('height', String(display.height));
+  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  svg.setAttribute('focusable', 'false');
+  const use = document.createElementNS(SVG_NAMESPACE, 'use');
+  use.setAttribute('href', `#${cropImageReference(media.dataUrl, media.image)}`);
+  use.setAttribute('width', String(media.image.width));
+  use.setAttribute('height', String(media.image.height));
+  svg.append(use);
+  for (const shape of media.shapes) {
+    const node = document.createElementNS(SVG_NAMESPACE, shape.kind);
+    for (const [name, value] of Object.entries(shape.attributes)) node.setAttribute(name, String(value));
+    svg.append(node);
+  }
+  return svg;
+}
+
+function cropAriaLabel(media) {
+  const origin = media.origin === 'page'
+    ? 'Recorte da captura da página inteira, na região do elemento desta pergunta.'
+    : 'Recorte da captura do elemento desta pergunta.';
+  return `${origin} ${media.legend}`;
+}
+
+function cropCaption(media) {
+  return media.origin === 'page' ? `${media.legend} ${EVIDENCE_CROP_REGION_LEGEND}` : media.legend;
+}
+
+function zoomDisplaySize(media) {
+  return evidenceCropDisplaySize(media.view, { longestSide: 880, maxWidth: 880, maxHeight: 620, maxScale: 6 }) ?? media.display;
+}
+
+// A imagem ampliada abre numa caixa de diálogo nativa: o Escape fecha e o foco volta para o cartão.
+function openCropZoom(media) {
+  if (!zoomDialog || typeof zoomDialog.showModal !== 'function') return;
+  const figure = el('figure', undefined, 'lay-crop lay-crop--zoom');
+  figure.append(cropSvg(media, zoomDisplaySize(media)));
+  figure.append(el('figcaption', cropCaption(media), 'lay-crop-caption'));
+  zoomBody.replaceChildren(figure);
+  zoomDialog.showModal();
+}
+
+function cropBlock(media, card) {
+  const figure = el('figure', undefined, 'lay-crop');
+  if (media.rawDataUrl) {
+    const image = document.createElement('img');
+    image.className = 'lay-thumb';
+    image.src = media.rawDataUrl;
+    image.alt = `Captura do elemento: ${card.element?.label ?? 'elemento da página'}`;
+    figure.append(image);
+    figure.append(el('figcaption', EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND, 'lay-crop-caption'));
+    return figure;
+  }
+  const zoom = el('button');
+  zoom.type = 'button';
+  zoom.className = 'lay-crop-zoom';
+  zoom.setAttribute('aria-label', 'Ampliar o recorte deste elemento');
+  zoom.append(cropSvg(media, media.display));
+  zoom.addEventListener('click', () => openCropZoom(media));
+  figure.append(zoom);
+  figure.append(el('figcaption', cropCaption(media), 'lay-crop-caption'));
+  figure.append(el('p', 'Clique na imagem para ver o recorte ampliado.', 'lay-crop-hint'));
+  return figure;
 }
 
 function objectBlock(card) {
   const block = el('div', undefined, 'lay-object');
-  const evidence = card.evidence;
-  if (evidence && isSafeEvidenceImageUrl(evidence.dataUrl, chrome.runtime.getURL('/'))) {
-    const image = document.createElement('img');
-    image.className = 'lay-thumb';
-    image.src = evidence.dataUrl;
-    image.alt = `Captura do elemento: ${card.element?.label ?? 'elemento da página'}`;
-    block.append(image);
-  }
+  const media = cardMedia(card);
+  if (media) block.append(cropBlock(media, card));
   const facts = document.createElement('dl');
   const fact = (label, value) => { facts.append(el('dt', label), el('dd', value)); };
   if (card.elementLevel) {
@@ -943,9 +1111,15 @@ function objectBlock(card) {
     fact('Onde olhar', 'Na página auditada como um todo.');
   }
   block.append(facts);
-  if (card.elementLevel && reportSessionState === 'result' && highlightableOccurrence(card)) {
-    const show = button('Mostrar na página', 'lay-show', event => { void showOnPage(card, event.currentTarget); });
-    block.append(show);
+  const highlightable = card.elementLevel && reportSessionState === 'result' && highlightableOccurrence(card);
+  if (highlightable) {
+    block.append(button('Mostrar na página', 'lay-show', event => { void showOnPage(card, event.currentTarget); }));
+  }
+  // Sem imagem no cartão, o que resta é dizer o que procurar e como: o tipo e o nome do elemento, o
+  // destaque ao vivo quando ele existe, e a frase honesta quando a auditoria não guardou imagem.
+  if (card.elementLevel && !media) {
+    const hint = highlightable ? ' Use “Mostrar na página” para vê-lo destacado na página auditada.' : '';
+    block.append(el('p', `${locateSentence(card, false)}${hint}`, 'lay-locate-note'));
   }
   return block;
 }

@@ -1233,6 +1233,12 @@ async function runLegacyAudit({
           selector, snippet, accessibility,
           ...(thumbnail?.status === 'captured' ? {
             dataUrl: thumbnail.dataUrl,
+            // SHA-256 do arquivo PNG capturado, já calculado na captura (`capture-evidence.js`). Fica
+            // guardado para que o relatório entregue possa mostrá-lo sem recalcular nada: o anexo de
+            // evidências é montado de forma síncrona, e o hash é o mesmo que o recálculo do artefato
+            // obtém dos próprios pixels (`artifact-hash.js`), então nenhum hash guardado muda por causa
+            // deste campo — auditorias anteriores, sem ele, continuam válidas.
+            binarySha256: thumbnail.hash,
             ...(thumbnail.fullPageEvidenceId ? { fullPageEvidenceId: thumbnail.fullPageEvidenceId } : {}),
             metadata: thumbnail.metadata,
           } : {}),

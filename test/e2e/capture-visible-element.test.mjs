@@ -26,6 +26,8 @@ test('a fully visible element capture preserves viewport and captures real pixel
     const metrics = await page.command('Page.getLayoutMetrics', {});
     const result = await captureElement(page, { x: before.rect[0], y: before.rect[1] + scroll, width: 100, height: 100 }, metrics);
     assert.equal(result.status, 'captured');
+    // Diagnóstico 1.1.62: o hash do arquivo PNG precisa vir da captura, para o relatório poder afirmá-lo.
+    assert.match(result.hash ?? '', /^[a-f0-9]{64}$/u, `a captura precisa devolver o SHA-256 do PNG: ${JSON.stringify(Object.keys(result))}`);
     const pixel = await extension.evaluate(page, `(async()=>{
       const image=await createImageBitmap(await(await fetch(${JSON.stringify(result.dataUrl)})).blob());
       const canvas=new OffscreenCanvas(image.width,image.height);const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);

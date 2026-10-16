@@ -293,7 +293,7 @@ test('renders all report sections, 146 items, occurrences and evidence records',
   for (const label of [
     'Identidade, escopo e estado da auditoria', 'Sumário executivo', 'Ações e filtros', 'Ocorrências priorizadas',
     'Mapa visual da prévia de anúncios', 'Revisão humana', 'Inventário de recursos de acessibilidade',
-    'Matriz completa dos 146 itens', 'Anexos de evidências', 'Metodologia, proveniência e integridade',
+    'Matriz completa dos 146 itens', 'Anexo de evidências', 'Metodologia, proveniência e integridade',
   ]) assert.match(html, new RegExp(label, 'u'));
   assert.equal((html.match(/data-report-item=/gu) || []).length, 146);
   for (const item of SAMPLE_AUDIT.itemResults) assert.match(html, new RegExp(`>${item.id.replaceAll('.', '\\.')}(?:<| —)`, 'u'));
@@ -365,7 +365,7 @@ test('embeds occurrence-specific marked screenshots and raw evidence with useful
   assert.match(html, /Contorno vermelho: elemento com falha\. O restante da imagem aparece escurecido só como contexto\./u);
   assert.match(html, /class="evidence-highlight evidence-highlight--review"/u);
   assert.match(html, /Contorno âmbar tracejado: elemento que precisa de revisão humana\./u);
-  assert.match(html, /marcação é derivada[^.]*PNG original[^.]*hash/iu);
+  assert.match(html, /marcação é derivada[^.]*ver Anexo de evidências, item 2[^.]*PNG original e os dois SHA-256/iu);
   assert.match(html, /<style>[^]*@page\s*\{[^}]*size:\s*A4/iu);
   assert.match(html, /thead\s*\{[^}]*display:\s*table-header-group/iu);
   assert.equal((html.match(/<script>/gu) || []).length, 1);
@@ -567,7 +567,7 @@ test('renders the approved ten-section information hierarchy before technical me
     'Revisão humana',
     'Inventário de recursos de acessibilidade',
     'Matriz completa dos 146 itens',
-    'Anexos de evidências',
+    'Anexo de evidências',
     'Metodologia, proveniência e integridade',
   ];
   let previous = -1;

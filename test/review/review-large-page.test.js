@@ -15,6 +15,10 @@ function functionSource(name) {
   return source.slice(start, end + 2);
 }
 
+function functionSources(names) {
+  return names.map(functionSource).join('\n');
+}
+
 test('um pedido de relatório durante outra geração diz que há uma em andamento', () => {
   const context = {};
   runInNewContext(`${functionSource('describeExportFailure')}\nthis.describeExportFailure = describeExportFailure;`, context);
@@ -27,15 +31,20 @@ test('um pedido de relatório durante outra geração diz que há uma em andamen
 class Node {
   constructor(className = '') { this.className = className; this.hidden = false; this.isConnected = true; this.next = null; this.text = ''; }
   get classList() { return { contains: name => this.className.split(' ').includes(name) }; }
+  get textContent() { return this.text; }
+  set textContent(value) { this.text = value; }
+  setAttribute(name) { this[name] = true; }
+  hasAttribute(name) { return this[name] === true; }
   after(node) { this.next = node; }
 }
 
-function environment(availability) {
+function environment(availability, { crop = null } = {}) {
   const show = new Node('lay-show');
   const card = new Node('lay-card');
   card.querySelector = selector => {
     if (selector === 'button.lay-show') return show;
-    if (selector === '.lay-show-note') return show.next;
+    if (selector === '.lay-locate-note') return show.next;
+    if (selector === '.lay-crop') return crop;
     return null;
   };
   const requests = [];
@@ -50,9 +59,16 @@ function environment(availability) {
       return true;
     },
   };
-  runInNewContext(`${functionSource('checkShowOnPage')}\nthis.checkShowOnPage = checkShowOnPage;`, context);
+  runInNewContext(
+    `${functionSources(['locateSentence', 'cardHasImage', 'checkShowOnPage'])}\nthis.checkShowOnPage = checkShowOnPage;`, context);
   return { context, show, card, requests };
 }
+
+test('nenhuma mensagem manda procurar a captura em outro lugar', () => {
+  assert.doesNotMatch(source, /captura registrada no cartão/u);
+  assert.match(functionSource('locateSentence'), /no recorte acima, neste mesmo cartão/u);
+  assert.match(functionSource('locateSentence'), /Esta auditoria não guardou imagem deste elemento\./u);
+});
 
 test('ao abrir o cartão, um elemento sem localização troca o botão por uma explicação', async () => {
   const env = environment({ state: 'unavailable', reason: 'no-binding' });
@@ -60,9 +76,24 @@ test('ao abrir o cartão, um elemento sem localização troca o botão por uma e
   assert.deepEqual(env.requests.map(request => request.intent.type), ['GET_HIGHLIGHT_AVAILABILITY']);
   assert.equal(env.requests[0].options.announce, false);
   assert.equal(env.show.hidden, true);
-  assert.match(env.show.next.text, /não tem localização registrada para destaque/u);
+  assert.match(env.show.next.text, /não tem localização registrada nesta auditoria/u);
+  assert.match(env.show.next.text, /Esta auditoria não guardou imagem deste elemento\./u);
   await env.context.checkShowOnPage({}, env.card);
   assert.equal(env.requests.length, 1, 'com o botão já trocado, não consulta de novo');
+});
+
+test('com o recorte no cartão, a explicação aponta para a imagem que está logo acima', async () => {
+  const env = environment({ state: 'unavailable', reason: 'no-binding' }, { crop: new Node('lay-crop') });
+  await env.context.checkShowOnPage({}, env.card);
+  assert.match(env.show.next.text, /A imagem deste elemento está no recorte acima, neste mesmo cartão\./u);
+  assert.doesNotMatch(env.show.next.text, /não guardou imagem/u);
+});
+
+test('sem imagem no cartão, a explicação diz o que procurar na página', async () => {
+  const env = environment({ state: 'unavailable', reason: 'no-binding' });
+  await env.context.checkShowOnPage({ element: { label: 'Botão “Buscar”' } }, env.card);
+  assert.match(env.show.next.text, /Elemento desta pergunta: Botão “Buscar”\./u);
+  assert.match(env.show.next.text, /não guardou imagem deste elemento/u);
 });
 
 test('um elemento com destaque disponível, ou indisponível por outro motivo, mantém o botão', async () => {

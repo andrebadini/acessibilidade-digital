@@ -4,6 +4,9 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { isSafeEvidenceImageUrl } from '../../src/review/review-state.js';
 import * as layReview from '../../src/core/report/lay-review.js';
+import * as evidenceCrop from '../../src/core/report/evidence-crop.js';
+import { EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND } from '../../src/core/report/evidence-highlight.js';
+import { GUIDED_REVIEW_TREATMENT_V1 } from '../../src/core/report/evidence-treatment.js';
 
 // Executa o renderizador real dos cartões da revisão guiada, sem iniciar a sessão do Chrome.
 const source = await readFile(new URL('../../src/review/review.js', import.meta.url), 'utf8');
@@ -13,6 +16,7 @@ const renderSource = source.slice(uiStart, uiEnd);
 
 class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this.textContent = ''; this.attributes = {}; this.classList = { toggle() {}, contains: () => false, add() {} }; }
+  get firstChild() { return this.children[0]; }
   append(...children) { this.children.push(...children); }
   addEventListener() {}
   setAttribute(name, value) { this.attributes[name] = String(value); }
@@ -51,9 +55,15 @@ function fixture(options) {
   const before = structuredClone(auditModel);
   let validations = 0;
   const context = {
-    ...layReview, auditModel, document: { createElement: tag => new Element(tag), createTextNode: text => ({ textContent: text }) },
+    ...layReview, ...evidenceCrop, EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND, GUIDED_REVIEW_TREATMENT_V1, auditModel,
+    document: {
+      createElement: tag => new Element(tag), createElementNS: (_namespace, tag) => new Element(tag),
+      createTextNode: text => ({ textContent: text }), body: new Element('body'),
+    },
     REVIEW_CARD_LIMIT: 40, reportSessionState: 'result', evaluator: { value: '' }, status: {}, list: new Element('div'),
     reportOccurrence: () => true,
+    // O índice real por modelo vive fora do trecho renderizado; aqui basta a lista de evidências.
+    modelLookups: model => ({ evidence: model?.evidence ?? [] }),
     isSafeEvidenceImageUrl(value, base) { validations += 1; return isSafeEvidenceImageUrl(value, base); },
     chrome: { runtime: { getURL: () => 'chrome-extension://extension/' } },
   };

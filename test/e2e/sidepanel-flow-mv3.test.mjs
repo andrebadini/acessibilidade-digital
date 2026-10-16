@@ -626,6 +626,51 @@ for (const scenario of [
           modelHash: durable.hash, modelRevision: durable.revision,
         });
       });
+      if (!scenario.idle) await step('GUIDED_CARD_CROP', async () => {
+        // O recorte com contorno tem de estar NO CARTÃO da pergunta, no mesmo lugar onde a pessoa responde
+        // — e nenhuma frase pode mandá-la procurar "a captura registrada no cartão" em outro lugar.
+        const cards = await extension.evaluate(report, `(() => {
+          const all=[...document.querySelectorAll('#review-list details.lay-card')];
+          let crops=0,outlined=0,plain=0,withoutImage=0;
+          for(const card of all){
+            card.open=true;
+            const object=card.querySelector('.lay-object');
+            const figure=object?.querySelector('figure.lay-crop')??null;
+            const svg=figure?.querySelector('svg')??null;
+            if(figure)crops+=1;
+            if(svg){if(svg.querySelector('rect[data-evidence-highlight]'))outlined+=1;else plain+=1;}
+            else if(figure?.querySelector('img.lay-thumb'))plain+=1;
+            else if(/não guardou imagem deste elemento/u.test(object?.querySelector('.lay-locate-note')?.textContent??''))withoutImage+=1;
+          }
+          return {total:all.length,crops,outlined,plain,withoutImage,
+            banned:[...document.querySelectorAll('#review-list details.lay-card')]
+              .filter(card=>/captura registrada no cartão/iu.test(card.textContent)).length};
+        })()`);
+        assert.equal(cards.banned, 0, `nenhum cartão manda procurar a captura em outro lugar: ${JSON.stringify(cards)}`);
+        assert.ok(cards.crops >= 1, `ao menos um cartão mostra o recorte do elemento: ${JSON.stringify(cards)}`);
+        assert.ok(cards.outlined >= 1, `o recorte do cartão traz o contorno desenhado: ${JSON.stringify(cards)}`);
+        assert.equal(cards.crops, cards.outlined + cards.plain, JSON.stringify(cards));
+        // Clicar no recorte amplia numa caixa de diálogo acessível; o Escape fecha e devolve o foco.
+        const zoom = await extension.evaluate(report, `(() => {
+          const button=document.querySelector('#review-list figure.lay-crop button.lay-crop-zoom');
+          if(!button)return {available:false};
+          button.click();
+          const dialog=document.querySelector('#lay-zoom-dialog');
+          const figure=dialog.querySelector('figure.lay-crop--zoom');
+          return {available:true,open:dialog.open,modal:dialog.matches(':modal'),
+            outline:Boolean(figure?.querySelector('svg rect[data-evidence-highlight]')),
+            legend:figure?.querySelector('figcaption')?.textContent??''};
+        })()`, { userGesture: true });
+        if (zoom.available) {
+          assert.equal(zoom.open && zoom.modal, true, 'o recorte ampliado abre em caixa de diálogo modal');
+          assert.equal(zoom.outline, true, 'a imagem ampliada mantém o contorno do elemento');
+          assert.match(zoom.legend, /Contorno vermelho/u);
+          await extension.command(report, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+          await extension.command(report, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+          await extension.waitForValue(report, `document.querySelector('#lay-zoom-dialog').open`, value => value === false,
+            { timeoutMs: 5_000, intervalMs: 50 });
+        }
+      });
     });
     t.diagnostic(`Chrome152; native-page-markers; original-not-copy; ${scenario.idle
       ? 'no-worker-debugger-during-two-idle-windows' : 'visual-QA-without-idle-claim'}; four-verified-downloads`);
