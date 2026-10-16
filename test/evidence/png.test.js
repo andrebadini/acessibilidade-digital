@@ -37,15 +37,85 @@ test('rejects malformed base64, CRC changes, trailing bytes and oversized limits
 });
 
 test('rejects an oversized base64 payload before allocating decoded bytes', () => {
+  const originalFromBase64 = Uint8Array.fromBase64;
   const originalAtob = globalThis.atob;
   let decodeCalls = 0;
-  globalThis.atob = value => { decodeCalls += 1; return originalAtob(value); };
+  const count = () => { decodeCalls += 1; };
+  Uint8Array.fromBase64 = function counted(value, options) { count(); return originalFromBase64.call(this, value, options); };
+  globalThis.atob = value => { count(); return originalAtob(value); };
   try {
     const oversized = `data:image/png;base64,${Buffer.alloc(256).toString('base64')}`;
     assert.throws(() => decodePngDataUrl(oversized, { maxBytes: 68 }), /limite|grande|bytes/iu);
     assert.equal(decodeCalls, 0);
   } finally {
+    Uint8Array.fromBase64 = originalFromBase64;
     globalThis.atob = originalAtob;
+  }
+});
+
+test('keeps the base64 canonicity contract after the fast decode path', () => {
+  const payload = PNG.slice('data:image/png;base64,'.length);
+  const head = payload.slice(0, 4);
+  const tail = payload.slice(4);
+
+  // '=' no meio, alfabeto url-safe, espaço em branco e nova linha continuam rejeitados como base64.
+  for (const broken of [
+    `data:image/png;base64,${head.replace('i', '=')}${tail}`,
+    `data:image/png;base64,${payload.slice(0, 4)}${payload.slice(4, 5) === 'A' ? '-' : '_'}${payload.slice(5)}`,
+    `data:image/png;base64,${head} ${tail}`,
+    `data:image/png;base64,${head}\n${tail}`,
+  ]) {
+    assert.throws(() => decodePngDataUrl(broken), /base64 PNG/u, broken.slice(0, 40));
+  }
+
+  // Preenchimento alterado: continua rejeitado, pela canonicidade ou pelo formato PNG, nunca aceito.
+  for (const broken of [
+    `data:image/png;base64,${payload.slice(0, -1)}A`,
+    `data:image/png;base64,${payload.slice(0, -2)}==`,
+    `data:image/png;base64,${payload.slice(0, -1)}`,
+  ]) {
+    assert.throws(() => decodePngDataUrl(broken), TypeError, broken.slice(0, 40));
+  }
+
+  // Bits residuais não nulos no último quarteto: os mesmos bytes decodificados, mas codificação não
+  // canônica. O PNG (68 bytes, resto 2) termina em um '=' e o caractere anterior carrega 2 bits livres.
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const spareIndex = payload.length - 2;
+  const spareValue = alphabet.indexOf(payload[spareIndex]);
+  assert.ok(spareValue >= 0 && spareValue % 4 === 0 && payload.endsWith('='));
+  for (const delta of [1, 2, 3]) {
+    const tampered = `${payload.slice(0, spareIndex)}${alphabet[spareValue + delta]}${payload.slice(spareIndex + 1)}`;
+    assert.throws(() => decodePngDataUrl(`data:image/png;base64,${tampered}`), /base64 PNG/u, `delta ${delta}`);
+  }
+});
+
+test('the fallback base64 path (sem codificador nativo) produz o mesmo resultado', async () => {
+  const payloads = [
+    PNG,
+    `data:image/png;base64,${Buffer.from(buildPng()).toString('base64')}`,
+    `data:image/png;base64,${Buffer.from(new Uint8Array([137, 80, 78, 71])).toString('base64')}`,
+    'data:image/png;base64,%%%%',
+    `data:image/png;base64,${PNG.slice('data:image/png;base64,'.length, -1)}A`,
+  ];
+  const native = await import('../../src/core/evidence/png.js');
+  const originalFromBase64 = Uint8Array.fromBase64;
+  const originalToBase64 = Uint8Array.prototype.toBase64;
+  delete Uint8Array.fromBase64;
+  delete Uint8Array.prototype.toBase64;
+  let fallback;
+  try {
+    fallback = await import('../../src/core/evidence/png.js?sem-nativo');
+  } finally {
+    Uint8Array.fromBase64 = originalFromBase64;
+    Uint8Array.prototype.toBase64 = originalToBase64;
+  }
+
+  for (const payload of payloads) {
+    const attempt = module => {
+      try { return { ok: true, bytes: Buffer.from(module.decodePngDataUrl(payload).bytes).toString('hex') }; }
+      catch (error) { return { ok: false, message: error.message }; }
+    };
+    assert.deepEqual(attempt(fallback), attempt(native), payload.slice(0, 40));
   }
 });
 

@@ -153,14 +153,29 @@ function correctionFor(occurrence, rule, item) {
   return rule?.summary ?? occurrence.justification;
 }
 
-function safeDataUrl(value) {
+/**
+ * A validação do data URL é feita no artefato, e não na string: o mesmo artefato congelado do modelo é
+ * referenciado por todas as ocorrências que o usam, então a captura integral de uma página alta (vários
+ * MB, ~200 ms por decodificação) era revalidada uma vez por ocorrência — 3 s de espera no fim de uma
+ * auditoria do portal de teste. A chave é a identidade do objeto; o campo `source` confere a string,
+ * para que o resultado nunca seja reaproveitado se o conteúdo mudar.
+ */
+const SAFE_DATA_URL = new WeakMap();
+
+function safeDataUrl(artifact) {
+  const value = artifact.dataUrl;
   if (typeof value !== 'string') return '';
+  const cached = SAFE_DATA_URL.get(artifact);
+  if (cached && cached.source === value) return cached.result;
+  let result = '';
   try {
     decodePngDataUrl(value);
-    return value;
+    result = value;
   } catch {
-    return '';
+    result = '';
   }
+  SAFE_DATA_URL.set(artifact, { source: value, result });
+  return result;
 }
 
 function previewBlock(evidence) {
@@ -169,7 +184,7 @@ function previewBlock(evidence) {
     return {
       evidenceId: artifact.evidenceId,
       kind: artifact.kind,
-      dataUrl: safeDataUrl(artifact.dataUrl),
+      dataUrl: safeDataUrl(artifact),
       mediaUrl: /^https?:\/\//u.test(mediaUrl) ? mediaUrl : '',
       origin: /^https?:\/\//u.test(mediaUrl) ? projectAuditResourceOrigin(mediaUrl) : '',
     };

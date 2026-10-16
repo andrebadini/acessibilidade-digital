@@ -33,6 +33,7 @@ import { section508ReferencesForWcag } from '../core/normative/section508.js';
 import { AUDIT_EXECUTION_INTERNAL } from './chrome-adapter.js';
 import { projectAuditResourceOrigin } from '../core/privacy.js';
 import { createOwnedTabRegistry } from './owned-tabs.js';
+import { perfBegin, perfCount, perfEnd, perfWrapCdp } from './perf-log.js';
 import { createRawNavigationVaultV1 } from './raw-navigation-vault.js';
 import { readObservedAuditInterruption, runObservedTabAudit } from './observed-tab-runner.js';
 import { createObservedPipelineRunner } from './audit-pipeline.js';
@@ -714,11 +715,13 @@ function manualQueue(occurrences, itemResults) {
 }
 
 async function draftModel(state) {
+  const perfHashes = perfBegin();
   const snapshotHash = await sha256Hex(canonicalStringify(state.snapshot || null));
   const ruleResultsHash = await sha256Hex(canonicalStringify(state.ruleResults));
   const evidenceHash = await sha256Hex(canonicalStringify(state.artifacts.map(artifact => ({
     evidenceId: artifact.evidenceId, kind: artifact.kind, nodeId: artifact.nodeId || null, hash: artifact.hash,
   }))));
+  perfEnd(state.auditId, 'rascunho-hashes', perfHashes, { artefatos: state.artifacts.length, nos: state.snapshot?.nodes?.length ?? 0 });
   const model = {
     schemaVersion: SCHEMA_VERSION,
     auditId: state.auditId,
@@ -762,7 +765,12 @@ async function draftModel(state) {
       capturedStateCount: state.fullPage ? 1 : 0,
     },
   };
-  const output = deepFreeze(structuredClone(model));
+  const perfClone = perfBegin();
+  const cloned = structuredClone(model);
+  perfEnd(state.auditId, 'rascunho-clone', perfClone);
+  const perfFreeze = perfBegin();
+  const output = deepFreeze(cloned);
+  perfEnd(state.auditId, 'rascunho-congelar', perfFreeze);
   return output;
 }
 
@@ -811,6 +819,12 @@ async function runLegacyAudit({
   let fatal = false;
   let recoverableFailure = false;
   let furtherPixelCaptureSuppressed = false;
+
+  // Medição por fase (1.1.62), desligada por padrão — ver src/background/perf-log.js. `perfBegin`
+  // devolve `null` com a medição desligada e `perfEnd` não faz nada com `null`; nenhum número daqui
+  // entra no modelo, no relatório ou no banco.
+  const perfMark = (phase, startedAt, detail) => perfEnd(auditId, phase, startedAt, detail);
+  const perfStartedAt = perfBegin();
 
   const awaitStep = async operation => {
     throwIfAborted(signal);
@@ -880,6 +894,7 @@ async function runLegacyAudit({
 
   try {
     throwIfAborted(signal);
+    const perfNav = perfBegin();
     await progress('opening', 'Abrindo o site', 5);
     const createdTab = await awaitStep(() => chromeAdapter.createTab({ url: 'about:blank', active: false }));
     if (!Number.isInteger(createdTab?.id)) throw new Error('Tab inválida');
@@ -894,6 +909,10 @@ async function runLegacyAudit({
     state.finalUrlObserved = true;
     cdp = await awaitStep(() => chromeAdapter.connectCdp(tab.id, { signal }));
     if (!cdp || typeof cdp.command !== 'function') throw new Error('CDP inválido');
+    perfMark('abrir-e-navegar', perfNav, { url: state.requestedUrl });
+    // Perfil de chamadas CDP por método, para achar qual comando domina cada fase. Com a medição
+    // desligada isto devolve o mesmo objeto (nenhuma identidade muda para os testes).
+    cdp = perfWrapCdp(cdp, auditId);
     // Congelamento de navegação (1.1.58). Só depois do anexo — e, portanto, depois da navegação que a
     // própria extensão pediu (`navigateTab` acontece bem antes, na linha 856) — a página passa a ter as
     // trocas de documento do frame principal seguradas. É best-effort: uma recusa aqui não derruba a
@@ -977,6 +996,7 @@ async function runLegacyAudit({
       }
     }
 
+    const perfAxe = perfBegin();
     try {
       const axeRunner = typeof chromeAdapter.runAxeInTab === 'function'
         ? chromeAdapter.runAxeInTab.bind(chromeAdapter)
@@ -995,7 +1015,9 @@ async function runLegacyAudit({
     if (state.rawAxe?.diagnostics?.some(entry => entry?.code === 'AXE_TIMEOUT')) {
       await awaitStep(() => waitForPageResponsive(chromeAdapter, tab.id, signal));
     }
+    perfMark('axe', perfAxe);
 
+    const perfEnvironment = perfBegin();
     try {
       const environment = await awaitStep(() => chromeAdapter.getEnvironment?.(tab.id, cdp, pristineMetrics));
       const viewport = environment?.viewport;
@@ -1019,6 +1041,7 @@ async function runLegacyAudit({
       rethrowAbort(error, signal);
       recoverable('ENVIRONMENT_UNAVAILABLE', 'Os metadados públicos do ambiente não puderam ser lidos.');
     }
+    perfMark('ambiente', perfEnvironment);
 
     // Aquecimento descartável (1.1.60), imediatamente antes da coleta: ver src/background/full-page-warm-up.js.
     // Em páginas que montam conteúdo sob demanda, é a captura integral que acorda o resto da página. Sem
@@ -1032,14 +1055,17 @@ async function runLegacyAudit({
     // catálogo de diagnósticos é fechado e não carrega números internos; a medida serve aos testes e à QA
     // (docs/qa/mapa-alinhado-1.1.60.md).
     if (chromeAdapter.captureFullPageEnabled !== false) {
+      const perfWarmUp = perfBegin();
       try {
         state.fullPageWarmUp = await warmUpFullPageLayout({ cdp, step: awaitStep, signal });
       } catch (error) {
         rethrowAbort(error, signal);
       }
+      perfMark('aquecimento-pagina', perfWarmUp);
     }
 
     await progress('collecting', 'Lendo a estrutura', 25);
+    const perfCollect = perfBegin();
     let raw;
     try {
       raw = chromeAdapter.collectPage
@@ -1052,11 +1078,16 @@ async function runLegacyAudit({
       rethrowAbort(error, signal);
       fail('COLLECTION_FAILED', 'A estrutura da página não pôde ser coletada com segurança.', error);
     }
+    perfMark('coleta-estrutural', perfCollect, { nodes: state.snapshot?.nodes?.length ?? null });
 
     // Colada na leitura da estrutura: os retângulos lidos acima e os pixels da imagem passam a ser do mesmo
     // estado da página. Nada interativo aconteceu entre uma coisa e outra (o axe e o ambiente vêm antes da
     // coleta; as verificações dinâmicas, depois).
-    if (chromeAdapter.captureFullPageEnabled !== false) await capturePristineFullPage();
+    if (chromeAdapter.captureFullPageEnabled !== false) {
+      const perfFullPage = perfBegin();
+      await capturePristineFullPage();
+      perfMark('captura-integral', perfFullPage, { bytes: state.fullPage?.dataUrl?.length ?? 0 });
+    }
 
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
 
@@ -1065,6 +1096,7 @@ async function runLegacyAudit({
     // pela sondagem de hover.
     const passive = PASSIVE_ATTACHED_ADAPTERS.has(chromeAdapter);
 
+    const perfProbes = perfBegin();
     try {
       const rawProbes = passive ? { targetSizes: state.snapshot.nodes.flatMap(node => {
         const rect = node.targetSizeRect;
@@ -1081,6 +1113,7 @@ async function runLegacyAudit({
       rethrowAbort(error, signal);
       recoverable('DYNAMIC_PROBES_FAILED', 'As verificações dinâmicas não puderam ser concluídas.');
     }
+    perfMark('sondas-dinamicas', perfProbes);
 
     // Conteúdo interativo revelado apenas por hover (5.1.13 / WCAG 2.1.1). Roda em modo descartável e
     // também na página atual: `CSS.forcePseudoState` não dispara eventos nem executa JS do site, e o
@@ -1088,6 +1121,7 @@ async function runLegacyAudit({
     // única exceção é a confirmação de menu que abre por script com o ponteiro de verdade
     // (`Input.dispatchMouseEvent`), e por isso ela só é autorizada quando a página é descartável:
     // na página atual a promessa é de leitura, e ali o indício segue como revisão humana.
+    const perfHover = perfBegin();
     try {
       state.snapshot = await awaitStep(() => applyHoverOnlyProbe(state.snapshot, cdp, {
         signal, allowPointerInteraction: !passive,
@@ -1097,8 +1131,10 @@ async function runLegacyAudit({
       rethrowAbort(error, signal);
       recoverable('DYNAMIC_PROBES_FAILED', 'As verificações dinâmicas não puderam ser concluídas.');
     }
+    perfMark('sonda-hover', perfHover);
 
     await progress('testing', 'Verificando acessibilidade', 50);
+    const perfRules = perfBegin();
     try {
       const core = await awaitStep(() => runCoreAudit(state.snapshot));
       state.coreRuleResults = [...core.ruleResults];
@@ -1128,8 +1164,10 @@ async function runLegacyAudit({
       state.rawAxe = null;
     }
     if (fatal) throw Object.assign(new Error('AUDIT_FATAL_HANDLED'), { auditHandled: true });
+    perfMark('regras-proprias', perfRules, { occurrences: state.itemResults.length });
 
     await progress('evidence', 'Preparando evidências', 72);
+    const perfEvidence = perfBegin();
     state.occurrences = [
       ...makeOccurrences(auditId, state.coreRuleResults, state.itemResults),
       ...structuredClone(state.axe.occurrences),
@@ -1249,6 +1287,11 @@ async function runLegacyAudit({
       }
       throwIfAborted(signal);
     }
+    perfMark('evidencias', perfEvidence, {
+      occurrences: state.occurrences.length, artifacts: state.artifacts.length,
+      thumbnails: thumbnailBudget.attempted, orcamentoAtingido: thumbnailBudget.reached,
+    });
+    const perfAnnouncementMap = perfBegin();
     if (state.fullPage && mapSource && typeof chromeAdapter.composeAnnouncementMap === 'function') {
       const pristineArtifact = state.artifacts.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
       const sourceBefore = canonicalStringify(pristineArtifact);
@@ -1285,6 +1328,7 @@ async function runLegacyAudit({
     // Mapa do teclado: deriva da mesma captura integral pristine do mapa de anúncios, mas é julgado
     // pelas próprias regras. Sem captura integral (modos sem pixels) não há mapa — a lista numerada
     // do relatório continua existindo a partir do instantâneo, sem pixels.
+    const perfKeyboardMap = perfBegin();
     if (state.fullPage && mapSource && typeof chromeAdapter.composeKeyboardMap === 'function') {
       const pristineArtifact = state.artifacts.find(artifact => artifact.kind === 'full-page' && artifact.state === 'pristine');
       const sourceBefore = canonicalStringify(pristineArtifact);
@@ -1317,6 +1361,8 @@ async function runLegacyAudit({
         recoverable(code, 'O mapa do teclado não pôde ser gerado localmente; a captura original foi preservada.');
       }
     }
+    perfMark('mapa-teclado', perfKeyboardMap);
+    const perfPresentation = perfBegin();
     state.occurrences.push(...makeEditorialOccurrences(auditId, state.editorialRuleResults));
     allocateOccurrenceIds(state);
     state.manualReview = manualQueue(state.occurrences, state.itemResults);
@@ -1326,12 +1372,15 @@ async function runLegacyAudit({
         occurrence.presentationTargetKey === `node:${occurrence.nodeId}`)
       .map(occurrence => [occurrence.occurrenceId, occurrence.nodeId]));
     state.presentation = dedupeFindingsForPresentation(state.occurrences, { canonicalNodeByOccurrenceId });
+    perfMark('apresentacao', perfPresentation, { ocorrencias: state.occurrences.length });
 
     await progress('reporting', 'Gerando relatório', 92);
     throwIfAborted(signal);
     state.status = recoverableFailure ? 'partial' : 'complete';
     try {
+      const perfHandoff = perfBegin();
       const handoffModel = await awaitStep(() => draftModel({ ...state, endedAt: canonicalTime(now()) }));
+      perfMark('modelo-handoff', perfHandoff, { evidencias: handoffModel?.evidence?.artifacts?.length ?? null });
       const handoff = await awaitStep(() => chromeAdapter.handoffReport?.(handoffModel));
       validateTransientReviewUrl(handoff?.reviewUrl, auditId, expectedExtensionId);
       state.report = {
@@ -1405,7 +1454,10 @@ async function runLegacyAudit({
     }
     if (state.occurrences.length) allocateOccurrenceIds(state);
     if (!state.manualReview.length && state.occurrences.length) state.manualReview = manualQueue(state.occurrences, state.itemResults);
+    const perfFinal = perfBegin();
     const final = await draftModel(state);
+    perfMark('modelo-final', perfFinal);
+    perfMark('total', perfStartedAt, { status: state.status });
     return final;
   }
 }
@@ -1852,6 +1904,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
         observedTarget.urlEvidence.href,
         target.initialUrlEvidence.href,
       );
+      const perfEnrichAttached = perfBegin();
       terminalModel = await enrichAuditForReport(legacyDraft, {
         now: modelNow,
         manifestVersion: legacyEffects.manifestVersion,
@@ -1859,6 +1912,7 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
         browserVersion: legacyDraft.environment?.chromeVersion || 'não disponível',
         rulesVersion: legacyDraft.methodology?.version || inventory.rulesVersion,
       });
+      perfEnd(auditId, 'enriquecer-modelo', perfEnrichAttached);
       return Object.freeze({ version: 1, kind: 'legacy-observation' });
     },
     async runCoreRules() {
@@ -1888,7 +1942,12 @@ export async function runAttachedAuditExecution(rawArgs = {}) {
         throw new Error('AUDIT_FAILED');
       }
       terminalPersistenceStarted = true;
-      await persistAuditModel(model);
+      const perfPersistAttached = perfBegin();
+      try {
+        await persistAuditModel(model);
+      } finally {
+        perfEnd(auditId, 'gravacao-indexeddb', perfPersistAttached);
+      }
     },
   });
   const pixelPreflight = safeCapturePolicy.mode === 'no-pixels' ? null : createPixelPipelinePreflightV1(privacyGate, {
@@ -2155,6 +2214,7 @@ async function runAuditExecutionInternal({
         requestedUrlEvidence.href,
       );
       compatibilityDraft = draft;
+      const perfEnrich = perfBegin();
       terminalModel = await enrichAuditForReport(draft, {
         now,
         manifestVersion: legacyEffects.manifestVersion,
@@ -2162,6 +2222,7 @@ async function runAuditExecutionInternal({
         browserVersion: draft.environment?.chromeVersion || 'não disponível',
         rulesVersion: draft.methodology?.version || inventory.rulesVersion,
       });
+      perfEnd(externalAuditId, 'enriquecer-modelo', perfEnrich);
       return Object.freeze({ version: 1, kind: 'legacy-observation' });
     },
     async runCoreRules() {
@@ -2172,7 +2233,12 @@ async function runAuditExecutionInternal({
     async buildAuditModel() { return terminalModel; },
     async persistAuditModel(model) {
       pipelinePersistenceStarted = true;
-      if (persistAuditModel) await Reflect.apply(persistAuditModel, internals, [model]);
+      const perfPersist = perfBegin();
+      try {
+        if (persistAuditModel) await Reflect.apply(persistAuditModel, internals, [model]);
+      } finally {
+        perfEnd(externalAuditId, 'gravacao-indexeddb', perfPersist, { evidencias: model?.evidence?.artifacts?.length ?? null });
+      }
     },
   });
   const runPipeline = createObservedPipelineRunner({ checkpointRecorder, services });
