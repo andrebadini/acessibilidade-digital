@@ -31,9 +31,10 @@ import { projectEvidenceProvenance, evidenceProvenanceRows } from './evidence-pr
 import { humanReviewHeading, humanReviewMetadata, HUMAN_REVIEW_DESCRIPTION, HUMAN_REVIEW_EMPTY } from './human-review-presentation.js';
 import { FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence } from './findings-board.js';
 import { EVIDENCE_SHA256_HELP, evidenceHashRows, evidenceFileHashPresentation, EVIDENCE_RECORD_HASH_LABEL, EVIDENCE_FILE_HASH_LABEL, cropSourceEvidence } from './evidence-hash-presentation.js';
-import { EVIDENCE_CROP_REGION_LEGEND, evidenceMediaParts, integralCropSource } from './evidence-crop.js';
+import {
+  EVIDENCE_CROP_PAGE_ORIGIN_ARIA, EVIDENCE_CROP_REGION_LEGEND, elementCropSource, evidenceMediaParts, integralCropSource,
+} from './evidence-crop.js';
 import { marksCropSvg, reviewMarksRecords } from './review-marks-presentation.js';
-import { EVIDENCE_CROP_PAGE_ORIGIN_ARIA, EVIDENCE_CROP_REGION_LEGEND, elementCropSource, evidenceMediaParts } from './evidence-crop.js';
 import { GUIDED_REVIEW_TREATMENT_V1 } from './evidence-treatment.js';
 import { TAB_READING_INTRO, TAB_READING_QUESTION, TAB_READING_SECTION_TITLE } from './tab-reading-text.js';
 import { projectTabReading } from './tab-reading-plan.js';
