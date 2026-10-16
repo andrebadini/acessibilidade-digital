@@ -25,6 +25,11 @@ const FULL_PAGE_EVIDENCE_KEYS = new Set([...EVIDENCE_BASE_KEYS, 'state', 'dataUr
 const ELEMENT_EVIDENCE_KEYS = new Set([
   ...EVIDENCE_BASE_KEYS, 'nodeId', 'backendNodeId', 'selector', 'snippet', 'accessibility',
   'dataUrl', 'fullPageEvidenceId', 'metadata', 'mediaUrl',
+  // Opcional desde a 1.1.62: o SHA-256 do arquivo PNG guardado, que a ficha de evidência e o anexo do
+  // relatório entregue mostram sem recalcular nada. O campo **não** entra no hash do artefato (o
+  // recálculo o sobrescreve a partir dos próprios pixels, `artifact-hash.js`), então auditorias
+  // anteriores continuam válidas sem ele e nenhum hash guardado muda por causa dele.
+  'binarySha256',
 ]);
 const ACCESSIBILITY_EVIDENCE_KEYS = set(
   'announcementPreview description descriptionSource name nameSource role states valueStatus visibleText',
@@ -380,6 +385,13 @@ function assertEvidence(artifact) {
     (!Number.isSafeInteger(artifact.backendNodeId) || artifact.backendNodeId < 0)) throw new TypeError();
   if (artifact.dataUrl !== undefined &&
     (typeof artifact.dataUrl !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/u.test(artifact.dataUrl))) {
+    throw new TypeError();
+  }
+  // O hash do arquivo só existe junto dos pixels que ele descreve: sem `dataUrl` não há arquivo a que
+  // se referir, e o valor precisa ter a forma de um SHA-256. Que ele corresponda aos bytes guardados é
+  // conferido na verificação de integridade, que já decodifica cada PNG.
+  if (artifact.binarySha256 !== undefined &&
+    (!SHA256.test(artifact.binarySha256) || typeof artifact.dataUrl !== 'string')) {
     throw new TypeError();
   }
   if (artifact.selector !== undefined) {

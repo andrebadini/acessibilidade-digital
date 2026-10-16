@@ -5,7 +5,10 @@ import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '
 import { NBR17225_ITEMS } from '../core/normative/nbr17225.js';
 import { WCAG22_LEVELS } from '../core/normative/wcag22.js';
 import { IMPACT_LABELS, impactText } from '../core/report/impact-labels.js';
-import { EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews } from '../core/report/evidence-treatment.js';
+import {
+  EVIDENCE_FICHE_TREATMENT_V1, EVIDENCE_TREATMENTS_V1, projectOccurrenceEvidencePreviews,
+} from '../core/report/evidence-treatment.js';
+import { decodePngDataUrl } from '../core/evidence/png.js';
 import {
   EVIDENCE_HIGHLIGHT_CLIPPED_LEGEND,
   evidenceCaptureSize,
@@ -29,6 +32,7 @@ import {
   buildFindingsBoard, consolidatedCitationParagraph, FINDINGS_BOARD_INTRO, FINDINGS_BOARD_LIMIT, FINDINGS_BOARD_TITLE, scoreboardSentence,
 } from '../core/report/findings-board.js';
 import { compareItemIds } from '../core/report/lay-review.js';
+import { EVIDENCE_SHA256_HELP, evidenceHashRows } from '../core/report/evidence-hash-presentation.js';
 
 const GROUPS = Object.freeze(['failed', 'alerts', 'humanReview', 'passed']);
 const GROUP_LABELS = Object.freeze({
@@ -592,9 +596,16 @@ function applyDeclaredCaptureSize(image, artifact) {
   return image;
 }
 
-function appendEvidenceMedia(document, figure, artifact, tone) {
+/**
+ * Aceita o tom (`failed`, `review`, `advisory`, `passed`) ou um tratamento já resolvido — a ficha de
+ * evidência tem tratamento próprio (`EVIDENCE_FICHE_TREATMENT_V1`), porque descreve o registro e não um
+ * veredito. A imagem guardada entra inteira no SVG e o `viewBox` recorta: nenhum pixel novo é gerado.
+ */
+function appendEvidenceMedia(document, figure, artifact, toneOrTreatment) {
   const label = `${evidenceKindLabel(artifact.kind)} local da evidência ${artifact.evidenceId}`;
-  const treatment = artifact.kind === 'element' && tone ? EVIDENCE_TREATMENTS_V1[tone] : null;
+  const treatment = artifact.kind === 'element'
+    ? (typeof toneOrTreatment === 'string' ? EVIDENCE_TREATMENTS_V1[toneOrTreatment] ?? null : toneOrTreatment ?? null)
+    : null;
   const frame = treatment ? evidenceFrame(artifact) : null;
   if (!treatment || !frame) {
     const image = document.createElement('img');
@@ -628,6 +639,143 @@ function appendEvidenceMedia(document, figure, artifact, tone) {
   }
   figure.append(svg);
   return `${evidenceHighlightLegend(treatment, frame)} ${label}.`;
+}
+
+// A ficha de evidência responde a pergunta "onde eu confiro a imagem de que este relatório fala?".
+function captureInstantLabel(evidence) {
+  const received = evidence?.metadata?.captureReceivedAt;
+  if (typeof received === 'string' && received) {
+    return `${received} (instante em que a extensão recebeu a captura; relógio local, não certificado)`;
+  }
+  return 'instante individual não registrado nesta auditoria; o período observado da página está logo abaixo.';
+}
+
+/**
+ * Bytes exatos do PNG guardado, para o botão de download. A decodificação é a canônica
+ * (`decodePngDataUrl` rejeita base64 não canônico), então o arquivo salvo tem o SHA-256 mostrado na ficha
+ * — é isso que permite a qualquer pessoa conferir com uma ferramenta comum. Devolve `null` quando não há
+ * PNG confiável a baixar.
+ */
+export function evidenceDownloadTarget(evidence) {
+  if (!isSafePngDataUrl(evidence?.dataUrl) || typeof evidence?.evidenceId !== 'string' || !evidence.evidenceId) return null;
+  try {
+    return { fileName: `${evidence.evidenceId}.png`, bytes: decodePngDataUrl(evidence.dataUrl).bytes };
+  } catch {
+    return null;
+  }
+}
+
+function downloadEvidencePng(document, evidence) {
+  const target = evidenceDownloadTarget(evidence);
+  const urlApi = typeof URL === 'undefined' ? null : URL;
+  if (!target || typeof Blob !== 'function' || typeof urlApi?.createObjectURL !== 'function' ||
+    typeof document?.createElement !== 'function') return false;
+  const url = urlApi.createObjectURL(new Blob([target.bytes], { type: 'image/png' }));
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', target.fileName);
+  link.setAttribute('rel', 'noopener');
+  document.body?.append?.(link);
+  link.click?.();
+  link.remove?.();
+  // O endereço temporário é liberado depois que o navegador já leu o arquivo; revogar no mesmo instante
+  // cancelava o download em parte dos casos.
+  if (typeof setTimeout === 'function') setTimeout(() => urlApi.revokeObjectURL?.(url), 30_000);
+  else urlApi.revokeObjectURL?.(url);
+  return true;
+}
+
+function appendEvidenceFicheImage(document, card, evidence) {
+  const hasPixels = isSafePngDataUrl(evidence.dataUrl);
+  const highlight = evidence.kind === 'element' && hasPixels ? evidenceFrame(evidence) : null;
+  if (!hasPixels) {
+    card.append(element(document, 'p', 'Imagem segura: PNG local não disponível nesta auditoria.', 'evidence-fiche-missing'));
+    return;
+  }
+  const figure = document.createElement('figure');
+  figure.setAttribute('class', 'evidence-fiche-media');
+  const caption = appendEvidenceMedia(document, figure, evidence, highlight ? EVIDENCE_FICHE_TREATMENT_V1 : null);
+  const captionText = highlight
+    ? `${caption} ${EVIDENCE_FICHE_TREATMENT_V1.binaryLegend}`
+    : evidence.kind === 'element'
+      ? `${caption} A localização exata do elemento não foi registrada, então não há contorno a desenhar; a imagem acima é a captura original.`
+      : `${caption} Captura integral do estado observado; ela dá contexto e não indica que cada pixel represente uma desconformidade.`;
+  figure.append(element(document, 'figcaption', captionText));
+  card.append(figure);
+}
+
+/** Ficha de uma evidência: imagem, ID, os dois SHA-256 inteiros, data/hora e o download do arquivo. */
+function appendEvidenceFiche(document, card, evidence, anchorNumber) {
+  card.setAttribute('data-report-evidence', evidence.evidenceId);
+  card.setAttribute('data-evidence-fiche', '');
+  card.setAttribute('data-evidence-kind', evidence.kind);
+  card.append(element(document, 'h4', `Evidência ${anchorNumber} — ${evidence.evidenceId} (${evidenceKindLabel(evidence.kind)})`));
+  appendEvidenceFicheImage(document, card, evidence);
+  const facts = document.createElement('dl');
+  facts.setAttribute('class', 'evidence-fiche-facts');
+  for (const [label, value, note] of [
+    ['ID da evidência', evidence.evidenceId, null],
+    ...evidenceHashRows(evidence),
+    ['Data e hora da captura', captureInstantLabel(evidence), null],
+  ]) {
+    facts.append(element(document, 'dt', label));
+    const cell = document.createElement('dd');
+    const code = element(document, 'code', value);
+    cell.append(code);
+    if (note) cell.append(element(document, 'span', ` ${note}`, 'evidence-fiche-note'));
+    facts.append(cell);
+  }
+  card.append(facts);
+  if (evidenceDownloadTarget(evidence)) {
+    const button = element(document, 'button', 'Baixar imagem (PNG)');
+    button.setAttribute('type', 'button');
+    button.setAttribute('data-evidence-download', evidence.evidenceId);
+    button.addEventListener('click', () => {
+      if (!downloadEvidencePng(document, evidence)) button.disabled = true;
+    });
+    card.append(button);
+    card.append(element(document, 'p', `O arquivo é gravado como ${evidence.evidenceId}.png, com os bytes originais: o SHA-256 dele tem de ser igual ao do arquivo de imagem acima.`, 'evidence-fiche-download-note'));
+  }
+  card.append(
+    element(document, 'p', `Proveniência: página ${evidence.pageId}; tipo ${evidence.kind}; estado ${evidence.state ?? 'não registrado'}.`),
+    ...evidenceProvenanceRows(evidence).map(([label, value]) => element(document, 'p', `${label}: ${value}`)),
+    element(document, 'p', `Seletor: ${evidence.selector?.css ?? 'não registrado.'}`),
+    element(document, 'p', `Snippet: ${evidence.snippet ?? 'não disponível.'}`),
+  );
+}
+
+function escapeForRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/**
+ * Cada ID de evidência citado no texto vira link para a ficha daquela evidência. O texto do parágrafo
+ * não muda: só ganha âncoras, nos mesmos limites de palavra em que o ID já aparecia. Sem isto, quem lê a
+ * constatação e quer ver a imagem precisa procurar o ID na lista de anexos de olho.
+ */
+export function linkEvidenceIds(document, paragraph, evidenceAnchorById) {
+  const text = paragraph?.textContent;
+  if (!text || !evidenceAnchorById?.size || typeof document?.createDocumentFragment !== 'function') return false;
+  const ids = [...evidenceAnchorById.keys()].filter(id => typeof id === 'string' && id).sort((left, right) => right.length - left.length);
+  if (!ids.length) return false;
+  const pattern = new RegExp(`(${ids.map(escapeForRegExp).join('|')})`, 'gu');
+  const parts = text.split(pattern);
+  if (parts.length === 1) return false;
+  const fragment = document.createDocumentFragment();
+  for (const part of parts) {
+    const anchor = evidenceAnchorById.get(part);
+    if (!anchor || !ids.includes(part)) {
+      fragment.append(document.createTextNode(part));
+      continue;
+    }
+    const link = element(document, 'a', part);
+    link.setAttribute('href', `#${anchor}`);
+    link.setAttribute('data-report-consult-evidence', '');
+    link.setAttribute('aria-label', `Ver a ficha da evidência ${part}`);
+    fragment.append(link);
+  }
+  paragraph.replaceChildren?.(fragment);
+  return true;
 }
 
 function plainBlock(document, name, title) {
@@ -1090,7 +1238,43 @@ function copyText(text, button) {
   button.textContent = 'Selecione o texto e copie';
 }
 
-function appendFindingsBoard(document, parent, board) {
+/**
+ * Miniatura da constatação: a mesma captura do elemento que o relatório estático mostra, com o contorno
+ * por fora do elemento, mais o caminho até a ficha — onde estão os dois hashes e o download do arquivo.
+ * Sem pixels do elemento, a frase diz o que existe (a ficha, quando houver) em vez de mandar a pessoa
+ * procurar em outro lugar.
+ */
+function appendFindingEvidence(document, row, finding, evidenceById, evidenceAnchorById) {
+  const elementId = finding.elementEvidenceId;
+  const artifact = elementId ? evidenceById.get(elementId) : null;
+  const figure = document.createElement('figure');
+  figure.setAttribute('class', 'findings-evidence');
+  const hasPixels = Boolean(artifact) && isSafePngDataUrl(artifact.dataUrl);
+  if (hasPixels) {
+    figure.setAttribute('data-findings-evidence', elementId);
+    figure.append(element(document, 'figcaption', appendEvidenceMedia(document, figure, artifact, 'failed')));
+    row.append(figure);
+  } else {
+    row.append(element(document, 'p', 'A imagem deste elemento não está nesta auditoria.', 'findings-evidence-missing'));
+  }
+  const links = [];
+  for (const evidenceId of finding.evidenceIds ?? []) {
+    const anchor = evidenceAnchorById.get(evidenceId);
+    if (!anchor) continue;
+    const link = element(document, 'a', `Ver a ficha da evidência ${evidenceId}`);
+    link.setAttribute('href', `#${anchor}`);
+    link.setAttribute('data-report-consult-evidence', '');
+    links.push(link);
+  }
+  if (links.length) {
+    const list = document.createElement('ul');
+    list.setAttribute('class', 'findings-evidence-links');
+    for (const link of links) { const item = document.createElement('li'); item.append(link); list.append(item); }
+    row.append(list);
+  }
+}
+
+function appendFindingsBoard(document, parent, board, evidenceById = new Map(), evidenceAnchorById = new Map()) {
   parent.append(element(document, 'p', FINDINGS_BOARD_INTRO));
   const score = document.createElement('dl');
   score.setAttribute('class', 'findings-score');
@@ -1132,9 +1316,11 @@ function appendFindingsBoard(document, parent, board) {
       row.append(element(document, 'p', finding.source === 'human'
         ? `Constatação (revisão humana de ${finding.evaluator}, ${finding.decidedAtLabel}): ${finding.text}`
         : `Constatação (verificação automática): ${finding.text}`));
+      appendFindingEvidence(document, row, finding, evidenceById, evidenceAnchorById);
       if (consolidated === null) {
         const citation = element(document, 'p', finding.citation, 'findings-citation');
         citation.setAttribute('data-findings-citation', '');
+        linkEvidenceIds(document, citation, evidenceAnchorById);
         row.append(citation);
         const copy = element(document, 'button', 'Copiar texto para citação');
         copy.setAttribute('type', 'button');
@@ -1153,6 +1339,7 @@ function appendFindingsBoard(document, parent, board) {
       const citation = element(document, 'p', consolidated, 'findings-citation');
       citation.setAttribute('data-findings-citation', '');
       citation.setAttribute('data-findings-citation-scope', 'item');
+      linkEvidenceIds(document, citation, evidenceAnchorById);
       const copy = element(document, 'button', 'Copiar texto para citação');
       copy.setAttribute('type', 'button');
       copy.setAttribute('data-findings-copy', '');
@@ -1351,7 +1538,7 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
 
   const failed = section(document, 2);
   failed.setAttribute('data-findings-board', '');
-  appendFindingsBoard(document, failed, view.findingsBoard);
+  appendFindingsBoard(document, failed, view.findingsBoard, evidenceById, evidenceAnchorById);
   root.append(failed);
 
   const review = section(document, 3);
@@ -1526,21 +1713,12 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const sources = document.createElement('details'); sources.setAttribute('data-technical-evidence', '');
   sources.setAttribute('data-report-annex', '');
   sources.append(element(document, 'summary', `Consultar evidências técnicas e anexos (${view.technicalEvidence.length})`));
-  for (const evidence of view.technicalEvidence) {
-    const card = document.createElement('article'); card.setAttribute('data-report-evidence', evidence.evidenceId);
+  sources.append(element(document, 'p', EVIDENCE_SHA256_HELP, 'evidence-fiche-help'));
+  for (const [index, evidence] of view.technicalEvidence.entries()) {
+    const card = document.createElement('article');
     card.setAttribute('data-evidence-kind', evidence.kind);
     card.setAttribute('id', evidenceAnchorById.get(evidence.evidenceId));
-    card.append(
-      element(document, 'h4', `${evidence.evidenceId} — ${evidenceKindLabel(evidence.kind)}`),
-      ...evidenceProvenanceRows(evidence).map(([label, value]) => element(document, 'p', `${label}: ${value}`)),
-      element(document, 'p', `Seletor: ${evidence.selector?.css ?? 'não registrado.'}`),
-      element(document, 'p', `Snippet: ${evidence.snippet ?? 'não disponível.'}`),
-    );
-    if (isSafePngDataUrl(evidence.dataUrl)) {
-      const image = document.createElement('img'); image.setAttribute('src', evidence.dataUrl);
-      image.setAttribute('alt', `${evidenceKindLabel(evidence.kind)} local da evidência ${evidence.evidenceId}`);
-      image.setAttribute('class', 'evidence-media'); applyDeclaredCaptureSize(image, evidence); card.append(image);
-    } else card.append(element(document, 'p', 'Imagem segura: PNG local não disponível.'));
+    appendEvidenceFiche(document, card, evidence, index + 1);
     sources.append(card);
   }
   methodology.append(sources);

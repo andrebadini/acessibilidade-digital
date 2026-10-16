@@ -531,6 +531,10 @@ function projectV1Evidence(artifact, pageId) {
   const output = {};
   for (const key of [
     'evidenceId', 'kind', 'hash', 'pixelState', 'pixelContentHash', 'state', 'dataUrl',
+    // O SHA-256 do arquivo PNG da miniatura (1.1.62) atravessa a migração como qualquer outro dado
+    // guardado: sem ele nesta lista, a projeção do V1 apagava o campo em silêncio e a ficha de evidência
+    // e o anexo do relatório ficavam sem o hash do arquivo, mesmo com os pixels guardados.
+    'binarySha256',
     'nodeId', 'backendNodeId', 'snippet', 'fullPageEvidenceId', 'mediaUrl',
     // `legend` são as entradas do mapa de anúncios; `stops`/`suspects` são as do mapa do teclado.
     // Sem eles na lista, a projeção do modelo apagava as duas listas em silêncio e o mapa do teclado

@@ -4631,4 +4631,7 @@ test('a page with more occurrences than the thumbnail budget keeps every occurre
   const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
   assert.equal(elements.length, count, 'every affected element keeps selector and snippet evidence');
   assert.equal(elements.filter(artifact => artifact.dataUrl).length, ELEMENT_CAPTURE_BUDGET.maxThumbnails);
+  const withPixels = elements.filter(artifact => artifact.dataUrl);
+  assert.ok(withPixels.every(artifact => /^[a-f0-9]{64}$/u.test(artifact.binarySha256 ?? '')),
+    `a miniatura guardada precisa levar o SHA-256 do arquivo: ${JSON.stringify(withPixels.slice(0, 2).map(artifact => Object.keys(artifact)))}`);
 });

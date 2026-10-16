@@ -103,7 +103,8 @@ export function buildFindingsBoard(model) {
         const human = occurrence.outcome === 'cantTell' && decision?.answer === 'não conforme';
         if (occurrence.outcome !== 'failed' && !human) continue;
         const page = pageById.get(occurrence.pageId);
-        const element = describeEvidenceElement(elementEvidence(occurrence, evidenceById));
+        const elementArtifact = elementEvidence(occurrence, evidenceById);
+        const element = describeEvidenceElement(elementArtifact);
         const observedAt = page?.timestamps?.endedAt ?? model.timestamps?.endedAt;
         // O apontamento no mapa do teclado entra na própria constatação: "Itens apontados: …" nomeia
         // os itens sem caixa e "Áreas marcadas no mapa do teclado: N" conta os retângulos desenhados.
@@ -117,6 +118,12 @@ export function buildFindingsBoard(model) {
           occurrenceId: occurrence.occurrenceId,
           source: human ? 'human' : 'automatic',
           pageUrl: page?.finalUrl ?? model.finalUrl,
+          // Referências estruturáveis, além das frases de `evidence`: a tela do relatório precisa do
+          // ID para ligar cada citação à ficha da evidência e da evidência do ELEMENTO para mostrar a
+          // miniatura com contorno. `evidence` continua sendo o texto pronto, sem alteração.
+          pageId: occurrence.pageId,
+          evidenceIds: [...(occurrence.evidenceRefs ?? [])],
+          elementEvidenceId: elementArtifact?.evidenceId ?? null,
           element: element?.label ?? null,
           subject: element ? withArticle(element) : 'à página',
           text,
@@ -135,6 +142,8 @@ export function buildFindingsBoard(model) {
           value.source === finding.source);
         if (duplicate) {
           for (const reference of finding.evidence) if (!duplicate.evidence.includes(reference)) duplicate.evidence.push(reference);
+          for (const evidenceId of finding.evidenceIds) if (!duplicate.evidenceIds.includes(evidenceId)) duplicate.evidenceIds.push(evidenceId);
+          duplicate.elementEvidenceId ??= finding.elementEvidenceId;
           duplicate.occurrenceIds.push(occurrence.occurrenceId);
           duplicate.citation = citationParagraph({ item, finding: duplicate });
           continue;

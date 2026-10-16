@@ -1,4 +1,4 @@
-import { hashEvidenceArtifact, isDerivedEvidenceKind } from '../evidence/artifact-hash.js';
+import { hashEvidenceArtifactDetailed, isDerivedEvidenceKind } from '../evidence/artifact-hash.js';
 import { canonicalStringify } from './canonical-json.js';
 import { sha256Hex } from './hash.js';
 
@@ -59,11 +59,17 @@ export async function verifyIntegrityLinks(model) {
   }
   const artifactById = new Map(model.evidence.map(artifact => [artifact.evidenceId, artifact]));
   for (const artifact of model.evidence) {
-    if (!SHA256.test(artifact.hash ?? '') || await hashEvidenceArtifact(artifact, {
+    const recomputed = await hashEvidenceArtifactDetailed(artifact, {
       sourceArtifact: isDerivedEvidenceKind(artifact.kind)
         ? artifactById.get(artifact.fullPageEvidenceId)
         : undefined,
-    }) !== artifact.hash) {
+    });
+    // O hash do arquivo de imagem, quando guardado, tem de corresponder aos pixels guardados: ele é o
+    // que a ficha de evidência e o anexo do relatório entregue afirmam ao leitor. Sem esta conferência,
+    // um valor trocado no armazenamento local passaria pela verificação (o hash do registro é
+    // recalculado a partir dos pixels, não do campo) e o relatório afirmaria um hash falso.
+    if (!SHA256.test(artifact.hash ?? '') || recomputed.hash !== artifact.hash ||
+      (artifact.binarySha256 !== undefined && artifact.binarySha256 !== recomputed.binarySha256)) {
       throw new TypeError('Hash de evidência inválido.');
     }
   }

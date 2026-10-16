@@ -403,6 +403,45 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   assert.ok(html.includes('Cada caixa azul numerada é um lugar onde a tecla Tab para'));
   assert.ok(html.includes(map.hash));
 
+  // Anexo de evidências do HTML entregue (1.1.62): cada evidência aparece UMA VEZ, com ID e os dois
+  // SHA-256 inteiros, e a ocorrência aponta para o item do anexo — nenhum hash é abreviado e nenhuma
+  // frase manda procurar a captura no arquivo.
+  const annexFiches = [...html.matchAll(/data-report-evidence="([^"]+)"/gu)].map(match => match[1]);
+  assert.ok(annexFiches.length > 0, 'o Anexo de evidências precisa listar as evidências citadas');
+  assert.equal(new Set(annexFiches).size, annexFiches.length, `cada evidência aparece uma vez: ${JSON.stringify(annexFiches)}`);
+  assert.ok(html.includes('Impressão digital (SHA-256) do registro'));
+  assert.ok(html.includes('SHA-256 do arquivo de imagem (PNG)'));
+  assert.ok(html.includes('impressão digital do arquivo: qualquer alteração na imagem muda esse código'),
+    'a explicação em linguagem simples acompanha o anexo');
+  const annexLinks = [...html.matchAll(/Ver Anexo de evidências, item (\d+)<\/a>/gu)].map(match => Number(match[1]));
+  assert.ok(annexLinks.length > 0, 'a ocorrência precisa apontar para o item do anexo');
+  for (const number of annexLinks) assert.ok(html.includes(`id="report-evidence-${number}"`), `item ${number} precisa existir no anexo`);
+  for (const evidenceId of annexFiches) {
+    assert.match(html, new RegExp(`Item \\d+ — ${evidenceId}`, 'u'),
+      `o item do anexo precisa nomear a evidência ${evidenceId}`);
+  }
+  // O SHA-256 do arquivo anunciado no anexo é o dos bytes do PNG guardado: recalculado aqui, byte a byte.
+  const hashProof = await extension.evaluate(extension.harnessPage, `(async()=>{
+    const store=(await import(chrome.runtime.getURL('/src/storage/audit-store.js'))).createAuditStore();
+    const model=await store.getAudit(${JSON.stringify(auditId)});
+    const artifact=model.evidence.find(item=>item.kind==='element'&&typeof item.binarySha256==='string');
+    if(!artifact) return {found:false,inventory:model.evidence.map(item=>({kind:item.kind,
+      pixels:typeof item.dataUrl==='string',binary:typeof item.binarySha256,
+      metadata:Object.keys(item.metadata??{}).join('|')}))};
+    const bytes=Uint8Array.from(atob(artifact.dataUrl.slice('data:image/png;base64,'.length)),c=>c.charCodeAt(0));
+    const digest=await crypto.subtle.digest('SHA-256',bytes);
+    const hex=[...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('');
+    return {found:true,evidenceId:artifact.evidenceId,stored:artifact.binarySha256,computed:hex};
+  })()`, { awaitPromise: true });
+  assert.equal(hashProof.found, true,
+    `a auditoria precisa guardar o SHA-256 do arquivo da evidência de elemento: ${JSON.stringify(hashProof.inventory ?? [])}`);
+  assert.equal(hashProof.stored, hashProof.computed,
+    'o hash guardado precisa ser o dos bytes do PNG, e não um valor qualquer');
+  assert.ok(html.includes(hashProof.stored),
+    `o Anexo de evidências precisa mostrar o SHA-256 do arquivo ${hashProof.evidenceId}`);
+  assert.ok(jsonBytes.includes(hashProof.stored), 'o JSON entregue carrega o mesmo hash do arquivo');
+
+
   // Alinhamento (1.1.60): nesta página estável a captura e a leitura da estrutura descrevem o mesmo
   // leiaute, então a escala é uniforme, nenhuma caixa foi omitida por mudança de leiaute, e as caixas
   // estão de fato pintadas na imagem.
@@ -420,6 +459,62 @@ test('prova o mapa do teclado: cartões que só abrem com o mouse ficam sem caix
   }
   assert.equal(loopback.cspReports.length, 0, `violações CSP: ${loopback.cspReports.join(' ')}`);
   assert.doesNotMatch(`${html}\n${loopback.cspReports.join('\n')}`, /unsafe-eval|EvalError/iu);
+
+  // Recorte do elemento NO CARTÃO da revisão guiada (1.1.62). O produto pediu que a pessoa veja a
+  // imagem com o contorno dentro do próprio cartão, sem sair da pergunta, e que nenhuma frase a mande
+  // procurar "a captura registrada no cartão" em outro lugar. A varredura abre TODOS os cartões no
+  // fim do roteiro, quando o estado da revisão já foi provado pelas asserções acima.
+  const cards = await extension.evaluate(report, `(() => {
+    const all=[...document.querySelectorAll('#review-list details.lay-card')];
+    let crops=0,outlined=0,plain=0,named=[];
+    for(const card of all){
+      card.open=true;
+      const object=card.querySelector('.lay-object');
+      const figure=object?.querySelector('figure.lay-crop')??null;
+      const svg=figure?.querySelector('svg')??null;
+      if(figure)crops+=1;
+      if(svg){
+        const box=svg.querySelector('rect[data-evidence-highlight]');
+        if(box){outlined+=1;named.push(figure.querySelector('figcaption')?.textContent??'');}
+        else plain+=1;
+      } else if(figure?.querySelector('img.lay-thumb'))plain+=1;
+    }
+    const list=document.querySelector('#review-list');
+    return {total:all.length,crops,outlined,plain,named,
+      banned:[...list.querySelectorAll('details.lay-card')]
+        .filter(card=>/captura registrada no cartão/iu.test(card.textContent)).length,
+      elsewhere:[...list.querySelectorAll('.lay-locate-note')]
+        .filter(note=>!/neste mesmo cartão|não guardou imagem deste elemento/u.test(note.textContent)).length};
+  })()`);
+  assert.ok(cards.total >= 2, `a revisão guiada precisa de cartões para varrer: ${JSON.stringify(cards)}`);
+  assert.equal(cards.banned, 0, `nenhum cartão pode mandar procurar a captura em outro lugar: ${JSON.stringify(cards)}`);
+  assert.equal(cards.elsewhere, 0, `toda orientação de localização aponta para o cartão ou diz que não há imagem: ${JSON.stringify(cards)}`);
+  assert.ok(cards.crops >= 1, `ao menos um cartão precisa mostrar o recorte do elemento: ${JSON.stringify(cards)}`);
+  assert.ok(cards.outlined >= 1, `o recorte do cartão precisa trazer o contorno desenhado: ${JSON.stringify(cards)}`);
+  assert.equal(cards.crops, cards.outlined + cards.plain, JSON.stringify(cards));
+  assert.ok(cards.named.every(text => /Contorno vermelho: o elemento desta pergunta\./u.test(text)),
+    `a legenda do recorte precisa dizer o que é o contorno: ${JSON.stringify(cards.named)}`);
+  t.diagnostic(`revisão guiada: cartões=${cards.total}; recortes=${cards.crops}; contornados=${cards.outlined}`);
+
+  // Clicar no recorte amplia na caixa de diálogo nativa; o Escape fecha.
+  const zoom = await extension.evaluate(report, `(() => {
+    const button=document.querySelector('#review-list figure.lay-crop button.lay-crop-zoom');
+    if(!button)return {available:false};
+    button.click();
+    const dialog=document.querySelector('#lay-zoom-dialog');
+    const figure=dialog.querySelector('figure.lay-crop--zoom');
+    return {available:true,open:dialog.open===true,modal:dialog.matches(':modal'),
+      outline:Boolean(figure?.querySelector('svg rect[data-evidence-highlight]')),
+      caption:figure?.querySelector('figcaption')?.textContent??''};
+  })()`, { userGesture: true });
+  if (zoom.available) {
+    assert.equal(zoom.open && zoom.modal, true, 'o recorte ampliado precisa abrir em caixa de diálogo modal');
+    assert.equal(zoom.outline, true, 'a imagem ampliada mantém o contorno do elemento');
+    assert.match(zoom.caption, /Contorno vermelho/u);
+    await pressKey(report, { key: 'Escape', code: 'Escape', virtualKeyCode: 27 });
+    await extension.waitForValue(report, `document.querySelector('#lay-zoom-dialog').open`, value => value === false,
+      { timeoutMs: 10_000, intervalMs: 50 });
+  }
 });
 
 test('uma página que cresce sem parar sai sem caixa nenhuma, com a lista inteira e a explicação', { timeout: 300_000 }, async t => {
