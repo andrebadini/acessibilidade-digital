@@ -54,6 +54,19 @@ function isCancellation(error, signal) {
 }
 
 /**
+ * Captura descartável que deixa a área de renderização alargada — a mesma do aquecimento, e ao mesmo preço.
+ * `captureBeyondViewport` amplia a área de renderização (a barra de rolagem clássica deixa de existir) e os
+ * bytes não são lidos por ninguém: quem chama só quer o EFEITO na página, que é deixar o leiaute no estado
+ * em que a captura de verdade vai acontecer.
+ */
+async function discardableWideCapture(cdp, step, size) {
+  await step(() => cdp.command('Page.captureScreenshot', {
+    format: 'jpeg', quality: FULL_PAGE_WARM_UP.quality, captureBeyondViewport: true, fromSurface: true,
+    clip: { x: 0, y: 0, width: size.width, height: size.height, scale: FULL_PAGE_WARM_UP.scale },
+  }));
+}
+
+/**
  * Executa o aquecimento e devolve o que foi medido para os testes e para a QA.
  * Nada do retorno entra no modelo da auditoria (o catálogo de diagnósticos é fechado e não aceita números
  * internos): é medida de bastidor, não conteúdo de relatório.
@@ -87,12 +100,7 @@ export async function warmUpFullPageLayout({
     if (!initial) return { ...empty, elapsedMs: elapsed(), reads };
     before = initial.height;
     after = initial.height;
-    // Captura descartável: jpeg de qualidade baixa cobrindo o conteúdo inteiro numa escala pequena.
-    // O resultado NÃO é atribuído a nada — os bytes morrem aqui.
-    await step(() => cdp.command('Page.captureScreenshot', {
-      format: 'jpeg', quality: FULL_PAGE_WARM_UP.quality, captureBeyondViewport: true, fromSurface: true,
-      clip: { x: 0, y: 0, width: initial.width, height: initial.height, scale: FULL_PAGE_WARM_UP.scale },
-    }));
+    await discardableWideCapture(cdp, step, initial);
     captured = true;
     const deadline = startedAt + FULL_PAGE_WARM_UP.ceilingMs;
     let previous = initial.height;
@@ -121,5 +129,44 @@ export async function warmUpFullPageLayout({
       ran: captured, settled: false, elapsedMs: elapsed(), reads,
       reason: 'failed', heightBefore: before, heightAfter: after,
     };
+  }
+}
+
+/**
+ * Deixa o leiaute no estado alargado ANTES de a auditoria medir o instante da captura (1.1.62).
+ *
+ * Por que existe: `captureBeyondViewport` não só tira a imagem, ele muda a área de renderização — a barra de
+ * rolagem clássica desaparece e o conteúdo fica ~15 px mais largo. Medido (ver docs/qa/
+ * mapa-teclado-caixas-1.1.62.md): o estado alargado CONTINUA valendo depois da captura até que alguma coisa
+ * obrigue a página a se rearranjar. Quem se rearranja é justamente a página que se monta sozinha — é o
+ * conteúdo novo chegando que traz a barra de volta e devolve a largura original.
+ *
+ * O resultado, sem esta etapa: a auditoria mede o leiaute com barra (antes da captura), a captura acontece
+ * sem barra, e a medida fresca dos retângulos (depois) vê o estado sem barra. As duas leituras discordam por
+ * 15 px de largura — e por tudo que depende da largura, como a altura de uma imagem `width:100%`. A
+ * discordância não é da página: é da própria captura. Antes da 1.1.62 ela bastava para o mapa sair sem
+ * caixa nenhuma, e é exatamente o caso da página que cresceu entre a leitura e a captura.
+ *
+ * Fixar o estado antes da medida resolve na raiz: recorte, imagem e retângulos frescos passam a descrever o
+ * MESMO leiaute, e as comparações de altura e largura em volta da captura voltam a medir o que prometem —
+ * a página se mexeu, não a área de renderização.
+ *
+ * Falha aqui é silenciosa (a auditoria segue com o comportamento anterior), mas cancelamento atravessa.
+ * Nada do retorno entra no modelo: o catálogo de diagnósticos é fechado e não carrega números internos.
+ *
+ * @returns {Promise<{ran: boolean, reason: string}>}
+ */
+export async function establishWidenedLayout({ cdp, step, signal } = {}) {
+  if (!cdp || typeof cdp.command !== 'function' || typeof step !== 'function') {
+    return { ran: false, reason: 'unavailable' };
+  }
+  try {
+    const size = contentOf(await step(() => cdp.command('Page.getLayoutMetrics', {})));
+    if (!size) return { ran: false, reason: 'size-unavailable' };
+    await discardableWideCapture(cdp, step, size);
+    return { ran: true, reason: 'widened' };
+  } catch (error) {
+    if (isCancellation(error, signal)) throw error;
+    return { ran: false, reason: 'failed' };
   }
 }

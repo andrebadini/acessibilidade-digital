@@ -1,0 +1,25 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px; font: 16px/1.4 system-ui, sans-serif; background: #ffffff; color: #1b1b1b; }
+h1 { font-size: 24px; margin: 0 0 16px; }
+#controles { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; margin-top: 16px; }
+#controles button, #controles a, #controles select, #controles input {
+  font: inherit; padding: 10px 14px; min-width: 240px; border: 2px solid #14417a; border-radius: 6px;
+  background: #f4f7fb; color: #10233d;
+}
+#controles a { display: inline-block; text-decoration: underline; }
+/* O aviso ilustrado: sem atributos de largura e altura, a imagem não tem tamanho nenhum antes de chegar.
+   `height:auto` sem proporção conhecida = altura zero, e é essa a mudança de leiaute que a auditoria
+   precisa ver depois da leitura da estrutura (o mesmo que um banner de imagem sem dimensão faz num site). */
+.banner { margin: 0 0 16px; }
+.banner img { display: block; width: 100%; height: auto; border-radius: 8px; }
+/* Catálogo de propósito comprido: dá trabalho à leitura da estrutura (árvore de acessibilidade e
+   instantâneo) e alarga a janela em que o crescimento pode cair sem estragar a imagem. Nada aqui é
+   alcançável pelo Tab, então as paradas do mapa continuam sendo só os cinco controles.
+   A altura é FIXA e o resto rola dentro: sem isso o catálogo faria uma página de dezenas de milhares de
+   pixels, a captura integral seria cortada no teto de 16.384 px e os controles — que precisam aparecer na
+   imagem para ter caixa — ficariam de fora do recorte. */
+.etiquetas { display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start;
+  max-height: 480px; overflow-y: auto; margin: 0 0 16px; }
+.etiqueta { font-size: 11px; padding: 2px 6px; border: 1px solid #cfd6dd; border-radius: 4px; color: #4d5560; }
+.rodape { margin-top: 24px; padding-top: 16px; border-top: 1px solid #c9c9c9; color: #444444; }

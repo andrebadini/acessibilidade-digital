@@ -113,6 +113,21 @@ test('valida a derivação fechada e recomputa os hashes de segmento, geometria 
   await assert.rejects(hashKeyboardMapArtifact(changedBytes), /segmento|hash/iu);
 });
 
+test('lê o mapa 1.0.0 guardado por uma revisão anterior e recusa versão desconhecida', async () => {
+  const artifact = await keyboardArtifact();
+  const previous = structuredClone(artifact);
+  previous.derivation.version = '1.0.0';
+  previous.hash = await hashKeyboardMapArtifact(previous);
+
+  assert.equal(validateKeyboardMapArtifact(previous, { sourceArtifact: SOURCE_ARTIFACT }), previous);
+  assert.equal(await hashKeyboardMapArtifact(previous, { sourceArtifact: SOURCE_ARTIFACT }), previous.hash);
+  assert.equal(await hashEvidenceArtifact(previous, { sourceArtifact: SOURCE_ARTIFACT }), previous.hash);
+
+  const unknown = structuredClone(artifact);
+  unknown.derivation.version = '9.9.9';
+  await assert.rejects(hashKeyboardMapArtifact(unknown), /não reconhecida/u);
+});
+
 test('rejeita campo inventado em qualquer nível do esquema', async () => {
   const artifact = await keyboardArtifact();
 

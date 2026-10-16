@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { FULL_PAGE_WARM_UP, warmUpFullPageLayout } from '../../src/background/full-page-warm-up.js';
+import { FULL_PAGE_WARM_UP, establishWidenedLayout, warmUpFullPageLayout } from '../../src/background/full-page-warm-up.js';
 
 const METRICS = altura => ({ cssContentSize: { width: 800, height: altura }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } });
 
@@ -164,5 +164,48 @@ test('sem cliente CDP ou sem passo da auditoria o aquecimento é simplesmente pu
     const resultado = await warmUpFullPageLayout(entrada);
     assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'size-unavailable' });
     assert.equal(resultado.reads, 0);
+  }
+});
+
+test('fixa o leiaute alargado com a mesma captura descartável do aquecimento', async () => {
+  const h = harness({ alturas: [1_200] });
+  const resultado = await establishWidenedLayout({ cdp: h.cdp, step: h.step });
+
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: true, reason: 'widened' });
+  assert.deepEqual(h.calls.map(([method]) => method), ['Page.getLayoutMetrics', 'Page.captureScreenshot']);
+  const params = h.calls[1][1];
+  assert.equal(params.format, 'jpeg', 'os bytes são descartados: não é captura de evidência');
+  assert.equal(params.captureBeyondViewport, true, 'é este modo que tira a barra de rolagem e alarga o leiaute');
+  assert.equal(params.fromSurface, true);
+  assert.deepEqual(params.clip, { x: 0, y: 0, width: 800, height: 1_200, scale: FULL_PAGE_WARM_UP.scale });
+  assert.ok(params.clip.scale <= 0.1, 'a captura descartável precisa custar pouco');
+});
+
+test('sem tamanho de página o alargamento nem dispara a captura', async () => {
+  const calls = [];
+  const cdp = { async command(method) { calls.push(method); return { cssContentSize: { width: 0, height: 0 } }; } };
+  const resultado = await establishWidenedLayout({ cdp, step: async operation => operation() });
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'size-unavailable' });
+  assert.deepEqual(calls, ['Page.getLayoutMetrics']);
+});
+
+test('falha no alargamento é silenciosa: a auditoria segue com o comportamento anterior', async () => {
+  const h = harness({ alturas: [1_200], captureFailure: new Error('CDP_COMMAND_FAILED') });
+  const resultado = await establishWidenedLayout({ cdp: h.cdp, step: h.step });
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'failed' });
+});
+
+test('cancelamento no alargamento atravessa, em vez de virar falha silenciosa', async () => {
+  const controlador = new AbortController();
+  const h = harness({ alturas: [1_200], signal: controlador.signal });
+  const execucao = establishWidenedLayout({ cdp: h.cdp, step: h.step, signal: controlador.signal });
+  controlador.abort(new DOMException('Operação cancelada.', 'AbortError'));
+  await assert.rejects(execucao, error => error?.name === 'AbortError');
+});
+
+test('sem cliente CDP ou sem passo da auditoria o alargamento é simplesmente pulado', async () => {
+  for (const entrada of [{}, { cdp: {}, step: async operation => operation() }, { cdp: { async command() { return {}; } } }]) {
+    const resultado = await establishWidenedLayout(entrada);
+    assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'unavailable' });
   }
 });

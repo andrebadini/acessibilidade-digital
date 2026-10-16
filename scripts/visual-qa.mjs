@@ -8,6 +8,7 @@
 //
 // Uso:
 //   node scripts/visual-qa.mjs [--out qa-out/<nome>] [--url https://... ...] [--no-fixture] [--reload-check]
+//                              [--device-scale-factor 2]
 //
 // Para cada página (a fixture local, salvo --no-fixture, e cada --url):
 //   01-painel.png          painel no resultado da auditoria
@@ -98,17 +99,21 @@ const USAGE = `Uso: node scripts/visual-qa.mjs [--out qa-out/<nome>] [--url http
   --no-fixture    não audita a fixture local test/e2e/fixtures/visual-qa/marcacao.html
   --reload-check  depois das capturas, recarrega a aba auditada e mostra os sinais na versão
                   recarregada (o convite e os sinais reencontrados ficam em 05b/05c-*.png)
+  --device-scale-factor <n>
+                  razão de pixels do dispositivo (padrão 1; use 2 para conferir a mesma página numa
+                  tela densa, em que a imagem capturada tem o dobro dos pixels e a caixa desenhada
+                  precisa continuar caindo sobre o elemento)
   --help          mostra esta ajuda
 `;
 
 function parseArguments(argv) {
-  const options = { out: null, urls: [], fixture: true, reloadCheck: false, help: false };
+  const options = { out: null, urls: [], fixture: true, reloadCheck: false, deviceScaleFactor: 1, help: false };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') { options.help = true; continue; }
     if (argument === '--no-fixture') { options.fixture = false; continue; }
     if (argument === '--reload-check') { options.reloadCheck = true; continue; }
-    if (argument === '--out' || argument === '--url') {
+    if (argument === '--out' || argument === '--url' || argument === '--device-scale-factor') {
       const value = argv[index + 1];
       if (typeof value !== 'string' || !value || value.startsWith('--')) {
         throw new Error(`ARGUMENTO_SEM_VALOR: ${argument}`);
@@ -117,6 +122,14 @@ function parseArguments(argv) {
       if (argument === '--out') {
         if (options.out !== null) throw new Error('ARGUMENTO_REPETIDO: --out');
         options.out = value;
+      } else if (argument === '--device-scale-factor') {
+        const scale = Number(value);
+        // O Chrome aceita fator fracionário, mas a revisão é sobre 1 e 2 (tela comum e tela densa); fora
+        // disso o roteiro recusa em vez de gerar capturas que ninguém sabe interpretar.
+        if (!Number.isFinite(scale) || scale <= 0 || scale > 4) {
+          throw new Error(`FATOR_DE_ESCALA_INVALIDO: ${value}`);
+        }
+        options.deviceScaleFactor = scale;
       } else {
         options.urls.push(value);
       }
@@ -876,12 +889,13 @@ async function captureReload({ panel, page, directory, located, attempt, shot })
 // Uma página
 // ---------------------------------------------------------------------------------------------
 
-async function auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck = false }) {
+async function auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck = false, deviceScaleFactor = 1 }) {
   const directory = join(outRoot, target.slug);
   await mkdir(directory, { recursive: true });
   const summary = {
     url: target.url,
     slug: target.slug,
+    deviceScaleFactor,
     directory: relative(outRoot, directory) || '.',
     outcome: 'nao-concluido',
     auditId: null,
@@ -927,6 +941,24 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck 
     launch = launched.value;
     const page = launch.startPage.page;
     summary.chrome = launch.chromeProduct;
+
+    // Tela densa (--device-scale-factor 2): a janela continua do mesmo tamanho em px CSS, e o que muda é a
+    // razão de pixels do dispositivo, exatamente como numa tela 2×. É essa razão que a auditoria lê
+    // (`devicePixelRatio`) e usa para converter retângulo em pixel de imagem, então é aqui que se confere
+    // que a caixa continua caindo sobre o elemento quando a imagem tem o dobro dos pixels.
+    if (deviceScaleFactor !== 1) {
+      const applied = await attempt('escala-da-tela', () => command(page, 'Emulation.setDeviceMetricsOverride', {
+        width: VIEWPORT.width, height: VIEWPORT.height, deviceScaleFactor, mobile: false,
+      }));
+      if (!applied.ok) return summary;
+      cleanups.push(async () => { try { await command(page, 'Emulation.clearDeviceMetricsOverride'); } catch { /* aba já fechada */ } });
+      const medido = await attempt('conferir-escala-da-tela', () => evaluate(page, 'devicePixelRatio'));
+      summary.deviceScaleFactorMeasured = medido.value ?? null;
+      if (medido.value !== deviceScaleFactor) {
+        summary.errors.push({ stage: 'escala-da-tela', detail: `a página respondeu ${medido.value} em vez de ${deviceScaleFactor}` });
+        return summary;
+      }
+    }
 
     // (a) painel + auditoria da página atual COM capturas de pixel ---------------------------
     const opened = await attempt('abrir-painel', () => launch.openSidePanelFromAction());
@@ -1462,13 +1494,17 @@ async function main() {
 
   process.stdout.write(`Saída: ${outRoot}\n`);
   process.stdout.write(`Chrome: ${chromeBinary}\n`);
+  process.stdout.write(`Fator de escala da tela: ${options.deviceScaleFactor}\n`);
   process.stdout.write(`Páginas: ${targets.map(target => `${target.slug} (${target.label})`).join(', ')}\n\n`);
 
   const pages = [];
   try {
     for (const target of targets) {
       process.stdout.write(`→ ${target.url}\n`);
-      const summary = await auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck: options.reloadCheck });
+      const summary = await auditPage({
+        target, outRoot, cleanups, chromeBinary,
+        reloadCheck: options.reloadCheck, deviceScaleFactor: options.deviceScaleFactor,
+      });
       pages.push(summary);
       printPageSummary(summary);
       await writeFile(join(outRoot, summary.slug, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
@@ -1485,7 +1521,7 @@ async function main() {
     extensionPath: WORKSPACE_ROOT,
     chromeBinary,
     chrome: pages.find(page => page.chrome)?.chrome ?? null,
-    viewport: { ...VIEWPORT },
+    viewport: { ...VIEWPORT, deviceScaleFactor: options.deviceScaleFactor },
     captureMode: CAPTURE_MODE,
     reloadCheck: options.reloadCheck,
     outRoot: relative(process.cwd(), outRoot) || '.',
