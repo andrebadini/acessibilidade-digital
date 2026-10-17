@@ -216,3 +216,17 @@ passou 9/9 nas duas versões. A falha era de foco do sistema operacional, não d
   não serve para esse caso porque a auditoria limpa a emulação antes de medir.
 - O harness recusou um portal público (HTTP 200, avaliação falhou). O caso foi registrado e a matriz
   seguiu com outro portal.
+
+## Conferência independente da revisão (portal estadual de defesa do consumidor)
+
+Rodada feita na revisão, fora da tarefa, com `scripts/measure-box-precision.mjs` e `--save-full-image`,
+Chrome for Testing 155 em janela visível, 1280×900, contra o código da 1.1.62 (`65829e0`) e o da 1.1.63:
+
+| Cenário | 1.1.62 | 1.1.63 |
+| --- | --- | --- |
+| Zoom 125 % | captura integral truncada em `1/zoom` (a margem direita e o fim da página ficam fora da imagem); retângulos gravados × 1,25 (ex.: campo de busca gravado em `447,239 268×38`, real `358,191 220×30`); 57 caixas do teclado, 43 do mapa de leitura e 23 elementos não confirmáveis | 268 caixas conferidas, 0 desalinhadas; teclado 57/57, mapa de leitura 76/76, elementos 135/135 |
+| Tela 2× (zoom 100 %) | mapas omitidos; só 15 elementos com caixa, e os recortes apontam para o lugar errado (7 de 15 reprovados pelos pixels, o resto inconclusivo) | 265 caixas conferidas, 0 desalinhadas; PNG 1566×8192; teclado 57/57, mapa de leitura 76/76, elementos 132/132 |
+
+As imagens com as caixas desenhadas sobre a captura integral foram abertas e conferidas a olho: na 1.1.63 as
+caixas cobrem o banner, os cartões de notícia, os títulos e os botões; na 1.1.62 em tela 2× a caixa do
+banner cai sobre os cartões.

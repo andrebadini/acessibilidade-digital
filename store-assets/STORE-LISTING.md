@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.62
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.63
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
@@ -40,6 +40,7 @@ Principais recursos:
 - registro da pessoa avaliadora, data e hora locais, nota e histórico das respostas revistas;
 - quadro de constatações com a situação de cada requisito da ABNT NBR 17225:2025 (não atendido, atendido, não aplicável ou sem conclusão) e frases prontas para citação em relatórios, com página, elemento, data e evidência;
 - relatórios locais em HTML, PDF, CSV e JSON-LD/EARL;
+- um botão de download para cada formato do relatório (PDF, HTML, CSV e JSON), além de "Baixar todos os formatos";
 - painel lateral persistente, destaque vivo do elemento e relatório completo em aba própria;
 - progresso real por etapa, com indicador da fase atual e confirmação visual das etapas concluídas;
 - personas de leitor de tela, acromatopsia e navegação por teclado;
