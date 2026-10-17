@@ -1,4 +1,5 @@
 import { createAuditModel } from '../core/report/audit-model.js';
+import { cropImageRegistry } from './crop-image-registry.js';
 import { resultsOverviewElement } from '../core/report/results-overview.js';
 import { checklistElement } from '../core/report/checklist-presentation.js';
 import { CONSUMER_ACCESSIBILITY_FIXED_BASIS, qualifiedConsumerReference } from '../core/legal/consumer-basis.js';
@@ -748,36 +749,12 @@ function downloadEvidencePng(document, evidence) {
  * de página inteira seria copiado no atributo de cada recorte — numa auditoria com centenas de elementos
  * isso multiplicaria megabytes de base64 na memória da aba e no arquivo entregue. Cada imagem entra uma
  * vez, com um `id`, e cada recorte a referencia por `<use>`.
+ *
+ * O registro é o mesmo da revisão guiada (`crop-image-registry.js`): as duas superfícies desenham no mesmo
+ * documento, e dois registros fariam o mesmo PNG entrar duas vezes.
  */
 function createCropDefinitions(document) {
-  const svg = document.createElementNS(SVG_NAMESPACE, 'svg');
-  svg.setAttribute('class', 'evidence-definitions');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('width', '0');
-  svg.setAttribute('height', '0');
-  svg.setAttribute('focusable', 'false');
-  const defs = document.createElementNS(SVG_NAMESPACE, 'defs');
-  svg.append(defs);
-  const byKey = new Map();
-  let count = 0;
-  return {
-    node: svg,
-    count: () => count,
-    reference(dataUrl, size) {
-      const key = `${size.width}x${size.height}\u0000${dataUrl}`;
-      if (byKey.has(key)) return byKey.get(key);
-      const image = document.createElementNS(SVG_NAMESPACE, 'image');
-      const id = `report-crop-image-${count += 1}`;
-      image.setAttribute('id', id);
-      image.setAttribute('href', dataUrl);
-      image.setAttribute('width', String(size.width));
-      image.setAttribute('height', String(size.height));
-      image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-      defs.append(image);
-      byKey.set(key, id);
-      return id;
-    },
-  };
+  return cropImageRegistry(document);
 }
 
 /**

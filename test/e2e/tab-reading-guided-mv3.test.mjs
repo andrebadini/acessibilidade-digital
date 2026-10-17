@@ -171,7 +171,8 @@ test('a leitura por Tab na verificação guiada grava cada resposta e fecha uma 
   for (const [index, aria] of crops.aria.entries()) {
     assert.match(aria, /^Recorte da captura (?:da página inteira, na região do elemento|do elemento) desta pergunta\. Contorno vermelho: o elemento desta pergunta\./u, `ponto ${index + 1}`);
   }
-  for (const caption of crops.captions) assert.match(caption, /Contorno vermelho: o elemento desta pergunta\./u);
+  // Na coluna estreita da seção a legenda é curta: só o que o contorno marca e o convite a ampliar.
+  for (const caption of crops.captions) assert.equal(caption, 'Contorno vermelho: este elemento.');
   assert.deepEqual(crops.listen, labels.map(label => `Ouvir o anúncio estimado de ${label}`),
     'o botão de ouvir nomeia o ponto e o elemento');
   // Cada botão de resposta nomeia o elemento: quem usa leitor de tela não ouve três "Sim" soltos.
@@ -209,7 +210,7 @@ test('a leitura por Tab na verificação guiada grava cada resposta e fecha uma 
     const row=document.querySelector('[data-tab-reading-row="${linkRow}"]');
     return row ? { state: row.getAttribute('data-tab-reading-state'), text: row.innerText.replace(/\\s+/gu,' ').trim() } : null;
   })()`, value => value?.state === 'nao', { timeoutMs: 30_000, intervalMs: 50 });
-  assert.match(answeredLink.text, /Resposta registrada: Não conforme/u);
+  assert.match(answeredLink.text, /Sua resposta: Não — o que o leitor de tela fala não corresponde a este elemento\./u);
   assert.match(answeredLink.text, new RegExp(`O que deveria dizer: ${NOTA_LINK}`, 'u'));
   assert.equal(await evaluate(report, `document.querySelector('[data-tab-reading-progress]')?.textContent ?? ''`), '1 de 4 conferidos');
 

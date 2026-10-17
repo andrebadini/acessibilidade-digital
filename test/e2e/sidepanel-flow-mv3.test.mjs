@@ -1062,6 +1062,13 @@ async function readPrivateAttempt(extension, requestedAuditId = null) {
       })(),
       fullPage:evidence.filter(item=>item?.kind==='full-page'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
       elements:evidence.filter(item=>item?.kind==='element'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
+      // 1.1.62: o elemento que está dentro da captura integral não tem miniatura própria — o artefato
+      // guarda onde ele estava na integral e de qual captura isso se refere, e o recorte sai dos pixels
+      // que já estão guardados (docs/qa/recortes-1.1.62.md). A prova, aqui, é que a posição foi
+      // registrada E que a imagem referida existe: sem ela o recorte não teria de onde sair.
+      elementsCropped:evidence.filter(item=>item?.kind==='element'&&item?.fullPageRect&&
+        evidence.some(artifact=>artifact?.evidenceId===item?.fullPageEvidenceId&&
+          /^data:image\\/png;base64,/u.test(artifact?.dataUrl??''))).length,
       rasterDataUrls:(publicText.match(/data:image\\/(?:png|jpeg|webp);base64,/giu)||[]).length,
       diagnostics:Array.isArray(model?.session?.diagnostics)?model.session.diagnostics.map(item=>item.code):[],
       urls:[model?.requestedUrl,model?.finalUrl,model?.pages?.[0]?.requestedUrl,model?.pages?.[0]?.finalUrl],
@@ -1261,6 +1268,14 @@ async function assertObservedTerminalAttempt(extension, auditId, identityBefore,
   assert.ok(['complete', 'partial'].includes(attempt.status));
   assert.equal(attempt.fullPage >= expected.minimumFullPage, true, JSON.stringify({ fullPage: attempt.fullPage }));
   assert.equal(attempt.elements >= expected.minimumElements, true, JSON.stringify({ elements: attempt.elements }));
+  // Duas formas de a evidência de elemento ter imagem, e cada modo prova a sua: miniatura própria (o
+  // elemento fora da captura integral) ou recorte da integral (1.1.62). A garantia é a mesma de antes —
+  // toda ocorrência com elemento tem imagem desenhável —, o que mudou foi de onde os pixels vêm.
+  if (expected.minimumCroppedElements !== undefined) {
+    assert.equal(attempt.elementsCropped >= expected.minimumCroppedElements, true,
+      JSON.stringify({ elementsCropped: attempt.elementsCropped, elements: attempt.elements,
+        fullPage: attempt.fullPage, status: attempt.status, diagnostics: attempt.diagnostics }));
+  }
   if (expected.fullPageExact !== undefined) assert.equal(attempt.fullPage, expected.fullPageExact);
   if (expected.elementsExact !== undefined) assert.equal(attempt.elements, expected.elementsExact);
   assert.equal(attempt.diagnostics.includes('ATTACHED_COPY_RELOADED'), false,
@@ -2232,7 +2247,8 @@ test('passive current-page audits complete in every mode and keep the observed d
       assert.equal(await step('RESULT', () => waitForResult(extension, panel, auditId)), auditId);
       await step('PROGRESS', () => assertObservedProgress(extension, panel));
       const terminalAttempt = await step('TERMINAL_PROOF', () => assertObservedTerminalAttempt(
-        extension, auditId, identityBefore, { minimumFullPage: 1, minimumElements: 1 }, fixture.origin));
+        extension, auditId, identityBefore,
+        { minimumFullPage: 1, minimumElements: 0, minimumCroppedElements: 1 }, fixture.origin));
       await step('PANEL_DETAIL', () =>
         assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore,
           { maxCaptureResizes: captureResizeCeiling(terminalAttempt) }));

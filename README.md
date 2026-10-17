@@ -4,6 +4,14 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.62 — todo elemento com imagem, mapa de leitura e leitura por Tab.** No relatório, o elemento que
+aparece na captura da página inteira passa a ter imagem própria (o recorte da integral, com o contorno); cada
+evidência citada leva a uma ficha com o SHA-256 do arquivo de imagem; o cartão da verificação guiada mostra o
+recorte do elemento; o mapa de leitura (códigos curtos com o texto que um leitor de tela falaria) entra no HTML
+exportado e no PDF; e a **Leitura por Tab** vira uma seção da verificação guiada, com uma pergunta por parada de
+Tab e uma constatação única no item 5.13.10. A auditoria de uma loja on-line ficou mais rápida. Veja as
+[notas da 1.1.62](docs/releases/1.1.62.md).
+
 **Versão 1.1.61 — um texto para citação por item da norma.** No relatório aberto pelo painel, quando um item da
 ABNT NBR 17225 tem várias constatações, o quadro oferece um só texto para copiar, citando todos os elementos; os
 relatórios exportados continuam com uma citação por elemento. Veja as [notas da 1.1.61](docs/releases/1.1.61.md).

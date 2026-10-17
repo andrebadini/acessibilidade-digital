@@ -334,7 +334,11 @@ dialog:not([open]) { display: none; }
 .lay-finding textarea, .lay-note textarea, .lay-image-plan textarea { width: 100%; box-sizing: border-box; font: inherit; }
 .lay-answered { padding: .5rem .7rem; border-left: .3rem solid #236b3b; background: #eff9f2; }
 .lay-answered[data-lay-answer="não conforme"] { border-left-color: #8b1e1e; background: #fff4f3; }
+/* "Não sei" é ausência de conclusão, não falha: cinza, para não competir com o vermelho do "Não". */
+.lay-answered[data-lay-answer="não foi possível determinar"] { border-left-color: #6b7280; background: #f6f7f8; }
 .lay-answered-note { white-space: pre-wrap; }
+/* Quem respondeu e quando é registro, não resposta: fica em letra menor, abaixo da frase principal. */
+.lay-answered-meta { margin-top: .2rem; font-size: .85rem; color: #4a5a68; }
 .lay-card[aria-busy="true"] { opacity: .7; }
 @media print { .lay-header, .lay-part { display: none !important; } }
 
@@ -358,7 +362,15 @@ dialog:not([open]) { display: none; }
 .lay-tab-row[data-tab-reading-state="nao-sei"] { --lay-tab-state: #6b4e00; background: #fff9e9; }
 .lay-tab-row[data-tab-reading-state] td:first-child { border-inline-start: .4rem solid var(--lay-tab-state, #738596); }
 .lay-tab-order { font-weight: 700; margin: .1rem 0; }
-.lay-tab-selector { padding: .3rem; font-size: .82rem; }
+/* Com `overflow-wrap: anywhere` a coluna do meio encolhia até a largura de uma letra e partia as
+   palavras ao meio ("Ordem / elemen/to", "Detalh/e técnic/o"). Os textos curtos que eu mesmo escrevo
+   aqui — o cabeçalho, "Tab 3 · botão" e o resumo do "Detalhe técnico" — esperam a palavra inteira, e é
+   isso que dá largura à coluna; só o seletor lá dentro é que precisa poder quebrar em qualquer ponto. */
+.lay-tab-reading thead th, .lay-tab-order, .lay-tab-detail summary { overflow-wrap: normal; }
+.lay-tab-detail { margin-top: .35rem; font-size: .85rem; }
+.lay-tab-detail summary { cursor: pointer; color: #24384a; }
+.lay-tab-detail[open] summary { margin-bottom: .25rem; }
+.lay-tab-selector { display: block; padding: .3rem; font-size: .82rem; }
 .lay-tab-listen { min-height: 44px; margin-top: .3rem; }
 .lay-tab-question .lay-q { font-size: 1rem; }
 .lay-tab-question .lay-answers button, .lay-tab-question .lay-finding-actions button, .lay-tab-bulk, .lay-tab-reading .lay-more { min-height: 44px; }

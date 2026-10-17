@@ -572,7 +572,13 @@ async function readConsolidatedModel(extension, auditId) {
       fullPage:(model?.evidence??[]).filter(item=>item?.pageId===pageId&&item?.kind==='full-page'&&
         /^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
       elements:(model?.evidence??[]).filter(item=>item?.pageId===pageId&&item?.kind==='element'&&
-        /^data:image\\/png;base64,/u.test(item.dataUrl??'')).length
+        /^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
+      // 1.1.62: o elemento dentro da captura integral não tem PNG próprio — o artefato guarda onde ele
+      // estava e de qual captura, e o recorte sai dos pixels que já estão guardados. A prova, aqui, é
+      // que a posição foi registrada E que a imagem referida existe.
+      elementsCropped:(model?.evidence??[]).filter(item=>item?.pageId===pageId&&item?.kind==='element'&&item?.fullPageRect&&
+        (model?.evidence??[]).some(artifact=>artifact?.evidenceId===item?.fullPageEvidenceId&&
+          /^data:image\\/png;base64,/u.test(artifact?.dataUrl??''))).length
     }]));
     const text=JSON.stringify(model??null);
     const sessionText=JSON.stringify(stored);
@@ -744,8 +750,13 @@ test('full-evidence batch completes sensitive pages without privacy pause and ex
   assert.equal(model.occurrenceCounts['page-2'] > 0, true, 'P5B_PAGE_2_OCCURRENCES_MISSING');
   assert.equal(model.evidenceCounts['page-1']?.fullPage >= 1, true, 'P5B_PAGE_1_FULL_PAGE_EVIDENCE_MISSING');
   assert.equal(model.evidenceCounts['page-2']?.fullPage >= 1, true, 'P5B_PAGE_2_FULL_PAGE_EVIDENCE_MISSING');
-  assert.equal(model.evidenceCounts['page-1']?.elements >= 1, true, 'P5B_PAGE_1_ELEMENT_EVIDENCE_MISSING');
-  assert.equal(model.evidenceCounts['page-2']?.elements >= 1, true, 'P5B_PAGE_2_ELEMENT_EVIDENCE_MISSING');
+  // A garantia é a mesma de antes — a evidência de cada página tem imagem desenhável do elemento —, mas
+  // na evidência completa os pixels vêm do recorte da captura integral (1.1.62), e não de um PNG por
+  // elemento: o que se exige é o recorte apontando para uma captura que existe e tem PNG guardado.
+  assert.equal(model.evidenceCounts['page-1']?.elementsCropped >= 1, true,
+    `P5B_PAGE_1_ELEMENT_EVIDENCE_MISSING ${JSON.stringify(model.evidenceCounts['page-1'])}`);
+  assert.equal(model.evidenceCounts['page-2']?.elementsCropped >= 1, true,
+    `P5B_PAGE_2_ELEMENT_EVIDENCE_MISSING ${JSON.stringify(model.evidenceCounts['page-2'])}`);
   assert.deepEqual(model.forbiddenModel, [], 'P5B_CONSOLIDATED_MODEL_PRIVATE_DATA_LEAK');
   assert.equal(model.activeParent, false, 'P5B_BATCH_ACTIVE_JOB_RETAINED_AFTER_TERMINAL');
   assert.equal(model.nonRemovedOwnerCount, 0, 'P5B_BATCH_OWNER_NOT_CLEANED');

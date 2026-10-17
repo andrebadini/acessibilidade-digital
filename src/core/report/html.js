@@ -369,7 +369,7 @@ function renderReportViewDocument(model, view, options = {}) {
   // disponível" e "não se aplica") sem apontar a seção em que a imagem aparece.
   const derivedMapFigure = kind => kind === 'keyboard-map'
     ? '<p class="evidence-relation">As imagens deste mapa estão na seção <a href="#report-section-6">Teclado</a>, com o SHA-256 de cada trecho.</p>'
-    : '<p class="evidence-relation">As imagens deste mapa estão na seção <a href="#report-section-5">Anúncios</a>, com o SHA-256 de cada trecho.</p>';
+    : '<p class="evidence-relation">As imagens deste mapa estão na seção <a href="#report-section-5">Mapa de leitura da página</a>, com o SHA-256 de cada trecho.</p>';
   const annexFigureFor = evidence => {
     if (firstPreviewByEvidence.has(evidence.evidenceId)) {
       return `<p>A imagem não se repete aqui: <a href="#${firstPreviewByEvidence.get(evidence.evidenceId)}">Consultar captura ${escapeHtml(evidence.evidenceId)} já apresentada</a>. O registro e os dois hashes acima identificam o arquivo dessa imagem.</p>`;
@@ -467,7 +467,11 @@ function reportTabReadingHtml(tab, model) {
     const media = partsWithImage
       ? `<svg class="evidence-media evidence-media--marked" data-evidence-treatment="${escapeHtml(GUIDED_REVIEW_TREATMENT_V1.tone)}" role="img" aria-label="${escapeHtml(`${EVIDENCE_CROP_PAGE_ORIGIN_ARIA} ${partsWithImage.legend}`)}" viewBox="${escapeHtml(`${partsWithImage.view.x} ${partsWithImage.view.y} ${partsWithImage.view.width} ${partsWithImage.view.height}`)}" width="${partsWithImage.display.width}" height="${partsWithImage.display.height}" preserveAspectRatio="xMidYMid meet" focusable="false"><use href="#${image.id}" width="${partsWithImage.image.width}" height="${partsWithImage.image.height}"></use>${evidenceShapesMarkup(partsWithImage.shapes)}</svg><figcaption>${escapeHtml(`${partsWithImage.legend} ${EVIDENCE_CROP_REGION_LEGEND}`)}</figcaption>`
       : '<p>A auditoria não guardou imagem deste elemento.</p>';
-    const decision = [`<strong>Resposta:</strong> ${escapeHtml(row.answerLabel ?? row.answer)}`, row.evaluator ? escapeHtml(row.evaluator) : '', row.decidedAtLabel ? escapeHtml(row.decidedAtLabel) : '']
+    // A frase inteira da resposta vem do plano (`Sua resposta: Não — o que o leitor de tela fala não
+    // corresponde a este elemento.`), com quem respondeu e quando em tipo menor ao lado: é a mesma frase
+    // que a caixa colorida da verificação guiada mostra, e o arquivo entregue não repete o rótulo
+    // técnico que ela veio substituir.
+    const decision = [escapeHtml(row.answerLabel ?? row.answer), row.evaluator ? escapeHtml(row.evaluator) : '', row.decidedAtLabel ? escapeHtml(row.decidedAtLabel) : '']
       .filter(Boolean).join(' · ');
     return `<tr data-tab-reading-row="${escapeHtml(row.occurrenceId)}" data-tab-reading-answer="${escapeHtml(row.answer)}"><td><figure class="marks-crop">${media}</figure></td><td>${escapeHtml(`Tab ${row.number} · ${row.kind ?? 'elemento'}`)}</td><td>${escapeHtml(row.name ? `“${row.name}”` : 'Sem nome acessível')}<br>${escapeHtml(row.kind ?? 'elemento')}</td><td>${escapeHtml(row.announcement ?? 'Prévia não disponível')}</td><td><p>${escapeHtml(TAB_READING_QUESTION)}</p><p>${decision}</p>${row.note ? `<p><strong>O que deveria dizer:</strong> ${escapeHtml(row.note)}</p>` : ''}</td></tr>`;
   }).join('');

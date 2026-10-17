@@ -170,3 +170,57 @@ export async function establishWidenedLayout({ cdp, step, signal } = {}) {
     return { ran: false, reason: 'failed' };
   }
 }
+
+/**
+ * Devolve a área de renderização ao estado em que a pessoa a deixou (1.1.62).
+ *
+ * Por que existe: `captureBeyondViewport` não só tira a imagem — ele esconde a barra de rolagem clássica e
+ * deixa a página ~15 px mais larga, e no Chrome 152 esse estado CONTINUA valendo depois da captura (é a
+ * mesma medição que motivou `establishWidenedLayout`). O saldo para quem audita a própria página é a página
+ * terminar mais larga e sem barra de rolagem — exatamente o que o produto promete que NÃO acontece
+ * (`DYNAMIC_PROBES_OMITTED_PASSIVE_MESSAGE`: "sem alterar foco, rolagem ou o layout final") e o que o
+ * oráculo de fonte intocada do próprio projeto reprova. A oscilação da captura é declarada; a largura
+ * final, não.
+ *
+ * Como repõe: `Emulation.clearDeviceMetricsOverride` sozinho NÃO desfaz a sobreposição que a captura
+ * deixou — medido no Chrome 152, a página continua sem barra. O que repõe é instalar uma sobreposição
+ * diferente da que está valendo e limpá-la em seguida: aí o navegador recalcula a área de renderização de
+ * verdade.
+ *
+ * A sobreposição instalada aqui tem o tamanho da ÁREA VISÍVEL, com 1 px a menos de altura. Esse "1 px a
+ * menos" é o que a torna diferente da que está valendo; e tomar a área visível — em vez do tamanho do
+ * conteúdo, que é o que a captura usa — é o que evita um segundo efeito: com a área do tamanho do conteúdo
+ * a página deixa de rolar por um instante, e uma página rolada perde e recupera a posição, com dois eventos
+ * de `scroll`. A largura fica intacta: é dela que dependem `srcset`, consultas de mídia e o próprio recorte.
+ *
+ * Quando não faz nada: página que não rola (sem barra de rolagem não havia o que perder) e página que não
+ * informou tamanho. Falha aqui é silenciosa — a auditoria já terminou —, mas cancelamento atravessa.
+ *
+ * @returns {Promise<{ran: boolean, reason: string}>}
+ *   `reason`: 'restored' | 'no-scrollbar' | 'size-unavailable' | 'unavailable' | 'failed'.
+ */
+export async function restoreRenderedViewport({ cdp, step, signal } = {}) {
+  if (!cdp || typeof cdp.command !== 'function' || typeof step !== 'function') {
+    return { ran: false, reason: 'unavailable' };
+  }
+  try {
+    const metrics = await step(() => cdp.command('Page.getLayoutMetrics', {}));
+    const size = contentOf(metrics);
+    if (!size) return { ran: false, reason: 'size-unavailable' };
+    const visible = metrics?.cssVisualViewport ?? metrics?.visualViewport ?? {};
+    const width = Number(visible.clientWidth ?? visible.width);
+    const height = Number(visible.clientHeight ?? visible.height);
+    if (!(width > 0) || !(height > 0)) return { ran: false, reason: 'size-unavailable' };
+    // Sem conteúdo mais alto que a área visível não havia barra de rolagem para perder: mexer aqui seria
+    // uma oscilação a mais por nada.
+    if (size.height <= height + 1) return { ran: false, reason: 'no-scrollbar' };
+    await step(() => cdp.command('Emulation.setDeviceMetricsOverride', {
+      width: Math.round(width), height: Math.max(1, Math.round(height) - 1), deviceScaleFactor: 1, mobile: false,
+    }));
+    await step(() => cdp.command('Emulation.clearDeviceMetricsOverride', {}));
+    return { ran: true, reason: 'restored' };
+  } catch (error) {
+    if (isCancellation(error, signal)) throw error;
+    return { ran: false, reason: 'failed' };
+  }
+}

@@ -158,7 +158,18 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   assert.equal(supplementalImage.legalAnalysis, null);
   const supplementalEvidence = audit.evidence.find(artifact => artifact.kind === 'element' &&
     artifact.nodeId === supplementalImage.nodeId && supplementalImage.evidenceRefs.includes(artifact.evidenceId));
-  assert.match(supplementalEvidence?.dataUrl ?? '', /^data:image\/png;base64,/);
+  // Desde a 1.1.62 o elemento que está dentro da captura integral não gera captura de tela própria: o
+  // artefato guarda **onde** ele estava e o recorte sai dos pixels que já estão no documento. A prova da
+  // imagem do elemento passa a ser o recorte apontando para o artefato de página inteira — e o PNG
+  // daquele elemento não é guardado de novo, que é o que evita um arquivo de imagem por elemento.
+  assert.ok(supplementalEvidence?.fullPageRect, 'o artefato do elemento guarda a região na captura integral');
+  assert.equal(supplementalEvidence.fullPageEvidenceId,
+    audit.evidence.find(artifact => artifact.kind === 'full-page')?.evidenceId,
+    'o recorte do elemento aponta para a captura integral da mesma auditoria');
+  assert.equal(typeof supplementalEvidence.dataUrl, 'undefined',
+    'na evidência completa o elemento não guarda PNG próprio: os pixels dele já estão na captura integral');
+  assert.match(audit.evidence.find(artifact => artifact.evidenceId === supplementalEvidence.fullPageEvidenceId)?.dataUrl ?? '',
+    /^data:image\/png;base64,/, 'e a captura integral apontada pelo recorte tem os pixels guardados');
   assert.ok(supplementalEvidence.accessibility.announcementPreview.length > 0);
   // Public-URL reports are view-only; the live owned-page action belongs to the panel.
   await extension.startPage.page.command('Page.bringToFront');
@@ -266,7 +277,15 @@ test('proves axe/map only through action → Side Panel → public URL consent �
   const rasters = audit.evidence.filter(artifact =>
     ['full-page', 'element'].includes(artifact.kind) && typeof artifact.dataUrl === 'string');
   assert.ok(rasters.some(artifact => artifact.kind === 'full-page'));
-  assert.ok(rasters.some(artifact => artifact.kind === 'element'));
+  // Na evidência completa, e desde a 1.1.62, os elementos vêm recortados da captura integral: o único
+  // raster guardado é a própria captura, e nenhum PNG de elemento é duplicado. A captura por elemento
+  // continua existindo no modo "Somente elementos" (ver test/e2e/current-page-pixel-direct-retire-mv3).
+  const elementArtifacts = audit.evidence.filter(artifact => artifact.kind === 'element');
+  assert.ok(elementArtifacts.length > 0, 'os elementos observados viram artefatos com seletor e descrição');
+  assert.ok(elementArtifacts.some(artifact => artifact.fullPageRect && typeof artifact.fullPageEvidenceId === 'string'),
+    'os elementos dentro da captura integral apontam para ela, e é dela que o relatório os recorta');
+  assert.ok(rasters.every(artifact => artifact.kind === 'full-page'),
+    'nenhum PNG por elemento é guardado quando os pixels dele já estão na captura integral');
   const liveCards = await extension.evaluate(report,
     `[...document.querySelectorAll('[data-report-annex] [data-report-evidence]')].map(card=>({id:card.dataset.reportEvidence,text:card.textContent}))`);
   for (const artifact of rasters) {

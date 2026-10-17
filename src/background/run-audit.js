@@ -1,5 +1,5 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
-import { establishWidenedLayout, warmUpFullPageLayout } from './full-page-warm-up.js';
+import { establishWidenedLayout, restoreRenderedViewport, warmUpFullPageLayout } from './full-page-warm-up.js';
 import { mapSourceGeometry } from '../core/evidence/map-source-geometry.js';
 import { contentSizeOf, domSnapshotRects, integralCaptureRect, snapshotFrameId, withFreshRects } from '../core/evidence/fresh-geometry.js';
 import { measureElementTarget } from '../browser/measure-element.js';
@@ -1491,6 +1491,14 @@ async function runLegacyAudit({
       }
     }
     perfMark('mapa-teclado', perfKeyboardMap);
+    // Fim do trabalho com pixels: devolver a área de renderização ao estado original. A captura
+    // (`captureBeyondViewport`) esconde a barra de rolagem e deixa a página ~15 px mais larga no Chrome 152,
+    // e esse estado continua valendo depois dela. Aqui todas as medidas que dependem do leiaute alargado já
+    // foram feitas (retângulos frescos, mapas), então repor a largura real só devolve à pessoa a página que
+    // ela tinha — é o que a frase declarada do produto promete e o que o oráculo de fonte intocada confere.
+    if (chromeAdapter.captureFullPageEnabled !== false || chromeAdapter.captureElementsEnabled !== false) {
+      await restoreRenderedViewport({ cdp, step: awaitStep, signal });
+    }
     const perfPresentation = perfBegin();
     state.occurrences.push(...makeEditorialOccurrences(auditId, state.editorialRuleResults));
     allocateOccurrenceIds(state);

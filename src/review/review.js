@@ -25,12 +25,13 @@ import {
 } from '../core/keyboard/keyboard-map-geometry.js';
 import { canonicalReviewMarks, describeReviewAreaPosition, REVIEW_MARKS_LIMITS, REVIEW_MARKS_VERSION } from '../core/review/review-marks.js';
 import { applyReportSourceControls, buildReportView, renderReportView, updateReportHighlightAction } from './report-view.js';
+import { cropImageRegistry } from './crop-image-registry.js';
 import { REPORT_PORT_NAME } from '../background/report-port.js';
 import { createReportHighlightPolicy } from './report-highlight-policy.js';
 import {
   buildTabReadingPlan, tabReadingProgress, tabReadingRowLabel,
-  TAB_READING_ANSWERS, TAB_READING_HINT_LABEL, TAB_READING_INTRO, TAB_READING_LISTEN_LABEL,
-  TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_SECTION_TITLE,
+  TAB_READING_ANSWER_TEXT, TAB_READING_ANSWERS, TAB_READING_HINT_LABEL, TAB_READING_INTRO,
+  TAB_READING_LISTEN_LABEL, TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_SECTION_TITLE,
 } from '../core/report/tab-reading-plan.js';
 import { createSpeaker } from '../reader/speech.js';
 
@@ -1038,36 +1039,15 @@ function cardMediaUncached(card) {
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 // Cada PNG entra uma vez no documento e os recortes o referenciam por `<use>`: sem isto, a mesma captura
-// de página inteira seria copiada na marcação de cada cartão que a usa.
-const CROP_IMAGE_DEFINITIONS = new Map();
-let cropDefinitions = null;
-let cropImageCount = 0;
-
+// de página inteira seria copiada na marcação de cada cartão que a usa. O registro é o mesmo do relatório
+// — ver `crop-image-registry.js`.
 function cropImageReference(dataUrl, size) {
-  if (!cropDefinitions) {
-    cropDefinitions = document.createElementNS(SVG_NAMESPACE, 'svg');
-    cropDefinitions.setAttribute('class', 'evidence-definitions');
-    cropDefinitions.setAttribute('aria-hidden', 'true');
-    cropDefinitions.setAttribute('width', '0');
-    cropDefinitions.setAttribute('height', '0');
-    cropDefinitions.setAttribute('focusable', 'false');
-    cropDefinitions.append(document.createElementNS(SVG_NAMESPACE, 'defs'));
-    document.body.append(cropDefinitions);
-  }
-  const bySize = CROP_IMAGE_DEFINITIONS.get(dataUrl) ?? new Map();
-  CROP_IMAGE_DEFINITIONS.set(dataUrl, bySize);
-  const key = `${size.width}x${size.height}`;
-  if (!bySize.has(key)) {
-    const image = document.createElementNS(SVG_NAMESPACE, 'image');
-    image.setAttribute('id', `lay-crop-image-${cropImageCount += 1}`);
-    image.setAttribute('href', dataUrl);
-    image.setAttribute('width', String(size.width));
-    image.setAttribute('height', String(size.height));
-    image.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-    cropDefinitions.firstChild.append(image);
-    bySize.set(key, image.getAttribute('id'));
-  }
-  return bySize.get(key);
+  const registry = cropImageRegistry(document);
+  // O relatório desenha no mesmo documento e pendura o registro na raiz dele; aqui só se cria o registro
+  // quando ainda não há nenhum — mover para o corpo o que já está no documento quebraria os `<use>` do
+  // relatório sem necessidade.
+  if (!registry.node.isConnected) registry.attach(document.body);
+  return registry.reference(dataUrl, size);
 }
 
 function cropSvg(media, display) {
@@ -1116,7 +1096,11 @@ function openCropZoom(media) {
   zoomDialog.showModal();
 }
 
-function cropBlock(media, card) {
+// `legend` curta: na coluna estreita da leitura por Tab a legenda completa (contorno + contexto +
+// origem do recorte) empurrava a imagem para fora da tela. Ali cabe "Contorno vermelho: este elemento.
+// Clique para ampliar."; quem abrir o recorte ampliado lê a explicação inteira.
+function cropBlock(media, card, options = {}) {
+  const short = options.shortLegend === true;
   const figure = el('figure', undefined, 'lay-crop');
   if (media.rawDataUrl) {
     const image = document.createElement('img');
@@ -1124,6 +1108,7 @@ function cropBlock(media, card) {
     image.src = media.rawDataUrl;
     image.alt = `Captura do elemento: ${card.element?.label ?? 'elemento da página'}`;
     figure.append(image);
+    // Sem marcação não há contorno: a frase curta diria que o elemento está contornado quando não está.
     figure.append(el('figcaption', EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND, 'lay-crop-caption'));
     return figure;
   }
@@ -1134,8 +1119,8 @@ function cropBlock(media, card) {
   zoom.append(cropSvg(media, media.display));
   zoom.addEventListener('click', () => openCropZoom(media));
   figure.append(zoom);
-  figure.append(el('figcaption', cropCaption(media), 'lay-crop-caption'));
-  figure.append(el('p', 'Clique na imagem para ver o recorte ampliado.', 'lay-crop-hint'));
+  figure.append(el('figcaption', short ? 'Contorno vermelho: este elemento.' : cropCaption(media), 'lay-crop-caption'));
+  figure.append(el('p', short ? 'Clique para ampliar.' : 'Clique na imagem para ver o recorte ampliado.', 'lay-crop-hint'));
   return figure;
 }
 
@@ -2077,17 +2062,25 @@ function tabReadingImageCell(row) {
   // dizer a que coluna pertence sem depender do cabeçalho, que sai de vista.
   cell.setAttribute('data-tab-cell', 'Imagem do elemento');
   const media = cardMedia(row);
-  if (media) cell.append(cropBlock(media, row));
+  if (media) cell.append(cropBlock(media, row, { shortLegend: true }));
   else cell.append(el('p', 'A auditoria não guardou imagem deste elemento.', 'lay-crop-caption'));
   return cell;
 }
 
+// O seletor CSS vai fechado dentro de "Detalhe técnico": para quem audita a página ele é útil, mas na
+// coluna estreita ele empurrava para fora o que a pessoa precisa ler ("Tab 3 · botão"). O destaque
+// fica com a ordem e o tipo do elemento; o jargão espera quem quiser abrir.
 function tabReadingElementCell(row) {
   const cell = document.createElement('td');
   cell.setAttribute('data-tab-cell', 'Ordem / elemento');
   cell.append(el('p', `Tab ${row.number} · ${row.element?.roleWord ?? 'elemento'}`, 'lay-tab-order'));
   const selector = row.evidence?.selector?.css;
-  if (typeof selector === 'string' && selector) cell.append(el('code', selector, 'lay-tab-selector'));
+  if (typeof selector === 'string' && selector) {
+    const details = document.createElement('details');
+    details.className = 'lay-tab-detail';
+    details.append(el('summary', 'Detalhe técnico'), el('code', selector, 'lay-tab-selector'));
+    cell.append(details);
+  }
   return cell;
 }
 
@@ -2112,12 +2105,18 @@ function tabReadingAnnouncementCell(row) {
   return cell;
 }
 
+// Frase de leigo para a resposta registrada, compartilhada com o arquivo entregue
+// (`TAB_READING_ANSWER_TEXT`): a pessoa responde "Sim / Não / Não sei" a uma pergunta sobre o anúncio;
+// repetir aqui o rótulo jurídico ("Não conforme (não atende ao item)") obrigaria ela a traduzir o próprio
+// clique. O quadro segue a resposta pela cor (`data-lay-answer`, a mesma chave dos cartões comuns) — antes
+// o atributo era outro e o CSS deixava o quadro verde em qualquer resposta.
 function tabReadingAnsweredLine(row) {
   const decision = row.decision;
   const wrap = el('div', undefined, 'lay-answered');
-  wrap.setAttribute('data-tab-reading-answer', decision.answer);
+  wrap.setAttribute('data-lay-answer', decision.answer);
   const revisions = decision.revisions?.length ? ` · revista ${decision.revisions.length} ${decision.revisions.length === 1 ? 'vez' : 'vezes'}` : '';
-  wrap.append(el('p', `Resposta registrada: ${ANSWER_LABELS[decision.answer]} — ${decision.evaluator}, ${formatLocalInstant(decision.decidedAt, auditModel.timezone)}${revisions}.`));
+  wrap.append(el('p', TAB_READING_ANSWER_TEXT[decision.answer] ?? `Sua resposta: ${ANSWER_LABELS[decision.answer]}.`));
+  wrap.append(el('p', `${decision.evaluator}, ${formatLocalInstant(decision.decidedAt, auditModel.timezone)}${revisions}.`, 'lay-answered-meta'));
   if (decision.note) {
     wrap.append(el('p', `${decision.answer === 'não conforme' ? 'O que deveria dizer' : 'Observação'}: ${decision.note}`, 'lay-answered-note'));
   }

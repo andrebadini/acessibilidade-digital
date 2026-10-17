@@ -19,6 +19,9 @@ import { EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND } from '../../src/core/report/eviden
 import { GUIDED_REVIEW_TREATMENT_V1 } from '../../src/core/report/evidence-treatment.js';
 import { isSafeEvidenceImageUrl } from '../../src/review/review-state.js';
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
+// O registro das imagens de recorte é o mesmo do relatório (ver crop-image-registry.js): o sandbox
+// reproduz o que o módulo real importa.
+import { cropImageRegistry } from '../../src/review/crop-image-registry.js';
 import { DEFAULT_STOPS, TEST_PNG, tabReadingModel } from '../report/tab-reading-fixture.js';
 
 const source = await readFile(new URL('../../src/review/review.js', import.meta.url), 'utf8');
@@ -111,7 +114,7 @@ function descendants(root) {
 
 function mount(model) {
   const context = {
-    ...layReview, ...evidenceCrop, ...tabPlan,
+    ...layReview, ...evidenceCrop, ...tabPlan, cropImageRegistry,
     EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND, GUIDED_REVIEW_TREATMENT_V1, isSafeEvidenceImageUrl,
     auditModel: model,
     reportSessionState: 'result',
@@ -231,7 +234,13 @@ test('a tabela tem as cinco colunas, na linha do Tab e com o anúncio estimado',
   // Cada célula diz a que coluna pertence: em tela estreita a tabela se empilha e o cabeçalho sai de vista.
   assert.deepEqual(descendants(rows[0]).map(node => node.getAttribute('data-tab-cell')).filter(Boolean),
     ['Imagem do elemento', 'Ordem / elemento', 'Nome e função', 'Anúncio estimado', 'Pergunta']);
-  assert.match(texts(cellOf(rows[0], 'Ordem / elemento')), /Tab 1 · botão #n-tab-1/u);
+  assert.match(texts(cellOf(rows[0], 'Ordem / elemento')), /Tab 1 · botão/u);
+  // O seletor CSS não concorre com a ordem: ele mora fechado dentro de "Detalhe técnico".
+  const detail = descendants(cellOf(rows[0], 'Ordem / elemento')).find(node => node.tagName === 'details');
+  assert.ok(detail, 'o seletor vai dentro de um <details>');
+  assert.equal(detail.getAttribute('open'), null, 'e o detalhe técnico nasce fechado');
+  assert.equal(detail.children.find(node => node.tagName === 'summary').textContent, 'Detalhe técnico');
+  assert.equal(detail.children.find(node => node.tagName === 'code').textContent, '#n-tab-1');
   assert.match(texts(cellOf(rows[0], 'Nome e função')), /“Buscar”/u);
   assert.match(texts(cellOf(rows[1], 'Nome e função')), /Sem nome acessível/u);
   assert.match(texts(cellOf(rows[2], 'Nome e função')), /“Pesquisar” Link/u);
@@ -250,6 +259,12 @@ test('cada ponto mostra o recorte do elemento com o contorno e o botão de ouvir
     assert.match(svg.getAttribute('aria-label'), /^Recorte da captura (?:da página inteira, na região do elemento|do elemento) desta pergunta\. Contorno vermelho: o elemento desta pergunta\./u);
     assert.ok(descendants(svg).some(node => node.attributes.class === 'evidence-highlight evidence-highlight--target'),
       'o contorno vermelho de localização é desenhado sobre a imagem');
+    // Na coluna estreita a legenda longa (tom + contexto + origem do recorte) não cabe: fica a frase
+    // curta, e a explicação inteira espera no recorte ampliado.
+    assert.equal(descendants(image).find(node => (node.attributes.class ?? '').includes('lay-crop-caption')).textContent,
+      'Contorno vermelho: este elemento.');
+    assert.equal(descendants(image).find(node => (node.attributes.class ?? '').includes('lay-crop-hint')).textContent,
+      'Clique para ampliar.');
     const listen = descendants(cellOf(rows[index], 'Anúncio estimado')).find(node => node.getAttribute('class') === 'lay-tab-listen');
     assert.equal(listen.textContent, tabPlan.TAB_READING_LISTEN_LABEL);
     assert.equal(listen.getAttribute('aria-label'), `${tabPlan.TAB_READING_LISTEN_LABEL} o anúncio estimado de ${expected}`);
@@ -315,7 +330,7 @@ test('“Não” abre o campo opcional do que deveria dizer e só grava no botã
   assert.equal(entry.revise, false);
   // A seção é remontada com a resposta registrada, e o campo de texto sai de cena.
   const after = rowNodes(api.layState.tabSection)[1];
-  assert.match(texts(cellOf(after, 'Pergunta')), /Resposta registrada: Não conforme/u);
+  assert.match(texts(cellOf(after, 'Pergunta')), /Sua resposta: Não — o que o leitor de tela fala não corresponde a este elemento\./u);
 });
 
 test('a linha respondida mostra a resposta, o estado de cor e o que deveria dizer', async () => {
@@ -328,7 +343,14 @@ test('a linha respondida mostra a resposta, o estado de cor e o que deveria dize
   assert.equal(first.getAttribute('data-tab-reading-state'), null, 'ponto ainda pendente não tem estado');
   assert.equal(second.getAttribute('data-tab-reading-state'), 'nao');
   assert.equal(third.getAttribute('data-tab-reading-state'), 'nao-sei');
-  assert.match(texts(cellOf(second, 'Pergunta')), /Resposta registrada: Não conforme \(não atende ao item\) — Fiscal Ana,/u);
+  // A resposta fala a língua da pergunta ("Sim / Não / Não sei"); quem respondeu e quando é registro.
+  assert.match(texts(cellOf(second, 'Pergunta')), /Sua resposta: Não — o que o leitor de tela fala não corresponde a este elemento\./u);
+  assert.match(texts(cellOf(second, 'Pergunta')), /Fiscal Ana,/u);
+  assert.match(texts(cellOf(third, 'Pergunta')), /Sua resposta: Não sei\./u);
+  // O quadro segue a resposta: "Não" é vermelho, "Não sei" é cinza, e não o verde de "Sim".
+  const answeredWrap = node => descendants(cellOf(node, 'Pergunta')).find(child => (child.attributes.class ?? '').includes('lay-answered'));
+  assert.equal(answeredWrap(second).getAttribute('data-lay-answer'), 'não conforme');
+  assert.equal(answeredWrap(third).getAttribute('data-lay-answer'), 'não foi possível determinar');
   assert.match(texts(cellOf(second, 'Pergunta')), /O que deveria dizer: Campo de busca, caixa de texto/u);
   assert.ok(descendants(cellOf(second, 'Pergunta')).some(node => node.textContent === 'Rever resposta'));
   // O progresso acompanha: dois de três conferidos.

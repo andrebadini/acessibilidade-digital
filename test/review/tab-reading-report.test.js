@@ -43,6 +43,14 @@ test('o HTML e o PDF entregues mostram a seção, o progresso e as linhas respon
     assert.equal((html.match(/data-tab-reading-answer="não foi possível determinar"/gu) ?? []).length, 1);
     assert.ok(html.includes('O que deveria dizer:'));
     assert.ok(html.includes('Campo de busca, caixa de texto'));
+    // A frase da resposta é a mesma da caixa colorida da verificação guiada: nesta seção o rótulo técnico
+    // ("Não conforme (não atende ao item)") não aparece — ele continua sendo o rótulo das fichas de
+    // revisão humana, que é outro lugar do relatório.
+    const section = sectionOf(html);
+    assert.ok(section.includes('Sua resposta: Sim — corresponde.'));
+    assert.ok(section.includes('Sua resposta: Não — o que o leitor de tela fala não corresponde a este elemento.'));
+    assert.ok(section.includes('Sua resposta: Não sei.'));
+    assert.equal(section.includes('Não conforme (não atende ao item)'), false);
   }
 });
 
