@@ -13,7 +13,12 @@ import { enrichAuditForReport } from '../core/report/enrich-audit.js';
 import { renderHtmlReport } from '../core/report/html.js';
 import { REPORT_HASH_BASE, verifyAuditIntegritySnapshot } from '../core/report/integrity.js';
 import { preparedReportFormats } from '../core/report/report-policy.js';
-import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from './export-formats.js';
+import {
+  canonicalExportFormatsV1,
+  createExportDeliveryIdentityV1,
+  EXPORT_FORMATS_V1,
+  isCanonicalExportFormatsV1,
+} from './export-formats.js';
 export { EXPORT_FORMATS_V1 };
 import { deriveSystemLimitations } from '../core/report/text-policy.js';
 import { inspectAuditSnapshotCapability } from '../storage/audit-store.js';
@@ -27,12 +32,15 @@ import {
 } from './export-issues.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+// A janela "Perguntar onde salvar cada arquivo" pode ficar aberta enquanto a pessoa decide
+// a pasta. Três minutos cobrem a escolha sem deixar a exportação presa para sempre.
+const SAVE_DIALOG_TIMEOUT_MS = 3 * 60_000;
 const PDF_COMMAND_TIMEOUT_MS = 45_000;
 const MAX_FINALIZATION_PASSES = 6;
 const GENERATED_REPORT_RESULTS = new WeakMap();
 const REPORT_REQUEST_KEYS = new Set([
   'auditModel', 'auditSnapshotCapability', 'exportLeaseOwnerId', 'exportAttempt',
-  'manifestVersion', 'browserVersion', 'timezone', 'now', 'timeoutMs', 'brand',
+  'manifestVersion', 'browserVersion', 'timezone', 'now', 'timeoutMs', 'brand', 'formats',
 ]);
 const DELIVERY_LEASE_ATTESTATION_KEYS = Object.freeze([
   'active', 'phase', 'retryAt', 'revision', 'exportAttempt', 'deliveryAt',
@@ -47,6 +55,9 @@ class OwnershipTransferTimeoutError extends DOMException {
 
 export async function runReportExport(request, dependencies) {
   const capturedRequest = captureReportExportRequest(request);
+  const requestedFormats = capturedRequest.formats ?? EXPORT_FORMATS_V1;
+  const csvRequested = requestedFormats.includes('csv');
+  const pdfRequested = requestedFormats.includes('pdf');
   let snapshotCapability = null;
   let exportLeaseOwnerId = null;
   let exportAttempt = null;
@@ -96,6 +107,7 @@ export async function runReportExport(request, dependencies) {
       timeoutMs: capturedRequest.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       dependencies,
       blobLifecycle,
+      requestedFormats,
     });
   }
   const at = deliveryAt;
@@ -111,8 +123,8 @@ export async function runReportExport(request, dependencies) {
   const original = sanitizeReportMessages(sourceModel);
   const generationIssues = [];
   const printCleanupLimitations = [];
-  let hasCsv = true;
-  let hasPdf = true;
+  let hasCsv = csvRequested;
+  let hasPdf = pdfRequested;
   let expectedPdfFallback = false;
   let model = null;
   let html = null;
@@ -177,16 +189,21 @@ export async function runReportExport(request, dependencies) {
   }
 
   if (!settled) {
-    hasCsv = false;
+    // Só os formatos pedidos podem aparecer como indisponíveis: um botão de PDF não deve
+    // declarar falha de CSV (nem o contrário), e o limite de tentativas só é alcançado
+    // depois que o PDF pedido falhou repetidamente.
+    const csvUnavailable = csvRequested && csv === null;
+    const keepsCsv = csvRequested && csv !== null;
+    hasCsv = keepsCsv;
     hasPdf = false;
     expectedPdfFallback = false;
-    csv = null;
+    if (!keepsCsv) csv = null;
     pdf = null;
     pdfFallback = false;
     removeIssue(generationIssues, 'REPORT_PDF_TAGGING_UNSUPPORTED');
-    addIssue(generationIssues, createExportIssue('REPORT_CSV_UNAVAILABLE'));
-    addIssue(generationIssues, createExportIssue('REPORT_PDF_UNAVAILABLE'));
-    model = await finalizeGeneratedModel(original, at, generationIssues, false, false, true, false);
+    if (csvUnavailable) addIssue(generationIssues, createExportIssue('REPORT_CSV_UNAVAILABLE'));
+    if (pdfRequested) addIssue(generationIssues, createExportIssue('REPORT_PDF_UNAVAILABLE'));
+    model = await finalizeGeneratedModel(original, at, generationIssues, false, false, true, hasCsv);
     html = renderHtmlReport(model);
     json = renderTechnicalJson(model);
   }
@@ -211,6 +228,7 @@ export async function runReportExport(request, dependencies) {
   const baseName = buildArtifactBaseName(model.auditId, at);
   const downloadOptions = {
     timeoutMs,
+    dialogTimeoutMs: SAVE_DIALOG_TIMEOUT_MS,
     ...(blobLifecycle ? { blobLifecycle } : {}),
     ...(snapshotCapability === null ? {} : {
       assertCanDownload: ({ format }) => dependencies.assertDelivery({
@@ -225,22 +243,29 @@ export async function runReportExport(request, dependencies) {
       }),
     }),
   };
-  const downloads = await downloadArtifacts({
-    baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
-  }, dependencies.downloadsAdapter, downloadOptions);
+  const requestedArtifacts = {
+    baseName,
+    ...(requestedFormats.includes('html') ? { html } : {}),
+    ...(requestedFormats.includes('json') ? { json } : {}),
+    ...(csv !== null && csvRequested ? { csv } : {}),
+    ...(pdf && pdfRequested ? { pdf } : {}),
+  };
+  const downloads = await downloadArtifacts(requestedArtifacts, dependencies.downloadsAdapter, downloadOptions);
   const missingGenerationLimitations = [];
-  if (csv === null) missingGenerationLimitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message);
-  if (!pdf) {
+  if (csvRequested && csv === null) missingGenerationLimitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message);
+  if (pdfRequested && !pdf) {
     const pdfIssue = generationIssues.find(issue => PDF_GENERATION_FAILURE_CODES.includes(issue.code));
     missingGenerationLimitations.push((pdfIssue ?? createExportIssue('REPORT_PDF_UNAVAILABLE')).message);
   }
   const deliveryLimitations = [...new Set([
     ...missingGenerationLimitations,
-    ...printCleanupLimitations,
+    ...(pdfRequested ? printCleanupLimitations : []),
     ...downloads.limitations,
   ])];
   const deliveryReceipt = {
-    status: downloads.formats.length === 4 && downloads.formats.every(format => format.status === 'complete') && deliveryLimitations.length === 0
+    status: requestedFormats.length === EXPORT_FORMATS_V1.length &&
+      downloads.formats.length === EXPORT_FORMATS_V1.length &&
+      downloads.formats.every(format => format.status === 'complete') && deliveryLimitations.length === 0
       ? 'complete'
       : 'partial',
     formats: downloads.formats,
@@ -258,6 +283,7 @@ export async function runReportExport(request, dependencies) {
     csv,
     pdf,
     formats: downloads.formats,
+    requestedFormats,
     deliveryReceipt,
     limitations: [...new Set([
       ...generationIssues.map(issue => issue.message),
@@ -279,6 +305,7 @@ export async function runReportExport(request, dependencies) {
 
 async function runImmutableRevisionExport({
   sourceModel, reportView, snapshotCapability, exportLeaseOwnerId, exportAttempt, artifactTimestamp, timeoutMs, dependencies, blobLifecycle,
+  requestedFormats,
 }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !reportView || reportView.version !== 1 ||
     reportView.auditId !== sourceModel.auditId || reportView.modelHash !== sourceModel.integrity.canonicalModelHash ||
@@ -291,13 +318,18 @@ async function runImmutableRevisionExport({
   const html = renderHtmlReport(model, { reportView, deliveryIdentity });
   const printHtml = renderHtmlReport(model, { reportView, deliveryIdentity, forPrint: true });
   const json = renderTechnicalJson(model, { deliveryIdentity });
+  const csvRequested = requestedFormats.includes('csv');
+  const pdfRequested = requestedFormats.includes('pdf');
   let csv = null;
   let pdf = null;
   let pdfFallback = false;
   const limitations = [];
-  try { csv = renderCanonicalCsv(model, dependencies.csvRenderer, deliveryIdentity); }
-  catch { limitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message); }
-  if (csv !== null) {
+  if (csvRequested) {
+    try { csv = renderCanonicalCsv(model, dependencies.csvRenderer, deliveryIdentity); }
+    catch { limitations.push(createExportIssue('REPORT_CSV_UNAVAILABLE').message); }
+  }
+  // O PDF é impresso mesmo quando o CSV pedido falhou: são botões independentes.
+  if (pdfRequested) {
     const printed = await printFinalHtml(printHtml, dependencies, timeoutMs, false, blobLifecycle);
     if (printed.cleanupLimited) limitations.push(createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message);
     if (printed.issue) limitations.push(printed.issue.message);
@@ -307,29 +339,37 @@ async function runImmutableRevisionExport({
       if (pdfFallback) limitations.push(createExportIssue('REPORT_PDF_TAGGING_UNSUPPORTED').message);
     }
   }
-  if (!pdf && !limitations.some(value => value === createExportIssue('REPORT_PDF_UNAVAILABLE').message)) {
+  if (pdfRequested && !pdf &&
+    !limitations.some(value => PDF_GENERATION_FAILURE_CODES.some(code => value === createExportIssue(code).message))) {
     limitations.push(createExportIssue('REPORT_PDF_UNAVAILABLE').message);
   }
   const baseName = buildArtifactBaseName(model.auditId, artifactTimestamp);
-  const downloads = await downloadArtifacts({
-    baseName, html, json, ...(csv === null ? {} : { csv }), ...(pdf ? { pdf } : {}),
-  }, dependencies.downloadsAdapter, {
+  const requestedArtifacts = {
+    baseName,
+    ...(requestedFormats.includes('html') ? { html } : {}),
+    ...(requestedFormats.includes('json') ? { json } : {}),
+    ...(csv !== null && csvRequested ? { csv } : {}),
+    ...(pdf && pdfRequested ? { pdf } : {}),
+  };
+  const downloads = await downloadArtifacts(requestedArtifacts, dependencies.downloadsAdapter, {
     timeoutMs,
+    dialogTimeoutMs: SAVE_DIALOG_TIMEOUT_MS,
     ...(blobLifecycle ? { blobLifecycle } : {}),
     assertCanDownload: ({ format }) => dependencies.assertDelivery({ snapshotCapability, exportLeaseOwnerId, format }),
     recordDeliveryState: entry => dependencies.recordDelivery({ snapshotCapability, exportLeaseOwnerId, ...entry }),
   });
   const receiptLimitations = [...new Set([...limitations, ...downloads.limitations])];
   const deliveryReceipt = {
-    status: downloads.formats.length === EXPORT_FORMATS_V1.length &&
+    status: requestedFormats.length === EXPORT_FORMATS_V1.length &&
+      downloads.formats.length === EXPORT_FORMATS_V1.length &&
       downloads.formats.every((entry, index) => entry.status === 'complete' && entry.format === EXPORT_FORMATS_V1[index]) &&
       receiptLimitations.length === 0 ? 'complete' : 'partial',
     formats: downloads.formats,
     limitations: receiptLimitations,
   };
   return attestReportExportResult({
-    model, html, json, csv, pdf, formats: downloads.formats, deliveryReceipt, exportDeliveryIdentity: deliveryIdentity,
-    limitations: receiptLimitations, pdfFallback,
+    model, html, json, csv, pdf, formats: downloads.formats, requestedFormats, deliveryReceipt,
+    exportDeliveryIdentity: deliveryIdentity, limitations: receiptLimitations, pdfFallback,
   }, snapshotCapability, exportLeaseOwnerId, exportAttempt, baseName);
 }
 
@@ -409,6 +449,7 @@ async function projectGeneratedResult(value) {
     csv: await generatedTextHash(value.csv, true),
     pdf: await generatedBinaryHash(value.pdf, true),
     formats: await sha256Hex(canonicalStringify(value.formats)),
+    requestedFormats: await sha256Hex(canonicalStringify(value.requestedFormats ?? EXPORT_FORMATS_V1)),
     deliveryReceipt: await sha256Hex(canonicalStringify(value.deliveryReceipt)),
     exportDeliveryIdentity: value.exportDeliveryIdentity === undefined ? null : await sha256Hex(canonicalStringify(createExportDeliveryIdentityV1(value.exportDeliveryIdentity))),
     limitations: await sha256Hex(canonicalStringify(value.limitations)),
@@ -780,7 +821,13 @@ function captureReportExportRequest(value) {
     for (const key of keys) {
       const descriptor = descriptors[key];
       if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TypeError();
-      if (key !== 'brand') output[key] = descriptor.value;
+      if (key === 'brand') continue;
+      if (key === 'formats') {
+        if (!isCanonicalExportFormatsV1(descriptor.value)) throw new TypeError();
+        output[key] = canonicalExportFormatsV1(descriptor.value);
+      } else {
+        output[key] = descriptor.value;
+      }
     }
     const hasModel = Object.hasOwn(output, 'auditModel');
     const hasCapability = Object.hasOwn(output, 'auditSnapshotCapability');

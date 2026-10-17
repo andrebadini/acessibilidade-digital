@@ -1011,6 +1011,7 @@ export function createSidePanelIntentRouter(raw) {
     if (envelope.type === 'REPORT_REQUEST_EXPORT') return input.exportLaunch?.requestExport?.({
       auditId: envelope.auditId, sessionCapabilityId: envelope.sessionCapabilityId, sender: request.sender,
       deleteAfterCompleteExport: envelope.deleteAfterCompleteExport === true,
+      ...(envelope.formats === undefined ? {} : { formats: envelope.formats }),
     }) ?? fail('FEATURE_UNAVAILABLE');
     if (envelope.type === 'REPORT_COMMIT_REVIEW_DECISION') return mutateReport(envelope, request.sender, 'review-commit');
     if (envelope.type === 'REPORT_COMMIT_REVIEW_BATCH') return mutateReport(envelope, request.sender, 'review-commit');

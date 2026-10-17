@@ -1,3 +1,4 @@
+import { pageZoomOf } from '../core/evidence/fresh-geometry.js';
 import { sha256Hex } from '../core/report/hash.js';
 import { MAX_MEASURED_PARTS, rectExceedsBounds, unionOfRects } from './measure-element.js';
 
@@ -75,12 +76,31 @@ async function capture(cdp, params, kind, metadata = {}) {
 // limitação (a altura capturada fica em `metadata.height`).
 export const FULL_PAGE_CAPTURE_LIMITS = Object.freeze({ maxDeviceHeight: 16_384, maxDevicePixels: 40_000_000 });
 
+// Os dois mapas derivados recusam uma fonte com lado maior que 8.192 px (limite congelado deles,
+// `maxDimension`). Com a página ampliada, o mesmo documento passa a render mais pixels do que em
+// 100 %: um documento de 5.759 px CSS vira 8.638 px de imagem em 150 % e o mapa inteiro seria omitido
+// por tamanho de fonte — pior do que as caixas erradas que esta versão corrige. A imagem continua
+// cobrindo a página inteira; quando o zoom a levaria além do que o mapa consegue ler, ela é reduzida
+// só o suficiente para caber. Em 100 % nada muda: a escala de recorte continua 1 e o limite de altura
+// de 16.384 px de dispositivo segue valendo.
+const FULL_PAGE_MAP_SOURCE_DIMENSION = 8_192;
+
+/**
+ * Densidade da tela (o 2× de um monitor Retina), separada do zoom da página.
+ *
+ * `contentSize / cssContentSize` já traz os dois fatores multiplicados: em 125 % e tela 2× a razão é
+ * 2,5, não 2. Dividir pelo zoom é o que impede o zoom de ser contado duas vezes — o recorte do CDP já
+ * cresce por ele. `deviceScaleFactor` nas métricas é o `devicePixelRatio` do ambiente, que também
+ * inclui o zoom, então passa pela mesma divisão.
+ */
 function deviceScale(metrics = {}) {
+  const zoom = pageZoomOf(metrics);
   const css = metrics.cssContentSize;
   const device = metrics.contentSize;
   const ratio = Number.isFinite(css?.width) && css.width > 0 && Number.isFinite(device?.width) && device.width > 0
-    ? device.width / css.width
-    : Number.isFinite(metrics.deviceScaleFactor) && metrics.deviceScaleFactor > 0 ? metrics.deviceScaleFactor : 1;
+    ? device.width / css.width / zoom
+    : Number.isFinite(metrics.deviceScaleFactor) && metrics.deviceScaleFactor > 0
+      ? metrics.deviceScaleFactor / zoom : 1;
   return Math.min(4, Math.max(1, ratio));
 }
 
@@ -94,11 +114,40 @@ export function safeFullPageCaptureHeight(width, height, scale = 1) {
 
 export async function captureFullPage(cdp, metrics = {}) {
   const size = dimensions(metrics);
+  const zoom = pageZoomOf(metrics);
+  const density = deviceScale(metrics);
+  // O teto de dispositivo conta o zoom: o recorte abaixo cresce pelo zoom e a densidade multiplica o
+  // raster de novo. Sem isso, uma página alta em 125 % podia passar do teto de 16.384 px de dispositivo.
   if (size.width !== null && size.height !== null) {
-    size.height = safeFullPageCaptureHeight(size.width, size.height, deviceScale(metrics));
+    size.height = safeFullPageCaptureHeight(size.width, size.height, density * zoom);
   }
+  // O recorte do CDP é interpretado em px CSS do documento, mas a imagem que o Chrome rasteriza com a
+  // página ampliada continua no tamanho do leiaute em 100 %: pedir `width` CSS devolvia uma imagem de
+  // `width` px mostrando só `width / zoom` CSS — a página inteira ficava cortada na horizontal e na
+  // vertical. Multiplicar o recorte pelo zoom faz a imagem cobrir todo o documento; os metadados
+  // continuam em CSS px, então a escala do mapa vira `largura do PNG / largura CSS` = zoom × escala da
+  // tela, que é exatamente a relação entre o pixel da imagem e o pixel CSS do documento.
+  //
+  // O zoom nunca aumenta o raster além do que o documento ocuparia em 100 % nem além do teto que os
+  // mapas leem (8.192 px): se aumentasse, a imagem seria reduzida de volta só o necessário. Em 100 %
+  // esta conta dá escala 1 e o recorte é idêntico ao de antes.
+  const naturalWidth = size.width === null ? null : size.width * zoom;
+  const naturalHeight = size.height === null ? null : size.height * zoom;
+  // A densidade da tela multiplica o raster além do zoom: o PNG final mede
+  // `natural × rasterScale × densidade`. Numa tela 2×, uma página de 5.246 px CSS virava 10.492 px e
+  // os dois mapas se recusavam a desenhá-la (limite de 8.192 px) — o mesmo problema que o zoom causava,
+  // agora pela densidade. A conta abaixo cabe nas duas causas ao mesmo tempo.
+  const rasterScale = naturalWidth !== null && naturalHeight !== null
+    ? Math.min(
+      1,
+      Math.max(size.width, FULL_PAGE_MAP_SOURCE_DIMENSION) / (naturalWidth * density),
+      Math.max(size.height, FULL_PAGE_MAP_SOURCE_DIMENSION) / (naturalHeight * density),
+    )
+    : 1;
   const clip = size.width !== null && size.height !== null
-    ? { x: 0, y: 0, width: size.width, height: size.height, scale: 1 }
+    ? {
+      x: 0, y: 0, width: naturalWidth, height: naturalHeight, scale: rasterScale,
+    }
     : null;
   return capture(cdp, {
     format: 'png', captureBeyondViewport: true, fromSurface: true,
@@ -220,9 +269,25 @@ export async function captureElement(cdp, rect, metrics = {}) {
   const geometry = normalizedClip(rect, metrics);
   if (!geometry) return cantTell('invalid-or-outside-rect', metrics);
   const { clip, margin, highlightBox, highlightParts, highlightClipped } = geometry;
-  const pixelScale = elementCaptureScale(clip.width, clip.height, deviceScale(metrics));
+  const density = deviceScale(metrics);
+  const pixelScale = elementCaptureScale(clip.width, clip.height, density);
   const scaledClip = pixelScale === 1 ? clip : { ...clip, scale: pixelScale };
-  const result = await capture(cdp, { format: 'png', captureBeyondViewport: !clipInsideViewports(clip, metrics), fromSurface: true, clip: scaledClip }, 'thumbnail', {
+  const zoom = pageZoomOf(metrics);
+  // A miniatura sofre do mesmo recorte da captura integral: as coordenadas do clip são CSS, mas o
+  // raster continua no tamanho do leiaute em 100 % e ainda é multiplicado pela densidade da tela.
+  // Pedir `clip × pixelScale` devolvia só `1 / (zoom × densidade)` do quadro — e numa tela 2× o PNG
+  // saía com o dobro do que os metadados declaravam. O recorte enviado ao Chrome cresce pelo zoom; a
+  // escala pedida cai por `zoom × densidade`, então a imagem final mede exatamente `quadro ×
+  // pixelScale`, como os metadados prometem. `metadata.clip` guarda o quadro LÓGICO (CSS) com a
+  // escala inteira, que é o sistema do `viewBox` e da marcação; só o pedido ao Chrome enxerga a
+  // densidade e o zoom.
+  const outputScale = zoom * density;
+  const requestClip = outputScale === 1 ? scaledClip
+    : {
+      x: clip.x * zoom, y: clip.y * zoom, width: clip.width * zoom, height: clip.height * zoom,
+      scale: pixelScale / outputScale,
+    };
+  const result = await capture(cdp, { format: 'png', captureBeyondViewport: !clipInsideViewports(clip, metrics), fromSurface: true, clip: requestClip }, 'thumbnail', {
     width: clip.width, height: clip.height, clip: scaledClip, highlightBox, highlightParts, annotationMargin: margin,
     ...(pixelScale > 1 ? { pixelScale } : {}),
     ...(highlightClipped ? { highlightClipped: true } : {}),

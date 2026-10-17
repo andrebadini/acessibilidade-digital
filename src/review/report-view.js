@@ -19,6 +19,7 @@ import {
   evidencePixelScale,
 } from '../core/report/evidence-highlight.js';
 import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
+import { createExportIssue, PDF_GENERATION_FAILURE_CODES } from '../export/export-issues.js';
 import { ATTACHED_COPY_RELOADED_MESSAGE } from '../core/report/diagnostic-policy.js';
 import { listedLimitations, viewportSummary } from '../core/report/text-policy.js';
 import { readerMapPresentation, READER_MAP_INTRO, READER_MAP_LEGACY_INTRO } from '../core/report/reader-map-presentation.js';
@@ -472,9 +473,26 @@ export function projectMethodology(model) {
 }
 
 export function projectExports(model) {
+  const artifact = model.report?.artifact;
+  const prepared = artifact?.status === 'pending' || !Array.isArray(artifact?.formats) || artifact.formats.length === 0
+    ? [...EXPORT_FORMATS_V1]
+    : EXPORT_FORMATS_V1.filter(format => artifact.formats.some(entry => entry?.format === format && entry?.status === 'prepared'));
+  const diagnostics = Array.isArray(model.session?.diagnostics) ? model.session.diagnostics : [];
+  const unavailable = EXPORT_FORMATS_V1.filter(format => !prepared.includes(format)).map(format => {
+    const codes = format === 'csv' ? ['REPORT_CSV_UNAVAILABLE']
+      : format === 'pdf' ? PDF_GENERATION_FAILURE_CODES : [];
+    const diagnostic = diagnostics.find(entry => codes.includes(entry?.code));
+    let reason;
+    try { reason = createExportIssue(diagnostic?.code).message; } catch {
+      reason = `O formato ${format.toUpperCase()} não está disponível neste relatório.`;
+    }
+    return freeze({ format, reason });
+  });
   return freeze({
     availability: model.report.status === 'pending' ? 'available' : model.report.status,
     formats: [...EXPORT_FORMATS_V1],
+    availableFormats: freeze(prepared),
+    unavailable: freeze(unavailable),
     limitations: Array.isArray(model.report.artifact?.limitations) ? [...model.report.artifact.limitations] : [],
   });
 }
@@ -1670,7 +1688,51 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   const actions = document.createElement('div');
   actions.setAttribute('class', 'executive-actions');
   actions.setAttribute('data-report-executive-actions', '');
-  const exportButton = element(document, 'button', 'Exportar HTML, PDF, CSV e JSON');
+  const exportGroup = document.createElement('div');
+  exportGroup.setAttribute('class', 'export-format-group');
+  exportGroup.setAttribute('data-report-export-formats', '');
+  exportGroup.setAttribute('role', 'group');
+  exportGroup.setAttribute('aria-label', 'Baixar relatório');
+  const unavailableByFormat = new Map((view.exports.unavailable ?? []).map(entry => [entry.format, entry.reason]));
+  const formatChoices = Object.freeze({
+    pdf: Object.freeze(['Baixar PDF', 'Para imprimir ou anexar a um ofício.']),
+    html: Object.freeze(['Baixar HTML', 'Para abrir no navegador, com imagens e links.']),
+    csv: Object.freeze(['Baixar planilha (CSV)', 'Para abrir no Excel ou no Google Sheets.']),
+    json: Object.freeze(['Baixar dados (JSON)', 'Arquivo técnico, com todos os dados.']),
+  });
+  for (const format of ['pdf', 'html', 'csv', 'json']) {
+    if (!Object.hasOwn(formatChoices, format)) continue;
+    const [buttonLabel, description] = formatChoices[format];
+    const option = document.createElement('div');
+    option.setAttribute('class', 'export-format-option');
+    const button = element(document, 'button', buttonLabel);
+    button.setAttribute('type', 'button');
+    button.setAttribute('data-report-export-format', format);
+    const helpId = `export-format-${format}-help`;
+    const descriptionNode = element(document, 'small', description, 'export-format-description');
+    descriptionNode.setAttribute('id', helpId);
+    option.append(button, descriptionNode);
+    button.setAttribute('aria-describedby', helpId);
+    if (unavailableByFormat.has(format)) {
+      button.disabled = true;
+      button.setAttribute('aria-disabled', 'true');
+      const reason = element(document, 'span', unavailableByFormat.get(format), 'export-format-unavailable');
+      reason.setAttribute('data-report-export-unavailable', format);
+      option.append(reason);
+      button.setAttribute('aria-describedby', `${helpId} export-format-${format}-unavailable`);
+      reason.setAttribute('id', `export-format-${format}-unavailable`);
+    } else {
+      button.addEventListener('click', () => onExport({ formats: [format] }));
+    }
+    const result = element(document, 'span', '', 'export-format-result');
+    result.setAttribute('data-report-export-result', format);
+    // Região viva por cartão: o resultado de um formato não apaga o dos outros. Sem
+    // `role="status"` para não duplicar o status único do relatório; `aria-live` basta.
+    result.setAttribute('aria-live', 'polite');
+    option.append(result);
+    exportGroup.append(option);
+  }
+  const exportButton = element(document, 'button', 'Baixar todos os formatos');
   exportButton.setAttribute('type', 'button'); exportButton.setAttribute('data-report-export', '');
   const deletionChoice = document.createElement('label');
   deletionChoice.setAttribute('class', 'export-retention-choice');
@@ -1680,16 +1742,27 @@ export function renderReportView({ view, document, onExport, onHighlightIntent =
   deleteAfterExport.setAttribute('id', 'delete-after-export');
   deleteAfterExport.setAttribute('data-report-delete-after-export', '');
   deleteAfterExport.checked = false;
-  deletionChoice.append(deleteAfterExport, element(document, 'span',
-    'Apagar os dados locais desta auditoria após baixar os quatro arquivos. Os downloads serão preservados.'));
-  exportButton.addEventListener('click', () => onExport({ deleteAfterCompleteExport: deleteAfterExport.checked === true }));
+  const allFormatsAvailable = (view.exports.availableFormats ?? EXPORT_FORMATS_V1).length === EXPORT_FORMATS_V1.length;
+  if (!allFormatsAvailable) {
+    deleteAfterExport.disabled = true;
+    deletionChoice.append(deleteAfterExport, element(document, 'span',
+      'A exclusão fica disponível quando os quatro formatos podem ser baixados. Os downloads serão preservados.'));
+  } else {
+    deletionChoice.append(deleteAfterExport, element(document, 'span',
+      'Apagar os dados locais desta auditoria após baixar os quatro arquivos. Os downloads serão preservados.'));
+  }
+  const allFormats = Object.freeze([...(view.exports.availableFormats ?? EXPORT_FORMATS_V1)]);
+  exportButton.addEventListener('click', () => onExport({
+    formats: allFormats,
+    deleteAfterCompleteExport: deleteAfterExport.checked === true,
+  }));
   const summaryPrint = element(document, 'button', 'Imprimir resumo / salvar PDF');
   summaryPrint.setAttribute('type', 'button');
   summaryPrint.setAttribute('data-report-print-summary', '');
   const printStatus = element(document, 'p', 'Resumo: totais, limitações, matriz ABNT e metodologia, sem fichas, capturas e conclusões humanas detalhadas. No diálogo de impressão, escolha Salvar como PDF.');
   printStatus.setAttribute('data-report-print-status', '');
   printStatus.setAttribute('aria-live', 'polite');
-  actions.append(exportButton, summaryPrint, printStatus, deletionChoice);
+  actions.append(exportGroup, exportButton, deletionChoice, summaryPrint, printStatus);
   executive.append(actions, limitations);
   root.append(executive);
   root.append(sectionNavigation(document));

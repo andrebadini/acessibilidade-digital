@@ -13,18 +13,21 @@ import { sha256Hex } from '../report/hash.js';
 import { KEYBOARD_MAP_LIMITATIONS, KEYBOARD_MAP_REQUIRED_LIMITATIONS, KEYBOARD_MAP_STOP_KINDS, KEYBOARD_MAP_SUSPECT_REASONS } from './keyboard-map-model.js';
 
 export const KEYBOARD_MAP_ALGORITHM = 'audita.keyboard-map';
-export const KEYBOARD_MAP_VERSION = '1.1.0';
+// 1.2.0: paradas e suspeitos fora da área capturada deixam de ser encaixados na borda (o encaixe
+// desenhava uma caixa de 1 px no lugar errado); passam a ficar sem caixa, contados em `omittedNoRect`.
+export const KEYBOARD_MAP_VERSION = '1.2.0';
 
 /**
  * Versões do algoritmo que esta revisão sabe **ler**, além de escrever.
  *
  * A 1.0.0 é a publicada até a 1.1.61 e continua aceita porque há auditorias guardadas nela: recusá-la faria
- * o relatório de quem já auditou parar de abrir. O esquema da geometria é o mesmo nas duas — o que mudou na
+ * o relatório de quem já auditou parar de abrir. O esquema da geometria é o mesmo nas três — o que mudou na
  * 1.1.0 foi a ORIGEM dos retângulos: eles passaram a ser medidos no mesmo leiaute da imagem
- * (`fresh-geometry.js`), e não na leitura estrutural de segundos antes. Por isso um mapa 1.0.0 continua
- * válido exatamente como foi escrito.
+ * (`fresh-geometry.js`), e não na leitura estrutural de segundos antes. A 1.2.0 mudou só o tratamento das
+ * posições fora da área capturada. Por isso os mapas 1.0.0 e 1.1.0 continuam válidos exatamente como foram
+ * escritos, com o encaixe que declaravam.
  */
-export const KEYBOARD_MAP_READABLE_VERSIONS = Object.freeze(['1.0.0', KEYBOARD_MAP_VERSION]);
+export const KEYBOARD_MAP_READABLE_VERSIONS = Object.freeze(['1.0.0', '1.1.0', KEYBOARD_MAP_VERSION]);
 export const KEYBOARD_MAP_PRINTABLE_ASPECT_RATIO = 1.3;
 
 export const KEYBOARD_MAP_LIMITS = Object.freeze({
@@ -56,6 +59,7 @@ export const KEYBOARD_MAP_PARTIAL_LIMITATIONS = Object.freeze([
   'closed-shadow-root-omitted',
   'frame-content-omitted',
   'stops-outside-source-clamped',
+  'stops-outside-source-omitted',
   'ancestor-clipped-stops-omitted',
   'cursor-style-not-collected',
   'privacy-content-omitted',

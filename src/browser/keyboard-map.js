@@ -71,17 +71,21 @@ function sourceWithinLimits(source) {
     source.width * source.height <= KEYBOARD_MAP_LIMITS.maxSourcePixels;
 }
 
-/** Caixa dentro da área capturada; nunca devolve retângulo degenerado nem fora da origem. */
-function clampedBox(bounds, cssWidth, cssHeight) {
+function outsideSource(bounds, cssWidth, cssHeight) {
+  return bounds.x >= cssWidth || bounds.y >= cssHeight || bounds.x + bounds.width <= 0 || bounds.y + bounds.height <= 0;
+}
+
+/**
+ * Recorte da caixa pela área capturada. Só é usado para itens que continuam na lista: no leiaute
+ * confirmado, o pedaço visível do elemento; no leiaute reprovado, a posição estimada que o esquema
+ * aceita. Nunca devolve retângulo degenerado nem fora da origem.
+ */
+function clippedBox(bounds, cssWidth, cssHeight) {
   const x = clamp(bounds.x, 0, Math.max(0, cssWidth - 1));
   const y = clamp(bounds.y, 0, Math.max(0, cssHeight - 1));
   const right = clamp(bounds.x + bounds.width, x + 1, cssWidth);
   const bottom = clamp(bounds.y + bounds.height, y + 1, cssHeight);
   return { x, y, width: right - x, height: bottom - y };
-}
-
-function outsideSource(bounds, cssWidth, cssHeight) {
-  return bounds.x >= cssWidth || bounds.y >= cssHeight || bounds.x + bounds.width <= 0 || bounds.y + bounds.height <= 0;
 }
 
 function maximumRasterSliceHeight(width) {
@@ -253,17 +257,36 @@ export function buildKeyboardMapPlan({
   }
   const counts = { ...selected.counts };
   let anyOutsideSource = false;
-  const clampAll = (entries, entryKind) => entries.map(entry => {
+  // Posição totalmente fora da captura não vira caixa no leiaute confirmado: encaixá-la na borda
+  // desenharia um retângulo de 1 px num lugar onde o elemento não está. O item sai das caixas e entra
+  // em `omittedNoRect`; a contagem de elegíveis não muda (ver `counts.eligible`).
+  //
+  // No leiaute reprovado (`sourceAligned: false`) NADA é desenhado: a lista continua completa e é ela
+  // que informa o item. Aí a caixa guardada é só a posição estimada recortada pela área da imagem, para
+  // o esquema fechado continuar válido — sem inventar uma caixa no lugar errado, porque não há desenho.
+  const layoutRejected = sourceAligned !== true;
+  const collectEntries = (entries, entryKind) => entries.flatMap(entry => {
     if (outsideSource(entry.bounds, geometry.cssWidth, geometry.cssHeight)) {
+      if (layoutRejected) {
+        return [{ ...entry, entryKind, bounds: clippedBox(entry.bounds, geometry.cssWidth, geometry.cssHeight) }];
+      }
       counts.omittedNoRect += 1;
       anyOutsideSource = true;
+      return [];
     }
-    return { ...entry, entryKind, bounds: clampedBox(entry.bounds, geometry.cssWidth, geometry.cssHeight) };
+    return [{
+      ...entry,
+      entryKind,
+      bounds: clippedBox(entry.bounds, geometry.cssWidth, geometry.cssHeight),
+    }];
   });
-  let stops = clampAll(selected.stops, 'stop');
-  let suspects = clampAll(selected.suspects, 'suspect');
+  let stops = collectEntries(selected.stops, 'stop').map((entry, offset) => ({ ...entry, number: offset + 1 }));
+  let suspects = collectEntries(selected.suspects, 'suspect').map((entry, offset) => ({ ...entry, number: offset + 1 }));
 
-  const buildSegments = () => stops.length === 0 && suspects.length === 0
+  // Mesmo sem nenhuma caixa desenhável, a imagem continua no relatório quando existia item fora da
+  // área: é ela que dá contexto à contagem de itens sem posição medida. Sem isso, uma página cujo único
+  // item de Tab está fora da captura sairia como "nada alcançável pelo Tab".
+  const buildSegments = () => stops.length === 0 && suspects.length === 0 && !anyOutsideSource
     ? []
     : segmentSlices(geometry, sourceMetadata, segmentCssHeight).map(slice => {
     const within = entry => {
@@ -291,11 +314,15 @@ export function buildKeyboardMapPlan({
     counts.omittedLimit += 1;
     segments = buildSegments();
   }
+  // "A página mudou de tamanho" descreve a recusa do leiaute, não o que sobrou depois de tirar os itens
+  // fora da área: mesmo que todos tenham ficado sem caixa, a razão de nenhuma caixa existir é a recusa.
+  const hasEntries = selected.stops.length > 0 || selected.suspects.length > 0;
   const drawBoxes = sourceAligned === true && (stops.length > 0 || suspects.length > 0);
-  if (!drawBoxes && (stops.length > 0 || suspects.length > 0)) limitations.add('source-layout-changed');
-  // "Encaixados na borda da imagem" só descreve o que aconteceu quando alguma caixa foi desenhada: sem
-  // caixa nenhuma, o encaixe não chegou à imagem, e dizer que chegou confundiria quem lê o relatório.
-  if (anyOutsideSource && drawBoxes) limitations.add('stops-outside-source-clamped');
+  if (!drawBoxes && hasEntries && sourceAligned !== true) limitations.add('source-layout-changed');
+  // A omissão é um fato da lista, não do desenho: o item existe e ficou sem posição. No leiaute
+  // reprovado (`sourceAligned: false`) nenhuma caixa sai por outro motivo e `source-layout-changed` já
+  // explica o silêncio; dizer "sem posição medida" ali seria uma segunda explicação para a mesma coisa.
+  if (anyOutsideSource && sourceAligned === true) limitations.add('stops-outside-source-omitted');
   let unresolved = 0;
   if (drawBoxes) {
     for (const segment of segments) {

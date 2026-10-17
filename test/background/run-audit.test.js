@@ -4740,6 +4740,45 @@ test('a page that grew between the read and the capture gets boxes measured in t
   assert.equal(codes.includes('FULL_PAGE_CAPTURE_TRUNCATED'), false);
 });
 
+test('with browser zoom the fresh boxes land in the same css pixels as the image', async () => {
+  const page = rawPage();
+  // Chrome 155 com a página em 125 %: o `getBoundingClientRect` e a imagem estão em px CSS atuais, mas o
+  // `DOMSnapshot` mede no espaço de 100 %. O fator exato vem de `cssVisualViewport.zoom`; sem ele, a caixa
+  // do primeiro botão sairia em x=12,5 e a imagem mostra x=10, e o erro cresceria para a direita.
+  page.layoutMetrics = {
+    cssContentSize: { width: 800, height: 1200 },
+    cssLayoutViewport: { clientWidth: 640, clientHeight: 480 },
+    cssVisualViewport: { zoom: 1.25 },
+  };
+  const { adapter, inputs } = mappingAdapter(page, {
+    domSnapshot: () => domSnapshotFromRects([
+      [1, { x: 12.5, y: 25, width: 100, height: 37.5 }],
+      [2, { x: 12.5, y: 75, width: 100, height: 37.5 }],
+      [3, { x: 12.5, y: 125, width: 400, height: 225 }],
+    ]),
+  });
+
+  const result = await attachedFullEvidence(adapter, 'audit-browser-zoom');
+
+  assert.equal(result.state, 'model');
+  assert.equal(inputs.length, 2);
+  for (const input of inputs) {
+    assert.equal(input.sourceAligned, true, 'o leiaute parou em volta da medição');
+    assert.deepEqual(input.layoutMetrics.cssContentSize, { width: 800, height: 1200 },
+      'a geometria da imagem continua nos px CSS da captura, não nos px do instantâneo');
+    const nodes = new Map(input.snapshot.nodes.map(node => [node.nodeId, node]));
+    assert.deepEqual(nodes.get('n-1').rect, { x: 10, y: 20, width: 80, height: 30 });
+    assert.deepEqual(nodes.get('n-2').rect, { x: 10, y: 60, width: 80, height: 30 });
+    assert.deepEqual(nodes.get('n-3').rect, { x: 10, y: 100, width: 320, height: 180 });
+  }
+  const elements = result.model.evidence.filter(artifact => artifact.kind === 'element');
+  assert.ok(elements.length > 0);
+  for (const artifact of elements) {
+    assert.deepEqual(artifact.fullPageRect, page.nodes.find(node => node.backendNodeId === artifact.backendNodeId).rect,
+      'o recorte gravado aponta para o mesmo pixel que a imagem mostra');
+  }
+});
+
 test('a page that grows while the rectangles are measured gets maps without boxes', async () => {
   const page = rawPage();
   const collected = { cssContentSize: { width: 800, height: 1200 }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };

@@ -31,6 +31,7 @@ const LIMITATIONS = Object.freeze({
   'frame-content-omitted': 'O conteúdo de frames internos não entra na lista.',
   'non-uniform-pixel-scale': 'As escalas horizontal e vertical da captura não são uniformes.',
   'stops-outside-source-clamped': 'Itens fora da área capturada foram encaixados na borda da imagem.',
+  'stops-outside-source-omitted': 'Itens fora da área capturada ficaram sem caixa, para não apontar o lugar errado; eles continuam contados como sem posição medida.',
   'ancestor-clipped-stops-omitted': 'Itens escondidos por uma área com rolagem própria ficaram fora da lista.',
   'cursor-style-not-collected': 'O estilo que revela itens clicáveis não foi coletado nesta auditoria; a lista de caixas laranja pode estar incompleta.',
   'privacy-content-omitted': 'O nome de itens com conteúdo possivelmente pessoal foi omitido; as posições continuam na imagem.',

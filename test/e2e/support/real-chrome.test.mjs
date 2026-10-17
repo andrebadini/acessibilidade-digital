@@ -343,7 +343,10 @@ test('launch option resolvers reject unsafe binaries, versions and directories',
     error => error.code === 'CHROME_BINARY_INVALID');
   assert.equal(resolveExpectedChromeMajor({ explicit: 152, env: {} }), 152);
   assert.equal(resolveExpectedChromeMajor({ env: { AUDITA_EXPECT_CHROME_MAJOR: '116' } }), 116);
-  assert.throws(() => resolveExpectedChromeMajor({ env: { AUDITA_EXPECT_CHROME_MAJOR: '0152' } }),
+  // O ambiente escolhe a versão da rodada mesmo quando o arquivo fixa a versão histórica: a checagem
+  // continua exata (o produto observado tem de ser 155), só a fonte da expectativa muda.
+  assert.equal(resolveExpectedChromeMajor({ explicit: 152, env: { AUDITA_EXPECT_CHROME_MAJOR: '155' } }), 155);
+  assert.throws(() => resolveExpectedChromeMajor({ explicit: 152, env: { AUDITA_EXPECT_CHROME_MAJOR: '0152' } }),
     error => error.code === 'CHROME_MAJOR_INVALID');
   assert.equal(validateChromeProduct('Chrome/152.0.8123.0', 152), 152);
   assert.throws(() => validateChromeProduct('Chrome/151.0.0.0', 152), error => error.code === 'CHROME_VERSION_DENIED');

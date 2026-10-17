@@ -7,6 +7,7 @@ const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REAL_CHROME_E2E = new Set([
   'test/e2e/tab-reading-mv3.test.mjs',
   'test/e2e/tab-reading-guided-mv3.test.mjs',
+  'test/e2e/tab-reading-map-mv3.test.mjs',
   'test/e2e/axe-mv3-csp.test.mjs',
   'test/e2e/batch-audit-mv3.test.mjs',
   'test/e2e/batch-pixel-consent-mv3.test.mjs',
@@ -22,7 +23,10 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/current-page-pixel-consent-free-mv3.test.mjs',
   'test/e2e/current-page-pixel-consent-mv3.test.mjs',
   'test/e2e/current-page-pixel-direct-retire-mv3.test.mjs',
+  'test/e2e/download-no-destination-mv3.test.mjs',
   'test/e2e/download-uniquify-mv3.test.mjs',
+  'test/e2e/export-download-prompt-mv3.test.mjs',
+  'test/e2e/export-format-buttons-mv3.test.mjs',
   'test/e2e/field-label-review.test.mjs',
   'test/e2e/input-purpose-observation.test.mjs',
   'test/e2e/lazy-iframe-current-page-mv3.test.mjs',

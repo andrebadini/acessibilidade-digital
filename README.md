@@ -4,6 +4,13 @@ Extensão MV3 para auditoria local de acessibilidade de uma página, com regras 
 
 ## Instalação e estado da entrega
 
+**Versão 1.1.63 — um botão por formato, downloads que não somem e caixas certas com zoom.** O relatório passa a
+ter um botão para cada formato (PDF, HTML, CSV e JSON), além de "Baixar todos os formatos". A exportação espera a
+janela "Perguntar onde salvar cada arquivo" do Chrome em vez de desistir em 30 segundos, e um formato que não pôde
+ser gravado não interrompe os outros. As caixas dos mapas, dos recortes e da Leitura por Tab caem sobre o elemento
+também com o zoom do navegador diferente de 100 % e em telas de alta densidade (Retina, escala de 125 %). Veja as
+[notas da 1.1.63](docs/releases/1.1.63.md).
+
 **Versão 1.1.62 — todo elemento com imagem, mapa de leitura e leitura por Tab.** No relatório, o elemento que
 aparece na captura da página inteira passa a ter imagem própria (o recorte da integral, com o contorno); cada
 evidência citada leva a uma ficha com o SHA-256 do arquivo de imagem; o cartão da verificação guiada mostra o

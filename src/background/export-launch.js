@@ -1,5 +1,9 @@
 import { EXPORT_SURFACE, deriveTrustedExtensionContext } from './target-capabilities.js';
-import { EXPORT_FORMATS_V1 } from '../export/export-formats.js';
+import {
+  canonicalExportFormatsV1,
+  EXPORT_FORMATS_V1,
+  isCanonicalExportFormatsV1,
+} from '../export/export-formats.js';
 import { canonicalAuditId } from '../storage/audit-retention.js';
 
 const AUDIT_ID = /^[A-Za-z0-9._:-]{1,160}$/u;
@@ -9,7 +13,18 @@ const EXPORT_MIME_V1 = Object.freeze({
   html: 'text/html;charset=utf-8', pdf: 'application/pdf',
   csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
 });
+// `formats` é opcional para que registros gravados antes da exportação por formato continuem
+// abrindo: a ausência sempre significa os quatro formatos canônicos.
 const LAUNCH_RECORD_KEYS = Object.freeze(['version','auditId','sourceReviewSessionCapabilityId','expectedRevision','attemptId','tabId','windowId','path','documentId','state','issuedAt','expiresAt']);
+const LAUNCH_RECORD_OPTIONS = Object.freeze([
+  // A ordem de `formats` antes de `terminalProof` acompanha a gravação: o registro nasce com
+  // `formats` e só recebe `terminalProof` depois, então a leitura confirmada compara a mesma
+  // sequência de chaves. Registros antigos, sem `formats`, continuam aceitos pelas opções seguintes.
+  Object.freeze([...LAUNCH_RECORD_KEYS, 'formats', 'terminalProof']),
+  Object.freeze([...LAUNCH_RECORD_KEYS, 'terminalProof']),
+  Object.freeze([...LAUNCH_RECORD_KEYS, 'formats']),
+  LAUNCH_RECORD_KEYS,
+]);
 const SESSION_RECORD_KEYS = Object.freeze(['version','sessionCapabilityId','auditId','launchTabId','launchDocumentId','expectedRevision','attemptId','intents','state','issuedAt','expiresAt']);
 const TERMINAL_PROOF_KEYS = Object.freeze(['version','auditId','sessionCapabilityId','attemptId','modelRevision','receiptStatus','applied','deleted','status','notified']);
 const RECEIPT_KEYS = Object.freeze(['version','auditId','modelRevision','modelHash','attemptId','status','formats']);
@@ -113,10 +128,16 @@ function sameTerminalProof(left, right) {
   return Boolean(left && right && TERMINAL_PROOF_KEYS.every(key => left[key] === right[key]));
 }
 function launchRecord(value) {
-  const row = exact(value, [...LAUNCH_RECORD_KEYS, 'terminalProof']) ?? exact(value, LAUNCH_RECORD_KEYS);
+  let row = null;
+  for (const keys of LAUNCH_RECORD_OPTIONS) {
+    row = exact(value, keys);
+    if (row) break;
+  }
   const hasTerminalProof = Boolean(row && Object.hasOwn(row, 'terminalProof'));
   const terminalProof = hasTerminalProof ? terminalProofRecord(row.terminalProof) : null;
-  if (!row || row.version !== 1 || !AUDIT_ID.test(row.auditId ?? '') || !CAPABILITY.test(row.sourceReviewSessionCapabilityId ?? '') ||
+  if (!row || (Object.hasOwn(row, 'formats') && (typeof row.formats !== 'string' ||
+      !isCanonicalExportFormatsV1(row.formats))) ||
+    row.version !== 1 || !AUDIT_ID.test(row.auditId ?? '') || !CAPABILITY.test(row.sourceReviewSessionCapabilityId ?? '') ||
     !Number.isSafeInteger(row.expectedRevision) || row.expectedRevision < 1 || !validAttempt(row.attemptId) || !safeId(row.tabId) || !safeId(row.windowId) ||
     row.path !== PATH || !['allocated','awaiting-connection','connected','terminal','revoked'].includes(row.state) ||
     !Number.isSafeInteger(row.issuedAt) || !Number.isSafeInteger(row.expiresAt) || row.expiresAt <= row.issuedAt ||
@@ -197,8 +218,14 @@ export function createExportLaunchAuthority(raw) {
   const getLaunch = auditId => AUDIT_ID.test(auditId ?? '') ? stored(input.sessionArea, launchKey(auditId), launchRecord) : Promise.resolve(null);
   const getSession = id => CAPABILITY.test(id ?? '') ? stored(input.sessionArea, sessionKey(id), sessionRecord) : Promise.resolve(null);
 
-  async function requestExport({ auditId, sessionCapabilityId, sender, deleteAfterCompleteExport = false } = {}) {
+  async function requestExport({ auditId, sessionCapabilityId, sender, deleteAfterCompleteExport = false, formats = undefined } = {}) {
     if (typeof deleteAfterCompleteExport !== 'boolean') return fail('REPORT_EXPORT_DENIED');
+    let requestedFormats;
+    try { requestedFormats = formats === undefined ? EXPORT_FORMATS_V1 : canonicalExportFormatsV1(formats); }
+    catch { return fail('REPORT_EXPORT_DENIED'); }
+    // A exclusão só é honesta quando os quatro formatos foram pedidos nesta exportação;
+    // botões individuais nunca podem apagar a auditoria local.
+    if (deleteAfterCompleteExport && requestedFormats.length !== EXPORT_FORMATS_V1.length) return fail('REPORT_EXPORT_DENIED');
     const authorization = await input.reportLaunch.authorizeExport({ auditId, sessionCapabilityId, sender });
     if (!authorization?.ok) return fail(authorization?.code === 'CONTEXT_DENIED' ? 'CONTEXT_DENIED' : 'REPORT_EXPORT_DENIED');
     return serialize(input.sessionArea, auditId, async () => {
@@ -225,7 +252,8 @@ export function createExportLaunchAuthority(raw) {
         ownedTabId = tab.id;
         const now = readEpoch(input.epochNow);
         const launch = deepFreeze({ version:1,auditId,sourceReviewSessionCapabilityId:sessionCapabilityId,expectedRevision:snapshot.revision,
-          attemptId,tabId:tab.id,windowId:authorization.windowId,path:PATH,documentId:null,state:'allocated',issuedAt:now,expiresAt:now+TTL_MS });
+          attemptId,tabId:tab.id,windowId:authorization.windowId,path:PATH,documentId:null,state:'allocated',issuedAt:now,expiresAt:now+TTL_MS,
+          formats: requestedFormats.join(',') });
         if (!await confirmed(input.sessionArea, launchKey(auditId), launch, launchRecord)) throw new Error('EXPORT_OPEN_FAILED');
         await input.sessionArea.set({ [indexKey(tab.id)]: auditId });
         await input.chromeApi.tabs.update(tab.id, { url: canonicalUrl(input.chromeApi,auditId), active:false });
@@ -268,7 +296,10 @@ export function createExportLaunchAuthority(raw) {
       const current=await getLaunch(auditId);
       if (!current || current.state!==launch.state || current.tabId!==launch.tabId) { await confirmed(input.sessionArea,sessionKey(sessionCapabilityId),deepFreeze({...session,state:'revoked'}),sessionRecord); return fail('EXPORT_CONNECT_DENIED'); }
       if (!await confirmed(input.sessionArea,launchKey(auditId),deepFreeze({...launch,documentId:sender.documentId,state:'connected'}),launchRecord)) return fail('EXPORT_CONNECT_DENIED');
-      return deepFreeze({ok:true,sessionCapabilityId,auditId,expectedRevision:launch.expectedRevision,attemptId:launch.attemptId});
+      return deepFreeze({
+        ok:true, sessionCapabilityId, auditId, expectedRevision:launch.expectedRevision, attemptId:launch.attemptId,
+        formats: launch.formats === undefined ? EXPORT_FORMATS_V1 : canonicalExportFormatsV1(launch.formats),
+      });
     });
   }
 

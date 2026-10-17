@@ -9,7 +9,10 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 export const MAX_CDP_FRAME_BYTES = 16 * 1024 * 1024;
-export const CANONICAL_CHROME_PRODUCT = 'Chrome/152.0.7977.64';
+// O produto esperado acompanha a versão escolhida para a execução. `AUDITA_EXPECT_CHROME_MAJOR` seleciona
+// a versão e `AUDITA_EXPECT_CHROME_PRODUCT` informa o texto exato que aquele Chrome for Testing relata;
+// a comparação dos testes continua sendo por igualdade, sem afrouxar nada. Sem as variáveis, 152.
+export const CANONICAL_CHROME_PRODUCT = process.env.AUDITA_EXPECT_CHROME_PRODUCT ?? 'Chrome/152.0.7977.64';
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const HARNESS_PATH = '/test/e2e/fixtures/real-tab-harness.html';
 const BLANK_PATH = '/test/e2e/fixtures/real-tab-blank.html';
@@ -90,9 +93,12 @@ function hostResolverArgs() {
 }
 
 export function buildChromeLaunchArgv(raw = {}) {
-  const keys = ['chromeBinary', 'extensionPath', 'platform', 'startUrl', 'userDataDir', 'viewport'];
-  if (!plain(raw) || Reflect.ownKeys(raw).length !== keys.length ||
-    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !keys.includes(key)) ||
+  const keys = ['chromeBinary', 'extensionPath', 'platform', 'startUrl', 'userDataDir', 'viewport', 'deviceScaleFactor'];
+  const densityValid = raw?.deviceScaleFactor === undefined ||
+    (Number.isFinite(raw.deviceScaleFactor) && raw.deviceScaleFactor >= 0.5 && raw.deviceScaleFactor <= 4);
+  const declared = plain(raw) ? Reflect.ownKeys(raw).filter(key => raw[key] !== undefined) : [];
+  if (!plain(raw) || declared.length < keys.length - 1 || declared.length > keys.length ||
+    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !keys.includes(key)) || !densityValid ||
     !canonicalAbsolute(raw.chromeBinary) || !safeChromeFlagPath(raw.extensionPath) ||
     !safeChromeFlagPath(raw.userDataDir) || !['darwin', 'linux', 'win32'].includes(raw.platform) ||
     raw.startUrl !== 'about:blank' || !plain(raw.viewport) ||
@@ -108,6 +114,7 @@ export function buildChromeLaunchArgv(raw = {}) {
     ...(raw.platform === 'darwin' ? ['--use-mock-keychain'] : []),
     '--window-position=-10000,-10000', `--window-size=${raw.viewport.width},${raw.viewport.height}`,
     `--user-data-dir=${raw.userDataDir}`,
+    ...(raw.deviceScaleFactor === undefined ? [] : [`--force-device-scale-factor=${raw.deviceScaleFactor}`]),
     `--disable-extensions-except=${raw.extensionPath}`,
     `--load-extension=${raw.extensionPath}`,
     ...hostResolverArgs(),
@@ -466,7 +473,16 @@ export async function resolveChromeBinary({ explicit, env = process.env, platfor
 }
 
 export function resolveExpectedChromeMajor({ explicit, env = process.env } = {}) {
-  const source = explicit ?? env.AUDITA_EXPECT_CHROME_MAJOR;
+  // Um valor explícito inválido do chamador continua sendo erro de contrato, mesmo com o ambiente
+  // preenchido: a variável escolhe a versão da rodada, não pode mascarar uma expectativa insegura.
+  if (explicit !== undefined && (typeof explicit === 'string'
+    ? !/^[1-9][0-9]{0,2}$/u.test(explicit)
+    : !positiveInteger(explicit) || explicit > 999)) throw fixed('CHROME_MAJOR_INVALID');
+  // O ambiente manda quando o valor explícito é válido: os arquivos e2e fixam a versão histórica (152)
+  // para continuar válidos quando executados sozinhos, mas uma rodada contra o Chrome instalado (155)
+  // precisa poder escolher a versão sem editar cada teste. A checagem NÃO afrouxa: a versão observada
+  // continua tendo de ser exatamente a esperada, venha ela do teste ou de AUDITA_EXPECT_CHROME_MAJOR.
+  const source = env?.AUDITA_EXPECT_CHROME_MAJOR ?? explicit;
   if (source === undefined) return null;
   if (typeof source === 'string' && !/^[1-9][0-9]{0,2}$/u.test(source)) throw fixed('CHROME_MAJOR_INVALID');
   const value = typeof source === 'string' ? Number(source) : source;
@@ -521,14 +537,17 @@ export async function resolveLaunchDirectories({ runRoot, downloadDirectory, qaD
 
 function resolveDownloadMode(value) {
   const mode = value ?? 'cdp';
-  if (mode !== 'cdp' && mode !== 'profile') throw fixed('CHROME_LAUNCH_INVALID');
+  if (!['cdp', 'profile', 'profile-prompt'].includes(mode)) throw fixed('CHROME_LAUNCH_INVALID');
   return mode;
 }
 
 export async function writeProfileDownloadPreferences(raw = {}) {
-  const keys = ['runRoot', 'downloadDirectory'];
-  if (!plain(raw) || Reflect.ownKeys(raw).length !== keys.length ||
-    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !keys.includes(key))) {
+  const required = ['runRoot', 'downloadDirectory'];
+  const allowed = [...required, 'promptForDownload'];
+  if (!plain(raw) || Reflect.ownKeys(raw).length < required.length || Reflect.ownKeys(raw).length > allowed.length ||
+    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !allowed.includes(key)) ||
+    required.some(key => !Object.hasOwn(raw, key)) ||
+    (Object.hasOwn(raw, 'promptForDownload') && typeof raw.promptForDownload !== 'boolean')) {
     throw fixed('CHROME_LAUNCH_INVALID');
   }
   const runRoot = await canonicalDirectory(raw.runRoot, 'UNSAFE_LAUNCH_DIRECTORY');
@@ -545,7 +564,7 @@ export async function writeProfileDownloadPreferences(raw = {}) {
     await writeFile(preferencesPath, `${JSON.stringify({
       download: {
         default_directory: downloadDirectory,
-        prompt_for_download: false,
+        prompt_for_download: raw.promptForDownload === true,
         directory_upgrade: true,
       },
     })}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
@@ -560,7 +579,7 @@ export async function configureDownloadBehavior(browser, downloadDirectory, down
   if (typeof browser?.command !== 'function' || !safeChromeFlagPath(downloadDirectory)) {
     throw fixed('CHROME_LAUNCH_INVALID');
   }
-  if (mode === 'profile') return false;
+  if (mode === 'profile' || mode === 'profile-prompt') return false;
   await browser.command('Browser.setDownloadBehavior', {
     behavior: 'allow', downloadPath: downloadDirectory, eventsEnabled: true,
   });
@@ -879,9 +898,12 @@ export function createBoundedBrowserCleanup(raw = {}) {
 export async function launchUnpackedExtension(t, options = {}) {
   const optionKeys = [
     'extensionPath', 'startUrl', 'downloadDirectory', 'viewport', 'chromeBinary', 'expectedMajor', 'qaDirectory', 'downloadMode',
+    'deviceScaleFactor',
   ];
+  const densityValid = options.deviceScaleFactor === undefined ||
+    (Number.isFinite(options.deviceScaleFactor) && options.deviceScaleFactor >= 0.5 && options.deviceScaleFactor <= 4);
   if (!plain(options) || Reflect.ownKeys(options).some(key => typeof key !== 'string' || !optionKeys.includes(key)) ||
-    !canonicalAbsolute(options.extensionPath) || !safeUrl(options.startUrl)) throw fixed('CHROME_LAUNCH_INVALID');
+    !densityValid || !canonicalAbsolute(options.extensionPath) || !safeUrl(options.startUrl)) throw fixed('CHROME_LAUNCH_INVALID');
   const downloadMode = resolveDownloadMode(options.downloadMode);
   const extensionPath = await resolveUnpackedExtensionPath(options.extensionPath);
   const chromeBinary = await resolveChromeBinary({ explicit: options.chromeBinary });
@@ -895,9 +917,10 @@ export async function launchUnpackedExtension(t, options = {}) {
     directories = await resolveLaunchDirectories({
       runRoot, downloadDirectory: options.downloadDirectory, qaDirectory: options.qaDirectory,
     });
-    if (downloadMode === 'profile') {
+    if (downloadMode === 'profile' || downloadMode === 'profile-prompt') {
       await writeProfileDownloadPreferences({
         runRoot: directories.runRoot, downloadDirectory: directories.downloadDirectory,
+        promptForDownload: downloadMode === 'profile-prompt',
       });
     }
   } catch (error) {
@@ -907,6 +930,7 @@ export async function launchUnpackedExtension(t, options = {}) {
   const spawnSpec = buildChromeLaunchArgv({
     chromeBinary, extensionPath, platform: process.platform, startUrl: 'about:blank',
     userDataDir: directories.runRoot, viewport,
+    ...(options.deviceScaleFactor === undefined ? {} : { deviceScaleFactor: options.deviceScaleFactor }),
   });
   const chrome = spawn(spawnSpec.file, spawnSpec.args, spawnSpec.options);
   const browser = createCdpPipeTransport({ readable: chrome.stdio[4], writable: chrome.stdio[3] });
@@ -923,6 +947,7 @@ export async function launchUnpackedExtension(t, options = {}) {
   launch.waitForSidePanel = () => waitForSidePanel(launch);
   launch.waitForReport = args => waitForReport(launch, args);
   launch.waitForFourDownloads = args => waitForFourDownloads(launch, args);
+  launch.waitForDownloads = args => waitForDownloads(launch, args);
   launch.captureJourney = (name, target, captureOptions) => captureJourney(launch, name, target, captureOptions);
   launch.captureVisualComparison = args => captureVisualComparison(launch, args);
   launch.close = () => {
@@ -1117,6 +1142,119 @@ export async function waitForFourDownloads(launch, args = {}) {
     await new Promise(resolvePromise => setTimeout(resolvePromise, intervalMs));
   } while (true);
   throw fixed('DOWNLOAD_PROOF_TIMEOUT');
+}
+
+function canonicalFormatsSubset(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > DOWNLOAD_FORMATS.length) throw fixed('DOWNLOAD_PROOF_DENIED');
+  let previous = -1;
+  for (const format of value) {
+    const index = DOWNLOAD_FORMATS.indexOf(format);
+    if (index <= previous) throw fixed('DOWNLOAD_PROOF_DENIED');
+    previous = index;
+  }
+  return value;
+}
+
+async function readDownloadedItems(launch, ids) {
+  if (ids.some(id => !Number.isSafeInteger(id) || id < 0)) return null;
+  const harness = await openTabHarness(launch);
+  return evaluate(harness, `(async () => {
+    const rows = [];
+    for (const id of ${JSON.stringify(ids)}) {
+      const [item] = await chrome.downloads.search({ id });
+      if (!item || item.state !== 'complete' || typeof item.filename !== 'string' || !item.filename) return null;
+      rows.push({ id: item.id, filename: item.filename, state: item.state });
+    }
+    return rows;
+  })()`, { awaitPromise: true });
+}
+
+/**
+ * Prova um recibo parcial ou completo de subconjunto: cada formato pedido precisa estar no
+ * recibo, e o arquivo exato apontado pelo `downloadId` precisa existir com tamanho e hash.
+ * Usar o id evita ambiguidade quando exportações repetidas deixam nomes uniquificados na pasta.
+ */
+export async function waitForDownloads(launch, args = {}) {
+  const keys = ['auditId', 'formats', 'timeoutMs', 'intervalMs'];
+  if (!plain(args) || !AUDIT_ID.test(args.auditId ?? '') ||
+    Reflect.ownKeys(args).some(key => typeof key !== 'string' || !keys.includes(key))) throw fixed('DOWNLOAD_PROOF_DENIED');
+  const formats = canonicalFormatsSubset(args.formats);
+  const timeoutMs = args.timeoutMs ?? 60_000;
+  const intervalMs = args.intervalMs ?? 100;
+  if (!positiveInteger(timeoutMs) || !positiveInteger(intervalMs)) throw fixed('DOWNLOAD_PROOF_DENIED');
+  const directory = await canonicalDirectory(launch?.downloadDirectory, 'DOWNLOAD_PROOF_DENIED');
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      const receipt = await readDurableExportReceipt(launch, args.auditId);
+      const status = formats.length === DOWNLOAD_FORMATS.length ? 'complete' : 'partial';
+      if (receipt?.version === 1 && receipt.auditId === args.auditId && receipt.status === status &&
+        Array.isArray(receipt.formats) && receipt.formats.length === formats.length &&
+        receipt.formats.every((row, index) => row?.format === formats[index] &&
+          row.mimeType === DOWNLOAD_MIME[row.format] && row.state === 'complete' &&
+          Number.isSafeInteger(row.downloadId) && row.downloadId >= 0 &&
+          Number.isSafeInteger(row.byteSize) && row.byteSize > 0 && /^[a-f0-9]{64}$/u.test(row.sha256 ?? ''))) {
+        const items = await readDownloadedItems(launch, receipt.formats.map(row => row.downloadId));
+        if (items) {
+          const records = [];
+          for (const [index, expected] of receipt.formats.entries()) {
+            const filename = items[index].filename;
+            const canonical = await realpath(filename).catch(() => null);
+            if (!canonical || dirname(canonical) !== directory) throw fixed('DOWNLOAD_PROOF_PENDING');
+            const bytes = await readFile(canonical);
+            if (bytes.length !== expected.byteSize || hashBytes(bytes) !== expected.sha256) throw fixed('DOWNLOAD_PROOF_PENDING');
+            records.push(Object.freeze({ format: expected.format, mime: expected.mimeType, filename: basename(canonical),
+              downloadId: expected.downloadId, state: 'complete', byteLength: expected.byteSize, sha256: expected.sha256 }));
+          }
+          return Object.freeze(records);
+        }
+      }
+    } catch { /* the export, the receipt and the files may still be in flight */ }
+    if (Date.now() >= deadline) break;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, intervalMs));
+  } while (true);
+  throw fixed('DOWNLOAD_PROOF_TIMEOUT');
+}
+
+export async function readLatestExportState(launch, auditId) {
+  if (!AUDIT_ID.test(auditId ?? '')) throw fixed('DOWNLOAD_PROOF_DENIED');
+  const harness = await openTabHarness(launch);
+  return evaluate(harness,
+    `import(chrome.runtime.getURL('/src/storage/audit-store.js')).then(module=>module.createAuditStore().getLatest())`,
+    { awaitPromise: true });
+}
+
+export async function readExportDeliveryJournal(launch, auditId) {
+  if (!AUDIT_ID.test(auditId ?? '')) throw fixed('DOWNLOAD_PROOF_DENIED');
+  const harness = await openTabHarness(launch);
+  return evaluate(harness,
+    `import(chrome.runtime.getURL('/src/storage/audit-store.js')).then(module=>module.createAuditStore().getExportDeliveryJournal(${JSON.stringify(auditId)}))`,
+    { awaitPromise: true });
+}
+
+export async function readDownloadState(launch, downloadId) {
+  if (!Number.isSafeInteger(downloadId) || downloadId < 0) throw fixed('DOWNLOAD_PROOF_DENIED');
+  const harness = await openTabHarness(launch);
+  return evaluate(harness, `(async () => {
+    const [item] = await chrome.downloads.search({ id: ${downloadId} });
+    return item ? {
+      id: item.id,
+      state: ['in_progress', 'interrupted', 'complete'].includes(item.state) ? item.state : 'other',
+      filename: typeof item.filename === 'string' ? item.filename : null,
+    } : null;
+  })()`, { awaitPromise: true });
+}
+
+export async function cancelDownload(launch, downloadId) {
+  if (!Number.isSafeInteger(downloadId) || downloadId < 0) throw fixed('DOWNLOAD_PROOF_DENIED');
+  const harness = await openTabHarness(launch);
+  // `chrome.downloads.cancel()` resolves to undefined: a strict value read would mistake
+  // success for a failed evaluation, so only an exception marks the cancellation as denied.
+  const result = await command(harness, 'Runtime.evaluate', {
+    expression: `chrome.downloads.cancel(${downloadId})`, awaitPromise: true, returnByValue: true,
+  });
+  if (result?.exceptionDetails) throw fixed('DOWNLOAD_CANCEL_DENIED');
+  return true;
 }
 
 async function qaFile(directory, name, code, mustExist = false) {

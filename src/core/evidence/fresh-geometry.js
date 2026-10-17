@@ -66,6 +66,73 @@ function usableRect(bounds) {
   return { x, y, width, height };
 }
 
+/**
+ * Zoom da página (o `Ctrl`+`+` do navegador), como fator multiplicativo dos px CSS.
+ *
+ * Por que isto existe: os retângulos do `DOMSnapshot` são medidos num espaço que NÃO acompanha o zoom
+ * da página — com o navegador em 125 %, um elemento que ocupa x=1012..1265 px CSS aparece no
+ * instantâneo em x=1265..1581 (o valor de 100 %). Todo o resto do produto (captura integral,
+ * `cssContentSize`, `getBoundingClientRect`) está em px CSS já ampliados. Sem converter, a caixa é
+ * desenhada longe do elemento, e o erro cresce com a distância até a origem — o que explica "muitas
+ * caixas certas e muitas erradas" no mesmo mapa.
+ *
+ * A fonte é o `zoom` que o próprio CDP devolve nas métricas de leiaute. Ele é exato em todos os
+ * valores testados (80 %, 90 %, 110 %, 125 %, 150 %, 200 %) e independe da densidade da tela
+ * (`deviceScaleFactor`), que já é absorvida pela razão entre o PNG e os px CSS da imagem.
+ * A conversão, portanto, é `px CSS atuais = px do instantâneo / zoom`.
+ *
+ * Ausência ou valor inválido vale 1: sem a informação, nada muda em relação ao comportamento anterior.
+ */
+export function pageZoomOf(metrics) {
+  for (const value of [metrics?.cssVisualViewport?.zoom, metrics?.visualViewport?.zoom]) {
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 1;
+}
+
+/**
+ * Fator entre o espaço do `DOMSnapshot` e os px CSS atuais.
+ *
+ * O instantâneo não acompanha nem o zoom da página nem a densidade da tela: com o navegador em 125 %
+ * e tela 2×, um elemento em x=34,8 px CSS aparece em x=87 (medido no Chrome 155). O fator é o produto
+ * dos dois, e o CDP já o entrega pronto na razão `contentSize / cssContentSize` — a mesma razão que a
+ * captura usa para descrever o raster. `pageZoomOf` sozinho só acerta quando a densidade é 1, que era
+ * o caso de todos os testes anteriores; numa tela 2× as caixas ficavam no dobro da posição.
+ *
+ * Sem a razão (métricas antigas ou incompletas), o zoom da página é a única informação disponível e o
+ * comportamento é o de antes.
+ */
+export function snapshotScaleOf(metrics) {
+  const zoom = pageZoomOf(metrics);
+  const device = metrics?.contentSize;
+  const css = metrics?.cssContentSize;
+  const ratio = Number.isFinite(device?.width) && device.width > 0 && Number.isFinite(css?.width) && css.width > 0
+    ? device.width / css.width
+    : null;
+  // Tela até 4× e zoom até 4×; fora dessa faixa o valor é ruído (métricas de outro documento) e não
+  // deve encolher ou explodir todos os retângulos.
+  if (!Number.isFinite(ratio) || ratio < 0.25 || ratio > 16) return zoom;
+  // `cssContentSize` é inteiro e arredondado: em 125 % a razão vinha 894 / 715 = 1,25035 e o erro de
+  // 0,03 % virava 1,5 px no fim de uma página de 5.000 px. As densidades reais do Chrome são valores
+  // conhecidos (1×, 1,25×, 1,5×, 2×...), então a densidade inferida encaixa no valor mais próximo
+  // quando está a menos de 2 % dele. Fora dessa margem (densidade exótica), o valor medido manda.
+  const inferred = ratio / zoom;
+  const common = [1, 1.25, 1.5, 2, 2.5, 3, 4]
+    .find(value => Math.abs(inferred - value) / value <= 0.02);
+  return zoom * (common ?? inferred);
+}
+
+/** Retângulo do espaço do instantâneo (independente de zoom) em px CSS atuais. */
+export function zoomAdjustedRect(rect, zoom) {
+  const factor = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+  return factor === 1 ? rect : {
+    x: rect.x / factor,
+    y: rect.y / factor,
+    width: rect.width / factor,
+    height: rect.height / factor,
+  };
+}
+
 function stringAt(strings, value) {
   return Number.isInteger(value) && value >= 0 && value < strings.length ? strings[value] : '';
 }
@@ -88,8 +155,12 @@ export function snapshotFrameId(snapshot) {
  * O documento principal é o que casa com `frameId`; sem ele, o primeiro documento da captura, que é a
  * convenção já usada pela normalização do instantâneo. Retângulos de dentro de frames ficam de fora: eles
  * estão no sistema de coordenadas do próprio frame, e os mapas não desenham conteúdo de frame.
+ *
+ * `zoom` é o fator de zoom do navegador no instante da medição (`pageZoomOf`). O `DOMSnapshot` mede em
+ * px CSS independentes de zoom; a conversão para px CSS atuais é feita aqui, uma única vez, para que
+ * todo consumidor receba o mesmo sistema de coordenadas da imagem.
  */
-export function domSnapshotRects(capture, { frameId = null } = {}) {
+export function domSnapshotRects(capture, { frameId = null, zoom = 1 } = {}) {
   const documents = Array.isArray(capture?.documents) ? capture.documents : null;
   const strings = Array.isArray(capture?.strings) ? capture.strings : null;
   if (!documents || !strings || documents.length === 0) return null;
@@ -108,7 +179,9 @@ export function domSnapshotRects(capture, { frameId = null } = {}) {
     const backendNodeId = nodes.backendNodeId?.[index];
     if (!Number.isInteger(backendNodeId)) continue;
     const rect = usableRect(rectByLayoutIndex.get(index));
-    if (rect) rects.set(backendNodeId, rect);
+    // O instantâneo não acompanha o zoom do navegador (ver `pageZoomOf`): converte cada retângulo para
+    // os px CSS atuais antes de devolvê-lo.
+    if (rect) rects.set(backendNodeId, zoomAdjustedRect(rect, zoom));
   }
   return rects.size > 0 ? rects : null;
 }
