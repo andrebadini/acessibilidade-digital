@@ -276,6 +276,8 @@ test('numa página que cresce depois da leitura, o mapa desenha caixa alinhada e
   assert.equal(mapa.limitations.includes('non-uniform-pixel-scale'), false, 'a escala é uniforme');
   assert.equal(mapa.limitations.includes('stops-outside-source-clamped'), false,
     'nenhuma parada pode ter sido jogada para dentro do recorte');
+  assert.equal(mapa.limitations.includes('stops-outside-source-omitted'), false,
+    'todas as paradas desta fixture estão dentro do recorte');
   // Fechado a lista do que pode sobrar, e por quê: as duas primeiras são de uma auditoria por URL (ninguém
   // apertou Tab de verdade, e o documento não tem raiz de sombra aberta); a terceira vem do catálogo da
   // própria fixture — 12.000 elementos dentro de um contêiner que rola entram na conta de "recortados", que
@@ -284,7 +286,7 @@ test('numa página que cresce depois da leitura, o mapa desenha caixa alinhada e
   assert.deepEqual([...mapa.limitations].sort(), [
     'ancestor-clipped-stops-omitted', 'tab-order-estimated-not-observed', 'top-document-open-shadow-only',
   ], `limitações inesperadas: ${JSON.stringify(mapa.limitations)}`);
-  assert.equal(mapa.derivation.version, '1.1.0', 'a geometria fresca é do algoritmo 1.1.0');
+  assert.equal(mapa.derivation.version, '1.2.0', 'a geometria fresca e a omissão sem encaixe são do algoritmo 1.2.0');
   assert.equal(mapa.counts.stops, mapa.stops.length);
   // `omittedNoRect` conta o que não tem caixa nenhuma — nesta página, os elementos sem tamanho (o
   // contêiner do aviso antes de o aviso chegar, `script`, `title`): a contagem é honesta e não é defeito. O

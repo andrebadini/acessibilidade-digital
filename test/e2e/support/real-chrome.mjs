@@ -9,7 +9,10 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 export const MAX_CDP_FRAME_BYTES = 16 * 1024 * 1024;
-export const CANONICAL_CHROME_PRODUCT = 'Chrome/152.0.7977.64';
+// O produto esperado acompanha a versão escolhida para a execução. `AUDITA_EXPECT_CHROME_MAJOR` seleciona
+// a versão e `AUDITA_EXPECT_CHROME_PRODUCT` informa o texto exato que aquele Chrome for Testing relata;
+// a comparação dos testes continua sendo por igualdade, sem afrouxar nada. Sem as variáveis, 152.
+export const CANONICAL_CHROME_PRODUCT = process.env.AUDITA_EXPECT_CHROME_PRODUCT ?? 'Chrome/152.0.7977.64';
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const HARNESS_PATH = '/test/e2e/fixtures/real-tab-harness.html';
 const BLANK_PATH = '/test/e2e/fixtures/real-tab-blank.html';
@@ -90,9 +93,12 @@ function hostResolverArgs() {
 }
 
 export function buildChromeLaunchArgv(raw = {}) {
-  const keys = ['chromeBinary', 'extensionPath', 'platform', 'startUrl', 'userDataDir', 'viewport'];
-  if (!plain(raw) || Reflect.ownKeys(raw).length !== keys.length ||
-    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !keys.includes(key)) ||
+  const keys = ['chromeBinary', 'extensionPath', 'platform', 'startUrl', 'userDataDir', 'viewport', 'deviceScaleFactor'];
+  const densityValid = raw?.deviceScaleFactor === undefined ||
+    (Number.isFinite(raw.deviceScaleFactor) && raw.deviceScaleFactor >= 0.5 && raw.deviceScaleFactor <= 4);
+  const declared = plain(raw) ? Reflect.ownKeys(raw).filter(key => raw[key] !== undefined) : [];
+  if (!plain(raw) || declared.length < keys.length - 1 || declared.length > keys.length ||
+    Reflect.ownKeys(raw).some(key => typeof key !== 'string' || !keys.includes(key)) || !densityValid ||
     !canonicalAbsolute(raw.chromeBinary) || !safeChromeFlagPath(raw.extensionPath) ||
     !safeChromeFlagPath(raw.userDataDir) || !['darwin', 'linux', 'win32'].includes(raw.platform) ||
     raw.startUrl !== 'about:blank' || !plain(raw.viewport) ||
@@ -108,6 +114,7 @@ export function buildChromeLaunchArgv(raw = {}) {
     ...(raw.platform === 'darwin' ? ['--use-mock-keychain'] : []),
     '--window-position=-10000,-10000', `--window-size=${raw.viewport.width},${raw.viewport.height}`,
     `--user-data-dir=${raw.userDataDir}`,
+    ...(raw.deviceScaleFactor === undefined ? [] : [`--force-device-scale-factor=${raw.deviceScaleFactor}`]),
     `--disable-extensions-except=${raw.extensionPath}`,
     `--load-extension=${raw.extensionPath}`,
     ...hostResolverArgs(),
@@ -466,7 +473,10 @@ export async function resolveChromeBinary({ explicit, env = process.env, platfor
 }
 
 export function resolveExpectedChromeMajor({ explicit, env = process.env } = {}) {
-  const source = explicit ?? env.AUDITA_EXPECT_CHROME_MAJOR;
+  // A variável de ambiente escolhe a versão SEM afrouxar a checagem: quando presente, ela substitui o
+  // valor fixo dos testes (a versão observada continua tendo de bater exatamente com a esperada). Sem a
+  // variável nada muda: o explícito de cada teste continua valendo.
+  const source = env?.AUDITA_EXPECT_CHROME_MAJOR ?? explicit;
   if (source === undefined) return null;
   if (typeof source === 'string' && !/^[1-9][0-9]{0,2}$/u.test(source)) throw fixed('CHROME_MAJOR_INVALID');
   const value = typeof source === 'string' ? Number(source) : source;
@@ -879,9 +889,12 @@ export function createBoundedBrowserCleanup(raw = {}) {
 export async function launchUnpackedExtension(t, options = {}) {
   const optionKeys = [
     'extensionPath', 'startUrl', 'downloadDirectory', 'viewport', 'chromeBinary', 'expectedMajor', 'qaDirectory', 'downloadMode',
+    'deviceScaleFactor',
   ];
+  const densityValid = options.deviceScaleFactor === undefined ||
+    (Number.isFinite(options.deviceScaleFactor) && options.deviceScaleFactor >= 0.5 && options.deviceScaleFactor <= 4);
   if (!plain(options) || Reflect.ownKeys(options).some(key => typeof key !== 'string' || !optionKeys.includes(key)) ||
-    !canonicalAbsolute(options.extensionPath) || !safeUrl(options.startUrl)) throw fixed('CHROME_LAUNCH_INVALID');
+    !densityValid || !canonicalAbsolute(options.extensionPath) || !safeUrl(options.startUrl)) throw fixed('CHROME_LAUNCH_INVALID');
   const downloadMode = resolveDownloadMode(options.downloadMode);
   const extensionPath = await resolveUnpackedExtensionPath(options.extensionPath);
   const chromeBinary = await resolveChromeBinary({ explicit: options.chromeBinary });
@@ -907,6 +920,7 @@ export async function launchUnpackedExtension(t, options = {}) {
   const spawnSpec = buildChromeLaunchArgv({
     chromeBinary, extensionPath, platform: process.platform, startUrl: 'about:blank',
     userDataDir: directories.runRoot, viewport,
+    ...(options.deviceScaleFactor === undefined ? {} : { deviceScaleFactor: options.deviceScaleFactor }),
   });
   const chrome = spawn(spawnSpec.file, spawnSpec.args, spawnSpec.options);
   const browser = createCdpPipeTransport({ readable: chrome.stdio[4], writable: chrome.stdio[3] });

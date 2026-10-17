@@ -57,9 +57,13 @@ export const KEYBOARD_MAP_LIMITATIONS = Object.freeze([
   'stop-limit-reached',
   'suspect-limit-reached',
   'badge-overlap-unresolved',
-  // Acrescentada depois da 1.1.0, sempre no fim: a ordem canônica é a da lista, então anexar mantém
+  // Acrescentadas depois da 1.1.0, sempre no fim: a ordem canônica é a da lista, então anexar mantém
   // válidos os mapas já guardados.
   'source-layout-changed',
+  // 1.2.0: o item fora da área capturada deixa de ser encaixado na borda (caixa no lugar errado) e
+  // passa a sair da lista de caixas, contado em `omittedNoRect`. O código antigo continua no catálogo
+  // para que mapas 1.1.0 guardados sigam abrindo.
+  'stops-outside-source-omitted',
 ]);
 
 export const KEYBOARD_MAP_REQUIRED_LIMITATIONS = Object.freeze([

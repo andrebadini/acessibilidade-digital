@@ -1,9 +1,11 @@
+import { establishWidenedLayout, restoreRenderedViewport } from '../background/full-page-warm-up.js';
 import { createCdpClient, createChromeDebuggerTransport } from '../browser/cdp-client.js';
 import { captureFullPage } from '../browser/capture-evidence.js';
 import { decodePngDataUrl, pngDataUrlFromBytes } from '../core/evidence/png.js';
 
 const THUMB_MAX = 320;
 const THUMB_MARGIN = 8;
+const identityStep = operation => operation();
 
 function dataUrlToBytes(dataUrl) {
   const prefix = 'data:image/png;base64,';
@@ -53,16 +55,20 @@ export async function cropElementImage(fullPageDataUrl, bounds, { maxSide = THUM
 }
 
 /**
- * Capture the inspected page once and crop a thumbnail per inventory entry.
- * Failure is non-fatal: the text report remains complete without pixels.
+ * Abre, ANTES da inspeção, a sessão que vai capturar a página.
+ *
+ * Por que antes: `captureBeyondViewport` amplia a área de renderização (a barra de rolagem clássica
+ * deixa de existir) enquanto tira a imagem. Sem fixar esse estado antes de medir, os retângulos saem no
+ * leiaute com barra e a imagem mostra o leiaute sem barra: tudo o que é ancorado à direita ou ao centro
+ * aparece deslocado no mapa, e o recorte do elemento pega o vizinho. A auditoria já faz isso em
+ * `capturePristineFullPage`; aqui a medida e a imagem precisam do mesmo cuidado.
+ *
+ * A sessão fica aberta durante a inspeção (`openReadingVisualSession`) e é fechada por
+ * `closeReadingVisualSession`, que devolve a área de renderização ao estado em que a pessoa a deixou.
+ * Falha aqui é silenciosa: `captureReadingVisuals` segue sem sessão e a conferência continua sem pixels.
  */
-export async function captureReadingVisuals(chromeApi, { tabId, entries, metrics } = {}) {
-  const limitations = [];
-  const elementImages = Object.create(null);
-  if (!chromeApi?.debugger || !Number.isSafeInteger(tabId) || tabId < 0) {
-    limitations.push('visual-capture-unavailable');
-    return { fullPage: null, pageMapGeometry: null, elementImages, limitations };
-  }
+export async function openReadingVisualSession(chromeApi, { tabId } = {}) {
+  if (!chromeApi?.debugger || !Number.isSafeInteger(tabId) || tabId < 0) return null;
   const target = { tabId };
   const cdp = createCdpClient({ ...createChromeDebuggerTransport(chromeApi), commandTimeoutMs: 20_000 });
   let attached = false;
@@ -70,8 +76,47 @@ export async function captureReadingVisuals(chromeApi, { tabId, entries, metrics
     await cdp.connect(tabId);
     attached = true;
     await cdp.command('Page.enable', {});
+    await establishWidenedLayout({ cdp, step: identityStep });
+    return { cdp, target, tabId, attached: true };
+  } catch {
+    if (attached) { try { await cdp.disconnect(target); } catch { /* already detached */ } }
+    return null;
+  }
+}
+
+/** Fecha a sessão de `openReadingVisualSession`: repõe a área de renderização e desanexa. */
+export async function closeReadingVisualSession(session) {
+  if (!session?.cdp || session.attached !== true) return;
+  try { await restoreRenderedViewport({ cdp: session.cdp, step: identityStep }); } catch { /* best-effort */ }
+  try { await session.cdp.disconnect(session.target); } catch { /* already detached */ }
+  session.attached = false;
+}
+
+/**
+ * Capture the inspected page once and crop a thumbnail per inventory entry.
+ * Failure is non-fatal: the text report remains complete without pixels.
+ *
+ * Com `session` (aberta antes da inspeção), a medida e a imagem descrevem o mesmo leiaute. Sem ela, a
+ * captura abre e fecha a própria sessão, sem fixar o estado antes: é o caminho de compatibilidade para
+ * quem chamar esta função isoladamente.
+ */
+export async function captureReadingVisuals(chromeApi, { tabId, entries, metrics, session } = {}) {
+  const limitations = [];
+  const elementImages = Object.create(null);
+  const owned = session ? null : await openReadingVisualSession(chromeApi, { tabId });
+  const active = session ?? owned;
+  if (!active?.cdp) {
+    limitations.push('visual-capture-unavailable');
+    return { fullPage: null, pageMapGeometry: null, elementImages, limitations };
+  }
+  const { cdp } = active;
+  try {
     const layout = await cdp.command('Page.getLayoutMetrics', {});
+    // O objeto inteiro, não só o tamanho: `captureFullPage` precisa de `cssVisualViewport.zoom` para
+    // cobrir a página quando o navegador está ampliado (ver `capture-evidence.js`). Descartar o zoom
+    // aqui devolvia a imagem truncada que a auditoria deixou de produzir no mesmo instante.
     const size = metrics || {
+      ...layout,
       cssContentSize: layout.cssContentSize || layout.contentSize,
       scrollX: 0,
       scrollY: 0,
@@ -106,6 +151,6 @@ export async function captureReadingVisuals(chromeApi, { tabId, entries, metrics
     limitations.push('visual-capture-unavailable');
     return { fullPage: null, pageMapGeometry: null, elementImages, limitations };
   } finally {
-    if (attached) { try { await cdp.disconnect(target); } catch { /* already detached */ } }
+    if (owned) await closeReadingVisualSession(owned);
   }
 }

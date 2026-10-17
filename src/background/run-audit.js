@@ -1,7 +1,7 @@
 import { captureElement, captureFullPage } from '../browser/capture-evidence.js';
 import { establishWidenedLayout, restoreRenderedViewport, warmUpFullPageLayout } from './full-page-warm-up.js';
 import { mapSourceGeometry } from '../core/evidence/map-source-geometry.js';
-import { contentSizeOf, domSnapshotRects, integralCaptureRect, snapshotFrameId, withFreshRects } from '../core/evidence/fresh-geometry.js';
+import { contentSizeOf, domSnapshotRects, integralCaptureRect, snapshotFrameId, snapshotScaleOf, withFreshRects } from '../core/evidence/fresh-geometry.js';
 import { measureElementTarget } from '../browser/measure-element.js';
 import { collectPage } from '../browser/collect-page.js';
 import { AXE_PROVENANCE, runAxeInTab } from '../browser/axe-adapter.js';
@@ -976,13 +976,16 @@ async function runLegacyAudit({
      * aos poucos os retângulos dela já não valem; estes valem, e quem sumiu simplesmente fica sem caixa.
      * Ver `src/core/evidence/fresh-geometry.js` para as medições que sustentam medir depois, e não antes.
      */
-    async function measureFreshRects() {
+    async function measureFreshRects(zoom = 1) {
       try {
         const capture = await awaitStep(() => cdp.command('DOMSnapshot.captureSnapshot', {
           computedStyles: [],
           includeDOMRects: true,
         }, { timeoutMs: 45_000 }));
-        const rects = domSnapshotRects(capture, { frameId: snapshotFrameId(state.snapshot) });
+        // O fator do instantâneo é o mesmo nos dois lados da captura; a leitura do instante da captura
+        // já está em mãos e evita uma ida extra ao navegador. Sem ele, as caixas ficariam deslocadas em
+        // todo mapa aberto com a página ampliada ou a tela densa (ver `snapshotScaleOf`).
+        const rects = domSnapshotRects(capture, { frameId: snapshotFrameId(state.snapshot), zoom });
         // Métricas depois da medição: se a página cresceu enquanto os retângulos eram medidos, a própria
         // medição é incoerente e o mapa sai sem caixa nenhuma.
         let measurementMetrics = null;
@@ -1035,7 +1038,9 @@ async function runLegacyAudit({
         } catch (error) {
           rethrowAbort(error, signal);
         }
-        const fresh = await measureFreshRects();
+        // O instantâneo mede em px de dispositivo: o fator inclui o zoom da página E a densidade da tela
+        // (`snapshotScaleOf`). Só o zoom deixava toda caixa no dobro da posição numa tela 2×.
+        const fresh = await measureFreshRects(snapshotScaleOf(captureMetrics));
         freshRects = fresh.rects;
         mapSource = mapSourceGeometry({
           captureMetrics,
