@@ -79,6 +79,30 @@ test('report export accepts only an optional boolean deletion preference and cop
   assert.equal(parseWorkerMessage(accessor).ok, false);
 });
 
+test('report export accepts only canonical format subsets and never deletes for a subset', () => {
+  const base = { type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1' };
+  for (const formats of ['pdf', 'html,json', 'html,pdf,json', 'html,pdf,csv,json']) {
+    assert.deepEqual(parseWorkerMessage({ ...base, formats }),
+      { ok: true, value: { ...base, formats } });
+  }
+  for (const formats of ['', 'json,html', 'html,json,pdf', 'pdf,pdf', 'xml', 'html, xml', 1, true, null]) {
+    assert.equal(parseWorkerMessage({ ...base, formats }).ok, false, String(formats));
+  }
+  for (const formats of ['pdf', 'html,json', 'html,pdf,json']) {
+    assert.equal(parseWorkerMessage({ ...base, formats, deleteAfterCompleteExport: true }).ok, false,
+      `deletion with ${formats}`);
+  }
+  assert.deepEqual(parseWorkerMessage({
+    ...base, formats: 'html,pdf,csv,json', deleteAfterCompleteExport: true,
+  }), {
+    ok: true,
+    value: { ...base, deleteAfterCompleteExport: true, formats: 'html,pdf,csv,json' },
+  });
+  const accessor = { ...base };
+  Object.defineProperty(accessor, 'formats', { enumerable: true, get() { throw new Error('must not read'); } });
+  assert.equal(parseWorkerMessage(accessor).ok, false);
+});
+
 const validMessages = [
   { type: 'PREPARE_PANEL_CAPABILITY', requestId: '_request', windowId: 9 },
   { type: 'PREPARE_PANEL_NAVIGATION_CAPABILITY', requestId: '_navigation', intent: 'single', windowId: 9 },

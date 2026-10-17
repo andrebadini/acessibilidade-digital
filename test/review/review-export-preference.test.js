@@ -55,6 +55,124 @@ test('an unconfirmed export stops waiting and says so instead of staying queued'
   assert.equal(status.textContent, 'estado da auditoria nova');
 });
 
+test('the report follows the durable receipt and names a partial delivery instead of staying queued', async () => {
+  const { describeExportDelivery, exportDeliveryText } = await import('../../src/export/export-outcome-message.js');
+  const watchSource = `${requestSource}; watchExportOutcome`;
+  const runWatch = ({ attempts, cleanupPending = false }) => {
+    const timers = [];
+    const status = { textContent: '' };
+    const regenerate = {};
+    const watch = runInNewContext(watchSource, {
+      auditModel: { auditId: 'audit-a' }, status, regenerate,
+      EXPORT_CLEANUP_MESSAGE: 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.',
+      describeExportDelivery, exportDeliveryText,
+      store: {
+        async getLatest() {
+          if (cleanupPending) return { auditId: 'audit-a', exportAttempt: 2, exportCleanupPending: true };
+          const state = attempts.shift();
+          return state ? { auditId: 'audit-a', exportAttempt: 2, ...state } : { auditId: 'audit-a', exportAttempt: 2 };
+        },
+      },
+      setTimeout(callback) { timers.push(callback); return timers.length; },
+      clearTimeout() {},
+      Date,
+    });
+    return { watch, timers, status, regenerate };
+  };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+
+  const partial = runWatch({
+    attempts: [{ exportStatus: 'partial', deliveryReceipt: {
+      status: 'partial',
+      limitations: ['O artefato PDF não concluiu o download (interrompido).'],
+      formats: [
+        { format: 'html', status: 'complete' },
+        { format: 'pdf', status: 'interrupted', failureCode: 'DOWNLOAD_INTERRUPTED' },
+      ],
+    } }],
+  });
+  const pending = partial.watch('audit-a', 1);
+  await flush();
+  assert.equal(partial.timers.length, 1, 'the report polls instead of waiting for a worker event');
+  partial.timers.shift()();
+  await flush();
+  await pending;
+  assert.match(partial.status.textContent, /Alguns arquivos do relatório não puderam ser baixados/u);
+  assert.match(partial.status.textContent, /PDF: o navegador interrompeu o download/u);
+  assert.match(partial.status.textContent, /exporte novamente/u);
+  assert.doesNotMatch(partial.status.textContent, /na fila de geração/u);
+  assert.equal(partial.regenerate.disabled, false);
+
+  const cleanup = runWatch({ attempts: [], cleanupPending: true });
+  const cleanupPending = cleanup.watch('audit-a', 1);
+  await flush();
+  cleanup.timers.shift()();
+  await flush();
+  await cleanupPending;
+  assert.match(cleanup.status.textContent, /arquivo obsoleto da exportação/u);
+  assert.doesNotMatch(cleanup.status.textContent, /na fila de geração/u);
+});
+
+test('a per-format button sends only its format, while the default request omits the field', async () => {
+  const sent = [];
+  const request = runInNewContext(`${requestSource}; requestExport`, {
+    auditModel: { auditId: 'audit-a' }, reportSessionCapabilityId: 'S'.repeat(22),
+    regenerate: {}, status: {}, exportConfirmationTimer: null,
+    document: { querySelector() { return null; } },
+    async sendAuthorizedRequest(build) { sent.push(build('S'.repeat(22))); return { ok: true }; },
+    setTimeout: () => 0, clearTimeout: () => {},
+  });
+  await request({ formats: ['pdf'] });
+  await request({ formats: ['html', 'json'] });
+  await request();
+  assert.deepEqual(sent.map(value => value.formats), ['pdf', 'html,json', undefined]);
+  assert.equal(Object.hasOwn(sent[2], 'formats'), false, 'the default must stay compatible with older workers');
+  assert.deepEqual(sent.map(value => value.deleteAfterCompleteExport), [false, false, false]);
+});
+
+test('the durable receipt fills each requested card result without erasing its neighbours', async () => {
+  const { describeExportDelivery, exportDeliveryText } = await import('../../src/export/export-outcome-message.js');
+  const nodes = new Map([
+    ['pdf', { textContent: '' }], ['csv', { textContent: '' }], ['html', { textContent: 'intocado' }],
+  ]);
+  const timers = [];
+  const status = { textContent: '' };
+  const regenerate = {};
+  const watch = runInNewContext(`${requestSource}; watchExportOutcome`, {
+    auditModel: { auditId: 'audit-a' }, status, regenerate,
+    EXPORT_CLEANUP_MESSAGE: 'limpeza pendente',
+    describeExportDelivery, exportDeliveryText,
+    document: { querySelector(selector) {
+      const format = selector.match(/data-report-export-result="([a-z]+)"/u)?.[1];
+      return nodes.get(format) ?? null;
+    } },
+    store: {
+      async getLatest() {
+        return { auditId: 'audit-a', exportAttempt: 2, exportStatus: 'partial', deliveryReceipt: {
+          status: 'partial',
+          limitations: ['O download do artefato CSV foi cancelado por você.'],
+          formats: [
+            { format: 'pdf', status: 'complete' },
+            { format: 'csv', status: 'interrupted', failureCode: 'DOWNLOAD_CANCELLED' },
+          ],
+        } };
+      },
+    },
+    setTimeout(callback) { timers.push(callback); return timers.length; },
+    clearTimeout() {},
+    Date,
+  });
+  const pending = watch('audit-a', 1, ['pdf', 'csv']);
+  await new Promise(resolve => setImmediate(resolve));
+  timers.shift()();
+  await pending;
+  assert.equal(nodes.get('pdf').textContent, 'PDF baixado.');
+  assert.equal(nodes.get('csv').textContent, 'CSV não foi baixado: você cancelou o salvamento.');
+  assert.equal(nodes.get('html').textContent, 'intocado', 'a result from another card must not be rewritten');
+  assert.match(status.textContent, /Baixados: PDF\./u);
+  assert.match(status.textContent, /você cancelou o salvamento/u);
+});
+
 test('regenerate uses the same current checkbox choice as the main export button', () => {
   const start = source.indexOf("regenerate.addEventListener('click'");
   const handler = source.slice(start, source.indexOf('\nreturnToPage.addEventListener', start));

@@ -791,16 +791,24 @@ function deliveryJournalRecord(auditId, entries) {
 }
 
 function exportReceiptFromRevision(reportRevision, entries) {
-  if (!reportRevision || !Array.isArray(entries) || entries.length !== EXPORT_FORMATS_V1.length) return null;
-  const formats = EXPORT_FORMATS_V1.map(format => entries.find(entry => entry.format === format));
-  if (formats.some(entry => !entry || entry.state !== 'terminal' || !Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0 ||
-    typeof entry.mimeType !== 'string' || !Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0 || !/^[a-f0-9]{64}$/u.test(entry.sha256 ?? ''))) return null;
+  if (!reportRevision || !Array.isArray(entries) || entries.length < 1 || entries.length > EXPORT_FORMATS_V1.length) return null;
+  const seen = new Set();
+  for (const entry of entries) {
+    if (!entry || !EXPORT_FORMATS.has(entry.format) || seen.has(entry.format) ||
+      entry.state !== 'terminal' || !Number.isSafeInteger(entry.downloadId) || entry.downloadId < 0 ||
+      typeof entry.mimeType !== 'string' || !Number.isSafeInteger(entry.byteSize) || entry.byteSize < 0 ||
+      !/^[a-f0-9]{64}$/u.test(entry.sha256 ?? '')) return null;
+    seen.add(entry.format);
+  }
+  const formats = EXPORT_FORMATS_V1.filter(format => seen.has(format))
+    .map(format => entries.find(entry => entry.format === format));
   const ownerId = formats[0].ownerId;
   const exportAttempt = formats[0].exportAttempt;
   if (formats.some(entry => entry.ownerId !== ownerId || entry.exportAttempt !== exportAttempt)) return null;
   return freezeStored({
     version: 1, auditId: reportRevision.auditId, modelRevision: reportRevision.modelRevision,
-    modelHash: reportRevision.modelHash, attemptId: String(exportAttempt), status: 'complete',
+    modelHash: reportRevision.modelHash, attemptId: String(exportAttempt),
+    status: formats.length === EXPORT_FORMATS_V1.length ? 'complete' : 'partial',
     formats: formats.map(entry => ({ format: entry.format, mimeType: entry.mimeType, byteSize: entry.byteSize,
       sha256: entry.sha256, downloadId: entry.downloadId, state: 'complete' })),
   });
@@ -823,8 +831,8 @@ function exportReceiptFromLatest(latest, auditId) {
       !Array.isArray(receipt.limitations) ||
       canonicalStringify(Object.keys(receipt).sort()) !== canonicalStringify(['formats', 'limitations', 'status'])) return null;
     if (receipt.limitations.some(value => typeof value !== 'string' || !value.trim()) ||
-      new Set(receipt.limitations).size !== receipt.limitations.length ||
-      (status === 'complete' ? receipt.limitations.length !== 0 : receipt.limitations.length === 0)) return null;
+      new Set(receipt.limitations).size !== receipt.limitations.length) return null;
+    if (status === 'complete' && receipt.limitations.length !== 0) return null;
     const seenDownloadIds = new Set();
     const seenFormats = new Set();
     let previousFormatIndex = -1;
@@ -847,6 +855,10 @@ function exportReceiptFromLatest(latest, auditId) {
     }
     if (status === 'complete' &&
       (receipt.formats.length !== EXPORT_FORMATS_V1.length || formats.length !== EXPORT_FORMATS_V1.length)) return null;
+    // Um recibo parcial sem limitações só é honesto quando todos os formatos registrados
+    // foram concluídos e a pessoa pediu só alguns deles (subconjunto próprio).
+    if (status === 'partial' && receipt.limitations.length === 0 &&
+      (formats.length < 1 || formats.length !== receipt.formats.length || formats.length >= EXPORT_FORMATS_V1.length)) return null;
     return freezeStored({ version: 1, ...identity, status, formats });
   } catch {
     return null;

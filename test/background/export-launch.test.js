@@ -554,12 +554,166 @@ test('export launch creates a bearer-free URL and persists one first-document se
   ]);
   assert.equal(connected.filter(result => result.ok === true).length, 1);
   const session = connected.find(result => result.ok);
-  assert.deepEqual(Object.keys(session).sort(), ['attemptId', 'auditId', 'expectedRevision', 'ok', 'sessionCapabilityId']);
+  assert.deepEqual(Object.keys(session).sort(), ['attemptId', 'auditId', 'expectedRevision', 'formats', 'ok', 'sessionCapabilityId']);
+  assert.deepEqual(session.formats, ['html', 'pdf', 'csv', 'json']);
   assert.deepEqual(await authority.complete({ sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', attemptId: '7', sender }),
     { ok: true, auditId: 'audit-1', state: 'terminal' });
   assert.deepEqual(calls.find(call => call[0] === 'terminal'), ['terminal', { type: 'EXPORT_COMPLETE', auditId: 'audit-1', deleted: false, status: 'complete', exportRevision: 5 }]);
   assert.equal(calls.filter(call => call[0] === 'receipt-reread').length, 1);
   assert.deepEqual(calls.filter(call => call[0] === 'completion'), [['completion', '7']]);
+});
+
+test('a subset request survives as an exact receipt while older records still mean all four formats', async () => {
+  const mime = {
+    html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+    csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+  };
+  const runCase = async ({ formats, deleteAfterCompleteExport = false, expectedFormats }) => {
+    const records = new Map(); const calls = []; let nextByte = 1;
+    const area = {
+      async get(keys) { const list = keys === null ? [...records.keys()] : (Array.isArray(keys) ? keys : [keys]); return Object.fromEntries(list.filter(key => records.has(key)).map(key => [key, structuredClone(records.get(key))])); },
+      async set(rows) { for (const [key, value] of Object.entries(rows)) records.set(key, structuredClone(value)); },
+      async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) records.delete(key); },
+    };
+    const snapshot = { model: { auditId: 'audit-1' }, revision: 4, capability: Object.freeze({}) };
+    const status = expectedFormats.length === 4 ? 'complete' : 'partial';
+    const store = {
+      async setRetentionIntent() {},
+      async getAuditSnapshot() { return snapshot; },
+      async getReportRevision() { return { version: 1, auditId: 'audit-1', modelRevision: 4, modelHash: 'a'.repeat(64), model: { auditId: 'audit-1' }, checkpoint: {} }; },
+      async acquireExportLease(_id, capability, options) { calls.push(['lease', options.ownerId]); return { acquired: true, exportAttempt: 7, revision: 4, expiresAt: '2026-08-29T12:10:00.000Z' }; },
+      async releaseExportLease() { return true; },
+      async getExportReceipt() {
+        calls.push(['receipt-reread']);
+        return {
+          version: 1, auditId: 'audit-1', modelRevision: 4, modelHash: 'a'.repeat(64),
+          attemptId: '7', status,
+          formats: expectedFormats.map((format, index) => ({
+            format, mimeType: mime[format], byteSize: index + 1,
+            sha256: String(index).repeat(64), downloadId: index + 1, state: 'complete',
+          })),
+        };
+      },
+      async completeExport(_auditId, value) { calls.push(['completion', value.attemptId]); return { completed: true }; },
+      async emitTerminal(event) { calls.push(['terminal', event]); },
+    };
+    const reportLaunch = {
+      async authorizeExport() { return { ok: true, auditId: 'audit-1', windowId: 9, sessionCapabilityId: 'R'.repeat(22) }; },
+      async validateConsumer() { return true; },
+    };
+    const chromeApi = {
+      runtime: {
+        id: 'ext-test', getURL: path => `chrome-extension://ext-test/${path}`,
+        async getContexts() { return [{ contextType: 'TAB', documentId: 'export-doc', documentUrl: 'chrome-extension://ext-test/src/export/index.html?auditId=audit-1', tabId: 51, windowId: 9 }]; },
+      },
+      tabs: {
+        async create(options) { calls.push(['create', options]); return { id: 51, windowId: 9, url: 'about:blank' }; },
+        async update(tabId, options) { calls.push(['navigate', tabId, options.url]); return { id: tabId, windowId: 9, url: options.url }; },
+        async get(tabId) { return { id: tabId, windowId: 9, url: 'chrome-extension://ext-test/src/export/index.html?auditId=audit-1' }; },
+        async remove(tabId) { calls.push(['remove', tabId]); },
+      },
+    };
+    const authority = createExportLaunchAuthority({
+      chromeApi, sessionArea: area, auditStore: store, reportLaunch, epochNow: () => 1000,
+      modelNow: () => '2026-08-29T12:00:00.000Z', randomBytes: size => new Uint8Array(size).fill(nextByte++),
+    });
+    const requested = await authority.requestExport({
+      auditId: 'audit-1', sessionCapabilityId: 'R'.repeat(22), deleteAfterCompleteExport,
+      ...(formats === undefined ? {} : { formats }),
+      sender: { id: 'ext-test', documentId: 'review-doc', url: 'chrome-extension://ext-test/src/review/index.html?auditId=audit-1' },
+    });
+    assert.equal(requested.ok, true);
+    const navigation = calls.find(call => call[0] === 'navigate')[2];
+    const sender = { id: 'ext-test', documentId: 'export-doc', url: navigation };
+    const session = await authority.connect({ auditId: 'audit-1', sender });
+    assert.deepEqual(session.formats, expectedFormats);
+    const launch = await authority.getLaunch('audit-1');
+    assert.equal(launch.formats, expectedFormats.join(','));
+    const completed = await authority.complete({
+      sessionCapabilityId: session.sessionCapabilityId, auditId: 'audit-1', attemptId: '7', sender,
+    });
+    assert.deepEqual(completed, { ok: true, auditId: 'audit-1', state: 'terminal' });
+    assert.equal((await authority.getLaunch('audit-1')).terminalProof.status, status);
+    return calls;
+  };
+
+  const pdfCalls = await runCase({ formats: 'pdf', expectedFormats: ['pdf'] });
+  assert.deepEqual(pdfCalls.find(([type]) => type === 'terminal')[1],
+    { type: 'EXPORT_COMPLETE', auditId: 'audit-1', deleted: false, status: 'partial', exportRevision: 5 });
+  await runCase({ formats: 'html,json', expectedFormats: ['html', 'json'] });
+  await runCase({ formats: undefined, expectedFormats: ['html', 'pdf', 'csv', 'json'] });
+  await runCase({ formats: 'html,pdf,csv,json', deleteAfterCompleteExport: true,
+    expectedFormats: ['html', 'pdf', 'csv', 'json'] });
+
+  // Registro gravado antes da exportação por formato: sem o campo opcional, vale o conjunto completo.
+  const legacyRecords = new Map([['audita:export-launch:v1:audit-1', {
+    version: 1, auditId: 'audit-1', sourceReviewSessionCapabilityId: 'R'.repeat(22),
+    expectedRevision: 4, attemptId: '7', tabId: 51, windowId: 9,
+    path: '/src/export/index.html', documentId: null, state: 'awaiting-connection',
+    issuedAt: 900, expiresAt: 1100,
+  }]]);
+  const legacyArea = {
+    async get(keys) { const list = keys === null ? [...legacyRecords.keys()] : (Array.isArray(keys) ? keys : [keys]); return Object.fromEntries(list.filter(key => legacyRecords.has(key)).map(key => [key, structuredClone(legacyRecords.get(key))])); },
+    async set(rows) { for (const [key, value] of Object.entries(rows)) legacyRecords.set(key, structuredClone(value)); },
+    async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) legacyRecords.delete(key); },
+  };
+  const legacyAuthority = createExportLaunchAuthority({
+    chromeApi: {
+      runtime: {
+        id: 'ext-test', getURL: path => `chrome-extension://ext-test/${path}`,
+        async getContexts() { return [{ contextType: 'TAB', documentId: 'export-doc', documentUrl: 'chrome-extension://ext-test/src/export/index.html?auditId=audit-1', tabId: 51, windowId: 9 }]; },
+      },
+      tabs: { async create() {}, async update() {}, async get() {} },
+    },
+    sessionArea: legacyArea,
+    auditStore: {
+      async getAuditSnapshot() {}, async acquireExportLease() {},
+      async releaseExportLease() { return true; },
+    },
+    reportLaunch: { async authorizeExport() {}, async validateConsumer() { return true; } },
+    epochNow: () => 1000, modelNow: () => '2026-08-29T12:00:00.000Z',
+    randomBytes: size => new Uint8Array(size).fill(9),
+  });
+  const legacySession = await legacyAuthority.connect({
+    auditId: 'audit-1',
+    sender: { id: 'ext-test', documentId: 'export-doc', url: 'chrome-extension://ext-test/src/export/index.html?auditId=audit-1' },
+  });
+  assert.deepEqual(legacySession.formats, ['html', 'pdf', 'csv', 'json']);
+  assert.equal(Object.hasOwn(legacyRecords.get('audita:export-launch:v1:audit-1'), 'formats'), false);
+
+  const deniedCalls = [];
+  const denied = createExportLaunchAuthority({
+    chromeApi: {
+      runtime: {
+        id: 'ext-test', getURL: path => `chrome-extension://ext-test/${path}`,
+        async getContexts() { return []; },
+      },
+      tabs: {
+        async create() { deniedCalls.push('create'); return { id: 51, windowId: 9 }; },
+        async update() { deniedCalls.push('update'); },
+        async get() { deniedCalls.push('get'); },
+      },
+    },
+    sessionArea: { async get() { return {}; }, async set() {}, async remove() {} },
+    auditStore: {
+      async getAuditSnapshot() {}, async acquireExportLease() {},
+      async releaseExportLease() { return true; },
+    },
+    reportLaunch: { async authorizeExport() {} },
+    epochNow: () => 1000, modelNow: () => '2026-08-29T12:00:00.000Z',
+    randomBytes: size => new Uint8Array(size).fill(1),
+  });
+  const base = {
+    auditId: 'audit-1', sessionCapabilityId: 'R'.repeat(22),
+    sender: { id: 'ext-test', documentId: 'review-doc' },
+  };
+  assert.deepEqual(await denied.requestExport({ ...base, formats: 'pdf', deleteAfterCompleteExport: true }),
+    { ok: false, code: 'REPORT_EXPORT_DENIED' });
+  for (const formats of ['json,html', 'pdf,pdf', '', 'xml']) {
+    assert.deepEqual(await denied.requestExport({ ...base, formats }),
+      { ok: false, code: 'REPORT_EXPORT_DENIED' }, formats);
+  }
+  assert.deepEqual(deniedCalls, []);
 });
 
 test('compensates a proven owned tab and export lease after launch allocation failure', async () => {

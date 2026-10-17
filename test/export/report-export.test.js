@@ -1568,3 +1568,94 @@ function deferred() {
   const promise = new Promise(next => { resolve = next; });
   return { promise, resolve };
 }
+
+test('a PDF-only export prints once and downloads only the PDF', async () => {
+  const events = [];
+  const tabCalls = [];
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z', formats: ['pdf'],
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: {
+      async createPrintTab() { tabCalls.push('create'); return { id: 71 }; },
+      async waitForReady() {}, async connectCdp() { return { async disconnect() {} }; },
+      async waitForAssets() {}, async removeTab() { tabCalls.push('remove'); },
+    },
+    async pdfRenderer() { return { bytes: new TextEncoder().encode('%PDF-1.7'), usedFallback: false, limitations: [] }; },
+    downloadsAdapter: fakeDownloads(events),
+  });
+  assert.deepEqual(result.requestedFormats, ['pdf']);
+  assert.deepEqual(result.formats.map(entry => [entry.format, entry.status]), [['pdf', 'complete']]);
+  assert.deepEqual(events.filter(entry => entry[0] === 'download').map(entry => entry[1]), [`${result.formats[0].filename}`]);
+  assert.equal(result.formats[0].filename.endsWith('.pdf'), true);
+  assert.deepEqual(tabCalls, ['create', 'remove']);
+  assert.equal(result.deliveryReceipt.status, 'partial', 'one format is never a complete four-format export');
+  assert.equal(result.csv, null);
+});
+
+test('a CSV-only export never opens the PDF print tab and downloads only the spreadsheet', async () => {
+  const events = [];
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z', formats: ['csv'],
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: {
+      async createPrintTab() { throw new Error('CSV must not open the print tab'); },
+      async waitForReady() { throw new Error('CSV must not wait for print'); },
+      async connectCdp() { throw new Error('CSV must not connect CDP'); },
+      async waitForAssets() { throw new Error('CSV must not wait for assets'); },
+      async removeTab() { throw new Error('CSV must not remove a print tab'); },
+    },
+    async pdfRenderer() { throw new Error('CSV must not render PDF'); },
+    downloadsAdapter: fakeDownloads(events),
+  });
+  assert.deepEqual(result.requestedFormats, ['csv']);
+  assert.deepEqual(result.formats.map(entry => [entry.format, entry.status]), [['csv', 'complete']]);
+  assert.deepEqual(events.filter(entry => entry[0] === 'download').map(entry => entry[1]), [`${result.formats[0].filename}`]);
+  assert.equal(result.formats[0].filename.endsWith('.csv'), true);
+  assert.equal(result.pdf, null);
+  assert.equal(result.deliveryReceipt.status, 'partial');
+  assert.deepEqual(result.deliveryReceipt.limitations, []);
+});
+
+test('HTML and JSON can be exported together without CSV or PDF', async () => {
+  const events = [];
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z', formats: ['html', 'json'],
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: {
+      async createPrintTab() { throw new Error('no print for HTML and JSON'); },
+      async waitForReady() { throw new Error('no print for HTML and JSON'); },
+      async connectCdp() { throw new Error('no CDP for HTML and JSON'); },
+      async waitForAssets() { throw new Error('no assets for HTML and JSON'); },
+      async removeTab() { throw new Error('no tab to remove'); },
+    },
+    async pdfRenderer() { throw new Error('no PDF for HTML and JSON'); },
+    downloadsAdapter: fakeDownloads(events),
+  });
+  assert.deepEqual(result.requestedFormats, ['html', 'json']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json']);
+  assert.deepEqual(events.filter(entry => entry[0] === 'download').map(entry => entry[1]), [
+    `${result.formats[0].filename}`, `${result.formats[1].filename}`,
+  ]);
+  assert.equal(result.csv, null);
+  assert.equal(result.pdf, null);
+  assert.equal(result.deliveryReceipt.status, 'partial');
+});
+
+test('a requested PDF that cannot be generated is reported without inventing CSV failure', async () => {
+  const events = [];
+  const result = await runReportExport({
+    auditModel: clone(SAMPLE_AUDIT), now: () => '2026-08-26T15:00:00.000Z', formats: ['html', 'pdf'],
+  }, {
+    urlApi: { createObjectURL() { return 'blob:chrome-extension://test/print'; }, revokeObjectURL() {} },
+    tabAdapter: successfulTabAdapter(),
+    async pdfRenderer() { throw new Error('print failed'); },
+    downloadsAdapter: fakeDownloads(events),
+  });
+  assert.deepEqual(result.requestedFormats, ['html', 'pdf']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html']);
+  assert.deepEqual(result.deliveryReceipt.limitations, ['O PDF não foi gerado devido a uma limitação técnica local.']);
+  assert.doesNotMatch(result.deliveryReceipt.limitations.join(' '), /CSV/iu);
+});

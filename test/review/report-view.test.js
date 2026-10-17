@@ -11,7 +11,7 @@ import { canonicalCoreRuleSummary, canonicalReviewQuestion } from '../../src/cor
 import { applyReviewDecisions, createReviewDecision } from '../../src/core/review/decisions.js';
 import { buildCompleteReportSummary, buildPanelSummary } from '../../src/panel/panel-summary.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
-import { buildReportView, projectExecutive, projectLimitationClauses, renderReportView, REPORT_VIEW_ISSUE_DETAIL_LIMIT, updateReportHighlightAction } from '../../src/review/report-view.js';
+import { buildReportView, projectExecutive, projectExports, projectLimitationClauses, renderReportView, REPORT_VIEW_ISSUE_DETAIL_LIMIT, updateReportHighlightAction } from '../../src/review/report-view.js';
 import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
@@ -136,9 +136,91 @@ test('export deletion is an explicit unchecked choice next to export and is rese
   root.querySelector('[data-report-export]').click();
   checkbox.checked = true;
   root.querySelector('[data-report-export]').click();
-  assert.deepEqual(calls, [{ deleteAfterCompleteExport: false }, { deleteAfterCompleteExport: true }]);
+  // "Baixar todos os formatos" pede os quatro canônicos, na ordem do recibo.
+  const allFormats = ['html', 'pdf', 'csv', 'json'];
+  assert.deepEqual(calls, [
+    { formats: allFormats, deleteAfterCompleteExport: false },
+    { formats: allFormats, deleteAfterCompleteExport: true },
+  ]);
   const fresh = renderReportView({ view, document: new Document(), onExport() {} });
   assert.notEqual(fresh.querySelector('input[data-report-delete-after-export]').checked, true);
+});
+
+test('each format has its own download button with a plain description and its own result region', async () => {
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const calls = [];
+  const root = renderReportView({ view, document: new Document(), onExport: options => calls.push(options) });
+  const group = root.querySelector('[data-report-export-formats]');
+  assert.equal(group.getAttribute('role'), 'group');
+  assert.equal(group.getAttribute('aria-label'), 'Baixar relatório');
+  const buttons = [...root.querySelectorAll('button[data-report-export-format]')];
+  assert.deepEqual(buttons.map(button => button.getAttribute('data-report-export-format')),
+    ['pdf', 'html', 'csv', 'json']);
+  assert.deepEqual(buttons.map(button => button.textContent),
+    ['Baixar PDF', 'Baixar HTML', 'Baixar planilha (CSV)', 'Baixar dados (JSON)']);
+  for (const button of buttons) {
+    const format = button.getAttribute('data-report-export-format');
+    const [helpId] = button.getAttribute('aria-describedby').split(' ');
+    assert.equal(helpId, `export-format-${format}-help`);
+    const description = root.querySelector(`[id="${helpId}"]`);
+    assert.ok(description, format);
+    assert.match(description.textContent, /\.$/u);
+    button.click();
+  }
+  assert.deepEqual(calls, ['pdf', 'html', 'csv', 'json'].map(format => ({ formats: [format] })));
+  const results = [...root.querySelectorAll('[data-report-export-result]')];
+  assert.deepEqual(results.map(result => result.getAttribute('data-report-export-result')),
+    ['pdf', 'html', 'csv', 'json']);
+  assert.ok(results.every(result => result.getAttribute('aria-live') === 'polite' && result.getAttribute('role') === null),
+    'each card owns one live region without duplicating the report status role');
+});
+
+test('formats the report could not prepare stay visible but disabled with the reason, and "all" asks only what exists', async () => {
+  const prepared = projectExports({
+    report: {
+      status: 'partial',
+      artifact: {
+        status: 'partial', pdfFallback: false, limitations: [],
+        formats: [{ format: 'html', status: 'prepared' }, { format: 'json', status: 'prepared' }],
+      },
+    },
+    session: { diagnostics: [{ code: 'REPORT_CSV_UNAVAILABLE', message: 'csv indisponível' }] },
+  });
+  assert.deepEqual(prepared.availableFormats, ['html', 'json']);
+  assert.deepEqual(prepared.formats, EXPORT_FORMATS_V1);
+  assert.deepEqual(prepared.unavailable.map(entry => entry.format), ['pdf', 'csv']);
+  assert.equal(prepared.unavailable[0].reason, 'O formato PDF não está disponível neste relatório.');
+  assert.equal(prepared.unavailable[1].reason, 'O CSV não foi gerado devido a uma limitação técnica local.');
+  assert.equal(projectExports({
+    report: { status: 'review-ready', artifact: { status: 'pending', formats: [] } },
+    session: { diagnostics: [] },
+  }).availableFormats.length, 4, 'a pending artifact still expects every format');
+
+  const { model, summary } = await fixture();
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const calls = [];
+  const root = renderReportView({
+    view: { ...view, exports: prepared }, document: new Document(), onExport: options => calls.push(options),
+  });
+  const pdf = root.querySelector('button[data-report-export-format="pdf"]');
+  const csv = root.querySelector('button[data-report-export-format="csv"]');
+  assert.equal(pdf.disabled, true);
+  assert.equal(csv.disabled, true);
+  assert.equal(pdf.getAttribute('aria-disabled'), 'true');
+  assert.match(root.querySelector('[data-report-export-unavailable="pdf"]').textContent, /não está disponível/u);
+  assert.match(csv.getAttribute('aria-describedby'), /export-format-csv-unavailable/u);
+  assert.match(root.querySelector('[data-report-export-unavailable="csv"]').textContent,
+    /O CSV não foi gerado devido a uma limitação técnica local\./u);
+  root.querySelector('button[data-report-export-format="html"]').click();
+  root.querySelector('button[data-report-export-format="json"]').click();
+  assert.deepEqual(calls, [{ formats: ['html'] }, { formats: ['json'] }]);
+  const checkbox = root.querySelector('input[data-report-delete-after-export]');
+  assert.equal(checkbox.disabled, true);
+  assert.match(root.querySelector('[data-report-delete-after-export]').parentNode.textContent,
+    /A exclusão fica disponível quando os quatro formatos podem ser baixados/u);
+  root.querySelector('[data-report-export]').click();
+  assert.deepEqual(calls.at(-1), { formats: ['html', 'json'], deleteAfterCompleteExport: false });
 });
 
 test('downloaded HTML is interactive while the same print projection is script-free and expanded', async () => {
@@ -1359,8 +1441,10 @@ test('live filters expose visible Portuguese labels and apply WCAG levels', asyn
   // O agrupador EXTERNO também é `role="group"` (nome acessível "Filtros do relatório vivo"); os grupos
   // de dimensão são os FILHOS dele. O DOM mínimo deste teste não entende combinador de filho, então a
   // seleção é estrutural (filhos diretos do agrupador), não por seletor composto.
-  const filtersWrapper = root.querySelector('[role="group"]');
-  assert.equal(filtersWrapper.getAttribute('aria-label'), 'Filtros do relatório vivo');
+  // O relatório também tem o grupo "Baixar relatório" antes dos filtros; o nome acessível
+  // identifica o agrupador certo sem depender da ordem de montagem.
+  const filtersWrapper = root.querySelector('[role="group"][aria-label="Filtros do relatório vivo"]');
+  assert.ok(filtersWrapper);
   const groups = [...filtersWrapper.children].filter(child => child.getAttribute('role') === 'group');
 
   assert.deepEqual(groups.map(group => group.getAttribute('aria-label')), [
@@ -1401,7 +1485,7 @@ test('impact wording is one closed vocabulary in the live report, including the 
     const root = renderReportView({ view, document: new Document(), onExport() {} });
     // 'minor' passou a ser "Baixo": nenhum ponto do relatório vivo pode dizer "Menor".
     assert.doesNotMatch(root.textContent, /Menor/u);
-    const impactGroup = [...root.querySelector('[role="group"]').children]
+    const impactGroup = [...root.querySelector('[role="group"][aria-label="Filtros do relatório vivo"]').children]
       .filter(child => child.getAttribute('role') === 'group')[0];
     for (const button of impactGroup.querySelectorAll('button')) {
       const word = IMPACT_WORDS[button.getAttribute('data-filter-value')];

@@ -16,7 +16,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
-  command, evaluate, launchUnpackedExtension, resolveRealChromeTestBinary, startFixtureServer, waitForValue,
+  command, evaluate, launchUnpackedExtension, resolveRealChromeTestBinary, startFixtureServer,
+  waitForFourDownloads, waitForValue,
 } from './support/real-chrome.mjs';
 
 /**
@@ -277,9 +278,38 @@ test('a leitura por Tab na verificação guiada grava cada resposta e fecha uma 
   await extension.evaluate(report, `document.querySelector('#lay-tab-reading').scrollIntoView({ behavior:'instant', block:'start' })`);
   await extension.captureJourney('report-tab-reading-answered', report, { captureBeyondViewport: false });
 
-  // Exportação: o documento entregue traz a MESMA tabela de respostas e a constatação única no fim.
+  // O relatório tem mapa do teclado e recortes guardados: é essa auditoria grande que será exportada.
+  assert.ok(await evaluate(report, `document.querySelectorAll('[data-keyboard-map-page]').length > 0`),
+    'a captura integral precisa produzir o mapa do teclado');
+  assert.ok(await evaluate(report, `document.querySelectorAll('.evidence-definitions image').length > 0`),
+    'os recortes precisam estar desenhados no relatório');
+
+  // Exportação: os quatro formatos saem de verdade, o PDF abre com páginas e o documento entregue
+  // traz a MESMA tabela de respostas, os recortes/mapas e a constatação única no fim.
   await extension.click(report, 'button[data-report-export]');
+  const exported = await waitForFourDownloads(extension, { auditId, timeoutMs: 180_000, intervalMs: 250 });
+  assert.deepEqual(exported.map(record => record.format), ['html', 'pdf', 'csv', 'json']);
+  for (const record of exported) {
+    assert.equal(record.state, 'complete', record.format);
+    assert.ok(record.byteLength > 0, record.format);
+    assert.match(record.sha256, /^[a-f0-9]{64}$/u, record.format);
+  }
+  // A tela do relatório acompanha o recibo durável e afirma a entrega — antes ela ficava em
+  // "na fila de geração" mesmo com os arquivos no disco.
+  await waitForValue(report, `document.querySelector('#review-status')?.textContent ?? ''`,
+    value => /quatro arquivos foram baixados/u.test(value), { timeoutMs: 30_000, intervalMs: 100 });
+
+  const pdfName = (await readdir(extension.downloadDirectory)).find(name => name.endsWith('.pdf'));
+  assert.ok(pdfName, 'o PDF precisa estar no diretório de downloads');
+  const pdfBytes = await readFile(join(extension.downloadDirectory, pdfName));
+  assert.equal(pdfBytes.subarray(0, 5).toString('latin1'), '%PDF-', 'o PDF precisa abrir com assinatura válida');
+  const pdfText = pdfBytes.toString('latin1');
+  const pdfPages = (pdfText.match(/\/Type\s*\/Page[^s]/gu) ?? []).length;
+  assert.ok(pdfPages > 0, `o PDF precisa ter páginas renderizadas, encontradas: ${pdfPages}`);
+
   const delivered = await waitForDeliveredHtml(extension);
+  assert.match(delivered, /data:image\/png;base64,/u, 'as imagens/recortes precisam estar embutidos no HTML entregue');
+  assert.match(delivered, /data-keyboard-map-page=/u, 'o mapa do teclado precisa acompanhar o HTML entregue');
   assert.match(delivered, /Leitura por Tab — o que o leitor de tela fala/u);
   assert.match(delivered, /4 de 4 conferidos/u);
   assert.equal((delivered.match(/data-tab-reading-row=/gu) ?? []).length, 4, 'as quatro linhas respondidas aparecem no documento entregue');
