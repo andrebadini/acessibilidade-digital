@@ -7,8 +7,11 @@ import {
   contentSizeOf,
   domSnapshotRects,
   layoutAgreement,
+  pageZoomOf,
   snapshotFrameId,
+  snapshotScaleOf,
   withFreshRects,
+  zoomAdjustedRect,
 } from '../../src/core/evidence/fresh-geometry.js';
 
 const metrics = (width, height) => ({ cssContentSize: { width, height } });
@@ -188,6 +191,69 @@ test('o leiaute está parado dentro das tolerâncias e mexeu fora delas', () => 
   ).stable, false);
   assert.equal(layoutAgreement(null, metrics(1280, 3121)).reason, 'size-unavailable');
   assert.equal(layoutAgreement(metrics(1280, 3121), {}).reason, 'size-unavailable');
+});
+
+test('o zoom do navegador entra na conversão do instantâneo para px CSS atuais', () => {
+  // Medido no Chrome 155: com a página em 125 %, um elemento que ocupa x=1012..1265 px CSS aparece
+  // no DOMSnapshot em x=1265..1581 (o espaço de 100 %). O `zoom` das métricas é o fator exato.
+  assert.equal(pageZoomOf({ cssVisualViewport: { zoom: 1.25 } }), 1.25);
+  assert.equal(pageZoomOf({ visualViewport: { zoom: 1.5 } }), 1.5);
+  assert.equal(pageZoomOf({ cssVisualViewport: { zoom: 0 } }), 1, 'valor inválido não muda a geometria');
+  assert.equal(pageZoomOf(null), 1, 'sem métricas o comportamento é o de 100 %');
+
+  const rects = domSnapshotRects(columnarCapture([
+    [11, { x: 1265, y: 50, width: 316.25, height: 50 }],
+  ]), { zoom: 1.25 });
+  assert.deepEqual(rects.get(11), { x: 1012, y: 40, width: 253, height: 40 });
+
+  // Zoom 0,9 é o caso em que o arredondamento do valor inteiro das métricas não serve: o fator exato
+  // vem do `zoom` do CDP, não da razão entre tamanhos arredondados.
+  const smaller = domSnapshotRects(columnarCapture([
+    [12, { x: 900, y: 90, width: 180, height: 36 }],
+  ]), { zoom: 0.9 });
+  assert.deepEqual(smaller.get(12), { x: 1000, y: 100, width: 200, height: 40 });
+
+  assert.deepEqual(zoomAdjustedRect({ x: 10, y: 20, width: 30, height: 40 }, 1),
+    { x: 10, y: 20, width: 30, height: 40 }, 'sem zoom o retângulo é o mesmo objeto lógico');
+});
+
+test('o fator do instantâneo inclui a densidade da tela, não só o zoom', () => {
+  // Medido no Chrome 155 com `--force-device-scale-factor=2`: um elemento em x=117,5 px CSS aparece
+  // no DOMSnapshot em x=235 (2×). Em 125 % sobre tela 2×, x=34,8 aparece em x=87 (2,5×). O fator é o
+  // produto zoom × densidade, que é exatamente `contentSize / cssContentSize`.
+  assert.equal(snapshotScaleOf({
+    contentSize: { width: 2530, height: 1514 },
+    cssContentSize: { width: 1265, height: 757 },
+  }), 2);
+  assert.equal(snapshotScaleOf({
+    contentSize: { width: 2530, height: 13086 },
+    cssContentSize: { width: 1012, height: 5234 },
+    cssVisualViewport: { zoom: 1.25 },
+  }), 2.5);
+  // Sem `contentSize` a razão não existe: o zoom da página continua sendo a melhor informação.
+  assert.equal(snapshotScaleOf({
+    cssContentSize: { width: 800, height: 1000 }, cssVisualViewport: { zoom: 1.25 },
+  }), 1.25);
+  assert.equal(snapshotScaleOf(null), 1, 'sem métricas o comportamento é o de 100 %');
+
+  // O tamanho CSS é inteiro: em 125 % a razão 894/715 = 1,25035 e uma página de 5.000 px terminaria
+  // 1,5 px fora. A densidade inferida encaixa em 1× e o fator volta a ser o zoom exato.
+  assert.equal(snapshotScaleOf({
+    contentSize: { width: 894, height: 6990 }, cssContentSize: { width: 715, height: 5592 },
+    cssVisualViewport: { zoom: 1.25 },
+  }), 1.25);
+  // Densidade fracionária real (1,25×): a razão 1118/894 = 1,25056 encaixa em 1,25.
+  assert.equal(snapshotScaleOf({
+    contentSize: { width: 1118, height: 6544 }, cssContentSize: { width: 894, height: 5235 },
+  }), 1.25);
+
+  const rects = domSnapshotRects(columnarCapture([
+    [11, { x: 235, y: 1207.33, width: 134.77, height: 49.59 }],
+  ]), { zoom: snapshotScaleOf({
+    contentSize: { width: 1788, height: 10492 },
+    cssContentSize: { width: 894, height: 5246 },
+  }) });
+  assert.deepEqual(rects.get(11), { x: 117.5, y: 603.665, width: 67.385, height: 24.795 });
 });
 
 test('fator de escala 2 não muda a geometria: os retângulos já vêm em px CSS', () => {

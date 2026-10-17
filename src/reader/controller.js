@@ -1,6 +1,6 @@
 import { tabReadingPageCommand } from './page-inspector.js';
 import { createReadingReport, attachReadingVisuals } from './report-model.js';
-import { captureReadingVisuals } from './visual-capture.js';
+import { captureReadingVisuals, closeReadingVisualSession, openReadingVisualSession } from './visual-capture.js';
 import { targetOperationLockName } from '../background/target-operation-queue.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
@@ -94,14 +94,22 @@ export function createReadingController(api, { tabId, documentId, sessionId }, {
       // The same native Web Lock is held by the worker throughout an audit.
       // The cleanup barrier can revoke this record before collecting any pixels.
       await api.storage.session.set({ [activeKey]: { documentId, sessionId, expiresAt } });
-      const raw = await execute({ type: 'collect' });
-      if (raw?.sessionId !== sessionId) throw failure();
-      let built = createReadingReport(raw, { origin: new URL(sourceUrl).origin });
+      // A sessão de pixels abre ANTES da inspeção: a captura integral mostra o leiaute sem a barra de
+      // rolagem, e é nele que os retângulos precisam ser medidos. Ver `openReadingVisualSession`.
+      const visualSession = await openReadingVisualSession(api, { tabId });
+      let built;
       try {
-        const visuals = await captureReadingVisuals(api, { tabId, entries: built.entries });
-        built = attachReadingVisuals(built, visuals);
-      } catch {
-        built = attachReadingVisuals(built, { elementImages: {}, fullPage: null, limitations: ['visual-capture-unavailable'] });
+        const raw = await execute({ type: 'collect' });
+        if (raw?.sessionId !== sessionId) throw failure();
+        built = createReadingReport(raw, { origin: new URL(sourceUrl).origin });
+        try {
+          const visuals = await captureReadingVisuals(api, { tabId, entries: built.entries, session: visualSession });
+          built = attachReadingVisuals(built, visuals);
+        } catch {
+          built = attachReadingVisuals(built, { elementImages: {}, fullPage: null, limitations: ['visual-capture-unavailable'] });
+        }
+      } finally {
+        await closeReadingVisualSession(visualSession);
       }
       report = built;
       return report;

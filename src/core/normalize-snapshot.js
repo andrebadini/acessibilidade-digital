@@ -1,5 +1,6 @@
 import { assertSnapshotV1 } from './snapshot-schema.js';
 import { escapeCssIdentifier } from './evidence/selector.js';
+import { snapshotScaleOf, zoomAdjustedRect } from './evidence/fresh-geometry.js';
 import {
   backgroundImageKind,
   isPairedCredentialIdentity,
@@ -542,6 +543,10 @@ function normalizeColumnar(raw) {
   if (!capture || !Array.isArray(capture.strings) || !Array.isArray(capture.documents)) {
     throw new TypeError('DOMSnapshot columnar ausente ou inválido.');
   }
+  // Retângulos do DOMSnapshot vêm em px de dispositivo (zoom da página × densidade da tela); o resto
+  // do produto (captura integral, CSS, `getBoundingClientRect`) usa os px CSS atuais. A leitura feita
+  // colada no instantâneo (`layoutMetricsAtSnapshot`) traz o fator exato. Ver `snapshotScaleOf`.
+  const zoom = snapshotScaleOf(raw.layoutMetricsAtSnapshot ?? raw.layoutMetrics);
   const strings = capture.strings;
   const documents = capture.documents;
   const styleNames = Array.isArray(capture.computedStyles) ? capture.computedStyles : [];
@@ -571,7 +576,8 @@ function normalizeColumnar(raw) {
     let elementOrder = 0;
     if (document.layout && Array.isArray(document.layout.nodeIndex)) {
       document.layout.nodeIndex.forEach((nodeIndex, layoutIndex) => {
-        const rect = copyRect(document.layout.bounds?.[layoutIndex]);
+        const captured = copyRect(document.layout.bounds?.[layoutIndex]);
+        const rect = captured ? zoomAdjustedRect(captured, zoom) : null;
         const styles = {};
         let layoutBackgroundImageKind;
         const styleRow = document.layout.styles?.[layoutIndex];

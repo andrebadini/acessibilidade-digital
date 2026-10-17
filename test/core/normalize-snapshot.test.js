@@ -231,6 +231,29 @@ test('normalizes a real columnar DOMSnapshot in deterministic iframe and shadow 
   });
 });
 
+test('converte as caixas do instantâneo colunar do espaço de 100 % para o zoom atual', () => {
+  // Medido no Chrome 155: com a página em 125 %, o DOMSnapshot devolve os retângulos como se o
+  // navegador estivesse em 100 %. O `zoom` da leitura feita colada no instantâneo é o fator exato.
+  const raw = columnarRaw();
+  raw.layoutMetricsAtSnapshot = { cssVisualViewport: { zoom: 1.25 }, cssContentSize: { width: 1024, height: 768 } };
+  const snapshot = normalizeSnapshot(raw);
+  assert.deepEqual(validateSnapshotV1(snapshot), []);
+
+  assert.deepEqual(snapshot.nodes.find(node => node.backendNodeId === 4).rect,
+    { x: 6.4, y: 6.4, width: 160, height: 32 });
+  assert.deepEqual(snapshot.nodes.find(node => node.backendNodeId === 10).rect,
+    { x: 6.4, y: 136, width: 224, height: 80 });
+
+  // Sem a leitura colada no instantâneo, a métrica disponível continua valendo — e sem métrica
+  // nenhuma o retângulo fica no espaço de 100 %, como antes desta correção.
+  const fromCurrentMetrics = columnarRaw();
+  fromCurrentMetrics.layoutMetrics = { cssVisualViewport: { zoom: 2 } };
+  assert.deepEqual(normalizeSnapshot(fromCurrentMetrics).nodes.find(node => node.backendNodeId === 4).rect,
+    { x: 4, y: 4, width: 100, height: 20 });
+  assert.deepEqual(normalizeSnapshot(columnarRaw()).nodes.find(node => node.backendNodeId === 4).rect,
+    { x: 8, y: 8, width: 200, height: 40 });
+});
+
 test('merges AX and runtime data while redacting sensitive values and resource URL secrets', async () => {
   const raw = columnarRaw();
   raw.warnings = [{ code: 'FRAME_RUNTIME_BLOCKED', message: 'blocked token=WARNING_FAKE' }];

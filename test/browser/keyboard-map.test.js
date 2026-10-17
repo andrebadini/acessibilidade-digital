@@ -183,7 +183,7 @@ test('página sem nada alcançável gera artefato vazio sem desenhar nada', asyn
   assert.deepEqual(validateKeyboardMapArtifact(artifact), artifact);
 });
 
-test('declara parcialidade quando o instantâneo não traz o cursor e clampa caixa fora da captura', async () => {
+test('declara parcialidade e deixa sem caixa o item fora da captura, sem encaixar na borda', async () => {
   const artifact = await composeKeyboardMap({
     pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
     snapshot: snapshot([
@@ -194,13 +194,19 @@ test('declara parcialidade quando o instantâneo não traz o cursor e clampa cai
 
   assert.equal(artifact.status, 'partial');
   assert.ok(artifact.limitations.includes('cursor-style-not-collected'));
-  assert.ok(artifact.limitations.includes('stops-outside-source-clamped'));
-  assert.deepEqual(artifact.stops[0].bounds, { x: 10, y: 99, width: 60, height: 1 });
+  // A caixa não pode ser desenhada no lugar errado: o item sai das caixas, mas continua contado e a
+  // imagem continua no relatório, agora sem nenhum retângulo de 1 px na borda.
+  assert.ok(artifact.limitations.includes('stops-outside-source-omitted'));
+  assert.deepEqual(artifact.stops, []);
+  assert.equal(artifact.counts.stops, 0);
+  assert.equal(artifact.counts.eligible, 1);
   assert.equal(artifact.counts.omittedNoRect, 1);
+  assert.ok(artifact.segments.length > 0, 'a imagem continua no relatório para dar contexto à contagem');
   assert.deepEqual(validateKeyboardMapArtifact(artifact), artifact);
 
-  // Com o leiaute reprovado não há encaixe nenhum na imagem: dizer que alguma caixa foi "encaixada na
-  // borda" seria descrever um desenho que não existe. O item continua contado como fora da área.
+  // Com o leiaute reprovado nada é desenhado, então a lista continua inteira: o item fora da captura
+  // permanece nela (a posição estimada é recortada só para o esquema fechado aceitar) e quem explica o
+  // silêncio é `source-layout-changed`; duas limitações para o mesmo fato confundiriam quem lê.
   const rejected = await composeKeyboardMap({
     pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
     snapshot: snapshot([
@@ -208,10 +214,33 @@ test('declara parcialidade quando o instantâneo não traz o cursor e clampa cai
     ]),
     layoutMetrics: SOURCE, sourceAligned: false, ...canvasRuntime(recordingLog()),
   });
+  assert.equal(rejected.limitations.includes('stops-outside-source-omitted'), false);
   assert.equal(rejected.limitations.includes('stops-outside-source-clamped'), false);
   assert.ok(rejected.limitations.includes('source-layout-changed'));
-  assert.equal(rejected.counts.omittedNoRect, 1);
+  assert.deepEqual(rejected.stops.map(entry => entry.nodeId), ['below']);
+  assert.equal(rejected.counts.stops, 1);
+  assert.equal(rejected.counts.omittedNoRect, 0);
   assert.deepEqual(validateKeyboardMapArtifact(rejected), rejected);
+});
+
+test('ao omitir um item fora da captura, a numeração das caixas que sobram continua de 1 a N', async () => {
+  // O item fora da área capturada é o PRIMEIRO da ordem de Tab. Se os números não fossem recalculados,
+  // a parada seguinte ficaria com o número 2 e sem fatia correspondente — o artefato seria recusado.
+  const artifact = await composeKeyboardMap({
+    pageId: 'page-1', fullPageEvidence: await pristineSource(200, 100),
+    snapshot: snapshot([
+      { nodeId: 'acima', tagName: 'button', accessibleName: 'Antes da captura', axRole: 'button', rect: { x: 10, y: -60, width: 60, height: 20 } },
+      { nodeId: 'dentro', tagName: 'button', accessibleName: 'Dentro da captura', axRole: 'button', rect: { x: 20, y: 30, width: 60, height: 20 } },
+    ]),
+    layoutMetrics: SOURCE, ...canvasRuntime(recordingLog()),
+  });
+
+  assert.ok(artifact.limitations.includes('stops-outside-source-omitted'));
+  assert.deepEqual(artifact.stops.map(entry => [entry.number, entry.nodeId, entry.segmentIndex]), [[1, 'dentro', 1]]);
+  assert.equal(artifact.counts.stops, 1);
+  assert.equal(artifact.counts.eligible, 2);
+  assert.equal(artifact.counts.omittedNoRect, 1);
+  assert.deepEqual(validateKeyboardMapArtifact(artifact), artifact);
 });
 
 test('sem caixas confiáveis a imagem sai limpa, a lista continua completa e a limitação é declarada', async () => {

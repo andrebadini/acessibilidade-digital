@@ -123,6 +123,16 @@ test('lê o mapa 1.0.0 guardado por uma revisão anterior e recusa versão desco
   assert.equal(await hashKeyboardMapArtifact(previous, { sourceArtifact: SOURCE_ARTIFACT }), previous.hash);
   assert.equal(await hashEvidenceArtifact(previous, { sourceArtifact: SOURCE_ARTIFACT }), previous.hash);
 
+  // A 1.1.0 desenhava o item fora da área encaixado na borda e declarava a limitação própria. Esse
+  // artefato guardado continua válido e legível exatamente como foi escrito.
+  const clamped = structuredClone(artifact);
+  clamped.derivation.version = '1.1.0';
+  clamped.status = 'partial';
+  clamped.limitations = [...clamped.limitations.filter(code => code !== 'stops-outside-source-omitted'),
+    'stops-outside-source-clamped'];
+  clamped.hash = await hashKeyboardMapArtifact(clamped, { sourceArtifact: SOURCE_ARTIFACT });
+  assert.equal(validateKeyboardMapArtifact(clamped, { sourceArtifact: SOURCE_ARTIFACT }), clamped);
+
   const unknown = structuredClone(artifact);
   unknown.derivation.version = '9.9.9';
   await assert.rejects(hashKeyboardMapArtifact(unknown), /não reconhecida/u);

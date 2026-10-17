@@ -138,6 +138,94 @@ test('leaves the full-page capture at scale 1', async () => {
   assert.equal(capture.metadata.pixelScale, undefined);
 });
 
+test('expande o recorte da captura integral pelo zoom do navegador e mantém os metadados em CSS px', async () => {
+  // Medido no Chrome 155: com a página em 125 %, um clip de 800 px CSS devolvia uma imagem de 800 px
+  // mostrando só 640 px CSS. O recorte pedido ao Chrome cresce pelo zoom; a imagem final mede
+  // `largura CSS × zoom` e o mapa converte retângulo → pixel por essa mesma razão.
+  const cdp = fakeCdp();
+  const capture = await captureFullPage(cdp, {
+    cssContentSize: { width: 800, height: 1200 }, contentSize: { width: 1000, height: 1500 },
+    cssVisualViewport: { zoom: 1.25 },
+  });
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 0, width: 1000, height: 1500, scale: 1 });
+  assert.equal(capture.metadata.width, 800, 'os metadados continuam no sistema CSS do documento');
+  assert.equal(capture.metadata.height, 1200);
+
+  const smaller = fakeCdp();
+  await captureFullPage(smaller, {
+    cssContentSize: { width: 1000, height: 900 }, cssVisualViewport: { zoom: 0.9 },
+  });
+  assert.deepEqual(smaller.calls[0][1].clip, { x: 0, y: 0, width: 900, height: 810, scale: 1 });
+});
+
+test('reduz só o necessário para a fonte do mapa caber no limite com a página ampliada', async () => {
+  // Em 150 %, uma página de 596×5.759 px CSS renderiza 894×8.638 px: o mapa recusaria a fonte inteira
+  // por passar de 8.192 px. A imagem continua cobrindo a página toda, reduzida só até caber.
+  const cdp = fakeCdp();
+  const capture = await captureFullPage(cdp, {
+    cssContentSize: { width: 596, height: 5759 }, cssVisualViewport: { zoom: 1.5 },
+  });
+  const { clip } = cdp.calls[0][1];
+  assert.equal(clip.width, 894);
+  assert.equal(clip.height, 8638.5);
+  assert.ok(clip.scale < 1 && clip.scale > 0.94);
+  assert.equal(Math.round(clip.height * clip.scale), 8192, 'a altura raster não passa do limite do mapa');
+  assert.equal(Math.round(clip.width * clip.scale), 848);
+  assert.deepEqual({ width: capture.metadata.width, height: capture.metadata.height }, { width: 596, height: 5759 });
+
+  // Em 100 % a conta dá escala 1 mesmo em página alta: o comportamento anterior não muda.
+  const normal = fakeCdp();
+  await captureFullPage(normal, { cssContentSize: { width: 596, height: 10_000 } });
+  assert.deepEqual(normal.calls[0][1].clip, { x: 0, y: 0, width: 596, height: 10_000, scale: 1 });
+});
+
+test('recorta a miniatura inteira com o zoom e declara o quadro lógico em CSS px', async () => {
+  const cdp = fakeCdp();
+  const capture = await captureElement(cdp, { x: 200, y: 300, width: 80, height: 40 }, {
+    cssContentSize: { width: 800, height: 1000 }, cssVisualViewport: { zoom: 1.25 },
+  });
+  // O quadro lógico continua 160×120 com escala inteira; o Chrome recebe o mesmo quadro em px de
+  // dispositivo do leiaute ampliado e uma escala dividida pelo zoom, então o PNG mede 160×120 × 2.
+  assert.deepEqual(capture.metadata.clip, { x: 160, y: 260, width: 160, height: 120, scale: 2 });
+  assert.equal(capture.metadata.pixelScale, 2);
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 200, y: 325, width: 200, height: 150, scale: 1.6 });
+});
+
+test('a tela 2× não dobra a posição e a fonte do mapa continua cabendo no limite', async () => {
+  // Medido no Chrome 155 com `--force-device-scale-factor=2`: a página de 894×5.246 px CSS renderiza
+  // 1.788×10.492 px. Sem descontar a densidade, o mapa recusava a fonte (lado > 8.192 px) e, no
+  // instantâneo, os retângulos vinham no dobro da posição. O raster é reduzido só até caber.
+  const cdp = fakeCdp();
+  const capture = await captureFullPage(cdp, {
+    cssContentSize: { width: 894, height: 5246 }, contentSize: { width: 1788, height: 10492 },
+  });
+  const { clip } = cdp.calls[0][1];
+  assert.equal(Math.round(clip.height * clip.scale * 2), 8192, 'o raster final cabe no limite do mapa');
+  assert.equal(Math.round(clip.width * clip.scale * 2), 1396);
+  assert.deepEqual({ width: capture.metadata.width, height: capture.metadata.height }, { width: 894, height: 5246 });
+
+  // Zoom e densidade juntos não podem contar o zoom duas vezes: a razão contentSize/css é 2,5
+  // (125 % × 2×), não 1,25. O recorte já cresce pelo zoom, então a densidade vale 2 e nada é reduzido.
+  const combined = fakeCdp();
+  await captureFullPage(combined, {
+    cssContentSize: { width: 800, height: 1200 }, contentSize: { width: 2000, height: 3000 },
+    cssVisualViewport: { zoom: 1.25 },
+  });
+  assert.deepEqual(combined.calls[0][1].clip, { x: 0, y: 0, width: 1000, height: 1500, scale: 1 });
+});
+
+test('a miniatura em tela 2× mede o que os metadados declaram', async () => {
+  const cdp = fakeCdp();
+  const capture = await captureElement(cdp, { x: 100, y: 100, width: 50, height: 20 }, {
+    cssContentSize: { width: 800, height: 1000 }, contentSize: { width: 1600, height: 2000 },
+  });
+  assert.deepEqual(capture.metadata.clip, { x: 60, y: 60, width: 130, height: 100, scale: 2 });
+  assert.equal(capture.metadata.pixelScale, 2);
+  // O clip pedido ao Chrome é o quadro lógico (a densidade já multiplica o raster sozinha) e a escala
+  // cai pela densidade: o PNG final mede 260×200, exatamente o quadro × `pixelScale`.
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 60, y: 60, width: 130, height: 100, scale: 1 });
+});
+
 test('visible capture requires the entire context crop inside both CSS viewports', async () => {
   const viewport = { pageX: 100, pageY: 200, clientWidth: 400, clientHeight: 300 };
   const metrics = { cssContentSize: { width: 1000, height: 2000 }, cssLayoutViewport: viewport,
@@ -289,7 +377,10 @@ test('caps the pristine capture of a very tall page at a renderer-safe height (1
   const capture = await captureFullPage(cdp, {
     cssContentSize: { width: 900, height: 157_000 }, contentSize: { width: 1800, height: 314_000 },
   });
-  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 0, width: 900, height: 8192, scale: 1 });
+  // A tela é 2× (contentSize = 2 × cssContentSize): o recorte de 8192 px CSS viraria 16384 px de
+  // raster, acima do lado de 8.192 px que os mapas leem. A escala 0,5 mantém a página inteira na
+  // imagem e o raster final em 900 × 8192 — antes esses mapas eram omitidos por tamanho de fonte.
+  assert.deepEqual(cdp.calls[0][1].clip, { x: 0, y: 0, width: 900, height: 8192, scale: 0.5 });
   assert.equal(capture.metadata.height, 8192, 'the captured height is what the metadata declares');
   const normal = fakeCdp();
   await captureFullPage(normal, { cssContentSize: { width: 800, height: 1200 } });
