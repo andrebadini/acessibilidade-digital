@@ -41,7 +41,7 @@ test('report artifacts share all 146 outcomes and occurrences without leaking se
   assert.deepEqual(technical.audit.occurrences, model.occurrences);
   assert.doesNotMatch(`${html}\n${json}`, /TOPSECRET|token=|session=/iu);
   assert.deepEqual(validateCoreRuleComposition(), []);
-  assert.equal(CORE_RULES.length, 131);
+  assert.equal(CORE_RULES.length, 132);
   assert.equal(NBR17225_ITEMS.filter(item => item.classification === 'requirement').length, 96);
   assert.equal(NBR17225_ITEMS.filter(item => item.classification === 'recommendation').length, 50);
 });

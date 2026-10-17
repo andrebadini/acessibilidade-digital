@@ -22,6 +22,22 @@
         <a href="#report-root">Voltar ao início do relatório</a>
       </div>
       <div id="review-list" role="group" aria-label="Ocorrências para revisão"></div>
+      <dialog id="lay-zoom-dialog" aria-labelledby="lay-zoom-title">
+        <h3 id="lay-zoom-title">Recorte ampliado do elemento desta pergunta</h3>
+        <div id="lay-zoom-body"></div>
+        <div class="dialog-actions">
+          <button id="lay-zoom-close" type="button">Fechar</button>
+        </div>
+      </dialog>
+      <dialog id="lay-tab-bulk-dialog" aria-labelledby="lay-tab-bulk-title" aria-describedby="lay-tab-bulk-summary" aria-hidden="true">
+        <h3 id="lay-tab-bulk-title">Marcar os pontos pendentes deste bloco como “Sim”?</h3>
+        <p id="lay-tab-bulk-summary"></p>
+        <p id="lay-tab-bulk-dialog-status" class="dialog-status"></p>
+        <div class="dialog-actions">
+          <button id="lay-tab-bulk-cancel" type="button">Cancelar</button>
+          <button id="lay-tab-bulk-confirm" type="button">Marcar como “Sim”</button>
+        </div>
+      </dialog>
       <dialog id="delete-audit-dialog" aria-labelledby="delete-audit-title" aria-describedby="delete-audit-description" aria-hidden="true">
         <h3 id="delete-audit-title">Excluir esta auditoria local?</h3>
         <p id="delete-audit-description">Esta ação apaga as evidências, os pixels e as revisões locais desta auditoria. Os downloads já salvos não serão apagados.</p>

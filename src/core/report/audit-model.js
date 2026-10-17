@@ -50,6 +50,7 @@ import {
 import { diagnosticPolicyEntry, SYSTEM_DIAGNOSTIC_POLICY } from './diagnostic-policy.js';
 import { validateNormalizedAxeSupplemental } from '../axe/validate-supplemental.js';
 import { aggregateItems } from '../rules/aggregate-items.js';
+import { TAB_READING_RULE_ID } from '../rules/tab-reading.js';
 import { unknownAccessibilityWidgetInventory } from '../detection/accessibility-widgets.js';
 import { validateAnnotationMapArtifact } from '../evidence/annotation-map-artifact.js';
 import { validateKeyboardMapArtifact } from '../keyboard/keyboard-map-artifact.js';
@@ -75,7 +76,7 @@ const PAGE_EXECUTION_STATE_MATRIX = Object.freeze({
 });
 const REVIEW_STATUSES = new Set(['unanswered', 'answered']);
 const METHODOLOGY_NAME = 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2';
-const EXPECTED_RULE_COUNT = 131;
+const EXPECTED_RULE_COUNT = 132;
 const URL_VALUE_KEYS = new Set(['action', 'cite', 'formaction', 'href', 'poster', 'src', 'currentsrc']);
 const NORMATIVE_FIELDS = Object.freeze(['itemWcagRefs', 'sourceWcagRefs', 'testedWcagRefs']);
 const CORE_RULE_METADATA = new Map(NBR17225_ITEMS.flatMap(item => item.ruleIds.map(ruleId => [ruleId, Object.freeze({
@@ -90,7 +91,14 @@ const EXPECTED_CORE_RULE_IDS = Object.freeze([...CORE_RULE_METADATA.keys()]);
 const LEGACY_CORE_RULE_IDS = Object.freeze(NBR17225_ITEMS
   .map(item => item.ruleIds[0])
   .filter(ruleId => typeof ruleId === 'string'));
-const ACCEPTED_CORE_RULE_COUNTS = Object.freeze([EXPECTED_RULE_COUNT, LEGACY_CORE_RULE_IDS.length]);
+// 1.1.61: o inventário instalado antes desta versão era exatamente este, sem a leitura por Tab. As
+// auditorias gravadas ali continuam abrindo com o inventário da própria versão, sem reescrever nada.
+const PREVIOUS_CORE_RULE_IDS = Object.freeze(EXPECTED_CORE_RULE_IDS.filter(ruleId => ruleId !== TAB_READING_RULE_ID));
+const ACCEPTED_CORE_RULE_COUNTS = Object.freeze([
+  EXPECTED_RULE_COUNT,
+  PREVIOUS_CORE_RULE_IDS.length,
+  LEGACY_CORE_RULE_IDS.length,
+]);
 export const V1_MIGRATION_DEFAULTS = Object.freeze({
   pageId: 'page-1',
   impact: 'minor',
@@ -531,7 +539,15 @@ function projectV1Evidence(artifact, pageId) {
   const output = {};
   for (const key of [
     'evidenceId', 'kind', 'hash', 'pixelState', 'pixelContentHash', 'state', 'dataUrl',
+    // O SHA-256 do arquivo PNG da miniatura (1.1.62) atravessa a migração como qualquer outro dado
+    // guardado: sem ele nesta lista, a projeção do V1 apagava o campo em silêncio e a ficha de evidência
+    // e o anexo do relatório ficavam sem o hash do arquivo, mesmo com os pixels guardados.
+    'binarySha256',
     'nodeId', 'backendNodeId', 'snippet', 'fullPageEvidenceId', 'mediaUrl',
+    // Onde o elemento estava na captura integral (1.1.62), em px CSS da imagem. Sem estes dois na
+    // lista, a projeção apagava a posição em silêncio e o recorte do elemento sumia do relatório
+    // mesmo com a captura integral guardada.
+    'fullPageRect', 'fullPageParts',
     // `legend` são as entradas do mapa de anúncios; `stops`/`suspects` são as do mapa do teclado.
     // Sem eles na lista, a projeção do modelo apagava as duas listas em silêncio e o mapa do teclado
     // chegava ao relatório sem nenhuma parada — e sem nada para a caixa numerada do desenho conferir.
@@ -1504,7 +1520,7 @@ function validateRuleInventory(model, ruleById) {
     ruleIds.every(ruleId => ruleById.get(ruleId)?.source?.engine === V1_MIGRATION_DEFAULTS.sourceEngine);
   const completeCoreInventory = completeInventory(EXPECTED_CORE_RULE_IDS);
   if (['complete', 'partial'].includes(model.session.status)) {
-    if (!completeCoreInventory && !completeInventory(LEGACY_CORE_RULE_IDS)) {
+    if (!completeCoreInventory && !completeInventory(PREVIOUS_CORE_RULE_IDS) && !completeInventory(LEGACY_CORE_RULE_IDS)) {
       throw new TypeError('Sessão concluída deve conter exatamente as regras core registradas.');
     }
     return;

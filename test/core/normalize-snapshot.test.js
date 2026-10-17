@@ -257,7 +257,7 @@ test('merges AX and runtime data while redacting sensitive values and resource U
 
   const audit = await runCoreAudit(snapshot);
   assert.equal(audit.composition.valid, true);
-  assert.equal(audit.ruleResults.length, 131);
+  assert.equal(audit.ruleResults.length, 132);
 
   const selector = buildStableSelector(button, buildSnapshotIndexes(snapshot));
   const snippet = sanitizeHtmlSnippet('<button id="send" onclick="bad()" data-token="fixture">Enviar</button>');

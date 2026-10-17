@@ -1,4 +1,4 @@
-# Conteúdo de distribuição — Audita Acessibilidade 1.1.61
+# Conteúdo de distribuição — Audita Acessibilidade 1.1.62
 
 Material local de referência; não representa publicação ou atualização de uma página de loja.
 
@@ -33,6 +33,9 @@ Principais recursos:
 - exportação do relatório complementar em HTML, CSV e JSON, além de impressão para salvar PDF;
 - revisão humana guiada em linguagem simples, sem exigir conhecimento de HTML: cada pendência vira uma pergunta sobre o que se vê na página (Sim, Não, Não consegui verificar ou Não existe nesta página), com o elemento descrito em palavras, destaque na página e ajudas opcionais de ampliação a 200%, largura de celular e espaçamento de leitura, desfeitas com um clique;
 - mapa do teclado: imagem da página inteira com uma caixa numerada em cada parada do Tab e os itens que parecem clicáveis mas o Tab não alcança marcados à parte, para qualquer pessoa conferir se falta algum menu, botão ou link;
+- mapa de leitura da página: cada caixa traz um código curto e a coluna ao lado diz o que um leitor de tela falaria naquele ponto, na ordem de leitura observada, no relatório aberto pelo painel e nos arquivos exportados;
+- Leitura por Tab dentro da revisão guiada: uma pergunta por parada da tecla Tab (o leitor de tela falaria isto neste elemento? sim, não ou não sei), com a resposta, quem respondeu e quando, e uma constatação única no item 5.13.10 citando os pontos pelo nome visível;
+- recorte de cada elemento direto da captura da página inteira, com o elemento contornado, mesmo quando ele não tinha imagem própria; e ficha de evidência com o SHA-256 do arquivo de imagem, reunida num anexo único no HTML exportado e no PDF;
 - detecção de blocos cujos links só aparecem quando o mouse passa por cima, sem caminho pelo teclado;
 - registro da pessoa avaliadora, data e hora locais, nota e histórico das respostas revistas;
 - quadro de constatações com a situação de cada requisito da ABNT NBR 17225:2025 (não atendido, atendido, não aplicável ou sem conclusão) e frases prontas para citação em relatórios, com página, elemento, data e evidência;

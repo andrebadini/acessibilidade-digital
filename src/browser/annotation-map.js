@@ -9,10 +9,12 @@ import {
   ANNOTATION_MAP_LIMITS,
   ANNOTATION_MAP_PRINTABLE_ASPECT_RATIO,
   ANNOTATION_MAP_VERSION,
+  annotationBadgeFont,
   annotationLeaderPoint,
   hashAnnotationMapArtifact,
   hashAnnotationMapGeometry,
 } from '../core/evidence/annotation-map-artifact.js';
+import { annotationMarkerLayout } from '../core/evidence/annotation-marker-layout.js';
 import { decodePngDataUrl, pngDataUrlFromBytes, validatePngRasterData } from '../core/evidence/png.js';
 import { sha256Hex } from '../core/report/hash.js';
 import { compositionSupport } from './canvas-runtime.js';
@@ -45,17 +47,16 @@ const BASE_LIMITATIONS = Object.freeze([
   'rasterization-browser-dependent',
   'source-capture-may-contain-personal-data',
 ]);
-const MARKER_RADIUS = 14;
-const MARKER_CLEARANCE = MARKER_RADIUS * 2 + 4;
+/**
+ * Etiqueta do mapa de leitura: caixa encostada ao elemento com o código curto (L1, L2…). A cor é a
+ * mesma do contorno — o par caixa+etiqueta se lê de longe, sem depender de a pessoa achar o número.
+ */
 const MARKER_STROKE = '#8b1e1e';
 const MARKER_OVERLAP_STROKE = '#6b4e00';
-/** Peso de uma colisão no custo do marcador: proximidade nunca vale mais que uma sobreposição. */
-const MARKER_COLLISION_COST = 1e6;
-const LEGEND_LINE_HEIGHT = 22;
-const LEGEND_PADDING = 16;
-const LEGEND_HEADING_HEIGHT = 34;
-const LEGEND_FONT = '15px system-ui';
-const LEGEND_HEADING_FONT = '700 17px system-ui';
+const BADGE_BG = '#8b1e1e';
+const BADGE_OVERLAP_BG = '#6b4e00';
+const BADGE_TEXT = '#ffffff';
+const LEADER_LINE_WIDTH_CSS = 2;
 const MAX_PREVIEW_CODE_POINTS = 4096;
 
 export class AnnotationMapError extends Error {
@@ -263,143 +264,9 @@ function clippedBounds(bounds, width, height) {
   return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
 }
 
-function boundedSpiralTrail(bounds, radius, width, height) {
-  const inset = radius + 2;
-  const horizontalInset = Math.min(inset, width / 2);
-  const verticalInset = Math.min(inset, height / 2);
-  const maximumX = Math.max(horizontalInset, width - horizontalInset);
-  const maximumY = Math.max(verticalInset, height - verticalInset);
-  const columns = Math.max(1, Math.floor((maximumX - horizontalInset) / MARKER_CLEARANCE) + 1);
-  const rows = Math.max(1, Math.floor((maximumY - verticalInset) / MARKER_CLEARANCE) + 1);
-  const centerX = bounds.x + bounds.width / 2;
-  const centerY = bounds.y + bounds.height / 2;
-  const originColumn = clamp(Math.round((centerX - horizontalInset) / MARKER_CLEARANCE), 0, columns - 1);
-  const originRow = clamp(Math.round((centerY - verticalInset) / MARKER_CLEARANCE), 0, rows - 1);
-  const maximumCandidates = Math.min(columns * rows, ANNOTATION_MAP_LIMITS.maxNodes * 4);
-  const trail = [];
-  const add = (column, row) => {
-    if (column < 0 || column >= columns || row < 0 || row >= rows || trail.length >= maximumCandidates) return;
-    trail.push({
-      x: Math.min(maximumX, horizontalInset + column * MARKER_CLEARANCE),
-      y: Math.min(maximumY, verticalInset + row * MARKER_CLEARANCE),
-    });
-  };
-  for (let ring = 0; ring < Math.max(columns, rows) && trail.length < maximumCandidates; ring += 1) {
-    if (ring === 0) { add(originColumn, originRow); continue; }
-    for (let column = originColumn - ring; column <= originColumn + ring; column += 1) add(column, originRow - ring);
-    for (let row = originRow - ring + 1; row <= originRow + ring; row += 1) add(originColumn + ring, row);
-    for (let column = originColumn + ring - 1; column >= originColumn - ring; column -= 1) add(column, originRow + ring);
-    for (let row = originRow + ring - 1; row > originRow - ring; row -= 1) add(originColumn - ring, row);
-  }
-  return trail;
-}
-
-function markerCandidates(bounds, radius, width, height) {
-  const inset = radius + 2;
-  const horizontalInset = Math.min(inset, width / 2);
-  const verticalInset = Math.min(inset, height / 2);
-  const points = [
-    [bounds.x, bounds.y], [bounds.x + bounds.width, bounds.y],
-    [bounds.x, bounds.y + bounds.height], [bounds.x + bounds.width, bounds.y + bounds.height],
-    [bounds.x + bounds.width / 2, bounds.y], [bounds.x + bounds.width / 2, bounds.y + bounds.height],
-    [bounds.x, bounds.y + bounds.height / 2], [bounds.x + bounds.width, bounds.y + bounds.height / 2],
-  ];
-  const candidates = points.map(([x, y]) => ({
-    x: clamp(x, horizontalInset, Math.max(horizontalInset, width - horizontalInset)),
-    y: clamp(y, verticalInset, Math.max(verticalInset, height - verticalInset)),
-  }));
-  candidates.push(...boundedSpiralTrail(bounds, radius, width, height));
-  const seen = new Set();
-  return candidates.filter(candidate => {
-    const key = `${candidate.x}:${candidate.y}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function distanceSquared(a, b) {
-  return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
-}
-
-function placeMarkers(entries, width, height) {
-  const placements = [];
-  let unresolved = 0;
-  for (const entry of entries) {
-    // Custo = colisões (peso dominante, para a anticolisão continuar mandando) + distância até o canto
-    // superior-esquerdo exterior do próprio elemento, que é a primeira candidata de `markerCandidates`.
-    const anchor = { x: entry.bounds.x, y: entry.bounds.y };
-    const candidates = markerCandidates(entry.bounds, MARKER_RADIUS, width, height);
-    const scored = candidates.map((candidate, index) => {
-      const collisions = placements.reduce((total, placed) => total + (distanceSquared(candidate, placed) < MARKER_CLEARANCE ** 2 ? 1 : 0), 0);
-      return {
-        ...candidate, index, collisions,
-        score: collisions * MARKER_COLLISION_COST + Math.sqrt(distanceSquared(candidate, anchor)),
-      };
-    }).sort((left, right) => left.score - right.score || left.index - right.index);
-    const selected = scored[0];
-    if (selected.collisions > 0) unresolved += 1;
-    // Ponta da linha-guia: a borda do contorno mais próxima do marcador, e não o centro do elemento —
-    // a linha pelo centro riscava o conteúdo do alvo na diagonal. Se o marcador já encosta no contorno,
-    // a ponta é o próprio marcador e o desenho não traça linha nenhuma.
-    const leader = annotationLeaderPoint(entry.bounds, selected.x, selected.y);
-    placements.push({
-      number: entry.number, x: selected.x, y: selected.y,
-      leaderX: leader.x, leaderY: leader.y,
-      bounds: entry.bounds, overlapped: selected.collisions > 0,
-    });
-  }
-  return { placements, unresolved };
-}
-
-function visibleAuditedText(value) {
-  return String(value ?? '').replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu,
-    character => `⟦U+${character.codePointAt(0).toString(16).toUpperCase()}⟧`);
-}
-
-function wrapLegend(entry, maxCharacters, measureText, maxWidth) {
-  const prefix = `${entry.number} — ${entry.selectorSummary} — `;
-  const source = visibleAuditedText(`${prefix}${entry.announcementPreview}`);
-  const words = source.split(' ');
-  const lines = [];
-  let current = '';
-  const fits = value => {
-    if (!measureText) return [...value].length <= maxCharacters;
-    const width = measureText(value);
-    if (!Number.isFinite(width) || width < 0) {
-      throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'O compositor não forneceu métricas de texto válidas.');
-    }
-    return width <= maxWidth + 0.01;
-  };
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (fits(candidate)) { current = candidate; continue; }
-    if (current) { lines.push(current); current = ''; }
-    for (const codePoint of [...word]) {
-      const token = `${current}${codePoint}`;
-      if (fits(token)) { current = token; continue; }
-      if (current) lines.push(current);
-      if (!fits(codePoint)) {
-        throw new AnnotationMapError('ANNOTATION_MAP_LEGEND_WIDTH_LIMIT', 'A largura da captura não comporta a legenda raster sem recorte.');
-      }
-      current = codePoint;
-    }
-  }
-  if (current) lines.push(current);
-  return lines.map((line, index) => ({ number: entry.number, text: line, continuation: index > 0 }));
-}
-
-function legendHeading(maxCharacters, measureText, maxWidth) {
-  const candidates = ['Legenda da prévia de anúncios', 'Legenda', 'L'];
-  if (!measureText) return candidates.find(value => [...value].length <= maxCharacters) || 'L';
-  for (const candidate of candidates) {
-    const width = measureText(candidate);
-    if (!Number.isFinite(width) || width < 0) {
-      throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'O compositor não forneceu métricas de título válidas.');
-    }
-    if (width <= maxWidth + 0.01) return candidate;
-  }
-  throw new AnnotationMapError('ANNOTATION_MAP_LEGEND_WIDTH_LIMIT', 'A largura da captura não comporta o título da legenda raster sem recorte.');
+/** Posicionamento das etiquetas: a mesma regra vale para este mapa e para o da conferência por Tab. */
+function placeMarkers(entries, geometry, width, height) {
+  return annotationMarkerLayout(entries, { width, height, cssWidth: geometry.cssWidth });
 }
 
 function maximumCanvasHeight(width) {
@@ -410,12 +277,12 @@ function maximumCanvasHeight(width) {
   ));
 }
 
-function legendCapacity(canvasHeight, imageHeight = 0) {
-  const available = canvasHeight - imageHeight - LEGEND_HEADING_HEIGHT - LEGEND_PADDING * 2;
-  return Math.max(0, Math.floor(available / LEGEND_LINE_HEIGHT));
-}
-
-function segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight, measureLegendText, measureLegendHeading) {
+/**
+ * Fatias imprimíveis da captura. Sem legenda raster, cada trecho é só imagem: a fatia é a própria faixa
+ * do documento, na altura máxima que ainda cabe numa folha em pé. A legenda acompanha o trecho como
+ * texto ao lado, no relatório, e não ocupa pixel de imagem.
+ */
+function segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight) {
   const canvasHeight = maximumCanvasHeight(sourceMetadata.width);
   if (Math.ceil(sourceMetadata.height / ANNOTATION_MAP_LIMITS.maxSegments) > canvasHeight) {
     throw new AnnotationMapError(
@@ -424,7 +291,7 @@ function segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight, measur
     );
   }
   const maximumImagePixels = Math.min(
-    Math.max(1, ANNOTATION_MAP_LIMITS.maxDimension - 512),
+    Math.max(1, ANNOTATION_MAP_LIMITS.maxDimension - 256),
     Math.floor(ANNOTATION_MAP_LIMITS.maxCanvasPixels / sourceMetadata.width),
     canvasHeight,
   );
@@ -432,55 +299,32 @@ function segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight, measur
   const requestedCssHeight = Number.isFinite(segmentCssHeight) && segmentCssHeight > 0 ? segmentCssHeight : defaultCssHeight;
   const minimumForCap = geometry.cssHeight / ANNOTATION_MAP_LIMITS.maxSegments;
   const minimumForRasterRow = 1 / geometry.scaleY;
-  const cssHeight = Math.max(1, Math.min(geometry.cssHeight, Math.max(requestedCssHeight, minimumForCap, minimumForRasterRow)));
+  const cssHeight = Math.max(1, Math.min(
+    geometry.cssHeight, defaultCssHeight,
+    Math.max(requestedCssHeight, minimumForCap, minimumForRasterRow),
+  ));
   const count = Math.max(1, Math.ceil(geometry.cssHeight / cssHeight));
-  const imageSegments = [];
-  const maxCharacters = Math.max(12, Math.floor((sourceMetadata.width - LEGEND_PADDING * 2) / 7));
-  const maximumTextWidth = Math.max(0, sourceMetadata.width - LEGEND_PADDING * 2);
-  const heading = legendHeading(maxCharacters, measureLegendHeading, maximumTextWidth);
+  const segments = [];
   for (let index = 0; index < count; index += 1) {
     const y = index * cssHeight;
     const height = Math.min(cssHeight, geometry.cssHeight - y);
-    const nextY = index === count - 1 ? geometry.cssHeight : (index + 1) * cssHeight;
+    const last = index === count - 1;
     const pixelY = index === 0 ? 0 : Math.round(y * geometry.scaleY);
-    const pixelBottom = index === count - 1 ? sourceMetadata.height : Math.round(nextY * geometry.scaleY);
+    const pixelBottom = last ? sourceMetadata.height : Math.round((y + height) * geometry.scaleY);
     const assigned = entries.filter(entry => {
       const center = entry.bounds.y + entry.bounds.height / 2;
-      return center >= y && (index === count - 1 ? center <= y + height : center < y + height);
+      return center >= y && (last ? center <= y + height : center < y + height);
     });
     const localized = assigned.map(entry => ({ ...entry, bounds: { ...entry.bounds, y: entry.bounds.y - y } }));
-    const placement = placeMarkers(localized, geometry.cssWidth, height);
-    const legendLines = assigned.flatMap(entry => wrapLegend(entry, maxCharacters, measureLegendText, maximumTextWidth));
-    imageSegments.push({
-      role: 'image-and-legend', sourceCssClip: { x: 0, y, width: geometry.cssWidth, height },
+    const placement = placeMarkers(localized, geometry, geometry.cssWidth, height);
+    segments.push({
+      role: 'image', sourceCssClip: { x: 0, y, width: geometry.cssWidth, height },
       sourcePixelClip: { x: 0, y: pixelY, width: sourceMetadata.width, height: pixelBottom - pixelY },
-      entryNumbers: assigned.map(entry => entry.number), placements: placement.placements, legendLines, legendHeading: heading,
+      entryNumbers: assigned.map(entry => entry.number), placements: placement.placements,
       unresolvedOverlap: placement.unresolved,
     });
   }
-  const overflow = [];
-  for (const segment of imageSegments) {
-    const imageHeight = segment.sourcePixelClip.height;
-    const capacity = legendCapacity(canvasHeight, imageHeight);
-    if (segment.legendLines.length > capacity) overflow.push(...segment.legendLines.splice(capacity));
-  }
-  const continuationCapacity = legendCapacity(canvasHeight);
-  if (overflow.length && continuationCapacity === 0) {
-    throw new AnnotationMapError(
-      'ANNOTATION_MAP_LEGEND_PRINT_LIMIT',
-      'A largura da captura não comporta uma linha de legenda em segmento imprimível.',
-    );
-  }
-  const continuations = [];
-  for (let offset = 0; offset < overflow.length; offset += continuationCapacity) {
-    const legendLines = overflow.slice(offset, offset + continuationCapacity);
-    continuations.push({
-      role: 'legend-continuation', sourceCssClip: null,
-      sourcePixelClip: null,
-      entryNumbers: [...new Set(legendLines.map(line => line.number))], placements: [], legendLines, legendHeading: heading, unresolvedOverlap: 0,
-    });
-  }
-  return [...imageSegments, ...continuations];
+  return segments;
 }
 
 /**
@@ -493,7 +337,7 @@ function segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight, measur
  * (marcar o lugar errado) é pior.
  */
 export function buildAnnotationMapPlan({
-  snapshot, sourceMetadata, layoutMetrics = {}, segmentCssHeight, measureLegendText, measureLegendHeading,
+  snapshot, sourceMetadata, layoutMetrics = {}, segmentCssHeight,
   sourceAligned = true,
 } = {}) {
   if (!sourceMetadata || !Number.isFinite(sourceMetadata.width) || !Number.isFinite(sourceMetadata.height) ||
@@ -524,41 +368,29 @@ export function buildAnnotationMapPlan({
   }
   const counts = { ...selected.counts, annotated: entries.length, omittedNoRect: selected.counts.omittedNoRect + outside };
   counts.eligible = counts.annotated + counts.omittedNoRect + counts.omittedLimit + counts.omittedClipped;
-  if (measureLegendText !== undefined && typeof measureLegendText !== 'function') {
-    throw new TypeError('A função de medição da legenda é inválida.');
-  }
-  if (measureLegendHeading !== undefined && typeof measureLegendHeading !== 'function') {
-    throw new TypeError('A função de medição do título da legenda é inválida.');
-  }
-  let segments = entries.length
-    ? segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight, measureLegendText, measureLegendHeading)
-    : [];
+  let segments = entries.length ? segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight) : [];
+  // Teto de segmentos: tira do fim, para a numeração da ordem de leitura continuar inteira de L1 a Ln.
   while (segments.length > ANNOTATION_MAP_LIMITS.maxSegments && entries.length) {
     entries.pop();
     counts.annotated -= 1;
     counts.omittedLimit += 1;
-    limitations.add('legend-limit-reached');
-    segments = entries.length
-      ? segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight, measureLegendText, measureLegendHeading)
-      : [];
+    limitations.add('node-limit-reached');
+    segments = entries.length ? segmentPlan(entries, geometry, sourceMetadata, segmentCssHeight) : [];
   }
   counts.unresolvedOverlap = segments.reduce((total, segment) => total + segment.unresolvedOverlap, 0);
   if (counts.unresolvedOverlap) limitations.add('unresolved-marker-overlap');
   const segmentByNumber = new Map();
   segments.forEach((segment, index) => {
-    if (segment.role !== 'image-and-legend') return;
     segment.entryNumbers.forEach(number => segmentByNumber.set(number, index + 1));
   });
   const legend = entries.map(({ bounds, ...entry }) => ({ ...entry, segmentIndex: segmentByNumber.get(entry.number) }));
   return { geometry, entries, legend, counts, limits: ANNOTATION_MAP_LIMITS, limitations: canonicalLimitations(limitations), segments };
 }
 
-function canvasHeightFor(segment, geometry, sourceWidth) {
+/** Cada segmento é só a faixa da imagem: a legenda vive no texto ao lado do trecho, não em pixel. */
+function canvasHeightFor(segment, sourceWidth) {
   const imageHeight = segment.sourcePixelClip?.height ?? 0;
-  const legendHeight = segment.legendLines.length
-    ? LEGEND_HEADING_HEIGHT + LEGEND_PADDING * 2 + segment.legendLines.length * LEGEND_LINE_HEIGHT
-    : 0;
-  return { imageHeight, legendHeight, height: imageHeight + legendHeight, width: sourceWidth };
+  return { imageHeight, height: imageHeight, width: sourceWidth };
 }
 
 function segmentOutlineRect(marker, geometry, dimensions) {
@@ -617,6 +449,55 @@ function drawElementOutlines(context, segment, plan, dimensions) {
   }
 }
 
+/**
+ * Caixa da etiqueta em px de imagem do segmento, com o arredondamento do canto. A etiqueta é desenhada
+ * na escala da captura: cresce junto com a imagem, e continua legível quando o relatório reduz o trecho
+ * para caber na folha.
+ */
+function badgeRect(marker, geometry, dimensions) {
+  const scaleX = geometry.scaleX;
+  const scaleY = geometry.scaleY;
+  const width = marker.width * scaleX;
+  const height = marker.height * scaleY;
+  const box = {
+    x: marker.x * scaleX - width / 2,
+    y: marker.y * scaleY - height / 2,
+    width, height,
+  };
+  if (!Number.isFinite(box.x) || !Number.isFinite(box.y) || width <= 0 || height <= 0) return null;
+  const clampedX = clamp(box.x, 0, Math.max(0, dimensions.width - width));
+  const clampedY = clamp(box.y, 0, Math.max(0, dimensions.imageHeight - height));
+  return { ...box, x: clampedX, y: clampedY };
+}
+
+/** Ponto onde a linha-guia sai da etiqueta: a borda da caixa na direção do alvo, nunca o meio dela. */
+function badgeEdgePoint(box, target) {
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const deltaX = target.x - center.x;
+  const deltaY = target.y - center.y;
+  if (deltaX === 0 && deltaY === 0) return center;
+  const factorX = deltaX === 0 ? Infinity : (box.width / 2) / Math.abs(deltaX);
+  const factorY = deltaY === 0 ? Infinity : (box.height / 2) / Math.abs(deltaY);
+  const factor = Math.min(factorX, factorY);
+  if (!Number.isFinite(factor)) return center;
+  return { x: center.x + deltaX * factor, y: center.y + deltaY * factor };
+}
+
+function roundedRectPath(context, box, radius) {
+  const corner = Math.max(0, Math.min(radius, box.width / 2, box.height / 2));
+  context.beginPath();
+  context.moveTo(box.x + corner, box.y);
+  context.lineTo(box.x + box.width - corner, box.y);
+  context.quadraticCurveTo(box.x + box.width, box.y, box.x + box.width, box.y + corner);
+  context.lineTo(box.x + box.width, box.y + box.height - corner);
+  context.quadraticCurveTo(box.x + box.width, box.y + box.height, box.x + box.width - corner, box.y + box.height);
+  context.lineTo(box.x + corner, box.y + box.height);
+  context.quadraticCurveTo(box.x, box.y + box.height, box.x, box.y + box.height - corner);
+  context.lineTo(box.x, box.y + corner);
+  context.quadraticCurveTo(box.x, box.y, box.x + corner, box.y);
+  context.closePath();
+}
+
 function drawSegment(context, bitmap, segment, plan, dimensions) {
   context.fillStyle = '#fff';
   context.fillRect(0, 0, dimensions.width, dimensions.height);
@@ -624,40 +505,35 @@ function drawSegment(context, bitmap, segment, plan, dimensions) {
     const { x: sx, y: sy, width: sw, height: sh } = segment.sourcePixelClip;
     context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, dimensions.width, dimensions.imageHeight);
   }
-  context.font = '700 16px system-ui';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
   const scale = Math.min(plan.geometry.scaleX, plan.geometry.scaleY);
   drawElementOutlines(context, segment, plan, dimensions);
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
   for (const marker of segment.placements) {
-    const markerRadius = MARKER_RADIUS * scale;
-    const x = marker.x * plan.geometry.scaleX;
-    const y = marker.y * plan.geometry.scaleY;
-    context.strokeStyle = marker.overlapped ? MARKER_OVERLAP_STROKE : MARKER_STROKE;
-    context.lineWidth = Math.max(2, Math.round(3 * scale));
-    // Sem contorno (ou já encostando nele) a linha-guia não é traçada: a ponta devolvida é o próprio
-    // marcador, que só cobriria o alvo.
+    const box = badgeRect(marker, plan.geometry, dimensions);
+    if (!box) continue;
+    const color = marker.overlapped ? BADGE_OVERLAP_BG : BADGE_BG;
+    // Linha-guia curta: sai da borda da etiqueta e termina sobre o contorno do elemento. Quando a
+    // etiqueta já encosta no alvo, a ponta devolvida é o próprio centro e nenhum traço é feito.
     const leader = segmentLeaderPoint(marker, plan.geometry, dimensions);
-    if (leader && (leader.x !== x || leader.y !== y)) {
-      context.beginPath(); context.moveTo(x, y); context.lineTo(leader.x, leader.y); context.stroke();
+    if (leader) {
+      const start = badgeEdgePoint(box, leader);
+      if (Math.hypot(leader.x - start.x, leader.y - start.y) >= 2) {
+        context.strokeStyle = color;
+        context.lineWidth = Math.max(2, Math.round(LEADER_LINE_WIDTH_CSS * scale));
+        context.beginPath(); context.moveTo(start.x, start.y); context.lineTo(leader.x, leader.y); context.stroke();
+      }
     }
-    context.fillStyle = '#fff';
-    context.beginPath(); context.arc(x, y, markerRadius, 0, Math.PI * 2); context.fill(); context.stroke();
-    context.fillStyle = '#14212b';
-    context.fillText(String(marker.number), x, y + 1);
+    context.fillStyle = color;
+    context.lineWidth = Math.max(2, Math.round(2 * scale));
+    roundedRectPath(context, box, Math.round(box.height * 0.28));
+    context.fill();
+    context.strokeStyle = '#fff';
+    context.stroke();
+    context.fillStyle = BADGE_TEXT;
+    context.font = `700 ${Math.max(9, Math.round(annotationBadgeFont(marker.height) * scale))}px system-ui`;
+    context.fillText(marker.code, box.x + box.width / 2, box.y + box.height / 2 + Math.round(scale));
   }
-  if (!segment.legendLines.length) return;
-  const legendTop = dimensions.imageHeight;
-  context.fillStyle = segment.role === 'legend-continuation' ? '#fff' : '#eef4f8';
-  context.fillRect(0, legendTop, dimensions.width, dimensions.legendHeight);
-  context.fillStyle = '#003b71';
-  context.textAlign = 'left';
-  context.textBaseline = 'alphabetic';
-  context.font = LEGEND_HEADING_FONT;
-  context.fillText(segment.legendHeading, LEGEND_PADDING, legendTop + 26);
-  context.fillStyle = '#14212b';
-  context.font = '15px system-ui';
-  segment.legendLines.forEach((line, index) => context.fillText(line.text, LEGEND_PADDING, legendTop + LEGEND_HEADING_HEIGHT + LEGEND_PADDING + index * LEGEND_LINE_HEIGHT));
 }
 
 /** Composes one page map locally. It never mutates the page or the pristine source artifact. */
@@ -693,35 +569,12 @@ export async function composeAnnouncementMap({
   }
   const sourceHash = await sha256Hex(source.bytes);
   if (sourceHash !== fullPageEvidence.hash) throw new AnnotationMapError('ANNOTATION_MAP_SOURCE_HASH_MISMATCH', 'O hash da captura original não corresponde aos pixels recebidos.');
-  let plan = buildAnnotationMapPlan({
+  // Uma passada só: sem legenda raster não há texto para medir antes de desenhar.
+  const plan = buildAnnotationMapPlan({
     snapshot, sourceMetadata: source, layoutMetrics, sourceAligned: sourceAligned !== false,
   });
-  if (plan.entries.length) {
-    const measurementCanvas = new worker.OffscreenCanvas(1, 1);
-    try {
-      const measurementContext = measurementCanvas.getContext?.('2d', { alpha: false });
-      if (!measurementContext || typeof measurementContext.measureText !== 'function') {
-        throw new AnnotationMapError('ANNOTATION_MAP_COMPOSITOR_UNAVAILABLE', 'O contexto 2D local não oferece métricas de texto.');
-      }
-      measurementContext.font = LEGEND_FONT;
-      plan = buildAnnotationMapPlan({
-        snapshot, sourceMetadata: source, layoutMetrics, sourceAligned: sourceAligned !== false,
-        measureLegendText: value => {
-          measurementContext.font = LEGEND_FONT;
-          return measurementContext.measureText(value).width;
-        },
-        measureLegendHeading: value => {
-          measurementContext.font = LEGEND_HEADING_FONT;
-          return measurementContext.measureText(value).width;
-        },
-      });
-    } finally {
-      try { measurementCanvas.width = 0; measurementCanvas.height = 0; } catch { /* Best-effort release of text metrics canvas. */ }
-    }
-  }
   const placementByNumber = new Map();
   plan.segments.forEach((segment, index) => {
-    if (segment.role !== 'image-and-legend') return;
     for (const marker of segment.placements) placementByNumber.set(marker.number, {
       marker, segmentIndex: index + 1, clipY: segment.sourceCssClip.y,
     });
@@ -743,7 +596,8 @@ export async function composeAnnouncementMap({
         marker: {
           x: placed.marker.x,
           y: placed.marker.y + placed.clipY,
-          size: MARKER_RADIUS * 2,
+          width: placed.marker.width,
+          height: placed.marker.height,
           leaderX: placed.marker.leaderX,
           leaderY: placed.marker.leaderY + placed.clipY,
         },
@@ -779,7 +633,7 @@ export async function composeAnnouncementMap({
   try {
     for (const segment of plan.segments) {
       throwIfAborted(signal);
-      const dimensions = canvasHeightFor(segment, plan.geometry, source.width);
+      const dimensions = canvasHeightFor(segment, source.width);
       if (dimensions.width > ANNOTATION_MAP_LIMITS.maxDimension || dimensions.height > ANNOTATION_MAP_LIMITS.maxDimension ||
         dimensions.width * dimensions.height > ANNOTATION_MAP_LIMITS.maxCanvasPixels) {
         throw new AnnotationMapError('ANNOTATION_MAP_SEGMENT_LIMIT', 'Um segmento do mapa excede os limites do compositor.');

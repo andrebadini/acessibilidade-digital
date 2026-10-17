@@ -27,6 +27,31 @@ export const EVIDENCE_TREATMENTS_V1 = Object.freeze({
   }),
 });
 
+/**
+ * Tratamento do cartão da revisão guiada. Ali o contorno responde "onde está o elemento desta pergunta?",
+ * e não "qual foi o veredito": por isso o tom é próprio (`target`) em vez de reaproveitar os tons do
+ * relatório, em que vermelho significa falha confirmada. Quem ainda não respondeu a pergunta veria a
+ * cor de um veredito que não existe. A frase é a pedida pelo produto, na íntegra.
+ */
+export const GUIDED_REVIEW_TREATMENT_V1 = Object.freeze({
+  tone: 'target',
+  aria: 'recorte da imagem do elemento desta pergunta, contornado em vermelho por fora do elemento, com o resto da captura escurecido.',
+  legend: 'Contorno vermelho: o elemento desta pergunta.',
+});
+
+/**
+ * Tratamento da ficha de evidência (relatório aberto pelo painel). Uma ficha descreve o REGISTRO — o
+ * arquivo, o ID e os hashes — e não um veredito: a mesma evidência pode sustentar constatações de itens
+ * diferentes, com desfechos diferentes. Por isso o contorno ali só responde “onde está o elemento desta
+ * evidência?”, sem afirmar falha nem aprovação.
+ */
+export const EVIDENCE_FICHE_TREATMENT_V1 = Object.freeze({
+  tone: 'target',
+  aria: 'captura do elemento desta evidência, contornado em vermelho por fora do elemento.',
+  legend: 'Contorno vermelho: o elemento desta evidência.',
+  binaryLegend: 'O arquivo PNG original não tem contorno: ele é desenhado só na tela, para localizar o elemento.',
+});
+
 function treatmentTone(occurrence) {
   if (!occurrence || typeof occurrence !== 'object' ||
     !NORMATIVE_CLASSIFICATIONS.has(occurrence.classification)) return null;

@@ -239,6 +239,23 @@ test('panel launches and exports the visual reading report; a subsequent audit r
   assert.match(pageText, /estimativa/iu);
   assert.match(pageText, /Conteúdo estrutural/u);
   assert.match(pageText, /Fora da sequência de Tab/u);
+  // A pergunta desta página é a MESMA da seção própria da verificação guiada, e o aviso diz onde a
+  // resposta é registrada: aqui não há botão de resposta, porque nada é gravado nesta página.
+  assert.match(pageText, /O que o leitor de tela fala corresponde a este elemento \(o que ele é e o que faz\)\?/u);
+  assert.match(pageText, /Para registrar as respostas no relatório, use a seção “Leitura por Tab” da verificação guiada\./u);
+  assert.doesNotMatch(pageText, /Confira se o anúncio representa o elemento\./u);
+  const readingShape = await evaluate(reader, `(() => {
+    const questions=[...document.querySelectorAll('.entry-question')];
+    return {
+      questions: questions.length,
+      rows: document.querySelectorAll('[data-entry-id]').length,
+      answerButtons: document.querySelectorAll('.lay-answers button, [data-tab-reading-answer]').length,
+      notices: document.querySelectorAll('.reading-notice').length,
+    };
+  })()`);
+  assert.equal(readingShape.questions, readingShape.rows, 'a pergunta aparece em toda linha, sem botões');
+  assert.equal(readingShape.answerButtons, 0, 'a página de leitura não registra resposta');
+  assert.ok(readingShape.notices >= 1, 'o aviso de onde responder aparece por tabela');
   assertPrivateValuesAbsent(pageText, 'reader page');
   const totalRows = await evaluate(reader, `document.querySelectorAll('[data-entry-id]').length`);
   assert.ok(totalRows > 20, 'the report must contain a substantive inventory of the fixture');

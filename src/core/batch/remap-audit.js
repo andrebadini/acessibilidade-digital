@@ -56,7 +56,9 @@ export async function remapAuditPage(input, { batchAuditId, pageId }) {
   const evidence = [];
   for (const artifact of evidenceDrafts) {
     if (artifact.kind === 'announcement-map') {
-      artifact.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry);
+      // Pelas regras da versão que o próprio mapa declara: o lote pode reencontrar auditorias guardadas
+      // em versões anteriores do algoritmo, cuja geometria tem outra forma.
+      artifact.derivation.geometrySnapshotHash = await hashAnnotationMapGeometry(artifact.derivation.geometry, { version: artifact.derivation.version });
     }
     artifact.hash = await hashEvidenceArtifact(artifact, {
       sourceArtifact: ['announcement-map', 'keyboard-map'].includes(artifact.kind)

@@ -17,6 +17,7 @@ import { parseStorageGetEnvelope } from './storage-get-envelope.js';
 import { createPixelPrivacyGateV1 } from './pixel-privacy-gate.js';
 import { isPixelCommitClockV1 } from './pixel-commit-clock.js';
 import { isTerminalDeliveryV1 } from './panel-port.js';
+import { perfBegin, perfEnd } from './perf-log.js';
 
 export const ACTIVE_AUDIT_JOB_KEY = 'audita:active-audit-job:v1';
 const START_JOURNAL_KEY = 'audita:start-journal:v1';
@@ -1084,9 +1085,16 @@ export function createAuthorizedAuditStarter(input) {
         },
         persistAuditModel: async model => {
           if (lastCheckpoint === null) throw new Error('CHECKPOINT_PERSIST_DENIED');
+          // Medição de bancada (1.1.62), desligada por padrão: ver src/background/perf-log.js.
+          const perfCandidate = perfBegin();
           const candidate = await terminalCandidate({ auditId: active.auditId, model, checkpoint: lastCheckpoint });
+          perfEnd(active.auditId, 'persist-verificar-integridade', perfCandidate);
+          const perfBundle = perfBegin();
           const bundle = copyPanelResultBundleV1(await buildPanelResultBundle({ reportRevision: candidate }));
+          perfEnd(active.auditId, 'persist-bundle-painel', perfBundle);
+          const perfWrite = perfBegin();
           await markFinalizing(liveRecord, candidate, bundle);
+          perfEnd(active.auditId, 'persist-gravar-terminal', perfWrite);
         },
       });
       return await settle(liveRecord, outcome);

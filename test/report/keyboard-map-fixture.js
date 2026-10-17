@@ -4,7 +4,9 @@ import {
   KEYBOARD_MAP_VERSION,
   hashKeyboardMapArtifact,
 } from '../../src/core/keyboard/keyboard-map-artifact.js';
-import { TEST_PNG, TEST_PNG_HASH, createPristineMapSource } from './annotation-map-fixture.js';
+import {
+  TEST_PAGE_CSS, TEST_PAGE_PIXELS, TEST_PNG, TEST_PNG_HASH, createPristineMapSource,
+} from './annotation-map-fixture.js';
 
 export { TEST_PNG, TEST_PNG_HASH, createPristineMapSource };
 
@@ -30,8 +32,8 @@ export async function createKeyboardMapFixture({
       sourceEvidenceId, sourceHash: TEST_PNG_HASH,
       geometry: {
         coordinateSpace: 'document-css-px',
-        sourceCssSize: { width: 1, height: 1 },
-        sourcePixelSize: { width: 1, height: 1 },
+        sourceCssSize: { ...TEST_PAGE_CSS },
+        sourcePixelSize: { ...TEST_PAGE_PIXELS },
         scaleX: 1,
         scaleY: 1,
         deviceScaleFactor: 1,
@@ -40,7 +42,8 @@ export async function createKeyboardMapFixture({
     status,
     segments: hasEntries ? [{
       segmentId: `${evidenceId}-segment-1`, index: 1, count: 1, role: 'image',
-      sourceCssClip: { x: 0, y: 0, width: 1, height: 1 }, width: 1, height: 1,
+      sourceCssClip: { x: 0, y: 0, ...TEST_PAGE_CSS },
+      width: TEST_PAGE_PIXELS.width, height: TEST_PAGE_PIXELS.height,
       dataUrl: TEST_PNG, contentHash: TEST_PNG_HASH,
     }] : [],
     stops: [{

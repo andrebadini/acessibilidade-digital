@@ -1,4 +1,5 @@
 import { NBR17225_ITEMS } from '../normative/nbr17225.js';
+import { TAB_READING_RULE_ID } from '../rules/tab-reading.js';
 
 // Revisão guiada para quem não tem formação técnica.
 //
@@ -569,6 +570,10 @@ export function buildLayReviewPlan(model) {
     const occurrence = occurrenceById.get(entry.occurrenceId);
     const item = itemById.get(entry.itemId);
     if (!occurrence || !item) continue;
+    // Leitura por Tab: as perguntas desta regra são feitas na seção própria, uma por parada de Tab, com
+    // o recorte e o anúncio estimado na mesma linha. Um cartão por parada aqui perguntaria a mesma coisa
+    // duas vezes — e fora do lugar, sem a sequência de Tab ao lado.
+    if ((occurrence.source?.ruleId ?? occurrence.ruleId) === TAB_READING_RULE_ID) continue;
     const nodeId = occurrence.target?.nodeId;
     const candidate = typeof nodeId === 'string' && nodeId && nodeId !== 'document'
       ? evidenceForOccurrence(occurrence, evidenceById) : null;

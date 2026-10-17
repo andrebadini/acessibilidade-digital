@@ -48,40 +48,84 @@ test('CSV uses quoted cells and neutralizes spreadsheet formula injection', () =
 
 const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
-test('attaches element screenshots before the code column and a numbered full-page map at the end', () => {
-  const inventoryRaw = inventory([
+// Captura de 1200×600 CSS que virou um PNG de 2400×1200: escala 2, como numa tela de alta densidade.
+const MAP_GEOMETRY = { pixelWidth: 2400, pixelHeight: 1200, cssWidth: 1200, cssHeight: 600 };
+
+function reportWithMap() {
+  const base = modelModule.createReadingReport(inventory([
     row({ id: 'first', tabOrder: 1, preview: 'Ir para o conteúdo' }),
     row({ id: 'heading', tabOrder: null, tabIndex: null, category: 'reading', role: 'heading', preview: 'Título principal', bounds: { x: 0, y: 40, width: 200, height: 30 } }),
-  ]);
-  const base = modelModule.createReadingReport(inventoryRaw, { origin: 'https://example.com', generatedAt: '2026-09-19T12:00:00.000Z' });
-  const report = modelModule.attachReadingVisuals(base, {
+  ]), { origin: 'https://example.com', generatedAt: '2026-09-19T12:00:00.000Z' });
+  return modelModule.attachReadingVisuals(base, {
     elementImages: { first: TINY_PNG },
     fullPage: TINY_PNG,
+    pageMapGeometry: MAP_GEOMETRY,
     limitations: ['visual-capture-unavailable'],
   });
+}
+
+test('attaches element screenshots before the code column and a reading map at the end', () => {
+  const report = reportWithMap();
   assert.equal(report.entries[0].image, TINY_PNG);
   assert.equal(report.entries[1].image, null);
   assert.equal(report.pageMap, TINY_PNG);
+  assert.deepEqual(report.pageMapGeometry, MAP_GEOMETRY);
   assert.ok(report.limitations.includes('A captura de tela não ficou disponível nesta inspeção.') || report.limitations.some(value => /captura/iu.test(value)));
   const html = modelModule.renderReadingHtml(report);
   assert.match(html, /Imagem do elemento/u);
   assert.match(html, /map-base/u);
-  assert.match(html, /map-label-num/u);
-  assert.match(html, /1\./u);
   assert.match(html, /Ir para o conteúdo/u);
-  assert.match(html, /L\d+|T[uí]tulo principal/u);
+  assert.match(html, /T[uí]tulo principal/u);
   assert.ok(html.indexOf('Imagem do elemento') < html.indexOf('Ordem / elemento'));
   assert.ok(html.indexOf('Mapa de leitura') > html.indexOf('Conferir'));
+});
+
+test('o mapa usa a medida da captura: viewBox no tamanho do PNG e caixa convertida pela escala', () => {
+  const html = modelModule.renderReadingHtml(reportWithMap());
+  // O viewBox é o tamanho em pixel do próprio PNG: é o que faz a caixa cair sobre o elemento.
+  assert.match(html, /viewBox="0 0 2400 1200"/u);
+  // A caixa medida no documento (10,20,80×24 CSS) vira (20,40,160×48) na escala 2.
+  assert.match(html, /class="map-box tone-[a-z]+" x="20" y="40" width="160" height="48"/u);
+  // O segundo elemento fica na posição dele, também convertida: (0,40,200×30) → (0,80,400×60).
+  assert.match(html, /class="map-box tone-[a-z]+" x="0" y="80" width="400" height="60"/u);
+  // A coluna da direita é o texto que seria ouvido, com o código e o Tab de quem recebe foco.
+  assert.match(html, /<span class="reader-map-code">L1<\/span> <bdi>Ir para o conteúdo<\/bdi> <span class="reader-map-tab">\(Tab 1\)<\/span>/u);
+  assert.match(html, /<span class="reader-map-code">L2<\/span> <bdi>Título principal<\/bdi><\/li>/u);
+});
+
+test('o mapa numera os códigos uma única vez, na ordem de leitura, e desenha só o código na imagem', () => {
+  const html = modelModule.renderReadingHtml(reportWithMap());
+  const codes = [...html.matchAll(/<text class="map-badge-text"[^>]*>(L\d+)<\/text>/gu)].map(match => match[1]);
+  assert.deepEqual(codes, ['L1', 'L2'], 'cada código aparece uma vez, em ordem');
+  const badges = [...html.matchAll(/<rect class="map-badge(?: map-badge-overlapped)?" x="([\d.-]+)" y="([\d.-]+)" width="([\d.-]+)" height="([\d.-]+)"/gu)];
+  assert.equal(badges.length, 2, 'uma etiqueta por elemento marcado');
+  // A etiqueta é uma caixa pequena com o código: o texto do anúncio não é desenhado dentro da imagem.
+  for (const badge of badges) assert.ok(Number(badge[3]) < 200, 'a etiqueta tem a largura de um código, não de um anúncio');
+  assert.equal((html.match(/Ir para o conteúdo<\/bdi>/gu) ?? []).length, 1, 'o anúncio aparece só na coluna de texto');
+});
+
+test('sem a medida da captura o mapa não desenha código nenhum em vez de apontar o lugar errado', () => {
+  const base = modelModule.createReadingReport(inventory([row()]), { origin: 'https://example.com', generatedAt: '2026-09-19T12:00:00.000Z' });
+  const report = modelModule.attachReadingVisuals(base, { elementImages: {}, fullPage: TINY_PNG, limitations: [] });
+  assert.equal(report.pageMapGeometry, null);
+  const html = modelModule.renderReadingHtml(report);
+  assert.match(html, /<img class="map-base"/u);
+  assert.doesNotMatch(html, /<text class="map-badge-text"/u);
+  assert.doesNotMatch(html, /<svg class="map-overlay"/u);
+  assert.match(html, /A medida da captura não foi registrada/u);
 });
 
 test('rejects non-PNG visual payloads and keeps a text-only report when capture is absent', () => {
   const base = modelModule.createReadingReport(inventory([row()]), { origin: 'https://example.com', generatedAt: '2026-09-19T12:00:00.000Z' });
   assert.throws(() => modelModule.attachReadingVisuals(base, { elementImages: { 'element-1': 'data:text/html,oi' }, fullPage: null }));
+  // Medida incoerente é recusada inteira: o mapa não pode ser desenhado com uma escala inventada.
+  assert.throws(() => modelModule.attachReadingVisuals(base, { elementImages: {}, fullPage: TINY_PNG, pageMapGeometry: { pixelWidth: 0, pixelHeight: 0, cssWidth: 0, cssHeight: 0 } }));
   const plain = modelModule.attachReadingVisuals(base, { elementImages: {}, fullPage: null });
   const html = modelModule.renderReadingHtml(plain);
   assert.match(html, /Captura não disponível/u);
   assert.doesNotMatch(html, /class="map-base"/u);
-  assert.doesNotMatch(html, /Mapa de leitura/u);
+  assert.match(html, /Mapa de leitura da página/u);
+  assert.match(html, /Captura da página inteira não disponível/u);
 });
 
 test('interleaved structural content cannot disturb Tab order or disclose session tokens in exports', () => {

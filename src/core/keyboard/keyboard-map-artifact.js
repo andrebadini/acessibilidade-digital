@@ -13,8 +13,18 @@ import { sha256Hex } from '../report/hash.js';
 import { KEYBOARD_MAP_LIMITATIONS, KEYBOARD_MAP_REQUIRED_LIMITATIONS, KEYBOARD_MAP_STOP_KINDS, KEYBOARD_MAP_SUSPECT_REASONS } from './keyboard-map-model.js';
 
 export const KEYBOARD_MAP_ALGORITHM = 'audita.keyboard-map';
-export const KEYBOARD_MAP_VERSION = '1.0.0';
-export const KEYBOARD_MAP_READABLE_VERSIONS = Object.freeze([KEYBOARD_MAP_VERSION]);
+export const KEYBOARD_MAP_VERSION = '1.1.0';
+
+/**
+ * Versões do algoritmo que esta revisão sabe **ler**, além de escrever.
+ *
+ * A 1.0.0 é a publicada até a 1.1.61 e continua aceita porque há auditorias guardadas nela: recusá-la faria
+ * o relatório de quem já auditou parar de abrir. O esquema da geometria é o mesmo nas duas — o que mudou na
+ * 1.1.0 foi a ORIGEM dos retângulos: eles passaram a ser medidos no mesmo leiaute da imagem
+ * (`fresh-geometry.js`), e não na leitura estrutural de segundos antes. Por isso um mapa 1.0.0 continua
+ * válido exatamente como foi escrito.
+ */
+export const KEYBOARD_MAP_READABLE_VERSIONS = Object.freeze(['1.0.0', KEYBOARD_MAP_VERSION]);
 export const KEYBOARD_MAP_PRINTABLE_ASPECT_RATIO = 1.3;
 
 export const KEYBOARD_MAP_LIMITS = Object.freeze({
@@ -123,7 +133,9 @@ function validateSize(value, label, { integer = false } = {}) {
 }
 
 function validateGeometry(geometry, { version = KEYBOARD_MAP_VERSION } = {}) {
-  if (version !== KEYBOARD_MAP_VERSION) throw new TypeError(`Versão do algoritmo do mapa do teclado não reconhecida: ${String(version)}.`);
+  if (!KEYBOARD_MAP_READABLE_VERSIONS.includes(version)) {
+    throw new TypeError(`Versão do algoritmo do mapa do teclado não reconhecida: ${String(version)}.`);
+  }
   if (!exactKeys(geometry, GEOMETRY_KEYS) || geometry.coordinateSpace !== 'document-css-px') {
     throw new TypeError('Geometria do mapa do teclado inválida.');
   }

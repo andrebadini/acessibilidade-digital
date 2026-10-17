@@ -11,7 +11,7 @@ import {
   composeAnnouncementMapForProduction,
   selectAnnouncementMapEntries,
 } from '../../src/browser/annotation-map.js';
-import { validateAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
+import { annotationBadgeSize, validateAnnotationMapArtifact } from '../../src/core/evidence/annotation-map-artifact.js';
 import { SAMPLE_AUDIT } from '../../fixtures/audits/sample-audit.js';
 import { normalizeSnapshot } from '../../src/core/normalize-snapshot.js';
 import { createAuditModel } from '../../src/core/report/audit-model.js';
@@ -76,6 +76,41 @@ function snapshot(nodes) {
   }
   return { schemaVersion: 1, document: { nodeId: 'document', title: 'Fixture', url: 'https://example.test/' }, nodes: normalized };
 }
+
+/**
+ * Contexto 2D falso do compositor: registra o que foi traçado e escrito, e reconhece as chamadas de
+ * desenho em uso. O teste fala do desenho (o traço, o texto, a posição) em vez de reimplementar canvas.
+ */
+function fakeContext({ onStroke, onText } = {}) {
+  const context = {
+    fillStyle: '', strokeStyle: '', lineWidth: 0, font: '', textAlign: '', textBaseline: '',
+    points: [],
+    fillRect() {}, drawImage() {}, arc() {}, fill() {},
+    measureText(value) { return { width: [...String(value)].length * 7 }; },
+    beginPath() { context.points = []; },
+    moveTo(x, y) { context.points.push([x, y]); },
+    lineTo(x, y) { context.points.push([x, y]); },
+    quadraticCurveTo(x, y) { context.points.push([x, y]); },
+    closePath() {},
+    stroke() { onStroke?.({ strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, points: context.points }); },
+    fillText(value, x, y) { onText?.({ value, x, y, fillStyle: context.fillStyle }); },
+  };
+  return context;
+}
+
+/** Canvas de worker falso: devolve um PNG válido do tamanho pedido, sem desenhar pixel de verdade. */
+function fakeCanvas({ onStroke, onText } = {}) {
+  return class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() { return fakeContext({ onStroke, onText }); }
+    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
+  };
+}
+
+/** Caixa desenhada da etiqueta: o marcador guarda o centro, o desenho parte do canto superior esquerdo. */
+const badgeBox = marker => ({ x: marker.x - marker.width / 2, y: marker.y - marker.height / 2, width: marker.width, height: marker.height });
+const boxesOverlap = (left, right) => left.x < right.x + right.width && left.x + left.width > right.x &&
+  left.y < right.y + right.height && left.y + left.height > right.y;
 
 test('selects a stable safe DOM/AX projection with structural selectors only', () => {
   const input = snapshot([
@@ -160,16 +195,7 @@ test('keeps an editable descendant AX secret out of the composed artifact, hashe
       { backendDOMNodeId: 10, role: { value: 'button' }, name: { value: 'Rótulo público ambíguo' } },
     ] },
   });
-  class Canvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      return {
-        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
-        measureText(value) { return { width: [...String(value)].length * 7 }; },
-      };
-    }
-    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
-  }
+  const Canvas = fakeCanvas();
   const source = await pristineSource(100, 100, { evidenceId: 'ev-full' });
   const artifact = await composeAnnouncementMap({
     pageId: 'page-1', snapshot: normalized, fullPageEvidence: source,
@@ -295,24 +321,58 @@ test('uses a bounded deterministic spiral trail before declaring identical marke
   assert.ok(outside > 0, 'nenhum marcador ficou fora do contorno para a linha-guia');
 });
 
-test('places each number next to its own element, preferring the outer top-left corner', () => {
+test('encosta a etiqueta de cada código no próprio elemento e não deixa etiqueta sobre etiqueta', () => {
+  const element = { x: 100, y: 100, width: 40, height: 40 };
   const plan = buildAnnotationMapPlan({
     snapshot: snapshot([
-      { nodeId: 'narrow', tagName: 'button', accessibleName: 'Estreito', axRole: 'button', rect: { x: 100, y: 100, width: 40, height: 40 } },
+      { nodeId: 'narrow', tagName: 'button', accessibleName: 'Estreito', axRole: 'button', rect: { ...element } },
       { nodeId: 'wide', tagName: 'button', accessibleName: 'Largo', axRole: 'button', rect: { x: 100, y: 100, width: 400, height: 40 } },
     ]),
     sourceMetadata: { width: 600, height: 300 },
     layoutMetrics: { cssContentSize: { width: 600, height: 300 } },
   });
   const placements = plan.segments[0].placements;
+  const [first, second] = placements.map(badgeBox);
 
-  // O primeiro marcador fica no canto superior-esquerdo exterior do próprio elemento.
-  assert.deepEqual([placements[0].x, placements[0].y], [100, 100]);
-  // O segundo tem o mesmo canto ocupado: cai no candidato livre mais perto (logo abaixo do canto), e
-  // não no primeiro livre da trilha, que ficaria no canto superior-direito a 300 px de distância.
-  assert.deepEqual([placements[1].x, placements[1].y], [100, 140]);
-  assert.equal(placements[1].overlapped, false);
+  // O código fica encostado no alvo — o vão é o mesmo BADGE_GAP_PX do desenho — e alinhado ao meio dele.
+  assert.deepEqual([first.x + first.width, first.y + first.height / 2], [98, 120]);
+  assert.equal(first.y + first.height / 2, element.y + element.height / 2);
+  // O mesmo lugar está ocupado pelo primeiro código: o segundo sai de cima dele sem cobrir nem a
+  // etiqueta anterior nem a caixa do elemento.
+  assert.equal(boxesOverlap(first, second), false, 'etiquetas não podem se cobrir');
+  assert.equal(boxesOverlap(second, element), false, 'a etiqueta não pode cobrir o alvo de outro código');
+  assert.deepEqual(placements.map(marker => marker.code), ['L1', 'L2']);
   assert.equal(plan.counts.unresolvedOverlap, 0);
+  assert.equal(plan.limitations.includes('unresolved-marker-overlap'), false);
+});
+
+test('numera os códigos uma única vez, em ordem, e dá a cada trecho a legenda do que ele mostra', () => {
+  const nodes = Array.from({ length: 12 }, (_, index) => ({
+    nodeId: `n-${index + 1}`, tagName: 'button', accessibleName: `Ação ${index + 1}`, axRole: 'button',
+    rect: { x: 4, y: index * 80 + 4, width: 120, height: 30 },
+  }));
+  const plan = buildAnnotationMapPlan({
+    snapshot: snapshot(nodes),
+    sourceMetadata: { width: 400, height: 2000 },
+    layoutMetrics: { cssContentSize: { width: 200, height: 1000 } },
+    segmentCssHeight: 240,
+  });
+
+  // Um código por elemento, na ordem de leitura, sem repetir e sem buraco em nenhum trecho.
+  assert.ok(plan.segments.length > 1);
+  assert.deepEqual(plan.legend.map(entry => entry.number), Array.from({ length: 12 }, (_, index) => index + 1));
+  assert.equal(new Set(plan.legend.map(entry => entry.number)).size, 12);
+  const drawn = plan.segments.flatMap(segment => segment.entryNumbers);
+  assert.deepEqual(drawn, plan.legend.map(entry => entry.number));
+  assert.deepEqual(plan.segments.flatMap(segment => segment.placements.map(marker => marker.code)),
+    plan.legend.map(entry => `L${entry.number}`));
+  // A legenda de cada trecho é a dos códigos que ele contém, e o código mora num trecho só.
+  plan.segments.forEach((segment, index) => {
+    for (const number of segment.entryNumbers) {
+      assert.equal(plan.legend.find(entry => entry.number === number).segmentIndex, index + 1);
+      assert.equal(segment.placements.filter(marker => marker.number === number).length, 1);
+    }
+  });
 });
 
 test('omits what an ancestor with its own scrolling hides, without moving what stays visible', () => {
@@ -390,24 +450,7 @@ test('replaces containers by their annotated descendants instead of numbering th
 
 test('draws a thin haloed outline around each annotated element', async () => {
   const strokes = [];
-  class Canvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      const context = {
-        fillRect() {}, drawImage() {}, fill() {}, fillText() {},
-        measureText(value) { return { width: [...String(value)].length * 7 }; },
-        strokeStyle: '', lineWidth: 0,
-        points: [],
-        beginPath() { context.points = []; },
-        moveTo(x, y) { context.points.push([x, y]); },
-        lineTo(x, y) { context.points.push([x, y]); },
-        arc() {},
-        stroke() { strokes.push({ strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, points: context.points }); },
-      };
-      return context;
-    }
-    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
-  }
+  const Canvas = fakeCanvas({ onStroke: stroke => strokes.push(stroke) });
   const artifact = await composeAnnouncementMap({
     pageId: 'page-1', fullPageEvidence: await pristineSource(100, 100),
     snapshot: snapshot([{
@@ -424,31 +467,16 @@ test('draws a thin haloed outline around each annotated element', async () => {
   assert.deepEqual(outlines.map(stroke => stroke.points), [rectangle, rectangle]);
   assert.deepEqual(outlines.map(stroke => stroke.strokeStyle), ['#fff', '#8b1e1e']);
   assert.equal(outlines[0].lineWidth > outlines[1].lineWidth, true, 'o halo branco é mais largo que o traço colorido');
-  // O marcador preferido é o canto superior-esquerdo do próprio elemento: encostado no contorno, ele
-  // dispensa a linha-guia.
+  // A etiqueta encosta no contorno pela borda esquerda: não há distância a vencer e a linha-guia
+  // desaparece — o traço de dois pontos é o traço da linha-guia.
   assert.deepEqual(strokes.filter(stroke => stroke.points.length === 2), []);
+  assert.deepEqual(artifact.derivation.geometry.annotations[0].marker.leaderX,
+    artifact.derivation.geometry.annotations[0].marker.x, 'sem linha-guia, a ponta guardada é a etiqueta');
 });
 
-test('sem geometria confiável o mapa de anúncios não desenha número nenhum e diz por quê', async () => {
+test('sem geometria confiável o mapa de leitura não desenha código nenhum e diz por quê', async () => {
   const strokes = [];
-  class Canvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      const context = {
-        fillRect() {}, drawImage() {}, fill() {}, fillText() {},
-        measureText(value) { return { width: [...String(value)].length * 7 }; },
-        strokeStyle: '', lineWidth: 0,
-        points: [],
-        beginPath() { context.points = []; },
-        moveTo(x, y) { context.points.push([x, y]); },
-        lineTo(x, y) { context.points.push([x, y]); },
-        arc() {},
-        stroke() { strokes.push({ strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, points: context.points }); },
-      };
-      return context;
-    }
-    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
-  }
+  const Canvas = fakeCanvas({ onStroke: stroke => strokes.push(stroke) });
   const fullPageEvidence = await pristineSource(100, 100);
   const artifact = await composeAnnouncementMap({
     pageId: 'page-1', fullPageEvidence,
@@ -461,7 +489,7 @@ test('sem geometria confiável o mapa de anúncios não desenha número nenhum e
     runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
   });
 
-  // Sem contorno, sem marcador e sem legenda: a imagem sozinha não sugere lugar nenhum.
+  // Sem contorno, sem código e sem legenda: a imagem sozinha não sugere lugar nenhum.
   assert.deepEqual(strokes, []);
   assert.deepEqual(artifact.segments, []);
   assert.deepEqual(artifact.legend, []);
@@ -473,64 +501,61 @@ test('sem geometria confiável o mapa de anúncios não desenha número nenhum e
   });
   assert.deepEqual(validateAnnotationMapArtifact(artifact, { sourceArtifact: fullPageEvidence }), artifact);
 
-  // O relatório diz, em português claro, que nenhum anúncio foi marcado e por quê.
+  // O relatório diz, em português claro, que nenhum elemento foi marcado e por quê.
   const [presented] = readerMapPresentation([{ pageId: 'page-1' }], [artifact]);
-  assert.match(presented.summary, /nenhum anúncio foi marcado/iu);
+  assert.equal(presented.format, 'reading-codes');
+  assert.match(presented.summary, /nenhum elemento foi marcado/iu);
   assert.match(presented.coverage, /nenhum foi marcado/iu);
   assert.ok(presented.limitations.some(text => /mudou de tamanho/iu.test(text)));
 });
 
-test('ends the leader line on the outline and drops it when the badge already touches the outline', async () => {
-  const compose = async rect => {
+test('ends the leader line on the outline of the element it points at', async () => {
+  const compose = async rects => {
     const strokes = [];
-    class Canvas {
-      constructor(width, height) { this.width = width; this.height = height; }
-      getContext() {
-        const context = {
-          fillRect() {}, drawImage() {}, fill() {}, fillText() {},
-          measureText(value) { return { width: [...String(value)].length * 7 }; },
-          strokeStyle: '', lineWidth: 0,
-          points: [],
-          beginPath() { context.points = []; },
-          moveTo(x, y) { context.points.push([x, y]); },
-          lineTo(x, y) { context.points.push([x, y]); },
-          arc() {},
-          stroke() { strokes.push({ strokeStyle: context.strokeStyle, lineWidth: context.lineWidth, points: context.points }); },
-        };
-        return context;
-      }
-      async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
-    }
+    const Canvas = fakeCanvas({ onStroke: stroke => strokes.push(stroke) });
     const artifact = await composeAnnouncementMap({
       pageId: 'page-1', fullPageEvidence: await pristineSource(100, 100),
-      snapshot: snapshot([{ nodeId: 'edge', tagName: 'button', accessibleName: 'Ação na borda', axRole: 'button', rect }]),
+      snapshot: snapshot(rects.map((rect, index) => ({
+        nodeId: `edge-${index + 1}`, tagName: 'button', accessibleName: `Ação ${index + 1} na borda`, axRole: 'button', rect,
+      }))),
       layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
       runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
     });
-    // Linha-guia = traço de dois pontos; o contorno tem cinco e o círculo do marcador, nenhum.
+    // Linha-guia = traço de dois pontos; o contorno tem cinco e a caixa da etiqueta, nove.
     return { artifact, leaders: strokes.filter(stroke => stroke.points.length === 2) };
   };
+  const samePlace = { x: 40, y: 40, width: 20, height: 20 };
 
-  // O elemento não cabe até a margem do marcador: a ponta é a borda do contorno, não o centro.
-  const outside = await compose({ x: 90, y: 20, width: 6, height: 20 });
-  assert.equal(outside.artifact.status, 'complete');
-  assert.deepEqual(outside.leaders.map(stroke => stroke.points), [[[84, 20], [90, 20]]]);
-  assert.equal(outside.artifact.derivation.geometry.annotations[0].marker.leaderX, 90);
-  assert.equal(outside.artifact.derivation.geometry.annotations[0].marker.leaderY, 20);
+  // Quatro elementos na mesma caixa: as etiquetas se espalham e as mais distantes precisam da
+  // linha-guia, que termina na borda do contorno — nunca no meio do conteúdo.
+  const spread = await compose([samePlace, { ...samePlace }, { ...samePlace }, { ...samePlace }]);
+  assert.equal(spread.artifact.status, 'complete');
+  const markers = spread.artifact.derivation.geometry.annotations.map(annotation => annotation.marker);
+  const leaderLength = leader => Math.hypot(leader.points[0][0] - leader.points.at(-1)[0],
+    leader.points[0][1] - leader.points.at(-1)[1]);
+  assert.ok(spread.leaders.length > 0, 'alguma etiqueta ficou longe o bastante para precisar de linha-guia');
+  assert.ok(spread.leaders.some(leader => leaderLength(leader) > 20),
+    'a etiqueta empurrada para longe do alvo é ligada por uma linha-guia de verdade');
+  for (const leader of spread.leaders) {
+    const end = leader.points.at(-1);
+    const own = markers.find(marker => marker.leaderX === end[0] && marker.leaderY === end[1]);
+    assert.ok(own, `a linha-guia termina na ponta guardada da própria anotação: ${end.join(',')}`);
+    // A ponta fica sobre o contorno: dentro da caixa do elemento e encostada em uma das bordas.
+    assert.ok(end[0] >= samePlace.x && end[0] <= samePlace.x + samePlace.width &&
+      end[1] >= samePlace.y && end[1] <= samePlace.y + samePlace.height, 'a ponta fica dentro da caixa do alvo');
+    assert.equal(end[0] === samePlace.x || end[0] === samePlace.x + samePlace.width ||
+      end[1] === samePlace.y || end[1] === samePlace.y + samePlace.height, true, 'a ponta fica sobre o contorno');
+  }
 
-  // A quatro px do contorno, o marcador já encosta: a linha não é traçada e a ponta guardada é o
-  // próprio marcador.
-  const touching = await compose({ x: 88, y: 20, width: 8, height: 20 });
+  // Quando o encaixe preferido é recusado e a etiqueta acaba sobre o contorno, não há linha a traçar:
+  // a ponta guardada é a própria etiqueta.
+  const touching = await compose([{ x: 0, y: 0, width: 6, height: 20 }]);
   assert.deepEqual(touching.leaders, []);
-  assert.equal(touching.artifact.derivation.geometry.annotations[0].marker.leaderX, 84);
+  assert.equal(touching.artifact.derivation.geometry.annotations[0].marker.leaderX,
+    touching.artifact.derivation.geometry.annotations[0].marker.x);
 });
 
-test('wraps raster legend by measured width and exposes bidi controls as visible tokens', () => {
-  let measurements = 0;
-  const measureLegendText = value => {
-    measurements += 1;
-    return [...value].reduce((width, character) => width + (character === 'W' ? 20 : 7), 0);
-  };
+test('keeps the legend out of the image: the trecho is only the source strip', () => {
   const plan = buildAnnotationMapPlan({
     snapshot: snapshot([{
       nodeId: 'wide', tagName: 'button', accessibleName: `WWWWWWWWWW \u202Etexto`, axRole: 'button',
@@ -538,14 +563,18 @@ test('wraps raster legend by measured width and exposes bidi controls as visible
     }]),
     sourceMetadata: { width: 100, height: 100 },
     layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
-    measureLegendText,
+    // A op\u00E7\u00E3o antiga de medir texto para a legenda raster n\u00E3o \u00E9 mais aceita nem usada: ela \u00E9 ignorada.
+    measureLegendText: () => 0,
   });
-  const lines = plan.segments.flatMap(segment => segment.legendLines.map(line => line.text));
 
-  assert.ok(measurements > 0);
-  assert.equal(lines.every(line => measureLegendText(line) <= 68), true);
-  assert.doesNotMatch(lines.join('\n'), /\u202E/u);
-  assert.match(lines.join('\n'), /U\+202E/u);
+  assert.deepEqual(plan.segments.map(segment => segment.role), ['image']);
+  for (const segment of plan.segments) {
+    assert.equal(Object.hasOwn(segment, 'legendLines'), false, 'nenhum trecho carrega linha de legenda');
+    assert.deepEqual(segment.sourceCssClip, { x: 0, y: 0, width: 100, height: 100 });
+  }
+  // O texto do an\u00FAncio continua no plano, para o relat\u00F3rio montar a coluna da legenda.
+  assert.equal(plan.legend.length, 1);
+  assert.match(plan.legend[0].announcementPreview, /\u202E/u);
 });
 
 test('freezes all declared limits and keeps global numbering across long segments without ellipsis', () => {
@@ -577,30 +606,24 @@ test('freezes all declared limits and keeps global numbering across long segment
   assert.doesNotMatch(JSON.stringify(plan.legend), /…|\.\.\./u);
 });
 
-test('moves bounded legend overflow into white continuations and reports entries omitted by the segment cap', () => {
-  const nodes = Array.from({ length: 20 }, (_, index) => ({
+test('stops the legend at the text limit and says how many entries were left out', () => {
+  const nodes = Array.from({ length: 200 }, (_, index) => ({
     nodeId: `long-${index + 1}`,
     tagName: 'button',
-    accessibleName: `Ação ${index + 1} ${'conteúdo-sem-segredo '.repeat(50)}`,
+    accessibleName: `Ação ${index + 1} ${'conteúdo-sem-segredo '.repeat(80)}`,
     axRole: 'button',
-    rect: { x: 5, y: 5 + index * 3, width: 80, height: 24 },
+    rect: { x: 4, y: (index % 40) * 5 + 4, width: 120, height: 30 },
   }));
-  const plan = buildAnnotationMapPlan({
-    snapshot: snapshot(nodes),
-    sourceMetadata: { width: 100, height: 200 },
-    layoutMetrics: { cssContentSize: { width: 100, height: 200 } },
-  });
+  const selected = selectAnnouncementMapEntries(snapshot(nodes));
 
-  assert.ok(plan.legend.length > 0 && plan.legend.length < 20);
-  assert.equal(plan.counts.omittedLimit, 20 - plan.legend.length);
-  assert.ok(plan.limitations.includes('legend-limit-reached'));
-  assert.ok(plan.segments.some(segment => segment.role === 'legend-continuation'));
-  assert.ok(plan.segments.length <= ANNOTATION_MAP_LIMITS.maxSegments);
-  assert.equal(plan.segments.filter(segment => segment.role === 'legend-continuation')
-    .every(segment => segment.sourceCssClip === null && segment.placements.length === 0), true);
-  const renderedLegend = plan.segments.flatMap(segment => segment.legendLines.map(line => line.text)).join('\n');
-  for (const entry of plan.legend) assert.match(renderedLegend, new RegExp(`^${entry.number} —|\\n${entry.number} —`, 'u'));
-  assert.doesNotMatch(renderedLegend, /…|\.\.\./u);
+  // A legenda é texto no relatório: ela para no teto de pontos de código do esquema, e o que ficou de
+  // fora é contado — a imagem nunca é cortada por causa dela.
+  assert.ok(selected.entries.length > 0 && selected.entries.length < 200);
+  assert.equal(selected.counts.omittedLimit, 200 - selected.entries.length);
+  assert.ok(selected.limitations.includes('legend-limit-reached'));
+  assert.equal(selected.counts.annotated, selected.entries.length);
+  assert.deepEqual(selected.entries.map(entry => entry.number),
+    Array.from({ length: selected.entries.length }, (_, index) => index + 1));
 });
 
 test('plans adjacent fractional CSS clips as contiguous non-overlapping source raster rows', () => {
@@ -613,7 +636,7 @@ test('plans adjacent fractional CSS clips as contiguous non-overlapping source r
     layoutMetrics: { cssContentSize: { width: 100, height: 200 } },
     segmentCssHeight: 200 / 3,
   });
-  const clips = plan.segments.filter(segment => segment.role === 'image-and-legend')
+  const clips = plan.segments.filter(segment => segment.role === 'image')
     .map(segment => segment.sourcePixelClip);
 
   assert.deepEqual(clips, [
@@ -624,7 +647,7 @@ test('plans adjacent fractional CSS clips as contiguous non-overlapping source r
   assert.equal(clips.at(-1).y + clips.at(-1).height, 200);
 });
 
-test('bounds every raster segment to a printable page ratio and splits legend continuations', () => {
+test('bounds every raster segment to a printable page ratio', () => {
   const sourceWidth = 100;
   const plan = buildAnnotationMapPlan({
     snapshot: snapshot([{
@@ -635,11 +658,15 @@ test('bounds every raster segment to a printable page ratio and splits legend co
     sourceMetadata: { width: sourceWidth, height: 200 },
     layoutMetrics: { cssContentSize: { width: sourceWidth, height: 200 } },
   });
-  const plannedHeight = segment => (segment.sourcePixelClip?.height ?? 0) +
-    (segment.legendLines.length ? 34 + 16 * 2 + segment.legendLines.length * 22 : 0);
+  const printableHeight = Math.floor(sourceWidth * 1.3);
 
-  assert.ok(plan.segments.filter(segment => segment.role === 'legend-continuation').length > 1);
-  assert.equal(plan.segments.every(segment => plannedHeight(segment) <= Math.floor(sourceWidth * 1.3)), true);
+  assert.deepEqual(plan.segments.map(segment => segment.role), ['image', 'image']);
+  // Sem legenda raster, a altura de cada folha é só a faixa da imagem — e ela cabe na proporção da
+  // folha em pé.
+  assert.equal(plan.segments.every(segment => segment.sourcePixelClip.height <= printableHeight), true);
+  assert.deepEqual(plan.segments.map(segment => segment.sourcePixelClip),
+    [{ x: 0, y: 0, width: sourceWidth, height: printableHeight },
+      { x: 0, y: printableHeight, width: sourceWidth, height: 200 - printableHeight }]);
   assert.ok(plan.segments.length <= ANNOTATION_MAP_LIMITS.maxSegments);
 });
 
@@ -686,16 +713,10 @@ test('production wrapper composes and revalidates a strict PNG segment with geom
   let closes = 0;
   const canvasSizes = [];
   const canvases = [];
-  class Canvas {
-    constructor(width, height) { this.width = width; this.height = height; canvasSizes.push([width, height]); canvases.push(this); }
-    getContext() {
-      return {
-        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
-        measureText(value) { return { width: [...String(value)].length * 7 }; },
-      };
-    }
-    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
-  }
+  const Canvas = fakeCanvas();
+  const Instrumented = class extends Canvas {
+    constructor(width, height) { super(width, height); canvasSizes.push([width, height]); canvases.push(this); }
+  };
   const source = await pristineSource(100, 100);
   const before = structuredClone(source);
   const artifact = await composeAnnouncementMapForProduction({
@@ -703,7 +724,7 @@ test('production wrapper composes and revalidates a strict PNG segment with geom
     snapshot: snapshot([{ nodeId: 'action', accessibleName: 'Ação', axRole: 'button', rect: { x: 0, y: 0, width: 1, height: 1 } }]),
     fullPageEvidence: source,
     layoutMetrics: { cssContentSize: { width: 100, height: 100 }, deviceScaleFactor: 2 },
-    runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() { closes += 1; } }) },
+    runtime: { OffscreenCanvas: Instrumented, createImageBitmap: async () => ({ close() { closes += 1; } }) },
   });
 
   assert.equal(artifact.status, 'complete');
@@ -711,61 +732,47 @@ test('production wrapper composes and revalidates a strict PNG segment with geom
   assert.deepEqual(artifact.derivation.geometry.sourceCssSize, { width: 100, height: 100 });
   assert.deepEqual(artifact.derivation.geometry.sourcePixelSize, { width: 100, height: 100 });
   assert.equal(artifact.derivation.geometry.annotations[0].nodeId, 'action');
-  assert.equal(artifact.derivation.geometry.annotations[0].marker.size, 28);
+  // A etiqueta é o código curto: o tamanho vem do próprio código e da largura da captura, e não de um
+  // texto medido no canvas.
+  assert.deepEqual({
+    width: artifact.derivation.geometry.annotations[0].marker.width,
+    height: artifact.derivation.geometry.annotations[0].marker.height,
+  }, annotationBadgeSize(1, 100));
   assert.equal(artifact.legend[0].segmentIndex, 1);
-  assert.equal(canvasSizes.length, artifact.segments.length + 1);
+  // Um canvas por trecho: a legenda é texto no relatório e não consome canvas nenhum.
+  assert.equal(canvasSizes.length, artifact.segments.length);
   artifact.segments.forEach((segment, index) => {
-    assert.deepEqual([segment.width, segment.height], canvasSizes[index + 1]);
+    assert.deepEqual([segment.width, segment.height], canvasSizes[index]);
   });
   assert.equal(canvases.every(canvas => canvas.width === 0 && canvas.height === 0), true);
   assert.equal(closes, 1);
   assert.deepEqual(source, before);
 });
 
-test('uses real canvas text metrics and rasterizes visible bidi tokens without clipping legend lines', async () => {
-  let measurements = 0;
+test('rasteriza s\u00F3 o c\u00F3digo da etiqueta, sem medir texto nem escrever o an\u00FAncio na imagem', async () => {
   const rasterText = [];
-  const measuredWidth = value => [...value].reduce((width, character) => width + (character === 'W' ? 20 : 7), 0);
-  class Canvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      return {
-        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {},
-        measureText(value) { measurements += 1; return { width: measuredWidth(value) }; },
-        fillText(value) { rasterText.push(value); },
-      };
-    }
-    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
-  }
+  const Canvas = fakeCanvas({ onText: text => rasterText.push(text.value) });
+  const source = await pristineSource(100, 100);
   const artifact = await composeAnnouncementMap({
-    pageId: 'page-1', fullPageEvidence: await pristineSource(100, 100),
-    snapshot: snapshot([{
-      nodeId: 'wide', tagName: 'button', accessibleName: `WWWWWWWWWW \u202Etexto`, axRole: 'button',
-      rect: { x: 5, y: 5, width: 80, height: 24 },
-    }]),
+    pageId: 'page-1', fullPageEvidence: source,
+    snapshot: snapshot([
+      { nodeId: 'wide', tagName: 'button', accessibleName: `WWWWWWWWWW \u202Etexto`, axRole: 'button', rect: { x: 5, y: 5, width: 80, height: 24 } },
+      { nodeId: 'other', tagName: 'button', accessibleName: 'Outra a\u00E7\u00E3o', axRole: 'button', rect: { x: 5, y: 55, width: 80, height: 24 } },
+    ]),
     layoutMetrics: { cssContentSize: { width: 100, height: 100 } },
     runtime: { OffscreenCanvas: Canvas, createImageBitmap: async () => ({ close() {} }) },
   });
 
   assert.equal(artifact.status, 'complete');
-  assert.ok(measurements > 0);
-  assert.doesNotMatch(rasterText.join('\n'), /\u202E/u);
-  assert.match(rasterText.join('\n'), /U\+202E/u);
-  const legendLines = rasterText.filter(value => !/^\d+$/u.test(value));
-  assert.equal(legendLines.every(line => measuredWidth(line) <= 68), true);
+  // O que vai para o pixel \u00E9 o c\u00F3digo; o an\u00FAncio inteiro vive na coluna de texto do relat\u00F3rio.
+  assert.deepEqual(rasterText, ['L1', 'L2']);
+  assert.doesNotMatch(JSON.stringify(artifact.derivation.geometry), /\u202E/u);
+  assert.match(artifact.legend.map(entry => entry.announcementPreview).join('\n'), /\u202E/u);
+  assert.deepEqual(validateAnnotationMapArtifact(artifact, { sourceArtifact: source }), artifact);
 });
 
 test('marks an otherwise rendered map partial when a closed shadow root was omitted', async () => {
-  class Canvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      return {
-        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
-        measureText(value) { return { width: [...String(value)].length * 7 }; },
-      };
-    }
-    async convertToBlob() { return new Blob([pngBytes(this.width, this.height)], { type: 'image/png' }); }
-  }
+  const Canvas = fakeCanvas();
   const source = await pristineSource(100, 100);
   const artifact = await composeAnnouncementMap({
     pageId: 'page-1', fullPageEvidence: source,
@@ -817,14 +824,7 @@ test('rejects a structurally valid source PNG inflate bomb before bitmap allocat
 
 test('rejects invalid compositor output with a fixed code and still releases the bitmap', async () => {
   let closes = 0;
-  class InvalidCanvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      return {
-        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
-        measureText(value) { return { width: [...String(value)].length * 7 }; },
-      };
-    }
+  class InvalidCanvas extends fakeCanvas() {
     async convertToBlob() { return new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }); }
   }
   await assert.rejects(composeAnnouncementMap({
@@ -839,14 +839,7 @@ test('rejects invalid compositor output with a fixed code and still releases the
 
 test('rejects a dimension-matching compositor PNG inflate bomb before accepting derived bytes', async () => {
   let closes = 0;
-  class BombCanvas {
-    constructor(width, height) { this.width = width; this.height = height; }
-    getContext() {
-      return {
-        fillRect() {}, drawImage() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, arc() {}, fill() {}, fillText() {},
-        measureText(value) { return { width: [...String(value)].length * 7 }; },
-      };
-    }
+  class BombCanvas extends fakeCanvas() {
     async convertToBlob() {
       return new Blob([pngBytes(this.width, this.height, new Uint8Array(10 * 1024 * 1024))], { type: 'image/png' });
     }
@@ -892,7 +885,7 @@ test('times out a stalled bitmap allocation, closes the late bitmap and avoids a
     runtime: {
       OffscreenCanvas: class {
         constructor() { this.width = 1; this.height = 1; allocations += 1; }
-        getContext() { return { measureText(value) { return { width: [...String(value)].length * 7 }; } }; }
+        getContext() { return fakeContext(); }
       },
       createImageBitmap: () => stalled,
     },
@@ -903,7 +896,7 @@ test('times out a stalled bitmap allocation, closes the late bitmap and avoids a
   // `await Promise.resolve()` não basta e o contador ainda está em 0.
   for (let tick = 0; tick < 20 && closes === 0; tick += 1) await Promise.resolve();
   assert.equal(closes, 1);
-  assert.equal(allocations, 1, 'somente o canvas transitório de métricas pode ter sido alocado');
+  assert.equal(allocations, 0, 'o mapa desenha a partir do bitmap: nenhum canvas existe antes dele');
 });
 
 test('cancels the active PNG inflate reader when the compositor deadline expires', async () => {

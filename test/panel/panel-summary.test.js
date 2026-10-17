@@ -179,7 +179,7 @@ test('separates attempted core coverage pairs from all-engine checkKeys and occu
   const summary = await buildPanelSummary({ model: SAMPLE_AUDIT, executionCheckpoint: checkpoint, inventory });
   const cards = allCards(summary);
 
-  assert.deepEqual(summary.coverage, { status: 'available', numerator: 2, denominator: 131, percent: '1,5%' });
+  assert.deepEqual(summary.coverage, { status: 'available', numerator: 2, denominator: 132, percent: '1,5%' });
   assert.equal(new Set(cards.map(card => card.checkKey)).size, cards.length);
   assert.equal(cards.some(card => card.engine === 'audita-core'), true);
   assert.equal(cards.some(card => card.engine === 'audita-manual-review'), false);
@@ -273,7 +273,7 @@ test('distinguishes zero denominator, started without outcomes, not-started page
     executionCheckpoint: checkpointFor(SAMPLE_AUDIT, inventory),
     inventory,
   });
-  assert.deepEqual(started.coverage, { status: 'available', numerator: 0, denominator: 131, percent: '0,0%' });
+  assert.deepEqual(started.coverage, { status: 'available', numerator: 0, denominator: 132, percent: '0,0%' });
 
   const partialModel = await failureBatch([true, false]);
   const partial = await buildPanelSummary({
@@ -281,7 +281,7 @@ test('distinguishes zero denominator, started without outcomes, not-started page
     executionCheckpoint: checkpointFor(partialModel, inventory),
     inventory,
   });
-  assert.equal(partial.coverage.denominator, 131);
+  assert.equal(partial.coverage.denominator, 132);
   assert.deepEqual(partial.limitations.notStartedPageIds, ['page-2']);
 });
 

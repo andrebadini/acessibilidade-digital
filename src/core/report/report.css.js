@@ -86,6 +86,9 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .evidence-halo{stroke:#fff;stroke-width:5}
 .evidence-highlight{stroke-width:2.5}
 .evidence-highlight--failed{stroke:#8b1e1e}.evidence-highlight--advisory{stroke:#986000}.evidence-highlight--review{stroke:#6b4e00;stroke-dasharray:14 9}.evidence-highlight--passed{stroke:#003b71}
+/* Contorno de localização (revisão guiada e tabela de leitura por Tab): responde "onde está o
+   elemento?", não "qual foi o veredito" — por isso não reaproveita os tons acima. */
+.evidence-highlight--target{stroke:#b00020}
 .marks-crop{display:block;max-width:100%;height:auto;border:1px solid #738596;border-radius:.3rem;background:#eef4f8}
 .marks-area-outline{fill:none;stroke:#b00020;stroke-width:3;vector-effect:non-scaling-stroke}
 .occurrence-evidence{margin:1rem 0 0}
@@ -104,6 +107,17 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .announcement-map-legend{display:grid;gap:.65rem;padding-left:2rem}
 .announcement-map-legend li{padding:.65rem;border-bottom:1px solid #738596;break-inside:avoid}
 .announcement-map-legend li span{display:block}.legend-selector{font-weight:750;margin-bottom:.25rem}
+/* Mapa de leitura (1.3.0): a imagem com as caixas à esquerda e, na mesma linha, os códigos daquele
+   trecho com o texto que um leitor de tela falaria. Em tela estreita a legenda desce para baixo da
+   imagem, sempre no mesmo trecho. */
+.reader-map-segment{background:#eef4f8}
+.reader-map-columns{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:.75rem;align-items:start}
+.reader-map-image{min-width:0}
+.reader-map-image .evidence-media{margin-top:0}
+.reader-map-segment-legend{display:grid;gap:.5rem;margin:0;padding-left:0;list-style:none;font-size:.92rem}
+.reader-map-segment-legend li{padding:.4rem .5rem;border-left:.25rem solid #8b1e1e;background:#fff;break-inside:avoid}
+.reader-map-code{display:inline-block;min-width:2.2em;padding:0 .1em 0 .3em;border-radius:.2rem;background:#8b1e1e;color:#fff;font-weight:750;text-align:center;white-space:pre}
+.reader-map-empty{margin:0;font-size:.92rem}
 .keyboard-map-card{min-width:0}
 .keyboard-map-counts{border-left:.3rem solid #0b4fa8;background:#eef4f8;padding:.6rem;font-weight:700}
 .keyboard-map-stops,.keyboard-map-suspects{display:grid;gap:.5rem;padding-left:2rem}
@@ -114,6 +128,16 @@ pre{padding:.75rem;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
 .widget-state{font-weight:750}.widget-card[data-widget-state="present"]{border-left:.4rem solid #003b71}.widget-card[data-widget-state="absent"]{border-left:.4rem double #738596}.widget-card[data-widget-state="unknown"]{border-left:.4rem dashed #6b4e00}
 .matrix-scroll{overflow-x:auto;border:1px solid #738596;border-radius:.3rem}
 .matrix-scroll table{min-width:58rem}
+/* A tabela da leitura por Tab tem cinco colunas e a primeira carrega o recorte: sem largura declarada, o
+   navegador entrega quase toda a largura à imagem e os títulos das outras colunas quebram no meio da
+   palavra ("elemen|to"). O table-layout fixo abaixo cabe igual na tela e na folha A4. */
+[data-report-tab-reading] table{table-layout:fixed}
+[data-report-tab-reading] th:nth-child(1),[data-report-tab-reading] td:nth-child(1){width:30%}
+[data-report-tab-reading] th:nth-child(2),[data-report-tab-reading] td:nth-child(2){width:14%}
+[data-report-tab-reading] th:nth-child(3),[data-report-tab-reading] td:nth-child(3){width:14%}
+[data-report-tab-reading] th:nth-child(4),[data-report-tab-reading] td:nth-child(4){width:13%}
+[data-report-tab-reading] th:nth-child(5),[data-report-tab-reading] td:nth-child(5){width:29%}
+[data-report-tab-reading] table td,[data-report-tab-reading] table th{overflow-wrap:anywhere}
 table{width:100%;border-collapse:collapse}
 th,td{border:1px solid #738596;padding:.55rem;text-align:left;vertical-align:top}
 th{background:#eef4f8;color:#14212b}
@@ -192,7 +216,7 @@ th{background:#eef4f8;color:#14212b}
 @media (min-width:42rem){.filters-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.scope-grid,.page-grid,.widget-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media (min-width:64rem){.filters-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.scope-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.summary-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.page-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.method-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @page{size:A4 portrait;margin:18mm 15mm 20mm}
-@media print{html{scroll-behavior:auto}.skip-link,.section-nav,.filters-shell,.filter-actions,.empty-state{display:none!important}.report-header,.report-footer{background:#fff;color:#14212b;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.method-card,.announcement-map-segment,.announcement-map-legend li,.keyboard-map-stops li,.keyboard-map-suspects li,details{break-inside:avoid}.occurrence-card[hidden]{display:block!important}details:not([open])>*:not(summary){display:block!important}[data-report-technical]:not([open])>*:not(summary),[data-report-limitations]:not([open])>*:not(summary){display:block!important}.report-view-document .report-header,.report-view-document [data-report-navigation],.report-view-document .filters-noscript{display:none!important}.report-view-document main>h1{display:block!important;margin:.25rem 0}.report-view-document .report-static-identity{display:block!important;margin:.2rem 0 .75rem}.report-view-document [data-report-evidence-preview] figure[data-evidence-kind="element"]{break-inside:avoid}.report-view-document [data-report-evidence-preview] figure[data-evidence-kind="full-page"]{break-inside:auto}.report-view-document [data-report-evidence-preview] figcaption{break-inside:avoid;break-before:avoid}.report-view-document [data-evidence-kind="full-page"]>.evidence-media{display:block;width:100%;max-height:210mm;object-fit:contain;object-position:top center}.report-view-document [data-report-issue],.report-view-document [data-report-technical],.report-view-document [data-report-limitations],.report-view-document [data-report-evidence]{break-inside:auto}.report-view-document [data-report-issue-heading],.report-view-document [data-report-evidence]>h4,.report-view-document summary{break-after:avoid}thead{display:table-header-group}thead th{overflow-wrap:normal}a{color:#14212b;text-decoration:none}main{max-width:none;padding:0}.status,.chip{color:#14212b!important;background:#fff!important;border-color:#14212b!important}.matrix-scroll{overflow:visible}.matrix-scroll table{min-width:0;font-size:8.5pt}.matrix-scroll th[scope="row"]{white-space:nowrap}.matrix-scroll td,.matrix-scroll th{overflow-wrap:normal}.report-enhanced .filters-noscript{display:block}.filters-noscript::after{content:" Todos os registros foram incluídos na impressão."}}
+@media print{html{scroll-behavior:auto}.skip-link,.section-nav,.filters-shell,.filter-actions,.empty-state{display:none!important}.report-header,.report-footer{background:#fff;color:#14212b;border-bottom:2px solid #003b71;padding:.5rem 0}.report-footer{border-top:2px solid #003b71;border-bottom:0}.major-section{break-before:page}.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.method-card,.announcement-map-segment,.announcement-map-legend li,.keyboard-map-stops li,.keyboard-map-suspects li,details{break-inside:avoid}.occurrence-card[hidden]{display:block!important}details:not([open])>*:not(summary){display:block!important}[data-report-technical]:not([open])>*:not(summary),[data-report-limitations]:not([open])>*:not(summary){display:block!important}.report-view-document .report-header,.report-view-document [data-report-navigation],.report-view-document .filters-noscript{display:none!important}.report-view-document main>h1{display:block!important;margin:.25rem 0}.report-view-document .report-static-identity{display:block!important;margin:.2rem 0 .75rem}.report-view-document [data-report-evidence-preview] figure[data-evidence-kind="element"]{break-inside:avoid}.report-view-document [data-report-evidence-preview] figure[data-evidence-kind="full-page"]{break-inside:auto}.report-view-document [data-report-evidence-preview] figcaption{break-inside:avoid;break-before:avoid}.report-view-document [data-evidence-kind="full-page"]>.evidence-media{display:block;width:100%;max-height:210mm;object-fit:contain;object-position:top center}.report-view-document .reader-map-segment{break-inside:avoid}.report-view-document .reader-map-columns{grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:.5rem}.report-view-document .reader-map-segment-legend{font-size:8pt}.report-view-document [data-report-issue],.report-view-document [data-report-technical],.report-view-document [data-report-limitations],.report-view-document [data-report-evidence]{break-inside:auto}.report-view-document [data-report-issue-heading],.report-view-document [data-report-evidence]>h4,.report-view-document summary{break-after:avoid}thead{display:table-header-group}thead th{overflow-wrap:normal}a{color:#14212b;text-decoration:none}main{max-width:none;padding:0}.status,.chip{color:#14212b!important;background:#fff!important;border-color:#14212b!important}.matrix-scroll{overflow:visible}.matrix-scroll table{min-width:0;font-size:8.5pt}.matrix-scroll th[scope="row"]{white-space:nowrap}.matrix-scroll td,.matrix-scroll th{overflow-wrap:normal}.report-enhanced .filters-noscript{display:block}.filters-noscript::after{content:" Todos os registros foram incluídos na impressão."}}
 @media print{
   [data-review-history],[data-review-record],[data-review-record] dl,[data-review-record] dd{break-inside:auto}
   [data-review-record] dt,[data-review-record] h3{break-after:avoid}
@@ -231,7 +255,8 @@ th{background:#eef4f8;color:#14212b}
 @media (max-width:42rem){main{padding:1rem}.meta{grid-template-columns:1fr}.meta dd{margin-bottom:.5rem}.report-header__inner{align-items:flex-start;flex-direction:column}.filter-actions{display:grid}.filter-actions button{width:100%}.occurrence-heading{display:block}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 @media (forced-colors:active){*{forced-color-adjust:auto}.status,.chip,.scope-card,.summary-card,.page-card,.occurrence-card,.review-card,.widget-card,.evidence-card,.map-card,.method-card,.filters-shell,.legal-analysis,.page-level-evidence,[data-report-issue],[data-report-evidence-preview] figure,[data-report-technical] section,.marks-crop{border-color:CanvasText}.occurrence-card[data-display-outcome="failed"]{border-left-style:double}.occurrence-card[data-display-outcome="cantTell"],[data-report-issue][data-result="humanReview"]{border-left-style:dashed}.evidence-spotlight{fill:none}.evidence-highlight,.evidence-halo,.marks-area-outline{stroke:CanvasText}a:focus-visible,button:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline-color:Highlight;box-shadow:none}}
+@media (max-width:40rem){.reader-map-columns{grid-template-columns:minmax(0,1fr)}}
 `;
 
 // Updated by the CSP integrity test whenever the static stylesheet changes.
-export const REPORT_CSS_CSP_HASH = 'sha256-bElpQaqQfD5PE6LZPU7jngCmve4hXp4PvqfipJakcOs=';
+export const REPORT_CSS_CSP_HASH = 'sha256-wfXBGadBA33ZS1nO6SNTo2vDSm+VTSZnWNa80Dp1b3U=';

@@ -626,6 +626,51 @@ for (const scenario of [
           modelHash: durable.hash, modelRevision: durable.revision,
         });
       });
+      if (!scenario.idle) await step('GUIDED_CARD_CROP', async () => {
+        // O recorte com contorno tem de estar NO CARTÃO da pergunta, no mesmo lugar onde a pessoa responde
+        // — e nenhuma frase pode mandá-la procurar "a captura registrada no cartão" em outro lugar.
+        const cards = await extension.evaluate(report, `(() => {
+          const all=[...document.querySelectorAll('#review-list details.lay-card')];
+          let crops=0,outlined=0,plain=0,withoutImage=0;
+          for(const card of all){
+            card.open=true;
+            const object=card.querySelector('.lay-object');
+            const figure=object?.querySelector('figure.lay-crop')??null;
+            const svg=figure?.querySelector('svg')??null;
+            if(figure)crops+=1;
+            if(svg){if(svg.querySelector('rect[data-evidence-highlight]'))outlined+=1;else plain+=1;}
+            else if(figure?.querySelector('img.lay-thumb'))plain+=1;
+            else if(/não guardou imagem deste elemento/u.test(object?.querySelector('.lay-locate-note')?.textContent??''))withoutImage+=1;
+          }
+          return {total:all.length,crops,outlined,plain,withoutImage,
+            banned:[...document.querySelectorAll('#review-list details.lay-card')]
+              .filter(card=>/captura registrada no cartão/iu.test(card.textContent)).length};
+        })()`);
+        assert.equal(cards.banned, 0, `nenhum cartão manda procurar a captura em outro lugar: ${JSON.stringify(cards)}`);
+        assert.ok(cards.crops >= 1, `ao menos um cartão mostra o recorte do elemento: ${JSON.stringify(cards)}`);
+        assert.ok(cards.outlined >= 1, `o recorte do cartão traz o contorno desenhado: ${JSON.stringify(cards)}`);
+        assert.equal(cards.crops, cards.outlined + cards.plain, JSON.stringify(cards));
+        // Clicar no recorte amplia numa caixa de diálogo acessível; o Escape fecha e devolve o foco.
+        const zoom = await extension.evaluate(report, `(() => {
+          const button=document.querySelector('#review-list figure.lay-crop button.lay-crop-zoom');
+          if(!button)return {available:false};
+          button.click();
+          const dialog=document.querySelector('#lay-zoom-dialog');
+          const figure=dialog.querySelector('figure.lay-crop--zoom');
+          return {available:true,open:dialog.open,modal:dialog.matches(':modal'),
+            outline:Boolean(figure?.querySelector('svg rect[data-evidence-highlight]')),
+            legend:figure?.querySelector('figcaption')?.textContent??''};
+        })()`, { userGesture: true });
+        if (zoom.available) {
+          assert.equal(zoom.open && zoom.modal, true, 'o recorte ampliado abre em caixa de diálogo modal');
+          assert.equal(zoom.outline, true, 'a imagem ampliada mantém o contorno do elemento');
+          assert.match(zoom.legend, /Contorno vermelho/u);
+          await extension.command(report, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+          await extension.command(report, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+          await extension.waitForValue(report, `document.querySelector('#lay-zoom-dialog').open`, value => value === false,
+            { timeoutMs: 5_000, intervalMs: 50 });
+        }
+      });
     });
     t.diagnostic(`Chrome152; native-page-markers; original-not-copy; ${scenario.idle
       ? 'no-worker-debugger-during-two-idle-windows' : 'visual-QA-without-idle-claim'}; four-verified-downloads`);
@@ -1017,6 +1062,13 @@ async function readPrivateAttempt(extension, requestedAuditId = null) {
       })(),
       fullPage:evidence.filter(item=>item?.kind==='full-page'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
       elements:evidence.filter(item=>item?.kind==='element'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
+      // 1.1.62: o elemento que está dentro da captura integral não tem miniatura própria — o artefato
+      // guarda onde ele estava na integral e de qual captura isso se refere, e o recorte sai dos pixels
+      // que já estão guardados (docs/qa/recortes-1.1.62.md). A prova, aqui, é que a posição foi
+      // registrada E que a imagem referida existe: sem ela o recorte não teria de onde sair.
+      elementsCropped:evidence.filter(item=>item?.kind==='element'&&item?.fullPageRect&&
+        evidence.some(artifact=>artifact?.evidenceId===item?.fullPageEvidenceId&&
+          /^data:image\\/png;base64,/u.test(artifact?.dataUrl??''))).length,
       rasterDataUrls:(publicText.match(/data:image\\/(?:png|jpeg|webp);base64,/giu)||[]).length,
       diagnostics:Array.isArray(model?.session?.diagnostics)?model.session.diagnostics.map(item=>item.code):[],
       urls:[model?.requestedUrl,model?.finalUrl,model?.pages?.[0]?.requestedUrl,model?.pages?.[0]?.finalUrl],
@@ -1216,6 +1268,14 @@ async function assertObservedTerminalAttempt(extension, auditId, identityBefore,
   assert.ok(['complete', 'partial'].includes(attempt.status));
   assert.equal(attempt.fullPage >= expected.minimumFullPage, true, JSON.stringify({ fullPage: attempt.fullPage }));
   assert.equal(attempt.elements >= expected.minimumElements, true, JSON.stringify({ elements: attempt.elements }));
+  // Duas formas de a evidência de elemento ter imagem, e cada modo prova a sua: miniatura própria (o
+  // elemento fora da captura integral) ou recorte da integral (1.1.62). A garantia é a mesma de antes —
+  // toda ocorrência com elemento tem imagem desenhável —, o que mudou foi de onde os pixels vêm.
+  if (expected.minimumCroppedElements !== undefined) {
+    assert.equal(attempt.elementsCropped >= expected.minimumCroppedElements, true,
+      JSON.stringify({ elementsCropped: attempt.elementsCropped, elements: attempt.elements,
+        fullPage: attempt.fullPage, status: attempt.status, diagnostics: attempt.diagnostics }));
+  }
   if (expected.fullPageExact !== undefined) assert.equal(attempt.fullPage, expected.fullPageExact);
   if (expected.elementsExact !== undefined) assert.equal(attempt.elements, expected.elementsExact);
   assert.equal(attempt.diagnostics.includes('ATTACHED_COPY_RELOADED'), false,
@@ -2187,7 +2247,8 @@ test('passive current-page audits complete in every mode and keep the observed d
       assert.equal(await step('RESULT', () => waitForResult(extension, panel, auditId)), auditId);
       await step('PROGRESS', () => assertObservedProgress(extension, panel));
       const terminalAttempt = await step('TERMINAL_PROOF', () => assertObservedTerminalAttempt(
-        extension, auditId, identityBefore, { minimumFullPage: 1, minimumElements: 1 }, fixture.origin));
+        extension, auditId, identityBefore,
+        { minimumFullPage: 1, minimumElements: 0, minimumCroppedElements: 1 }, fixture.origin));
       await step('PANEL_DETAIL', () =>
         assertPanelSummaryAndDetail(extension, panel, 'full-evidence', 1, identityBefore,
           { maxCaptureResizes: captureResizeCeiling(terminalAttempt) }));

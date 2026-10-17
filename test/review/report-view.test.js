@@ -15,7 +15,9 @@ import { buildReportView, projectExecutive, projectLimitationClauses, renderRepo
 import { readerMapPresentation } from '../../src/core/report/reader-map-presentation.js';
 import { EXPORT_FORMATS_V1 } from '../../src/export/report-export.js';
 import { labelComparisonFixture } from '../report/label-comparison-fixture.js';
-import { createAnnotationMapFixture, createPristineMapSource, TEST_PNG } from '../report/annotation-map-fixture.js';
+import {
+  createAnnotationMapFixture, createLegacyAnnotationMapFixture, createPristineMapSource, TEST_PNG,
+} from '../report/annotation-map-fixture.js';
 import { createKeyboardMapFixture } from '../report/keyboard-map-fixture.js';
 import { hashKeyboardMapArtifact } from '../../src/core/keyboard/keyboard-map-artifact.js';
 import { REVIEW_MARKS_VERSION } from '../../src/core/review/review-marks.js';
@@ -593,20 +595,59 @@ test('the interactive reader map displays the derived PNG, numbered full announc
   const root = renderReportView({ view, document: new Document(), onExport() {} });
   const card = root.querySelector('[data-announcement-map-page="page-1"]');
   assert.ok(card, 'the reader map must render as a page-level visual, not just an artifact ID');
+  // A seção é que dá nome ao mapa (`h2`, o mesmo nome do índice e da página de conferência por Tab):
+  // o mapa abre direto na explicação leiga, sem repetir o título num `h3` logo abaixo.
+  const mapSection = card.parentNode;
+  const intro = mapSection.children[1];
+  assert.equal(intro.tagName, 'P');
+  assert.match(intro.textContent, /^Cada caixa marca um elemento da página/u);
   assert.equal(card.getAttribute('data-map-status'), 'complete');
+  assert.equal(card.getAttribute('data-map-format'), 'reading-codes');
   const image = card.querySelector('img[data-map-segment-image]');
   assert.equal(image?.getAttribute('src'), TEST_PNG);
-  assert.match(image?.getAttribute('alt') ?? '', /Segmento 1 de 1.*marcador 1/u);
+  // O trecho do mapa de leitura é só imagem: a legenda vive na coluna ao lado, com o código do elemento.
+  assert.match(image?.getAttribute('alt') ?? '', /Segmento 1 de 1: códigos L1/u);
+  // A imagem e a lista de códigos ficam no mesmo contêiner: a coluna da direita acompanha o trecho.
+  assert.equal(image?.parentNode.getAttribute('class'), 'reader-map-image');
+  assert.equal(image?.parentNode.parentNode.getAttribute('class'), 'reader-map-columns');
   const entry = card.querySelector('li[data-map-marker="1"]');
+  assert.equal(entry?.parentNode.getAttribute('class'), 'reader-map-segment-legend');
   assert.equal(entry?.getAttribute('value'), '1');
+  assert.equal(entry.querySelector('.reader-map-code')?.textContent.trim(), 'L1');
   assert.ok(entry.textContent.includes('Salvar & continuar <agora>, botão'));
-  assert.match(entry.textContent, /segmento 1/u);
   const provenance = card.querySelector('details[data-map-provenance]');
   assert.ok(provenance.textContent.includes(view.readerMaps[0].hash));
   assert.ok(provenance.textContent.includes(view.readerMaps[0].derivation.sourceHash));
   assert.match(card.textContent, /1 de 1 elementos elegíveis/u);
   assert.equal(card.querySelectorAll('script').length, 0);
   assert.equal(JSON.stringify(model), before, 'presenting the map must not change original evidence or normative identity');
+});
+
+test('mapa guardado antes dos códigos de leitura abre com a apresentação com que foi gerado', async () => {
+  const legacyMap = await createLegacyAnnotationMapFixture();
+  const { model, summary } = await fixture({ mutateDraft(draft) {
+    draft.evidence[0] = createPristineMapSource();
+    draft.evidence.push(legacyMap);
+    return draft;
+  } });
+  const view = buildReportView({ model, summary, modelRevision: 1, modelHash: model.integrity.canonicalModelHash });
+  const root = renderReportView({ view, document: new Document(), onExport() {} });
+  const card = root.querySelector('[data-announcement-map-page="page-1"]');
+  assert.equal(card?.getAttribute('data-map-format'), 'numbered-preview');
+  // Legenda raster guardada: o trecho de imagem e a continuação seguem desenhando os dois PNGs.
+  assert.equal(card.querySelectorAll('img[data-map-segment-image]').length, 2);
+  // O desenho guardado continua abrindo como foi gerado (números dentro da imagem, legenda raster); o
+  // que acompanha o mapa atual é só o nome da seção, porque para quem lê é a mesma seção.
+  assert.match(root.textContent, /Mapa guardado de uma revisão anterior/u);
+  // O DOM do teste é um esboço sem seletor de classe: a ausência da apresentação nova se prova pelo
+  // HTML entregue, abaixo, onde `reader-map-*` existe como texto.
+  assert.doesNotMatch(root.textContent, /Códigos e textos deste mapa/u);
+  assert.ok(card.querySelector('li[data-map-marker="1"]'));
+  const html = renderHtmlReport(model, { reportView: view });
+  const markup = html.slice(html.indexOf('data-announcement-map-page="page-1"'));
+  assert.match(markup.slice(0, markup.indexOf('</article>')), /Legenda completa dos anúncios estimados/u);
+  assert.doesNotMatch(markup.slice(0, markup.indexOf('</article>')), /reader-map-code|reader-map-columns/u);
+  assert.match(html, /continuação da legenda/iu);
 });
 
 test('the exported ReportView includes map pixels and escaped untruncated legend for HTML and PDF', async () => {
@@ -616,8 +657,16 @@ test('the exported ReportView includes map pixels and escaped untruncated legend
   const html = renderHtmlReport(model, { reportView: view });
   assert.match(html, /data-announcement-map-page="page-1"/u);
   assert.match(html, /data-map-status="partial"/u);
+  assert.match(html, /data-map-format="reading-codes"/u);
+  // O HTML entregue (e o PDF gerado dele) abre o mapa com o título da seção e a explicação leiga — o
+  // título aparece uma vez só, no `h2` da seção (antes dele havia um `h3` com o mesmo texto).
+  assert.match(html, /<h2 id="report-heading-5">Mapa de leitura da página<\/h2><p>Cada caixa marca um elemento da página/u);
+  assert.doesNotMatch(html, /<h3>Mapa de leitura da página<\/h3>/u);
   assert.match(html, /data-map-segment-image/u);
   assert.match(html, /data-map-marker="1"/u);
+  // A legenda fica na coluna da direita, junto do trecho: código na imagem, texto ao lado.
+  assert.match(html, /class="reader-map-columns"[\s\S]*class="reader-map-image"[\s\S]*class="reader-map-segment-legend"[\s\S]*reader-map-code">L1 </u);
+  assert.match(html, /<figcaption>Segmento 1 de 1: códigos L1\.<\/figcaption>/u);
   assert.ok(html.includes(TEST_PNG));
   assert.ok(html.includes(preview.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')));
   assert.ok(html.includes(view.readerMaps[0].hash));
@@ -887,7 +936,7 @@ test('ReportViewV1 owns exact frozen copies and the canonical four-format order'
   assert.deepEqual(Object.keys(view), [
     'version', 'auditId', 'modelRevision', 'modelHash', 'filters', 'executive', 'issues',
     'checklist', 'technicalEvidence', 'readerMaps', 'keyboardMaps', 'methodology', 'exports', 'matrix',
-    'reviewHistory', 'findingsBoard',
+    'reviewHistory', 'tabReading', 'findingsBoard',
   ]);
   assert.deepEqual(Object.keys(view.filters), ['impact', 'wcag', 'result', 'classification', 'page', 'engine', 'abnt']);
   assert.deepEqual(Object.keys(view.issues), ['failed', 'alerts', 'humanReview', 'passed']);
@@ -1100,7 +1149,7 @@ test('live report puts the decision summary before compact navigation and expose
     'Cobertura e quatro grupos de resultado',
     'Quadro de constatações (requisitos da ABNT NBR 17225:2025)',
     'Revisão humana guiada e conclusões registradas',
-    'Mapas de anúncios',
+    'Mapa de leitura da página',
     'Mapa do teclado',
     'Matriz completa dos 146 itens',
     'Metodologia, fontes, integridade, evidências técnicas e anexos',
@@ -1129,7 +1178,7 @@ test('live report puts the decision summary before compact navigation and expose
     '#report-section-5', '#report-section-6', '#report-section-7', '#report-section-8',
   ]);
   assert.deepEqual(navigation.querySelectorAll('a').map(link => link.textContent), [
-    'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Anúncios',
+    'Sumário', 'Resultados', 'Quadro de constatações', 'Revisão guiada', 'Mapa de leitura',
     'Teclado', 'Matriz ABNT', 'Metodologia e evidências',
   ]);
   assert.ok(firstSection.querySelector('[data-report-outcome]'));
@@ -1562,7 +1611,14 @@ test('live report derives occurrence-specific boxes while preserving the pristin
   assert.equal(root.querySelectorAll('svg[data-evidence-treatment="review"]').length, 0);
 
   assert.equal(failed.querySelector('[data-evidence-kind="full-page"]').querySelector('svg'), null);
-  assert.equal(root.querySelector('[data-report-evidence="ev-control"]').querySelector('img').getAttribute('src'), original.dataUrl);
+  // A ficha de evidência mostra o ELEMENTO com o contorno por fora (antes dela só havia o PNG cru): o
+  // contorno é o mesmo desenho derivado usado nas ocorrências, e a legenda diz que o arquivo baixado não
+  // o contém. O PNG original continua embutido, byte a byte, dentro do SVG.
+  const fiche = root.querySelector('[data-report-evidence="ev-control"]');
+  const ficheVisual = fiche.querySelector('svg[data-evidence-treatment="target"]');
+  assert.equal(ficheVisual.querySelector('image').getAttribute('href'), original.dataUrl);
+  assert.match(fiche.querySelector('figcaption').textContent, /Contorno vermelho: o elemento desta evidência\./u);
+  assert.match(fiche.querySelector('figcaption').textContent, /não tem contorno/u);
   assert.deepEqual(model.evidence.find(evidence => evidence.kind === 'element'), originalSnapshot);
 
   const html = renderHtmlReport(model, { reportView: view });

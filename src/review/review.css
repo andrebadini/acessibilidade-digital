@@ -104,6 +104,16 @@ button:hover, button:focus-visible, a:focus-visible, summary:focus-visible { bac
 code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; background: #eef1f3; }
 .evidence-media { display: block; width: 100%; max-width: 100%; height: auto; max-height: 28rem; object-fit: contain; border: 1px solid #65737e; background: #fff; }
 .evidence-media--marked { overflow: hidden; }
+/* Mapa de leitura (1.3.0): a imagem com as caixas à esquerda e, na mesma linha, os códigos daquele
+   trecho com o texto que um leitor de tela falaria. É o mesmo par caixa ↔ texto do HTML entregue e
+   do PDF; em tela estreita a coluna desce para baixo da imagem, sempre no mesmo trecho. */
+.reader-map-columns { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: .75rem; align-items: start; }
+.reader-map-image { min-width: 0; }
+.reader-map-image .evidence-media { margin-top: 0; }
+.reader-map-segment-legend { display: grid; gap: .5rem; margin: 0; padding-left: 0; list-style: none; font-size: .92rem; }
+.reader-map-segment-legend li { padding: .4rem .5rem; border-left: .25rem solid var(--danger); background: var(--surface); break-inside: avoid; }
+.reader-map-code { display: inline-block; min-width: 2.2em; padding: 0 .1em 0 .3em; border-radius: .2rem; background: var(--danger); color: #fff; font-weight: 750; text-align: center; white-space: pre; }
+.reader-map-empty { margin: 0; font-size: .92rem; }
 .evidence-spotlight { fill: #000; fill-opacity: .38; stroke: none; pointer-events: none; }
 .evidence-highlight, .evidence-halo { fill: none; vector-effect: non-scaling-stroke; pointer-events: none; }
 .evidence-halo { stroke: #fff; stroke-width: 5; }
@@ -112,6 +122,9 @@ code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 
 .evidence-highlight--advisory { stroke: #986000; }
 .evidence-highlight--review { stroke: #6b4e00; stroke-dasharray: 14 9; }
 .evidence-highlight--passed { stroke: #003b71; }
+/* Contorno do cartão da revisão guiada: ali o vermelho responde "onde está o elemento desta pergunta?",
+   e não "deu falha" — a legenda do cartão diz isso em palavras (`GUIDED_REVIEW_TREATMENT_V1`). */
+.evidence-highlight--target { stroke: #b00020; }
 /* Recorte da área marcada na revisão guiada, na tela do relatório: a imagem guardada entra inteira e
    o `viewBox` recorta, com o contorno vermelho por cima. Sem `style` embutido, como no HTML entregue. */
 .marks-crop { display: block; max-width: 100%; height: auto; margin: .5rem 0; border: 1px solid #738596; border-radius: .3rem; background: #eef4f8; }
@@ -128,6 +141,7 @@ dialog:not([open]) { display: none; }
 .dialog-actions button { flex: 1 1 10rem; min-height: 2.75rem; }
 @media (min-width: 48rem) { .report-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } [data-report-evidence-preview] { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 32rem) { main { padding: .75rem; } .dialog-actions { flex-direction: column; } .report-filters { grid-template-columns: 1fr; } .report-identity, .report-view > section { padding: .85rem; } .section-nav { align-items: flex-start; flex-direction: column; } .section-nav ul { width: 100%; } }
+@media (max-width: 40rem) { .reader-map-columns { grid-template-columns: minmax(0, 1fr); } }
 @media print {
   /* A aba imprime por esta folha, não pela do relatório entregue: sem estas duas regras o Ctrl+P da
      aba parte palavra no meio (medido: 198 na matriz e 2 no cabeçalho), que é a mesma classe de
@@ -165,12 +179,17 @@ dialog:not([open]) { display: none; }
   [data-evidence-kind="full-page"] > .evidence-media { display: block; width: 100%; max-height: 210mm; object-fit: contain; object-position: top center; }
   [data-report-issue], [data-report-technical], [data-report-limitations], [data-report-evidence] { break-inside: auto; }
   [data-report-issue-heading], [data-report-evidence] > h4, summary { break-after: avoid; }
+  /* O mapa de leitura impresso é o mesmo par imagem + coluna de códigos do PDF entregue: o trecho não
+     se parte no meio e a coluna continua ao lado da imagem, com o texto em corpo de impressão. */
+  .reader-map-segment { break-inside: avoid; }
+  .reader-map-columns { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: .5rem; }
+  .reader-map-segment-legend { font-size: 8pt; }
 }
 .report-checklist { margin-block: 1rem; padding: .9rem; border: 1px solid #738596; border-radius: .65rem; background: #f7f9fb; }
 .report-checklist > summary { font-weight: 700; cursor: pointer; min-height: 2.75rem; }
 .report-checklist [data-checklist-question] { margin-top: .75rem; padding: .7rem; border-top: 1px solid #b8c5cf; overflow-wrap: anywhere; }
 .report-checklist [data-checklist-question] > summary { cursor: pointer; min-height: 2.75rem; font-weight: 600; }
-@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } .evidence-highlight { stroke: CanvasText; } .evidence-halo { stroke: CanvasText; } .evidence-spotlight { fill: none; } .lay-marks-area, .lay-marks-area--selected, .lay-marks-area--drawing, .marks-area-outline { stroke: CanvasText; } .lay-marks-pick--selected { border-color: CanvasText; } }
+@media (forced-colors: active) { button, input, textarea, .review-controls, .review-card, dialog, .report-identity, .report-view > section, [data-report-metric], [data-report-issue], [data-report-evidence-preview] figure, [data-report-evidence], .section-nav a, .report-filters [role="group"], .report-view th, .report-view td { border-color: CanvasText; } .report-filters button[aria-pressed="true"] { background: Highlight; color: HighlightText; } [data-report-executive-actions] button { background: Canvas; color: CanvasText; border-color: ButtonText; } .evidence-highlight { stroke: CanvasText; } .evidence-halo { stroke: CanvasText; } .evidence-spotlight { fill: none; } .lay-marks-area, .lay-marks-area--selected, .lay-marks-area--drawing, .marks-area-outline { stroke: CanvasText; } .lay-marks-pick--selected { border-color: CanvasText; } .lay-tab-reading, .lay-tab-row[data-tab-reading-state] td:first-child { border-color: CanvasText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
 [data-report-metrics] [data-report-metric="failed"]{background:#fff4f3;color:#8b1e1e}
 [data-report-metrics] [data-report-metric="alerts"],[data-report-metrics] [data-report-metric="humanReview"]{background:#fff9e9;color:#6b4e00}
@@ -202,7 +221,23 @@ dialog:not([open]) { display: none; }
 .findings-item-citation .findings-citation { margin: 0 0 .5rem; }
 .findings-citation-title { margin: 0 0 .35rem; font-weight: 700; }
 [data-findings-copy] { min-height: 44px; }
-@media (min-width: 48rem) { .findings-score { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+/* Miniatura da constatação: largura útil do cartão, sem deformar, e a ficha logo abaixo. */
+.findings-evidence { max-width: 32rem; margin: .5rem 0; }
+.findings-evidence figcaption { margin-top: .35rem; font-size: .9rem; color: #4a5a68; }
+.findings-evidence-links { margin: .35rem 0 0; padding-left: 1.4rem; }
+.findings-evidence-links a { display: inline-flex; align-items: center; min-height: 44px; }
+.findings-evidence-missing { margin: .35rem 0; color: #4a5a68; }
+/* Ficha de evidência: imagem, ID, os dois SHA-256 inteiros, data/hora e o download do PNG original. */
+.evidence-fiche-help { margin-top: 0; padding: .55rem .7rem; border-left: .3rem solid #003b71; background: #f7fafc; }
+.evidence-fiche-facts { display: grid; grid-template-columns: minmax(0, 1fr); gap: .15rem .75rem; margin: .75rem 0; }
+.evidence-fiche-facts dt { font-weight: 700; }
+.evidence-fiche-facts dd { margin: 0 0 .5rem; }
+.evidence-fiche-facts code { font-size: .82rem; }
+.evidence-fiche-note { display: block; font-size: .9rem; color: #4a5a68; }
+.evidence-fiche-media { max-width: 32rem; margin: .5rem 0; }
+.evidence-fiche-media figcaption { margin-top: .35rem; font-size: .9rem; color: #4a5a68; }
+.evidence-fiche-download-note { font-size: .9rem; color: #4a5a68; }
+@media (min-width: 48rem) { .findings-score { grid-template-columns: repeat(4, minmax(0, 1fr)); } .evidence-fiche-facts { grid-template-columns: 16rem minmax(0, 1fr); } }
 
 .lay-header { padding: 1rem; border: 2px solid #003b71; border-radius: .5rem; background: #eef4f8; margin-block: 1rem; }
 .lay-header h3 { margin-top: 0; }
@@ -229,6 +264,17 @@ dialog:not([open]) { display: none; }
 .lay-object dt { font-weight: 700; }
 .lay-object dd { margin: 0 0 .4rem; overflow-wrap: anywhere; }
 .lay-thumb { max-width: min(100%, 22rem); max-height: 14rem; object-fit: contain; border: 1px solid #c8d0d6; background: #fff; }
+/* Recorte do elemento no cartão: o SVG tem o tamanho de leitura calculado em `evidence-crop.js` e só
+   encolhe em cartão estreito — sem ampliação além de 3×, que só traria serrilhado. */
+.lay-crop { flex: 0 1 auto; max-width: 100%; margin: 0; }
+.lay-crop-zoom { display: block; max-width: 100%; min-height: 0; padding: 0; border: 1px solid #65737e; border-radius: .3rem; background: #fff; cursor: zoom-in; }
+.lay-crop-svg { display: block; max-width: 100%; height: auto; }
+.lay-crop-caption { margin: .35rem 0 0; font-size: .9rem; color: #4a5a68; }
+.lay-crop-hint { margin: .25rem 0 0; font-size: .9rem; color: #4a5a68; }
+#lay-zoom-dialog { inline-size: min(60rem, calc(100% - 2rem)); }
+#lay-zoom-body { max-height: 70vh; overflow: auto; }
+#lay-zoom-body .lay-crop { margin-inline: auto; }
+.lay-locate-note { flex: 1 1 100%; margin: .2rem 0 0; padding: .45rem .6rem; border-left: .3rem solid #6b4e00; background: #fff9e9; }
 .lay-questions { padding-left: 1.2rem; }
 .lay-question { margin-block: 1rem; padding-bottom: .8rem; border-bottom: 1px solid #e1e7ed; }
 .lay-q { font-size: 1.1rem; font-weight: 700; margin: .2rem 0; }
@@ -288,6 +334,56 @@ dialog:not([open]) { display: none; }
 .lay-finding textarea, .lay-note textarea, .lay-image-plan textarea { width: 100%; box-sizing: border-box; font: inherit; }
 .lay-answered { padding: .5rem .7rem; border-left: .3rem solid #236b3b; background: #eff9f2; }
 .lay-answered[data-lay-answer="não conforme"] { border-left-color: #8b1e1e; background: #fff4f3; }
+/* "Não sei" é ausência de conclusão, não falha: cinza, para não competir com o vermelho do "Não". */
+.lay-answered[data-lay-answer="não foi possível determinar"] { border-left-color: #6b7280; background: #f6f7f8; }
 .lay-answered-note { white-space: pre-wrap; }
+/* Quem respondeu e quando é registro, não resposta: fica em letra menor, abaixo da frase principal. */
+.lay-answered-meta { margin-top: .2rem; font-size: .85rem; color: #4a5a68; }
 .lay-card[aria-busy="true"] { opacity: .7; }
 @media print { .lay-header, .lay-part { display: none !important; } }
+
+/* Leitura por Tab: seção própria, com uma linha por parada da sequência de Tab. A cor da linha diz o
+   estado da resposta (verde conferido, vermelho não corresponde, âmbar sem conclusão) — sempre junto do
+   texto da resposta, nunca só pela cor. */
+.lay-tab-reading { margin-block: 1.5rem; padding: 1rem; border: 2px solid #003b71; border-radius: .5rem; background: #fff; }
+.lay-tab-reading > h3 { margin-top: 0; }
+.lay-tab-progress { font-weight: 700; margin: .4rem 0; }
+.lay-tab-reading progress { display: block; width: 100%; height: 1rem; margin-bottom: .5rem; }
+.lay-tab-controls { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-block: .6rem; }
+.lay-tab-controls .lay-toggle { display: flex; flex-direction: row; gap: .5rem; align-items: center; min-height: 44px; width: auto; font-weight: 600; }
+.lay-tab-controls .lay-toggle input { width: 1.2rem; height: 1.2rem; margin: 0; }
+.lay-tab-scroll { max-width: 100%; overflow-x: auto; }
+.lay-tab-scroll:focus-visible { outline: 3px solid #ffbf47; outline-offset: 2px; }
+.lay-tab-reading table { width: 100%; border-collapse: collapse; font-size: .925rem; }
+.lay-tab-reading th, .lay-tab-reading td { padding: .6rem; border: 1px solid #c8d0d6; text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+.lay-tab-reading thead th { background: #eef4f8; }
+.lay-tab-row[data-tab-reading-state="sim"] { --lay-tab-state: #236b3b; background: #f2fbf5; }
+.lay-tab-row[data-tab-reading-state="nao"] { --lay-tab-state: #8b1e1e; background: #fff4f3; }
+.lay-tab-row[data-tab-reading-state="nao-sei"] { --lay-tab-state: #6b4e00; background: #fff9e9; }
+.lay-tab-row[data-tab-reading-state] td:first-child { border-inline-start: .4rem solid var(--lay-tab-state, #738596); }
+.lay-tab-order { font-weight: 700; margin: .1rem 0; }
+/* Com `overflow-wrap: anywhere` a coluna do meio encolhia até a largura de uma letra e partia as
+   palavras ao meio ("Ordem / elemen/to", "Detalh/e técnic/o"). Os textos curtos que eu mesmo escrevo
+   aqui — o cabeçalho, "Tab 3 · botão" e o resumo do "Detalhe técnico" — esperam a palavra inteira, e é
+   isso que dá largura à coluna; só o seletor lá dentro é que precisa poder quebrar em qualquer ponto. */
+.lay-tab-reading thead th, .lay-tab-order, .lay-tab-detail summary { overflow-wrap: normal; }
+.lay-tab-detail { margin-top: .35rem; font-size: .85rem; }
+.lay-tab-detail summary { cursor: pointer; color: #24384a; }
+.lay-tab-detail[open] summary { margin-bottom: .25rem; }
+.lay-tab-selector { display: block; padding: .3rem; font-size: .82rem; }
+.lay-tab-listen { min-height: 44px; margin-top: .3rem; }
+.lay-tab-question .lay-q { font-size: 1rem; }
+.lay-tab-question .lay-answers button, .lay-tab-question .lay-finding-actions button, .lay-tab-bulk, .lay-tab-reading .lay-more { min-height: 44px; }
+.lay-tab-bulk { margin-top: .75rem; }
+.lay-tab-reading .lay-more { margin-left: .5rem; }
+#lay-tab-bulk-dialog { inline-size: min(36rem, calc(100% - 2rem)); }
+@media (max-width: 44rem) {
+  /* Empilhamento: cada linha vira uma ficha, com o nome da coluna em `data-tab-cell`. Sem isto, quem
+     responde no telefone teria que arrastar a tabela de lado a cada resposta. */
+  .lay-tab-scroll { overflow-x: visible; }
+  .lay-tab-reading thead { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); }
+  .lay-tab-reading tr { display: block; margin-bottom: .9rem; padding: .4rem .55rem; border: 1px solid #c8d0d6; border-radius: .4rem; }
+  .lay-tab-reading td { display: block; border: 0; padding: .35rem 0; }
+  .lay-tab-reading td::before { content: attr(data-tab-cell) ': '; font-weight: 700; color: #24384a; }
+  .lay-tab-reading td.lay-tab-question::before { content: none; }
+}

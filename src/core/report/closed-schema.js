@@ -1,3 +1,4 @@
+import { annotationMapReadRules } from '../evidence/annotation-map-artifact.js';
 import { validateKeyboardMapArtifact } from '../keyboard/keyboard-map-artifact.js';
 import { NBR17225_EDITORIAL_NOTES } from '../normative/nbr17225.js';
 import { NORMATIVE_SOURCE_LEDGER } from '../normative/source-ledger.js';
@@ -25,7 +26,22 @@ const FULL_PAGE_EVIDENCE_KEYS = new Set([...EVIDENCE_BASE_KEYS, 'state', 'dataUr
 const ELEMENT_EVIDENCE_KEYS = new Set([
   ...EVIDENCE_BASE_KEYS, 'nodeId', 'backendNodeId', 'selector', 'snippet', 'accessibility',
   'dataUrl', 'fullPageEvidenceId', 'metadata', 'mediaUrl',
+  // Opcional desde a 1.1.62: o SHA-256 do arquivo PNG guardado, que a ficha de evidência e o anexo do
+  // relatório entregue mostram sem recalcular nada. O campo **não** entra no hash do artefato (o
+  // recálculo o sobrescreve a partir dos próprios pixels, `artifact-hash.js`), então auditorias
+  // anteriores continuam válidas sem ele e nenhum hash guardado muda por causa dele.
+  'binarySha256',
+  // Opcionais desde a 1.1.62: onde o elemento estava na captura integral, em px CSS da própria imagem
+  // (`fullPageRect` é a caixa; `fullPageParts`, quando existir, são os fragmentos de linha do inline
+  // multilinha). Com eles o recorte do elemento sai da captura que já está guardada, sem uma captura de
+  // tela por elemento. Entram no hash do artefato como qualquer outro dado guardado — o recálculo usa o
+  // mesmo JSON canônico, então o hash de uma auditoria antiga, sem os campos, não muda.
+  'fullPageRect', 'fullPageParts',
 ]);
+/** Retângulo em px CSS de imagem. Todos os quatro números são exigidos, e largura/altura são positivas. */
+const EVIDENCE_RECT_KEYS = set('x y width height');
+/** Teto de fragmentos de linha guardados por elemento, o mesmo da marcação desenhada (`evidence-highlight`). */
+const ELEMENT_FULL_PAGE_PART_LIMIT = 8;
 const ACCESSIBILITY_EVIDENCE_KEYS = set(
   'announcementPreview description descriptionSource name nameSource role states valueStatus visibleText',
 );
@@ -36,6 +52,8 @@ const MAP_DERIVATION_KEYS = set('type algorithm version sourceEvidenceId sourceH
 const MAP_GEOMETRY_KEYS = set('coordinateSpace sourceCssSize sourcePixelSize scaleX scaleY deviceScaleFactor annotations');
 const MAP_ANNOTATION_KEYS = set('number nodeId sourceRect marker segmentIndex');
 const MAP_MARKER_KEYS = set('x y size leaderX leaderY');
+// Etiqueta do mapa de leitura (1.3.0): caixa com largura e altura próprias, no lugar do círculo.
+const MAP_BADGE_KEYS = set('x y width height leaderX leaderY');
 const MAP_SEGMENT_KEYS = set('segmentId index count role sourceCssClip width height dataUrl contentHash');
 const MAP_LEGEND_KEYS = set('number nodeId selectorSummary announcementPreview nameSource segmentIndex');
 const MAP_COUNT_KEYS = set('eligible annotated omittedNoRect omittedFrame omittedLimit unresolvedOverlap');
@@ -382,6 +400,13 @@ function assertEvidence(artifact) {
     (typeof artifact.dataUrl !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/u.test(artifact.dataUrl))) {
     throw new TypeError();
   }
+  // O hash do arquivo só existe junto dos pixels que ele descreve: sem `dataUrl` não há arquivo a que
+  // se referir, e o valor precisa ter a forma de um SHA-256. Que ele corresponda aos bytes guardados é
+  // conferido na verificação de integridade, que já decodifica cada PNG.
+  if (artifact.binarySha256 !== undefined &&
+    (!SHA256.test(artifact.binarySha256) || typeof artifact.dataUrl !== 'string')) {
+    throw new TypeError();
+  }
   if (artifact.selector !== undefined) {
     assertExact(artifact.selector, set('css framePath'));
     if (artifact.selector.css !== null) assertString(artifact.selector.css);
@@ -399,6 +424,24 @@ function assertEvidence(artifact) {
     assertStringArray(artifact.accessibility.states);
   }
   if (artifact.metadata !== undefined) assertEvidenceMetadata(artifact.metadata);
+  if (artifact.fullPageRect !== undefined) {
+    // A posição só vale presa à captura integral que a contém: um retângulo solto não teria imagem de
+    // onde ser recortado nem como ser conferido depois.
+    if (typeof artifact.fullPageEvidenceId !== 'string') throw new TypeError();
+    assertEvidenceRect(artifact.fullPageRect);
+  }
+  if (artifact.fullPageParts !== undefined) {
+    if (typeof artifact.fullPageEvidenceId !== 'string') throw new TypeError();
+    assertArray(artifact.fullPageParts);
+    if (artifact.fullPageParts.length === 0 || artifact.fullPageParts.length > ELEMENT_FULL_PAGE_PART_LIMIT) throw new TypeError();
+    for (const part of artifact.fullPageParts) assertEvidenceRect(part);
+  }
+}
+
+function assertEvidenceRect(rect) {
+  assertExact(rect, EVIDENCE_RECT_KEYS);
+  for (const key of ['x', 'y']) if (!Number.isFinite(rect[key])) throw new TypeError();
+  for (const key of ['width', 'height']) if (!Number.isFinite(rect[key]) || rect[key] <= 0) throw new TypeError();
 }
 
 // Teto da escala de pixels da miniatura de elemento. Acompanha `ELEMENT_CAPTURE_PIXEL_LIMITS.maxScale`
@@ -453,6 +496,15 @@ function assertKeyboardMap(artifact) {
   validateKeyboardMapArtifact(artifact);
 }
 
+/** A partir da 1.3.0 a marca é a caixa do código; antes dela era o círculo numerado. */
+function annotationMapUsesBadge(artifact) {
+  try {
+    return annotationMapReadRules(artifact?.derivation?.version).badge === true;
+  } catch {
+    return false;
+  }
+}
+
 function assertAnnotationMap(artifact) {
   const expectedMapKeys = artifact.pixelState === 'omitted-budget'
     ? MAP_EVIDENCE_KEYS
@@ -466,7 +518,9 @@ function assertAnnotationMap(artifact) {
   for (const annotation of artifact.derivation.geometry.annotations) {
     assertExact(annotation, MAP_ANNOTATION_KEYS);
     assertExact(annotation.sourceRect, set('x y width height'));
-    assertExact(annotation.marker, MAP_MARKER_KEYS);
+    // A chave da etiqueta depende da versão declarada: círculo numerado até a 1.2.0, caixa com o código
+    // curto (L1, L2…) na 1.3.0. Auditorias antigas continuam abrindo com o conjunto da própria versão.
+    assertExact(annotation.marker, annotationMapUsesBadge(artifact) ? MAP_BADGE_KEYS : MAP_MARKER_KEYS);
   }
   assertArray(artifact.segments);
   for (const segment of artifact.segments) {

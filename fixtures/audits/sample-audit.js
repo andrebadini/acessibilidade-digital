@@ -127,7 +127,7 @@ export const SAMPLE_AUDIT = createAuditModel({
   versions: { extension: '0.1.0', rules: '1.0.0', browser: 'Chrome/147.0.0.0' },
   environment: { chromeVersion: 'Chrome/147.0.0.0', viewport: VIEWPORT },
   scope: canonicalScope('single', 1),
-  methodology: { name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', coreRuleCount: 131, supplementalRuleCount: 0, ruleCount: 131, itemCount: 146 },
+  methodology: { name: 'Audita Acessibilidade — ABNT NBR 17225 e WCAG 2.2', version: '1.0.0', coreRuleCount: 132, supplementalRuleCount: 0, ruleCount: 132, itemCount: 146 },
   session: {
     status: 'partial', partial: true,
     diagnostics: [{

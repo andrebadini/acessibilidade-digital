@@ -239,6 +239,12 @@ async function readReportEvidence(extension, auditId) {
       status:model?.session?.status??null,
       fullPage:evidence.filter(item=>item?.kind==='full-page'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
       elements:evidence.filter(item=>item?.kind==='element'&&/^data:image\\/png;base64,/u.test(item.dataUrl??'')).length,
+      // 1.1.62: na evidência completa o elemento dentro da captura integral não tem PNG próprio — o
+      // artefato guarda onde ele estava e de qual captura, e o recorte sai dos pixels já guardados. A
+      // prova, aqui, é que a posição foi registrada E que a imagem referida existe.
+      elementsCropped:evidence.filter(item=>item?.kind==='element'&&item?.fullPageRect&&
+        evidence.some(artifact=>artifact?.evidenceId===item?.fullPageEvidenceId&&
+          /^data:image\\/png;base64,/u.test(artifact?.dataUrl??''))).length,
       diagnosticCodes:Array.isArray(model?.session?.diagnostics)?model.session.diagnostics.map(item=>item.code):[],
       requestedUrl:model?.requestedUrl??null,
       finalUrl:model?.finalUrl??null,
@@ -678,7 +684,9 @@ test('URL pixel modes complete without privacy pause and clean owned tabs', { ti
       assert.equal(evidence.revision, 1);
       assert.ok(['complete', 'partial'].includes(evidence.status));
       assert.ok(evidence.fullPage >= 1, JSON.stringify(evidence));
-      assert.ok(evidence.elements >= 1, JSON.stringify(evidence));
+      // A garantia continua a mesma — a evidência do elemento tem imagem desenhável —, e na evidência
+      // completa ela vem do recorte da captura integral (1.1.62), não de um PNG por elemento.
+      assert.ok(evidence.elementsCropped >= 1, JSON.stringify(evidence));
       assert.deepEqual(evidence.forbidden, []);
       assertSafeEvidenceUrls(evidence, fixture.origin);
       await openAndProveReport(extension, panel, auditId, rawUrl, {
