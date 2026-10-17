@@ -554,7 +554,8 @@ async function recoveryDownloadMatchesEntry(adapter, downloadId, entry, timeoutM
       timeoutMs,
       'A correlação do download obsoleto excedeu o tempo limite.',
     );
-    if (snapshotDownloadInspection(value, downloadId) === 'absent') return 'absent';
+    const inspection = snapshotDownloadInspection(value, downloadId);
+    if (inspection === 'absent' || inspection === 'interrupted-no-destination') return 'absent';
     const actualFilename = canonicalDownloadSearchResult(value, downloadId, {
       requestedFilename: entry.filename,
       format: entry.format,
@@ -855,7 +856,7 @@ async function cleanupPhysicalDownload(adapter, downloadId, cancelOperation, tim
     } catch {
       return { removed: false };
     }
-    if (inspection === 'interrupted-user-cancelled-absent') {
+    if (inspection === 'interrupted-user-cancelled-absent' || inspection === 'interrupted-no-destination') {
       const erase = ownOrPrototypeMethod(adapter, 'eraseDownload');
       if (!erase) return { removed: false };
       try {
@@ -918,6 +919,14 @@ function snapshotDownloadInspection(value, downloadId) {
     if (state === 'interrupted' && field('error') === 'USER_CANCELED' &&
       field('canResume') === false && field('exists') === false) {
       return 'interrupted-user-cancelled-absent';
+    }
+    // O Chrome marca exists:true só porque a entrada ainda existe; sem filename não há caminho em
+    // disco, então um download interrompido antes de abrir o arquivo não pode ter deixado resíduo
+    // físico — mesmo que os bytes já tenham chegado da origem, como acontece quando a pasta de
+    // downloads recusa a escrita.
+    if (state === 'interrupted' && field('error') === 'USER_CANCELED' &&
+      field('canResume') === false && field('exists') === true && field('filename') === '') {
+      return 'interrupted-no-destination';
     }
     return 'invalid';
   } catch {

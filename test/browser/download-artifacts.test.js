@@ -585,6 +585,55 @@ test('settles an interrupted artifact only after Chrome attests user cancellatio
   ]);
 });
 
+test('settles an interrupted download that never opened a destination file and continues the remaining formats', async () => {
+  const events = [];
+  const journal = [];
+  let inspections = 0;
+  let nextId = 90;
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/no-destination'; },
+    revokeObjectURL() {},
+    async download() { return nextId++; },
+    resolveDownloadFilename: ATTEST_REQUESTED_FILENAME,
+    async waitForDownload(id) {
+      if (id === 90) throw Object.assign(new Error('interrupted'), { name: 'DownloadInterruptedError' });
+      return { id, state: 'complete' };
+    },
+    async cancelDownload(id) { events.push(['cancel', id]); },
+    async inspectDownload(id) {
+      events.push(['inspect', id]);
+      if (id !== 90) return [];
+      inspections += 1;
+      return inspections === 1
+        ? [{
+            id, state: 'interrupted', error: 'USER_CANCELED', canResume: false, exists: true,
+            filename: '', bytesReceived: 24, fileSize: 24,
+          }]
+        : [];
+    },
+    async eraseDownload(id) { events.push(['erase', id]); return [id]; },
+    async removeDownloadFile() { throw new Error('removeFile must not receive an interrupted item'); },
+  };
+
+  const result = await downloadArtifacts({ baseName: 'audit', html: '<!doctype html>', csv: 'a\r\n' }, adapter, {
+    timeoutMs: 50,
+    hashBytes: FAST_SHA256,
+    async recordDeliveryState(entry) { journal.push(entry); return true; },
+  });
+
+  assert.deepEqual(events, [
+    ['cancel', 90], ['inspect', 90], ['erase', 90], ['inspect', 90],
+  ]);
+  assert.deepEqual(result.formats.map(entry => [entry.format, entry.status, entry.failureCode]), [
+    ['html', 'interrupted', 'DOWNLOAD_INTERRUPTED'],
+    ['csv', 'complete', undefined],
+  ]);
+  assert.deepEqual(journal.filter(entry => entry.format === 'html').at(-1), {
+    state: 'cleaned', format: 'html', filename: 'audit.html', downloadId: 90,
+  });
+  assert.ok(journal.some(entry => entry.format === 'csv' && entry.state === 'terminal'));
+});
+
 test('keeps interrupted cleanup pending for ambiguous, resumable, residual or incompletely erased downloads', async () => {
   const cancelled = id => ({ id, state: 'interrupted', error: 'USER_CANCELED', canResume: false, exists: false });
   let accessorRead = false;
@@ -601,6 +650,8 @@ test('keeps interrupted cleanup pending for ambiguous, resumable, residual or in
     ['resumable', { first: [{ ...cancelled(80), canResume: true }] }],
     ['missing-can-resume', { first: [{ id: 80, state: 'interrupted', error: 'USER_CANCELED', exists: false }] }],
     ['physical-residue', { first: [{ ...cancelled(80), exists: true }] }],
+    ['named-residue', { first: [{ ...cancelled(80), exists: true, filename: '/tmp/a.html', bytesReceived: 0 }] }],
+    ['unknown-destination', { first: [{ ...cancelled(80), exists: true, bytesReceived: 12 }] }],
     ['missing-exists', { first: [{ id: 80, state: 'interrupted', error: 'USER_CANCELED', canResume: false }] }],
     ['accessor', { first: [accessorItem] }],
     ['proxy', { first: new Proxy([cancelled(80)], {}) }],

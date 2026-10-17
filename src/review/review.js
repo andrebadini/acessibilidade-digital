@@ -34,6 +34,7 @@ import {
   TAB_READING_LISTEN_LABEL, TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_SECTION_TITLE,
 } from '../core/report/tab-reading-plan.js';
 import { createSpeaker } from '../reader/speech.js';
+import { describeExportDelivery, exportDeliveryText } from '../export/export-outcome-message.js';
 
 // Respostas canônicas: conforme, não conforme, não foi possível determinar e não se aplica. A tela as
 // oferece em linguagem simples (LAY_ANSWERS): Sim, Não, Não consegui verificar, Não existe nesta página.
@@ -428,16 +429,32 @@ const tabBulkController = createDestructiveDialog({
 zoomClose?.addEventListener('click', () => zoomDialog.close());
 zoomDialog?.addEventListener('close', () => zoomBody.replaceChildren());
 
-// The worker acknowledges the request before the files exist, and the export tab closes
-// itself on failure without telling this page. Without a deadline the screen would keep
+// The worker acknowledges the request before the files exist, and the export tab reports
+// the outcome only through the durable receipt. Without a deadline the screen would keep
 // saying "na fila de geração" forever, with no file, no error and no way forward, so the
-// request is bounded and an unconfirmed outcome is reported as exactly that.
-const EXPORT_CONFIRMATION_TIMEOUT_MS = 120_000;
+// request is bounded and an unconfirmed outcome is reported as exactly that. Quatro
+// formatos podem levar 30 s cada, além da impressão do PDF: o limite acompanha esse
+// trabalho e continua finito.
+const EXPORT_CONFIRMATION_TIMEOUT_MS = 300_000;
+const EXPORT_OUTCOME_POLL_MS = 1_500;
 let exportConfirmationTimer = null;
 
 async function requestExport({ deleteAfterCompleteExport = false } = {}) {
   if (!auditModel?.auditId) return;
   const requestedAuditId = auditModel.auditId;
+  // A resposta do worker confirma apenas o pedido, não os arquivos. Sem acompanhar o
+  // recibo durável, a tela ficava em "na fila de geração" mesmo quando o download
+  // falhava. A leitura é barata e limitada; em teste ou contexto sem store, é ignorada.
+  const canWatchOutcome = typeof store !== 'undefined' && store && typeof store.getLatest === 'function';
+  let baselineAttempt = 0;
+  if (canWatchOutcome) {
+    try {
+      const previous = await store.getLatest();
+      if (previous?.auditId === requestedAuditId && Number.isSafeInteger(previous.exportAttempt)) {
+        baselineAttempt = previous.exportAttempt;
+      }
+    } catch { /* the bounded notice below still reports the unconfirmed outcome */ }
+  }
   regenerate.disabled = true;
   status.textContent = 'Solicitando a geração do relatório.';
   clearTimeout(exportConfirmationTimer);
@@ -458,6 +475,7 @@ async function requestExport({ deleteAfterCompleteExport = false } = {}) {
   exportConfirmationTimer = null;
   regenerate.disabled = false;
   status.textContent = response?.ok ? 'Relatório atualizado na fila de geração.' : describeExportFailure(response?.code);
+  if (response?.ok && canWatchOutcome) void watchExportOutcome(requestedAuditId, baselineAttempt);
 }
 
 // Em página grande a exportação leva dezenas de segundos; um segundo pedido nesse intervalo era
@@ -468,6 +486,40 @@ function describeExportFailure(code) {
   }
   if (code === 'EXPORT_LEASE_DENIED') return 'Outra exportação desta auditoria ainda está terminando. Tente de novo em alguns segundos.';
   return 'Não foi possível gerar o relatório atualizado.';
+}
+
+// Acompanha o recibo durável até o desfecho. O limite de tempo é o mesmo do aviso de
+// confirmação: se nada terminal aparecer, a tela diz que não houve confirmação e como
+// tentar de novo, em vez de continuar prometendo uma fila que não anda.
+async function watchExportOutcome(requestedAuditId, baselineAttempt) {
+  const deadline = Date.now() + EXPORT_CONFIRMATION_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, EXPORT_OUTCOME_POLL_MS));
+    if (auditModel?.auditId !== requestedAuditId) return;
+    let latest = null;
+    try { latest = await store.getLatest(); } catch { latest = null; }
+    if (!latest || latest.auditId !== requestedAuditId) continue;
+    const attempt = Number.isSafeInteger(latest.exportAttempt) ? latest.exportAttempt : 0;
+    if (attempt <= baselineAttempt) continue;
+    // Durante a exportação o journal tem entradas em andamento, o que também marca
+    // exportCleanupPending. Só é uma limpeza realmente presa quando a tentativa desta
+    // exportação não está mais em andamento (ou já terminou com ressalva).
+    if (latest.exportCleanupPending === true &&
+      !['running', 'delivering'].includes(latest.exportStatus) &&
+      !['complete', 'partial', 'failed'].includes(latest.exportStatus)) {
+      status.textContent = EXPORT_CLEANUP_MESSAGE;
+      regenerate.disabled = false;
+      return;
+    }
+    if (!['complete', 'partial', 'failed'].includes(latest.exportStatus)) continue;
+    status.textContent = exportDeliveryText(describeExportDelivery(latest));
+    regenerate.disabled = false;
+    return;
+  }
+  if (auditModel?.auditId !== requestedAuditId) return;
+  regenerate.disabled = false;
+  status.textContent = 'A geração dos arquivos não foi confirmada, então os arquivos não foram baixados. '
+    + 'Tente novamente; se persistir, feche as abas de exportação abertas antes de repetir.';
 }
 
 async function returnToAuditedPage() {

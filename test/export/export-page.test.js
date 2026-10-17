@@ -41,6 +41,17 @@ async function exportPageFixture(t, { closeFails = false, completionFails = fals
   const exporting = deferred();
   const recovering = deferred();
   const status = { textContent: '' };
+  const closeHandlers = [];
+  const details = { textContent: '', hidden: true };
+  const closeButton = {
+    hidden: true, focused: 0,
+    addEventListener(type, handler) { if (type === 'click') closeHandlers.push(handler); },
+    focus() { this.focused += 1; },
+  };
+  const elements = new Map([
+    ['#export-status', status], ['#export-details', details],
+    ['#export-close-row', closeButton], ['#export-close', closeButton],
+  ]);
   const clientArguments = []; const clients = []; const ports = [];
   const nativeRevocations = []; const removedTabs = []; const workerRequests = []; const calls = [];
   const documentListeners = new Map();
@@ -87,7 +98,23 @@ async function exportPageFixture(t, { closeFails = false, completionFails = fals
     buildReportView: () => ({}), deriveExportLeaseOwner, createExportTabAdapter: () => ({}),
     reconcileStaleDownloads: async () => undefined,
     runReportExport(_request, hooks) { exportDependencies = hooks; calls.push('export'); return exporting.promise; },
-    createExportSuccessRequest: value => value, persistExportSuccess: async () => { calls.push('success'); },
+    describeExportDelivery: value => ({
+      tone: 'info', headline: 'Os quatro arquivos foram baixados e o recibo local foi confirmado.',
+      lines: [], guidance: null, value,
+    }),
+    createExportSuccessRequest: value => value,
+    persistExportSuccess: async () => {
+      calls.push('success');
+      return {
+        latest: {
+          auditId: AUDIT_ID, exportStatus: 'complete',
+          deliveryReceipt: {
+            status: 'complete', limitations: [],
+            formats: ['html', 'pdf', 'csv', 'json'].map(format => ({ format, status: 'complete' })),
+          },
+        },
+      };
+    },
     createExportFailureRequest: value => value,
     persistExportFailure: async () => { calls.push('failure'); return { latest: { message: 'Exportação interrompida.' } }; },
     awaitExportCompletionAcknowledgement: async () => { if (completionFails) throw new Error('ack unavailable'); },
@@ -104,7 +131,8 @@ async function exportPageFixture(t, { closeFails = false, completionFails = fals
   runInNewContext(script, {
     __dependencies: dependencies, chrome, URL: NativeURL, setTimeout, clearTimeout,
     location: { href: `chrome-extension://${EXTENSION_ID}/src/export/index.html?auditId=${AUDIT_ID}` },
-    navigator: { userAgent: 'Chrome/152' }, document: { querySelector: () => status },
+    navigator: { userAgent: 'Chrome/152' },
+    document: { querySelector: selector => elements.get(selector) ?? null, title: '' },
     addEventListener(type, listener, options) {
       const entries = documentListeners.get(type) ?? [];
       entries.push({ listener, once: options?.once === true }); documentListeners.set(type, entries);
@@ -223,16 +251,21 @@ test('internal export page authenticates first, rebuilds one stored revision and
     'a transient acknowledgement failure must preserve the durable receipt and active export tab for retry');
   assert.match(script, /shouldPreserveExportTabAndLease[\s\S]*await recoverPendingDownloadCleanup\(error\)/u,
     'download cleanup ownership must remain in the live export tab until durable recovery finishes');
-  assert.ok(script.indexOf('await recoverPendingDownloadCleanup(error)') < script.indexOf('await persistAndCloseFailure(error)'),
+  assert.ok(script.indexOf('await recoverPendingDownloadCleanup(error)') < script.indexOf('await persistFailureOutcome(error)'),
     'cleanup recovery must finish before failure persistence can release the lease');
   assert.match(script, /isPendingReportReservationError\(error\)[\s\S]*await recoverPendingReportReservation\(error\)/u,
     'a late persistent reservation must be adopted by its live export tab');
-  assert.ok(script.indexOf('await recoverPendingReportReservation(error)') < script.indexOf('await persistAndCloseFailure(error)'),
+  assert.ok(script.indexOf('await recoverPendingReportReservation(error)') < script.indexOf('await persistFailureOutcome(error)'),
     'reservation ownership must settle before failure persistence can release the lease');
   assert.match(script, /advancePendingDownloadOwnership\(error[\s\S]*advancePendingExportCleanup/u,
     'an adopted asynchronous download source must settle before an empty journal can release the tab');
   assert.doesNotMatch(script, /navigator\.locks|request\(['"]audita-export/u);
-  assert.match(script, /if \(!busy\) await closeOwnTab\(\)/u);
+  // A falha agora fica visível na própria aba, com motivo e saída, em vez de fechá-la
+  // em silêncio — que era o sintoma de "aba inválida". O botão é a única forma de fechar.
+  assert.doesNotMatch(script.slice(script.indexOf('async function persistFailureOutcome'),
+    script.indexOf('async function recoverPendingReportReservation')), /closeOwnTab/u);
+  assert.match(script, /showOutcome\(describeExportDelivery\(persisted\?\.latest\)\)/u);
+  assert.match(script, /describeExportDelivery\(\{ exportStatus: 'failed', message \}\)/u);
   assert.match(completion, /type:\s*'EXPORT_COMPLETE'[\s\S]*sessionCapabilityId[\s\S]*attemptId/u);
   assert.match(script, /mimeType,\s*byteSize,\s*sha256/u);
   assert.doesNotMatch(script, /searchParams\.get\(['"](?:leaseOwnerId|exportAttempt|revision|capability)/u);
@@ -243,7 +276,11 @@ test('internal export page authenticates first, rebuilds one stored revision and
   assert.match(html, /Excluir auditoria local[^.]*página do relatório/iu);
   assert.doesNotMatch(html, /exclusão[^.]*escolhida antes/iu);
   assert.match(html, /arquivos já baixados[^.]*não são apagados/iu);
-  assert.doesNotMatch(html, /<button|<input/iu);
+  assert.doesNotMatch(html, /<input/iu);
+  assert.equal((html.match(/<button\b/giu) ?? []).length, 1,
+    'only the close control is offered; the export itself has no form input');
+  assert.match(html, /id="export-close"[^>]*>Fechar esta aba</u);
+  assert.match(html, /id="export-details" hidden/u);
   assert.match(css, /@media\s*\(max-width:\s*24rem\)/u);
   assert.match(css, /@media\s*\(forced-colors:\s*active\)/u);
 });

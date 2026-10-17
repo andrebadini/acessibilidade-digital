@@ -466,7 +466,16 @@ export async function resolveChromeBinary({ explicit, env = process.env, platfor
 }
 
 export function resolveExpectedChromeMajor({ explicit, env = process.env } = {}) {
-  const source = explicit ?? env.AUDITA_EXPECT_CHROME_MAJOR;
+  // Um valor explícito inválido do chamador continua sendo erro de contrato, mesmo com o ambiente
+  // preenchido: a variável escolhe a versão da rodada, não pode mascarar uma expectativa insegura.
+  if (explicit !== undefined && (typeof explicit === 'string'
+    ? !/^[1-9][0-9]{0,2}$/u.test(explicit)
+    : !positiveInteger(explicit) || explicit > 999)) throw fixed('CHROME_MAJOR_INVALID');
+  // O ambiente manda quando o valor explícito é válido: os arquivos e2e fixam a versão histórica (152)
+  // para continuar válidos quando executados sozinhos, mas uma rodada contra o Chrome instalado (155)
+  // precisa poder escolher a versão sem editar cada teste. A checagem NÃO afrouxa: a versão observada
+  // continua tendo de ser exatamente a esperada, venha ela do teste ou de AUDITA_EXPECT_CHROME_MAJOR.
+  const source = env.AUDITA_EXPECT_CHROME_MAJOR ?? explicit;
   if (source === undefined) return null;
   if (typeof source === 'string' && !/^[1-9][0-9]{0,2}$/u.test(source)) throw fixed('CHROME_MAJOR_INVALID');
   const value = typeof source === 'string' ? Number(source) : source;

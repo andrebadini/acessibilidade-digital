@@ -24,6 +24,7 @@ import {
   shouldPreserveExportTabAndLease,
 } from './export-page-failure-policy.js';
 import { awaitExportCompletionAcknowledgement } from './export-completion.js';
+import { describeExportDelivery } from './export-outcome-message.js';
 import {
   advancePendingReportReservation,
   isPendingReportReservationError,
@@ -31,6 +32,10 @@ import {
 } from './report-export.js';
 
 const status = document.querySelector('#export-status');
+const details = document.querySelector('#export-details');
+const closeRow = document.querySelector('#export-close-row');
+const closeButton = document.querySelector('#export-close');
+const DOWNLOAD_CLEANUP_RECOVERY_TIMEOUT_MS = 30_000;
 const store = createAuditStore();
 const downloadsAdapter = createDownloadsAdapter(chrome);
 const auditId = normalizeReviewAuditId(new URL(location.href).searchParams.get('auditId'));
@@ -59,7 +64,22 @@ function sendWorkerRequest(message) {
   });
 }
 
+closeButton?.addEventListener?.('click', () => { void closeOwnTab(); });
 void start().catch(error => fail(error));
+
+function showOutcome(outcome) {
+  document.title = `${outcome.headline} — Audita Acessibilidade`;
+  status.setAttribute?.('role', outcome.tone === 'error' ? 'alert' : 'status');
+  status.textContent = outcome.headline;
+  if (details) {
+    details.textContent = [...(outcome.lines ?? []), outcome.guidance]
+      .filter(value => typeof value === 'string' && value.trim()).join(' ');
+    details.hidden = false;
+  }
+  const closeControl = closeRow ?? closeButton;
+  if (closeControl) closeControl.hidden = false;
+  closeButton?.focus?.();
+}
 
 async function start() {
   if (!auditId) throw new TypeError('Auditoria não identificada.');
@@ -106,6 +126,7 @@ async function generate(connected) {
     ownerId: leaseOwnerId, exportAttempt, now: new Date().toISOString(), ttlMs: 10 * 60 * 1000,
     latestState: { ...latestState, exportStatus: 'delivering', message: 'Transferindo os arquivos do relatório.' },
   });
+  status.textContent = 'Gerando os quatro arquivos (HTML, PDF, CSV e JSON). Isso pode levar alguns minutos.';
   const result = await runReportExport({
     auditSnapshotCapability: sourceSnapshotCapability, exportLeaseOwnerId: leaseOwnerId, exportAttempt,
     manifestVersion: chrome.runtime.getManifest().version, browserVersion: verified.environment?.chromeVersion || navigator.userAgent,
@@ -128,14 +149,23 @@ async function generate(connected) {
           ...(downloadId === undefined ? {} : { downloadId }), mimeType, byteSize, sha256, state });
     },
   });
-  await persistExportSuccess(createExportSuccessRequest({ auditId, result, latest: latestState }), store);
+  const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId, result, latest: latestState }), store);
   leaseClaimed = false;
   completionPending = true;
-  status.textContent = 'Os arquivos foram baixados; confirmando o recibo local.';
+  const deliveredEverything = persisted?.latest?.exportStatus === 'complete';
+  status.textContent = deliveredEverything
+    ? 'Os arquivos foram baixados; confirmando o recibo local.'
+    : 'A exportação terminou; confirmando o recibo local.';
   await confirmExportCompletion(connected);
   completionPending = false;
-  status.textContent = 'Os quatro arquivos foram baixados e o recibo local foi confirmado.';
-  await closeOwnTab();
+  if (deliveredEverything) {
+    status.textContent = 'Os quatro arquivos foram baixados e o recibo local foi confirmado.';
+    await closeOwnTab();
+    return;
+  }
+  // Entrega parcial ou sem arquivos: a aba continua aberta com o motivo em português
+  // simples e uma saída. Fechá-la em silêncio era o que deixava só uma aba "inválida".
+  showOutcome(describeExportDelivery(persisted?.latest));
 }
 
 async function confirmExportCompletion(connected) {
@@ -160,12 +190,22 @@ async function fail(error) {
     if (reservation === 'superseded') leaseClaimed = false;
   } else if (shouldPreserveExportTabAndLease(error)) {
     status.textContent = 'A limpeza de um download anterior continua pendente; esta aba e sua exclusividade foram preservadas.';
-    await recoverPendingDownloadCleanup(error);
+    const recovered = await recoverPendingDownloadCleanup(error);
+    if (!recovered) {
+      showOutcome({
+        tone: 'error',
+        headline: 'A limpeza de um download anterior não terminou.',
+        lines: ['O navegador ainda não confirmou a remoção de um arquivo obsoleto da exportação.'],
+        guidance: 'Feche esta aba, aguarde alguns minutos e exporte novamente. '
+          + 'Se o problema continuar, reinicie o navegador.',
+      });
+      return;
+    }
   }
-  await persistAndCloseFailure(error);
+  await persistFailureOutcome(error);
 }
 
-async function persistAndCloseFailure(error) {
+async function persistFailureOutcome(error) {
   let message = 'Não foi possível preparar os artefatos do relatório.';
   const busy = isAuditExportLeaseConflict(error);
   const invalidated = isAuditRevisionConflict(error);
@@ -177,10 +217,26 @@ async function persistAndCloseFailure(error) {
       message = persisted.latest.message;
     } catch { /* preserve fixed limitation */ }
   }
-  if (busy) message = 'Este relatório já está sendo gerado em outra aba; tente novamente após a conclusão.';
-  if (invalidated) message = 'A auditoria foi atualizada durante a exportação; a versão mais nova foi preservada.';
-  status.textContent = message;
-  if (!busy) await closeOwnTab();
+  if (busy) {
+    // A falha fica visível nesta aba, com o que fazer, em vez de a aba sumir sem explicação.
+    showOutcome({
+      tone: 'error',
+      headline: 'Este relatório já está sendo gerado em outra aba.',
+      lines: [message],
+      guidance: 'Aguarde os arquivos terminarem de baixar e exporte novamente depois.',
+    });
+    return;
+  }
+  if (invalidated) {
+    showOutcome({
+      tone: 'error',
+      headline: 'A auditoria foi atualizada durante a exportação.',
+      lines: ['A versão mais nova foi preservada e os arquivos desta tentativa não foram baixados.'],
+      guidance: 'Volte à aba do relatório para conferir a versão atual e exportar de novo.',
+    });
+    return;
+  }
+  showOutcome(describeExportDelivery({ exportStatus: 'failed', message }));
 }
 
 async function recoverPendingReportReservation(error) {
@@ -201,7 +257,12 @@ async function recoverPendingReportReservation(error) {
 }
 
 async function recoverPendingDownloadCleanup(error) {
+  // A aba não pode ficar presa para sempre esperando uma limpeza que o navegador não
+  // confirma. Depois do prazo, a exclusividade e a aba continuam preservadas, mas a
+  // pessoa vê o motivo e uma saída.
+  const deadline = Date.now() + DOWNLOAD_CLEANUP_RECOVERY_TIMEOUT_MS;
   for (;;) {
+    if (Date.now() >= deadline) return false;
     const pendingOwnership = await advancePendingDownloadOwnership(error, { timeoutMs: 5_000 });
     if (pendingOwnership === 'waiting') {
       await new Promise(resolve => setTimeout(resolve, 250));
@@ -214,7 +275,7 @@ async function recoverPendingDownloadCleanup(error) {
           ...entry, now: new Date().toISOString(), outcome: resolution,
         }), { auditId }),
     });
-    if (outcome === 'resolved') return;
+    if (outcome === 'resolved') return true;
     await new Promise(resolve => setTimeout(resolve, 250));
   }
 }

@@ -55,6 +55,64 @@ test('an unconfirmed export stops waiting and says so instead of staying queued'
   assert.equal(status.textContent, 'estado da auditoria nova');
 });
 
+test('the report follows the durable receipt and names a partial delivery instead of staying queued', async () => {
+  const { describeExportDelivery, exportDeliveryText } = await import('../../src/export/export-outcome-message.js');
+  const watchSource = `${requestSource}; watchExportOutcome`;
+  const runWatch = ({ attempts, cleanupPending = false }) => {
+    const timers = [];
+    const status = { textContent: '' };
+    const regenerate = {};
+    const watch = runInNewContext(watchSource, {
+      auditModel: { auditId: 'audit-a' }, status, regenerate,
+      EXPORT_CLEANUP_MESSAGE: 'Um arquivo obsoleto da exportação não pôde ser removido com confirmação; tente gerar o relatório novamente.',
+      describeExportDelivery, exportDeliveryText,
+      store: {
+        async getLatest() {
+          if (cleanupPending) return { auditId: 'audit-a', exportAttempt: 2, exportCleanupPending: true };
+          const state = attempts.shift();
+          return state ? { auditId: 'audit-a', exportAttempt: 2, ...state } : { auditId: 'audit-a', exportAttempt: 2 };
+        },
+      },
+      setTimeout(callback) { timers.push(callback); return timers.length; },
+      clearTimeout() {},
+      Date,
+    });
+    return { watch, timers, status, regenerate };
+  };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+
+  const partial = runWatch({
+    attempts: [{ exportStatus: 'partial', deliveryReceipt: {
+      status: 'partial',
+      limitations: ['O artefato PDF não concluiu o download (interrompido).'],
+      formats: [
+        { format: 'html', status: 'complete' },
+        { format: 'pdf', status: 'interrupted', failureCode: 'DOWNLOAD_INTERRUPTED' },
+      ],
+    } }],
+  });
+  const pending = partial.watch('audit-a', 1);
+  await flush();
+  assert.equal(partial.timers.length, 1, 'the report polls instead of waiting for a worker event');
+  partial.timers.shift()();
+  await flush();
+  await pending;
+  assert.match(partial.status.textContent, /Alguns arquivos do relatório não puderam ser baixados/u);
+  assert.match(partial.status.textContent, /PDF: o navegador interrompeu o download/u);
+  assert.match(partial.status.textContent, /exporte novamente/u);
+  assert.doesNotMatch(partial.status.textContent, /na fila de geração/u);
+  assert.equal(partial.regenerate.disabled, false);
+
+  const cleanup = runWatch({ attempts: [], cleanupPending: true });
+  const cleanupPending = cleanup.watch('audit-a', 1);
+  await flush();
+  cleanup.timers.shift()();
+  await flush();
+  await cleanupPending;
+  assert.match(cleanup.status.textContent, /arquivo obsoleto da exportação/u);
+  assert.doesNotMatch(cleanup.status.textContent, /na fila de geração/u);
+});
+
 test('regenerate uses the same current checkbox choice as the main export button', () => {
   const start = source.indexOf("regenerate.addEventListener('click'");
   const handler = source.slice(start, source.indexOf('\nreturnToPage.addEventListener', start));
