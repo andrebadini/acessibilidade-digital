@@ -17,3 +17,18 @@ export const TAB_READING_ANSWERS = Object.freeze([
   Object.freeze({ answer: 'não conforme', label: 'Não', tone: 'nao' }),
   Object.freeze({ answer: 'não foi possível determinar', label: 'Não sei', tone: 'nao-sei' }),
 ]);
+
+/**
+ * O que a pessoa lê depois de responder, com as palavras da própria pergunta.
+ *
+ * É a frase que a caixa colorida da verificação guiada mostra e a que a linha da seção no arquivo
+ * entregue mostra: a resposta registrada é a mesma pergunta ("o que o leitor de tela fala corresponde a
+ * este elemento?") e o rótulo técnico — "Não conforme (não atende ao item)" — é justamente o jargão que
+ * ela não tem como interpretar. Como o módulo acima existe para as duas superfícies não divergirem, a
+ * frase mora aqui, e não em cada uma.
+ */
+export const TAB_READING_ANSWER_TEXT = Object.freeze({
+  conforme: 'Sua resposta: Sim — corresponde.',
+  'não conforme': 'Sua resposta: Não — o que o leitor de tela fala não corresponde a este elemento.',
+  'não foi possível determinar': 'Sua resposta: Não sei.',
+});

@@ -25,17 +25,22 @@ O pedido tinha cinco partes:
 
 ## 1. Qual item normativo, e por quê 5.13.10
 
-A regra ficou presa ao item **5.13.10 — Componentes com nome acessível** (requisito; WCAG 4.1.2), e não
-ao **5.13.12**.
+A regra ficou presa ao item **5.13.10 — Componentes com nome acessível** (requisito; WCAG 4.1.2). Não
+ao **5.13.12**, que no catálogo (`src/core/normative/nbr17225.js`) é **"Semântica de componentes
+customizados"** — outro assunto, ainda que também toque em 4.1.2.
 
-O 5.13.12 trata da ordem/sequência de foco; a pergunta desta seção não é *"a ordem faz sentido?"* e sim
-*"o que o leitor de tela anuncia corresponde a este elemento (o que ele é e o que faz)?"* — que é
-exatamente o objeto do 5.13.10: o nome acessível e a função do componente. O item 5.13.10 passou a
-declarar **duas** regras: a automática `accessible-component-name` (nome acessível ausente) e a nova
-`tab-reading-announcement` (o anúncio conferido à mão, parada por parada). A segunda é **sempre
-`cantTell`**: um anúncio só é incorreto depois que a pessoa responde "Não" — o motor nunca conclui
-sozinho. A ordem de Tab entra como **contexto** (a sequência é o eixo da seção, e o mapa do teclado já
-responde pelo 5.13.12).
+A pergunta desta seção não é *"a ordem faz sentido?"* e sim *"o que o leitor de tela anuncia corresponde
+a este elemento (o que ele é e o que faz)?"* — que é exatamente o objeto do 5.13.10: o nome acessível e
+a função do componente. O item 5.13.10 passou a declarar **duas** regras: a automática
+`accessible-component-name` (nome acessível ausente) e a nova `tab-reading-announcement` (o anúncio
+conferido à mão, parada por parada). A segunda é **sempre `cantTell`**: um anúncio só é incorreto depois
+que a pessoa responde "Não" — o motor nunca conclui sozinho.
+
+A ordem de Tab entra como **contexto**, não como item avaliado: a sequência é o eixo da seção (a pessoa
+segue a página na ordem em que o teclado a percorre), e os itens que tratam de teclado seguem onde
+estavam — **5.1.4 — Ordem de foco previsível** (WCAG 2.4.3) para a ordem, e **5.1.13 — Acessibilidade
+por teclado parcial** (WCAG 2.1.1) para o mapa do teclado, de onde saem as paradas desta seção. Nenhum
+dos dois é afirmado ou alterado por esta regra.
 
 ## 2. Como a seção funciona
 

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { FULL_PAGE_WARM_UP, establishWidenedLayout, warmUpFullPageLayout } from '../../src/background/full-page-warm-up.js';
+import { FULL_PAGE_WARM_UP, establishWidenedLayout, restoreRenderedViewport, warmUpFullPageLayout } from '../../src/background/full-page-warm-up.js';
 
-const METRICS = altura => ({ cssContentSize: { width: 800, height: altura }, cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } });
+const METRICS = altura => ({
+  cssContentSize: { width: 800, height: altura },
+  cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+  cssVisualViewport: { clientWidth: 800, clientHeight: 600 },
+});
 
 /**
  * Relógio e espera falsos: o teste não pode depender de tempo real. Cada `delay(ms)` empurra o relógio,
@@ -206,6 +210,86 @@ test('cancelamento no alargamento atravessa, em vez de virar falha silenciosa', 
 test('sem cliente CDP ou sem passo da auditoria o alargamento é simplesmente pulado', async () => {
   for (const entrada of [{}, { cdp: {}, step: async operation => operation() }, { cdp: { async command() { return {}; } } }]) {
     const resultado = await establishWidenedLayout(entrada);
+    assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'unavailable' });
+  }
+});
+
+// ------------------------------------------------------------------ reposição da área de renderização
+//
+// A captura com `captureBeyondViewport` esconde a barra de rolagem e deixa a página ~15 px mais larga; no
+// Chrome 152 o estado continua valendo depois dela. O que estes testes fixam: a reposição instala uma
+// sobreposição DIFERENTE (medida: com a mesma, o navegador não recalcula nada) e a limpa em seguida, sem
+// tocar na largura — e não mexe na página quando não há barra de rolagem para perder. A sobreposição usa a
+// ÁREA VISÍVEL, não o conteúdo: medida no Chrome 152, a do tamanho do conteúdo tira a rolagem da página por
+// um instante e ela perde e recupera a posição (dois eventos de `scroll`), coisa que o mapa do teclado não
+// pode provocar.
+
+test('repõe a área de renderização instalando uma sobreposição diferente e limpando-a', async () => {
+  const calls = [];
+  const cdp = { async command(method, params = {}) { calls.push([method, params]); return METRICS(2_400); } };
+  const resultado = await restoreRenderedViewport({ cdp, step: async operation => operation() });
+
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: true, reason: 'restored' });
+  assert.deepEqual(calls.map(([method]) => method),
+    ['Page.getLayoutMetrics', 'Emulation.setDeviceMetricsOverride', 'Emulation.clearDeviceMetricsOverride']);
+  const params = calls[1][1];
+  assert.equal(params.width, 800, 'a largura é preservada: é dela que dependem srcset e consultas de mídia');
+  assert.equal(params.height, 599, 'a altura parte da área visível (600) e difere dela, senão não recalcula');
+  assert.ok(params.height < 2_400,
+    'a sobreposição não pode ter a altura do conteúdo: isso tira a rolagem da página por um instante');
+  assert.equal(params.mobile, false);
+  assert.equal(params.deviceScaleFactor, 1);
+});
+
+test('página que não rola não é tocada: sem barra de rolagem não havia o que perder', async () => {
+  const calls = [];
+  const cdp = { async command(method) { calls.push(method); return METRICS(600); } };
+  const resultado = await restoreRenderedViewport({ cdp, step: async operation => operation() });
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'no-scrollbar' });
+  assert.deepEqual(calls, ['Page.getLayoutMetrics']);
+});
+
+test('sem tamanho de página a reposição não chega a instalar sobreposição', async () => {
+  const calls = [];
+  const cdp = { async command(method) { calls.push(method); return { cssContentSize: { width: 0, height: 0 } }; } };
+  const resultado = await restoreRenderedViewport({ cdp, step: async operation => operation() });
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'size-unavailable' });
+  assert.deepEqual(calls, ['Page.getLayoutMetrics']);
+});
+
+test('sem a área visível a reposição não adivinha tamanho: pula em vez de instalar sobreposição', async () => {
+  const calls = [];
+  const cdp = {
+    async command(method) {
+      calls.push(method);
+      return { cssContentSize: { width: 800, height: 2_400 } };
+    },
+  };
+  const resultado = await restoreRenderedViewport({ cdp, step: async operation => operation() });
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'size-unavailable' });
+  assert.deepEqual(calls, ['Page.getLayoutMetrics']);
+});
+
+test('falha na reposição é silenciosa, e cancelamento atravessa', async () => {
+  const falha = { async command() { throw new Error('CDP_COMMAND_FAILED'); } };
+  const resultado = await restoreRenderedViewport({ cdp: falha, step: async operation => operation() });
+  assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'failed' });
+
+  const controlador = new AbortController();
+  controlador.abort(new DOMException('Operação cancelada.', 'AbortError'));
+  const cdp = {
+    async command() {
+      throw new DOMException('Operação cancelada.', 'AbortError');
+    },
+  };
+  await assert.rejects(
+    restoreRenderedViewport({ cdp, step: async operation => operation(), signal: controlador.signal }),
+    error => error?.name === 'AbortError');
+});
+
+test('sem cliente CDP ou sem passo da auditoria a reposição é simplesmente pulada', async () => {
+  for (const entrada of [{}, { cdp: {}, step: async operation => operation() }, { cdp: { async command() { return {}; } } }]) {
+    const resultado = await restoreRenderedViewport(entrada);
     assert.deepEqual({ ran: resultado.ran, reason: resultado.reason }, { ran: false, reason: 'unavailable' });
   }
 });

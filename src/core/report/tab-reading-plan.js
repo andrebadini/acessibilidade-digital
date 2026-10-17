@@ -1,5 +1,5 @@
 import { TAB_READING_NBR_ITEM, TAB_READING_RULE_ID } from '../rules/tab-reading.js';
-import { ANSWER_LABELS, describeEvidenceElement, formatLocalInstant, layHint } from './lay-review.js';
+import { describeEvidenceElement, formatLocalInstant, layHint } from './lay-review.js';
 
 // Leitura por Tab: as linhas da seção própria da verificação guiada e o texto único de constatação.
 //
@@ -15,13 +15,15 @@ import { ANSWER_LABELS, describeEvidenceElement, formatLocalInstant, layHint } f
 // Os textos ficam em `tab-reading-text.js` (sem dependências) porque a página de conferência por Tab,
 // que não carrega o motor de regras, diz a mesma pergunta e o mesmo aviso.
 import {
-  TAB_READING_ANSWERS, TAB_READING_HINT_LABEL, TAB_READING_INTRO, TAB_READING_LISTEN_LABEL,
-  TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_READER_NOTICE, TAB_READING_SECTION_TITLE,
+  TAB_READING_ANSWER_TEXT, TAB_READING_ANSWERS, TAB_READING_HINT_LABEL, TAB_READING_INTRO,
+  TAB_READING_LISTEN_LABEL, TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_READER_NOTICE,
+  TAB_READING_SECTION_TITLE,
 } from './tab-reading-text.js';
 
 export {
-  TAB_READING_ANSWERS, TAB_READING_HINT_LABEL, TAB_READING_INTRO, TAB_READING_LISTEN_LABEL,
-  TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_READER_NOTICE, TAB_READING_SECTION_TITLE,
+  TAB_READING_ANSWER_TEXT, TAB_READING_ANSWERS, TAB_READING_HINT_LABEL, TAB_READING_INTRO,
+  TAB_READING_LISTEN_LABEL, TAB_READING_NO_VOICE_MESSAGE, TAB_READING_QUESTION, TAB_READING_READER_NOTICE,
+  TAB_READING_SECTION_TITLE,
 };
 
 /**
@@ -240,7 +242,10 @@ export function projectTabReading(model) {
       hints: [...row.hints],
       elementEvidenceId: row.evidence?.evidenceId ?? null,
       answer: row.decision?.answer ?? null,
-      answerLabel: row.decision ? ANSWER_LABELS[row.decision.answer] ?? row.decision.answer : null,
+      // A frase da resposta, não o rótulo técnico: é a mesma que a verificação guiada mostra na caixa
+      // colorida (ver `TAB_READING_ANSWER_TEXT`).
+      answerLabel: row.decision
+        ? TAB_READING_ANSWER_TEXT[row.decision.answer] ?? row.decision.answer : null,
       note: row.decision?.note ?? null,
       evaluator: row.decision?.evaluator ?? null,
       decidedAtLabel: row.decision ? formatLocalInstant(row.decision.decidedAt, timezone) : null,

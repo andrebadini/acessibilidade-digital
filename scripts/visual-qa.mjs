@@ -75,6 +75,10 @@ const PERSISTENCE_WAIT_MS = 6_000;
 const SELECTIONS_PER_PAGE = 3;
 // Quantos sinais distintos o roteiro chega a reconhecer antes de escolher os 3 da captura.
 const SELECTION_PROBES = 8;
+// Quantas vezes o roteiro repete o MESMO gesto "Ir ao elemento do sinal N" quando o alvo está em um
+// elemento que a própria página esconde naquele instante (o carrossel da fixture troca de slide a cada
+// 2 s, então o alvo volta a existir alguns segundos depois — é a pessoa insistindo no mesmo botão).
+const GO_TO_GESTURE_LIMIT = 12;
 const ROLLING_SHOTS = 3;
 
 // ---------------------------------------------------------------------------------------------
@@ -694,6 +698,70 @@ async function clickByFocusId(target, focusId) {
   if (clicked !== true) throw new Error(`FOCO_NAO_ENCONTRADO: ${focusId}`);
 }
 
+// Quando o anel não aparece, o roteiro precisa do motivo, não da impressão. A leitura não pode ela
+// mesma virar erro (por isso não passa por `attempt`): ela responde três perguntas — o painel recusou
+// o gesto (e disse por quê), o detalhe aberto é o da ocorrência certa, e o sinal ficou onde?
+async function diagnoseSelection({ panel, page, number, target, scrollWatch, ringSeenAt }) {
+  const safeEvaluate = async (node, expression) => {
+    try { return await evaluate(node, expression); } catch { return null; }
+  };
+  const markers = await safeEvaluate(panel, PANEL_MARKERS);
+  const overlay = await safeEvaluate(page, OVERLAY_STATE);
+  const group = overlay?.groups?.find(entry => entry.number === number) ?? null;
+  // Onde o próprio produto aceita desenhar o anel: rolar a página em passos mostra se o alvo existe
+  // em algum lugar do documento. Sem isso, "o anel não apareceu" não diferencia "o alvo não é
+  // desenhável" de "o gesto não rolou até ele" — e, se a ETIQUETA aparecer sem o anel enquanto a
+  // ocorrência está selecionada, aí sim o defeito é do produto.
+  const found = [];
+  const height = (await safeEvaluate(page, 'Math.max(document.documentElement.scrollHeight, innerHeight)')) ?? 0;
+  for (let y = 0; y <= height; y += 400) {
+    await safeEvaluate(page, `(() => { scrollTo({left:0, top:${y}, behavior:'instant'}); return true; })()`);
+    await sleep(220);
+    const state = await safeEvaluate(page, OVERLAY_STATE);
+    const seen = state?.groups?.find(entry => entry.number === number) ?? null;
+    if (seen?.visible === true || seen?.ringVisible === true) {
+      found.push({ y: Math.round(y), label: seen.visible, ring: seen.ringVisible, box: seen.ring });
+    }
+  }
+  await safeEvaluate(page, `(() => { scrollTo({left:0, top:0, behavior:'instant'}); return true; })()`);
+  await sleep(200);
+  return {
+    goButtonPresented: await safeEvaluate(panel,
+      `Boolean(document.querySelector('[data-result-detail] .detail-actions [data-action="go-to-page-marker"]'))`),
+    detailOpenForTarget: await safeEvaluate(panel, `(() => {
+      const card = [...document.querySelectorAll('button[data-intent="SELECT_OCCURRENCE"]')]
+        .find(node => node.dataset.focusId === ${JSON.stringify(target)});
+      const detail = document.querySelector('[data-result-detail]');
+      return { selected: card?.getAttribute('aria-pressed') === 'true' ?? null,
+        detailPresent: Boolean(detail), actions: ${DETAIL_ACTIONS} };
+    })()`),
+    panelStatus: markers?.status ?? null,
+    panelMessage: markers?.message ?? null,
+    live: await safeEvaluate(panel, PANEL_HIGHLIGHT_LIVE),
+    selectTrace: (await safeEvaluate(panel, 'globalThis.__auditaQaSelectTrace ?? null')) ?? null,
+    scroll: overlay?.scroll ?? null,
+    scrollWatch: scrollWatch ?? null,
+    ringSeenAt: found,
+    group: group ? { visible: group.visible, onScreen: group.onScreen, ringVisible: group.ringVisible,
+      ring: group.ring, button: group.button, candidates: group.targetCandidateCount,
+      underRing: group.paintedUnderRing } : null,
+  };
+}
+
+// Depois do clique em "Ir ao elemento do sinal", a página deveria rolar. Uma leitura só, 15 s depois,
+// confundiria "não rolou" com "rolou e voltou": esta janela curta guarda o que a rolagem fez.
+async function watchScroll(page, { steps = 10, intervalMs = 120 } = {}) {
+  const seen = [];
+  for (let step = 0; step < steps; step += 1) {
+    try {
+      const value = await evaluate(page, '({x: Math.round(scrollX), y: Math.round(scrollY)})');
+      if (value && !seen.some(entry => entry.x === value.x && entry.y === value.y)) seen.push(value);
+    } catch { /* a página pode estar trocando de contexto */ }
+    await sleep(intervalMs);
+  }
+  return seen;
+}
+
 async function waitForPanelScreen(panel, accepted, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   const seen = [];
@@ -1158,20 +1226,46 @@ async function auditPage({ target, outRoot, cleanups, chromeBinary, reloadCheck 
       const name = `04-selecionado-${index + 1}.png`;
       const entry = { number, title: occurrence.title, classification: occurrence.classification,
         focusId: occurrence.focusId, screenshot: null, ringVisible: false,
-        highlightOffered: false, highlightAction: null, highlightBox: null };
+        highlightOffered: false, highlightAction: null, highlightBox: null,
+        goButtonPresented: null, goGestures: 0, diagnostic: null };
+      let scrollWatch = null;
       const selected = await attempt(`selecionar-${index + 1}`, async () => {
         await clickByFocusId(panel, occurrence.focusId);
         // Como o usuário faria: "Ir ao elemento do sinal N" rola a página até o elemento e o seleciona.
         await sleep(250);
         const go = await evaluate(panel, `Boolean(document.querySelector('[data-result-detail] .detail-actions [data-action="go-to-page-marker"]'))`);
-        if (go) await click(panel, '[data-result-detail] .detail-actions [data-action="go-to-page-marker"]');
+        entry.goButtonPresented = go;
+        // A fixture tem alvos que a PRÓPRIA página esconde: o carrossel troca de slide a cada 2 s
+        // (CASO 10), e um elemento em slide inativo não tem caixa — o navegador não tem como rolar até
+        // ele e o produto não desenha contorno de caixa inexistente. Quem audita insiste no mesmo botão;
+        // o roteiro insiste de forma medida — o MESMO gesto, na MESMA ocorrência — até a página poder
+        // mostrar o alvo, e registra quantos gestos foram precisos. A exigência não muda: se o anel não
+        // aparecer em nenhuma tentativa, o passo falha como antes.
+        let gestures = 0;
+        if (go) {
+          for (gestures = 1; gestures <= GO_TO_GESTURE_LIMIT; gestures += 1) {
+            await click(panel, '[data-result-detail] .detail-actions [data-action="go-to-page-marker"]');
+            const drawn = await waitForValue(page, ringForNumber(number), value => value?.ringVisible === true,
+              { timeoutMs: gestures === 1 ? 2_000 : 700, intervalMs: 100 }).catch(() => null);
+            if (drawn) break;
+          }
+        }
+        entry.goGestures = gestures;
+        scrollWatch = await watchScroll(page, { steps: gestures > 1 ? 6 : 10 });
         await waitForValue(page, ringForNumber(number), value => value?.ringVisible === true,
           { timeoutMs: 15_000, intervalMs: 100 });
         await sleep(300);
         return true;
       });
       entry.ringVisible = selected.ok;
-      if (!selected.ok) entry.erro = 'o anel do sinal selecionado não apareceu na página';
+      if (!selected.ok) {
+        entry.erro = 'o anel do sinal selecionado não apareceu na página';
+        // "O anel não apareceu" sozinho não diz se o gesto foi recusado pelo produto, se a página não
+        // rolou ou se o alvo está fora da tela. A leitura abaixo separa os três casos: a resposta que o
+        // painel deu, se o detalhe continuou aberto e onde o sinal ficou depois do gesto.
+        entry.diagnostic = await diagnoseSelection({ panel, page, number,
+          target: occurrence.focusId, scrollWatch });
+      }
 
       // O anel marca o sinal escolhido; o "Destacar elemento na página" acrescenta a caixa com o
       // rótulo da falha, que é a marcação mais forte que a pessoa vê. Vale capturar as duas.
@@ -1967,7 +2061,19 @@ const TAB_READING_STATE = `(() => {
       listen: cell(row, 'Anúncio estimado')?.querySelector('.lay-tab-listen')?.getAttribute('aria-label') ?? null,
       answers: [...(cell(row, 'Pergunta')?.querySelectorAll('[data-tab-reading-answer]') ?? [])]
         .map(button => button.getAttribute('aria-label')),
+      // O seletor CSS não disputa a coluna: ele mora fechado em "Detalhe técnico" (leigo não lê seletor).
+      technicalDetail: (() => {
+        const details = cell(row, 'Ordem / elemento')?.querySelector('details.lay-tab-detail');
+        return details ? { open: details.open, summary: details.querySelector('summary')?.textContent ?? null } : null;
+      })(),
     })),
+    // A cor do quadro da resposta é o que prova que o quadro SEGUE a resposta (verde em "Sim", vermelho em
+    // "Não", cinza em "Não sei"). Sem medir, a captura só mostra o tom para quem olha.
+    answeredStyles: [...section.querySelectorAll('.lay-answered')].map(node => {
+      const style = getComputedStyle(node);
+      return { answer: node.getAttribute('data-lay-answer'), background: style.backgroundColor,
+        borderInlineStart: style.borderInlineStartColor, text: flat(node).slice(0, 200) };
+    }),
   };
 })()`;
 
@@ -2502,6 +2608,13 @@ function printPageSummary(summary) {
       if (!item.ringVisible) parts.push('sem anel');
       parts.push(item.highlightOffered ? 'com destaque' : 'sem destaque na página');
       if (!item.screenshot) parts.push('sem captura');
+      // O diagnóstico acompanha a linha: sem ele, "sem anel" não diz se o produto recusou o gesto.
+      if (item.diagnostic) parts.push(`[painel ${item.diagnostic.panelStatus ?? '?'}` +
+        `${item.diagnostic.panelMessage ? `: ${item.diagnostic.panelMessage}` : ''}` +
+        `; rolagem ${item.diagnostic.scroll ? `${item.diagnostic.scroll.x},${item.diagnostic.scroll.y}` : '?'}` +
+        `; rolagem-apos-o-clique ${(item.diagnostic.scrollWatch ?? []).map(entry => entry.y).join('/') || '?'}` +
+        `; alvo-em ${(item.diagnostic.ringSeenAt ?? []).map(entry => `${entry.y}(etiqueta=${entry.label},anel=${entry.ring})`).join(' ') || 'nenhuma posição'}` +
+        `; alvo ${item.diagnostic.group ? `visível=${item.diagnostic.group.visible} naTela=${item.diagnostic.group.onScreen} anel=${item.diagnostic.group.ringVisible}` : 'ausente'}]`);
       return parts.join(' ');
     }).join('; ')}`);
   }

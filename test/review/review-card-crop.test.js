@@ -8,6 +8,9 @@ import * as evidenceCrop from '../../src/core/report/evidence-crop.js';
 import { EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND } from '../../src/core/report/evidence-highlight.js';
 import { GUIDED_REVIEW_TREATMENT_V1 } from '../../src/core/report/evidence-treatment.js';
 import { TEST_PNG, TEST_PNG_HASH } from '../report/annotation-map-fixture.js';
+// O registro das imagens de recorte é o mesmo do relatório (ver crop-image-registry.js): o sandbox
+// reproduz o que o módulo real importa.
+import { cropImageRegistry } from '../../src/review/crop-image-registry.js';
 
 // O cartão da revisão guiada mostra o elemento por inteiro: a miniatura guardada quando existe e, sem
 // ela, o recorte da captura da página inteira na região do elemento — nunca uma caixa adivinhada.
@@ -68,7 +71,7 @@ function render(model) {
   const auditModel = model;
   const before = structuredClone(auditModel);
   const context = {
-    ...layReview, ...evidenceCrop, EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND, GUIDED_REVIEW_TREATMENT_V1, auditModel,
+    ...layReview, ...evidenceCrop, cropImageRegistry, EVIDENCE_HIGHLIGHT_UNMARKED_LEGEND, GUIDED_REVIEW_TREATMENT_V1, auditModel,
     document: {
       createElement: tag => new Element(tag), createElementNS: (_namespace, tag) => new Element(tag),
       createTextNode: text => ({ textContent: text }), body: new Element('body'),
