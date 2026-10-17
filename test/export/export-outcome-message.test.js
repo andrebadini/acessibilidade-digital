@@ -109,3 +109,83 @@ test('missing or hostile receipt data degrades to a readable failure, never to u
     assert.doesNotMatch(text, /undefined|NaN/u);
   }
 });
+
+test('a single-format export confirms only the file that was asked for', () => {
+  const outcome = describeExportDelivery({
+    exportStatus: 'partial',
+    deliveryReceipt: { status: 'partial', limitations: [], formats: [{ format: 'pdf', status: 'complete' }] },
+  }, ['pdf']);
+  assert.equal(outcome.tone, 'info');
+  assert.equal(outcome.headline, 'PDF baixado e o recibo local foi confirmado.');
+  assert.deepEqual(outcome.lines, []);
+  assert.deepEqual(outcome.results, [{ format: 'pdf', ok: true, text: 'PDF baixado.' }]);
+});
+
+test('two formats are named together and each one gets its own result line', () => {
+  const outcome = describeExportDelivery({
+    exportStatus: 'partial',
+    deliveryReceipt: {
+      status: 'partial',
+      limitations: ['O artefato CSV não concluiu o download (interrompido).'],
+      formats: [
+        { format: 'html', status: 'complete' },
+        { format: 'csv', status: 'interrupted', failureCode: 'DOWNLOAD_INTERRUPTED' },
+      ],
+    },
+  }, 'html,csv');
+  assert.equal(outcome.tone, 'error');
+  assert.match(outcome.headline, /Alguns dos arquivos pedidos/u);
+  assert.deepEqual(outcome.results.map(result => [result.format, result.ok]), [['html', true], ['csv', false]]);
+  assert.match(outcome.results[1].text, /CSV não foi baixado: o navegador interrompeu o download\./u);
+});
+
+test('a cancelled save dialog says the person cancelled that file and does not blame the disk', () => {
+  const outcome = describeExportDelivery({
+    exportStatus: 'partial',
+    deliveryReceipt: {
+      status: 'partial',
+      limitations: ['O download do artefato PDF foi cancelado por você.'],
+      formats: [{ format: 'pdf', status: 'interrupted', failureCode: 'DOWNLOAD_CANCELLED' }],
+    },
+  }, ['pdf']);
+  assert.equal(outcome.tone, 'error');
+  assert.equal(outcome.headline, 'PDF não foi baixado.');
+  assert.match(outcome.lines.join(' '), /PDF: você cancelou o salvamento\./u);
+  assert.match(outcome.guidance, /exporte novamente e confirme o salvamento na janela do navegador/u);
+  assert.deepEqual(outcome.results, [{ format: 'pdf', ok: false, text: 'PDF não foi baixado: você cancelou o salvamento.' }]);
+});
+
+test('a cancellation is not confused with a disk problem when other formats completed', () => {
+  const outcome = describeExportDelivery({
+    exportStatus: 'partial',
+    deliveryReceipt: {
+      status: 'partial',
+      limitations: ['O download do artefato CSV foi cancelado por você.'],
+      formats: [
+        { format: 'html', status: 'complete' },
+        { format: 'csv', status: 'interrupted', failureCode: 'DOWNLOAD_CANCELLED' },
+      ],
+    },
+  }, ['html', 'csv']);
+  assert.match(outcome.lines.join(' '), /Baixados: HTML\./u);
+  assert.match(outcome.lines.join(' '), /CSV: você cancelou o salvamento\./u);
+  assert.match(outcome.guidance, /confirme o salvamento na janela do navegador/u);
+  assert.doesNotMatch(outcome.guidance, /espaço livre/u);
+});
+
+test('a receipt that contains formats nobody asked for is not presented as success', () => {
+  const outcome = describeExportDelivery({
+    exportStatus: 'partial',
+    deliveryReceipt: {
+      status: 'partial',
+      limitations: [],
+      formats: [
+        { format: 'html', status: 'complete' },
+        { format: 'pdf', status: 'complete' },
+      ],
+    },
+  }, ['pdf']);
+  assert.notEqual(outcome.tone, 'info');
+  assert.doesNotMatch(outcome.headline, /baixado e o recibo local foi confirmado/u);
+  assert.match(exportDeliveryText(outcome), /não pôde ser conferido|não foi baixado/u);
+});

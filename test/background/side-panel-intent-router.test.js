@@ -1303,6 +1303,17 @@ test('routes report and export envelopes through the single launch authorities w
   }
   const openCall = calls.find(([name]) => name === 'open');
   assert.deepEqual(calls.filter(([name]) => name === 'request-export').map(([, value]) => value.deleteAfterCompleteExport), [false, true]);
+  for (const formats of ['pdf', 'html,json', 'html,pdf,csv,json']) {
+    const response = await router.dispatch({
+      envelope: parsed({ type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId: SESSION, auditId: 'audit-1', formats }),
+      sender,
+    });
+    assert.equal(response.ok, true);
+    assert.deepEqual(calls.at(-1), ['request-export', {
+      auditId: 'audit-1', sessionCapabilityId: SESSION, sender,
+      deleteAfterCompleteExport: false, formats,
+    }]);
+  }
   assert.deepEqual(calls.find(([name]) => name === 'delete-audit')[1].manualAuthorization, {
     version: 1, scope: 'one', auditId: 'audit-1', authorizedAt: '2026-08-29T12:00:00.000Z',
   });
@@ -1310,7 +1321,8 @@ test('routes report and export envelopes through the single launch authorities w
     auditId: 'audit-1', windowId: 9,
     sourceSessionCapabilityId: SESSION, sourceSessionState: 'result',
   });
-  assert.doesNotMatch(JSON.stringify(calls), /model|summary|projection|bytes|formats/iu);
+  // `formats` atravessa apenas como seleção canônica; modelo, artefatos e bytes nunca.
+  assert.doesNotMatch(JSON.stringify(calls), /model|summary|projection|bytes|artifact|evidence/iu);
 });
 
 test('denies report launch when the authorized source session is not exact or no longer report-capable', async t => {

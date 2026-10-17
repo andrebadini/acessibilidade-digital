@@ -24,6 +24,8 @@ const REAL_CHROME_E2E = new Set([
   'test/e2e/current-page-pixel-direct-retire-mv3.test.mjs',
   'test/e2e/download-no-destination-mv3.test.mjs',
   'test/e2e/download-uniquify-mv3.test.mjs',
+  'test/e2e/export-download-prompt-mv3.test.mjs',
+  'test/e2e/export-format-buttons-mv3.test.mjs',
   'test/e2e/field-label-review.test.mjs',
   'test/e2e/input-purpose-observation.test.mjs',
   'test/e2e/lazy-iframe-current-page-mv3.test.mjs',

@@ -1,4 +1,5 @@
 import { canonicalReviewMarks } from '../core/review/review-marks.js';
+import { EXPORT_FORMATS_V1, isCanonicalExportFormatsV1 } from '../export/export-formats.js';
 
 const MAX_ENVELOPE_BYTES = 4096;
 const MAX_REVIEW_DECISION_ENVELOPE_BYTES = 24 * 1024;
@@ -89,11 +90,14 @@ const MESSAGE_SCHEMAS = deepFreeze({
 export function parseWorkerMessage(message) {
   const type = readSafeOwnEnumerableDataType(message);
   if (!type.found || !Object.hasOwn(MESSAGE_SCHEMAS, type.value)) return failure('UNKNOWN_MESSAGE');
-  const copy = copyExactDataRecord(message, MESSAGE_SCHEMAS[type.value]) ??
+  const baseKeys = MESSAGE_SCHEMAS[type.value];
+  const copy = copyExactDataRecord(message, baseKeys) ??
     (type.value === 'REPORT_REQUEST_EXPORT'
-      ? copyExactDataRecord(message, [...MESSAGE_SCHEMAS[type.value], 'deleteAfterCompleteExport'])
+      ? copyExactDataRecord(message, [...baseKeys, 'deleteAfterCompleteExport']) ??
+        copyExactDataRecord(message, [...baseKeys, 'formats']) ??
+        copyExactDataRecord(message, [...baseKeys, 'deleteAfterCompleteExport', 'formats'])
       : type.value === 'REPORT_COMMIT_REVIEW_DECISION'
-        ? copyExactDataRecord(message, [...MESSAGE_SCHEMAS[type.value], 'revise']) : null);
+        ? copyExactDataRecord(message, [...baseKeys, 'revise']) : null);
   if (!copy) return failure('INVALID_MESSAGE');
   if (!hasFlatPrimitiveShape(copy)) return failure('INVALID_MESSAGE');
   const byteLength = capturedUtf8Length(copy);
@@ -195,6 +199,13 @@ function validWorkerEnvelope(value) {
       safeChromeId(value.windowId);
   }
   if (['REPORT_REQUEST_EXPORT', 'REPORT_RETURN_TO_SOURCE', 'REPORT_DELETE_AUDIT', 'REPORT_DELETE_ALL_AUDITS'].includes(value.type)) {
+    const deleteRequested = value.type === 'REPORT_REQUEST_EXPORT' &&
+      Object.hasOwn(value, 'deleteAfterCompleteExport') && value.deleteAfterCompleteExport === true;
+    const formats = value.type === 'REPORT_REQUEST_EXPORT' && Object.hasOwn(value, 'formats')
+      ? value.formats : undefined;
+    if (formats !== undefined && (!isCanonicalExportFormatsV1(formats) || formats.split(',').length !== EXPORT_FORMATS_V1.length && deleteRequested)) {
+      return false;
+    }
     return validOpaqueId(value.sessionCapabilityId) && validAuditId(value.auditId) &&
       (!Object.hasOwn(value, 'deleteAfterCompleteExport') || typeof value.deleteAfterCompleteExport === 'boolean');
   }

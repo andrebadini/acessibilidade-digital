@@ -1136,6 +1136,7 @@ async function genuineReportExport(options = {}) {
     auditSnapshotCapability: snapshot.capability,
     exportLeaseOwnerId: leaseOwnerId,
     exportAttempt: acquired.exportAttempt,
+    ...(options.formats === undefined ? {} : { formats: options.formats }),
   }, {
     urlApi: {
       createObjectURL() { return 'blob:chrome-extension://test/print'; },
@@ -1265,3 +1266,53 @@ function generatedModel(formats, issueCodes = [], options = {}) {
   };
   return refreshIntegrity(model);
 }
+
+test('persists a single-format PDF export as partial and hashes only the requested artifact', async () => {
+  const result = await genuineReportExport({ formats: ['pdf'] });
+  assert.deepEqual(result.requestedFormats, ['pdf']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['pdf']);
+  const persisted = await persistExportSuccess({
+    auditId: result.model.auditId, result, latest: { auditId: result.model.auditId, status: 'partial' },
+  }, { async commitAudit() {} });
+  assert.deepEqual(persisted.latest.deliveryReceipt.formats.map(entry => entry.format), ['pdf']);
+  assert.equal(persisted.latest.deliveryReceipt.status, 'partial');
+  assert.equal(persisted.latest.exportStatus, 'partial');
+});
+
+test('persists HTML and JSON as a two-format request without complaining about missing CSV or PDF', async () => {
+  const result = await genuineReportExport({ formats: ['html', 'json'] });
+  const persisted = await persistExportSuccess({
+    auditId: result.model.auditId, result, latest: { auditId: result.model.auditId, status: 'partial' },
+  }, { async commitAudit() {} });
+  assert.deepEqual(persisted.latest.deliveryReceipt.formats.map(entry => entry.format), ['html', 'json']);
+  assert.equal(persisted.latest.deliveryReceipt.status, 'partial');
+});
+
+test('a requested PDF that failed generation is accepted only with its controlled limitation', async () => {
+  const result = await genuineReportExport({ formats: ['html', 'pdf', 'json'], pdfFailure: true });
+  assert.deepEqual(result.requestedFormats, ['html', 'pdf', 'json']);
+  assert.deepEqual(result.formats.map(entry => entry.format), ['html', 'json']);
+  assert.match(result.deliveryReceipt.limitations.join(' '), /PDF não foi gerado/u);
+  const persisted = await persistExportSuccess({
+    auditId: result.model.auditId, result, latest: { auditId: result.model.auditId, status: 'partial' },
+  }, { async commitAudit() {} });
+  assert.equal(persisted.latest.deliveryReceipt.status, 'partial');
+
+  const unexplained = await genuineReportExport({ formats: ['html', 'json'] });
+  unexplained.requestedFormats = ['html', 'pdf', 'json'];
+  let committed = false;
+  await assert.rejects(async () => persistExportSuccess({
+    auditId: unexplained.model.auditId, result: unexplained, latest: {},
+  }, { async commitAudit() { committed = true; } }), /PDF|diagnóstico|parcial|formato|pedid/iu);
+  assert.equal(committed, false);
+});
+
+test('rejects a receipt that delivers a format nobody requested in this export', async () => {
+  const result = await genuineReportExport({ formats: ['html', 'json'] });
+  result.requestedFormats = ['json'];
+  let committed = false;
+  await assert.rejects(async () => persistExportSuccess({
+    auditId: result.model.auditId, result, latest: {},
+  }, { async commitAudit() { committed = true; } }), /formato|recibo|pedid|correla|resultado/iu);
+  assert.equal(committed, false);
+});

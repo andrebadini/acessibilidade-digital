@@ -19,6 +19,7 @@ import { createInstalledCoreRuleInventory } from '../../src/core/rules/core-rule
 import { reportInput } from '../report/helpers.js';
 import {
   AuditDeleteBusyError,
+  AuditExportLeaseConflictError,
   AuditStorageUnavailableError,
   createAuditStore,
   createInMemoryAuditStore,
@@ -460,6 +461,112 @@ test('a controlled partial delivery keeps an authenticated completion receipt af
       attemptId: String(acquired.exportAttempt), status: 'partial',
       formats: formats.map(({ filename: _filename, status: _status, ...entry }) => ({ ...entry, state: 'complete' })),
     });
+  });
+});
+
+test('a subset export keeps an exact partial receipt when nothing failed', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    for (const requested of [['pdf'], ['html', 'json']]) {
+      const store = factory();
+      const suffix = requested.join('-');
+      const auditId = `subset-receipt-${backend.toLowerCase()}-${suffix}`;
+      const { model, checkpoint, latest } = await terminalFixture(auditId);
+      await store.commitAuditWithCheckpointIfAbsent(auditId, model, checkpoint, latest,
+        { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+      const snapshot = await store.getAuditSnapshot(auditId);
+      const acquired = await store.acquireExportLease(auditId, snapshot.capability,
+        { ownerId: `export:${auditId}:pending`, now: '2026-08-29T12:00:01.000Z' });
+      const ownerId = `export:${auditId}:${acquired.exportAttempt}`;
+      await store.claimExportLease(auditId, snapshot.capability,
+        { ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:02.000Z' });
+      await store.beginExportDelivery(auditId, snapshot.capability,
+        { ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:03.000Z' });
+      const mime = {
+        html: 'text/html;charset=utf-8', pdf: 'application/pdf',
+        csv: 'text/csv;charset=utf-8', json: 'application/json;charset=utf-8',
+      };
+      const formats = [];
+      for (const [index, format] of requested.entries()) {
+        const identity = {
+          format, filename: `${auditId}.${format}`, mimeType: mime[format], byteSize: 20 + index,
+          sha256: String(index + 7).repeat(64), downloadId: 90 + index,
+        };
+        formats.push({ ...identity, status: 'complete' });
+        await store.recordExportDelivery(auditId, snapshot.capability, {
+          ownerId, exportAttempt: acquired.exportAttempt,
+          now: `2026-08-29T12:00:04.${String(index).padStart(3, '0')}Z`, state: 'terminal', ...identity,
+        });
+      }
+      await store.finalizeExportAndMaybeDelete(auditId, model, {
+        auditId, exportStatus: 'partial',
+        exportDeliveryIdentity: {
+          auditId, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
+          attemptId: String(acquired.exportAttempt),
+        },
+        deliveryReceipt: { status: 'partial', formats, limitations: [] },
+      }, snapshot.capability, {
+        ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:05.000Z',
+        clearDeliveryJournal: true, deleteAfterCompleteExport: false,
+      });
+
+      const receipt = await store.getExportReceipt(auditId);
+      assert.equal(receipt.status, 'partial');
+      assert.deepEqual(receipt.formats.map(row => row.format), requested);
+      assert.deepEqual(receipt.formats, formats.map(({ filename: _filename, status: _status, ...entry }) => ({
+        ...entry, state: 'complete',
+      })));
+      assert.equal(Object.isFrozen(receipt.formats), true);
+      assert.equal(Object.hasOwn(receipt, 'limitations'), false,
+        'a clean subset receipt must not invent limitations');
+    }
+  });
+});
+
+test('a subset receipt that claims a format absent from the journal is rejected without mutation', async t => {
+  for (const [backend, factory] of storeFactories()) await t.test(backend, async () => {
+    const store = factory();
+    const auditId = `subset-mismatch-${backend.toLowerCase()}`;
+    const { model, checkpoint, latest } = await terminalFixture(auditId);
+    await store.commitAuditWithCheckpointIfAbsent(auditId, model, checkpoint, latest,
+      { now: '2026-08-29T12:00:00.000Z', deleteAfterCompleteExport: false });
+    const snapshot = await store.getAuditSnapshot(auditId);
+    const acquired = await store.acquireExportLease(auditId, snapshot.capability,
+      { ownerId: `export:${auditId}:pending`, now: '2026-08-29T12:00:01.000Z' });
+    const ownerId = `export:${auditId}:${acquired.exportAttempt}`;
+    await store.claimExportLease(auditId, snapshot.capability,
+      { ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:02.000Z' });
+    await store.beginExportDelivery(auditId, snapshot.capability,
+      { ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:03.000Z' });
+    const pdf = {
+      format: 'pdf', filename: `${auditId}.pdf`, mimeType: 'application/pdf',
+      byteSize: 30, sha256: 'c'.repeat(64), downloadId: 95,
+    };
+    await store.recordExportDelivery(auditId, snapshot.capability, {
+      ownerId, exportAttempt: acquired.exportAttempt,
+      now: '2026-08-29T12:00:04.000Z', state: 'terminal', ...pdf,
+    });
+    const json = {
+      format: 'json', filename: `${auditId}.json`, mimeType: 'application/json;charset=utf-8',
+      byteSize: 31, sha256: 'd'.repeat(64), downloadId: 96,
+    };
+    await assert.rejects(store.finalizeExportAndMaybeDelete(auditId, model, {
+      auditId, exportStatus: 'partial',
+      exportDeliveryIdentity: {
+        auditId, modelRevision: snapshot.revision, modelHash: model.integrity.canonicalModelHash,
+        attemptId: String(acquired.exportAttempt),
+      },
+      deliveryReceipt: {
+        status: 'partial', limitations: [],
+        formats: [{ ...pdf, status: 'complete' }, { ...json, status: 'complete' }],
+      },
+    }, snapshot.capability, {
+      ownerId, exportAttempt: acquired.exportAttempt, now: '2026-08-29T12:00:05.000Z',
+      clearDeliveryJournal: true, deleteAfterCompleteExport: false,
+    }), error => error instanceof AuditExportLeaseConflictError);
+
+    assert.equal((await store.getAuditSnapshot(auditId)).revision, snapshot.revision);
+    const journal = await store.getExportDeliveryJournal(auditId);
+    assert.deepEqual(journal.map(entry => [entry.format, entry.state]), [['pdf', 'terminal']]);
   });
 });
 

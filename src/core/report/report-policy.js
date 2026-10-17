@@ -53,9 +53,11 @@ export function validateReportState(model) {
   const pdfFailed = [...generationCodes].some(code => PDF_FAILURE_CODES.has(code));
   const csvFailed = generationCodes.has('REPORT_CSV_UNAVAILABLE');
   const taggingFallback = generationCodes.has('REPORT_PDF_TAGGING_UNSUPPORTED');
-  if ((!hasPreparationFailure && ((formats.includes('pdf') === pdfFailed) ||
-    (formats.includes('csv') === csvFailed))) || artifact.pdfFallback !== taggingFallback ||
-    (taggingFallback && pdfFailed)) {
+  // A exportação por formato pode preparar só o que foi pedido: ausência de CSV ou PDF
+  // sem diagnóstico significa "não pedido", não falha. O que continua proibido é um
+  // diagnóstico de falha conviver com o formato declarado como preparado.
+  if ((pdfFailed && formats.includes('pdf')) || (csvFailed && formats.includes('csv')) ||
+    artifact.pdfFallback !== taggingFallback || (taggingFallback && pdfFailed)) {
     throw new TypeError('Formatos preparados contradizem os diagnósticos da geração.');
   }
   const expectedArtifactStatus = generationDiagnostics.length === 0 ? 'complete' : 'partial';

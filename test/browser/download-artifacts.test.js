@@ -1732,3 +1732,117 @@ test('a transient interrupted signal does not discard a download that Chrome rep
   assert.deepEqual(settled, { id: 77, state: 'complete' });
   assert.equal(listeners.size, 0, 'the terminal wait releases its listener');
 });
+
+test('a download waiting for the "save as" decision keeps waiting beyond the deadline instead of failing', async () => {
+  const listeners = new Set();
+  let item = { id: 120, state: 'in_progress', filename: '', exists: true };
+  let settle;
+  const settled = new Promise(resolve => { settle = resolve; });
+  const chromeApi = {
+    runtime: {},
+    downloads: {
+      onChanged: {
+        addListener(listener) { listeners.add(listener); },
+        removeListener(listener) { listeners.delete(listener); },
+      },
+      download(_options, callback) { callback(120); },
+      search(_query, callback) { callback([{ ...item }]); },
+    },
+  };
+  const adapter = createDownloadsAdapter(chromeApi, { createObjectURL() { return 'blob:test'; }, revokeObjectURL() {} });
+  let keepWaiting = 0;
+  const pending = adapter.waitForDownload(120, { timeoutMs: 300, keepWaiting: () => { keepWaiting += 1; } });
+  pending.then(value => settle({ value }), error => settle({ error }));
+  // O diálogo continua aberto por mais que o prazo original: cada inspeção renova a espera.
+  await new Promise(resolve => setTimeout(resolve, 700));
+  const state = await Promise.race([settled, Promise.resolve('pending')]);
+  assert.equal(state, 'pending', 'an open destination dialog must not expire the download deadline');
+  assert.ok(keepWaiting >= 3, 'the outer deadline must be renewed while the person decides');
+  item = { id: 120, state: 'complete', filename: '/tmp/audit.pdf', exists: true };
+  for (const listener of [...listeners]) listener({ id: 120, state: { current: 'complete' } });
+  assert.deepEqual(await pending, { id: 120, state: 'complete' });
+  assert.equal(listeners.size, 0);
+});
+
+test('a destination that never resolves is contained by the dialog wait ceiling', async () => {
+  // O mesmo estado "in_progress + filename vazio" também aparece quando o Chrome não consegue
+  // gravar na pasta de destino. A API não distingue os dois casos, então a renovação da espera
+  // tem teto: sem ele a exportação ficaria presa para sempre.
+  const listeners = new Set();
+  const item = { id: 122, state: 'in_progress', filename: '', exists: true };
+  const chromeApi = {
+    runtime: {},
+    downloads: {
+      onChanged: {
+        addListener(listener) { listeners.add(listener); },
+        removeListener(listener) { listeners.delete(listener); },
+      },
+      download(_options, callback) { callback(122); },
+      search(_query, callback) { callback([{ ...item }]); },
+    },
+  };
+  const adapter = createDownloadsAdapter(chromeApi, { createObjectURL() { return 'blob:test'; }, revokeObjectURL() {} });
+  await assert.rejects(
+    adapter.waitForDownload(122, { timeoutMs: 100, dialogTimeoutMs: 300, keepWaiting() {} }),
+    error => error.name === 'TimeoutError',
+  );
+  assert.equal(listeners.size, 0, 'the ceiling still releases the listener');
+});
+
+test('cancelling the save dialog reports USER_CANCELED and never renews the deadline again', async () => {
+  const listeners = new Set();
+  let item = { id: 121, state: 'in_progress', filename: '', exists: true };
+  const chromeApi = {
+    runtime: {},
+    downloads: {
+      onChanged: {
+        addListener(listener) { listeners.add(listener); },
+        removeListener(listener) { listeners.delete(listener); },
+      },
+      download(_options, callback) { callback(121); },
+      search(_query, callback) { callback([{ ...item }]); },
+    },
+  };
+  const adapter = createDownloadsAdapter(chromeApi, { createObjectURL() { return 'blob:test'; }, revokeObjectURL() {} });
+  let keepWaiting = 0;
+  const pending = adapter.waitForDownload(121, { timeoutMs: 300, keepWaiting: () => { keepWaiting += 1; } });
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.ok(keepWaiting >= 1);
+  item = { id: 121, state: 'interrupted', error: 'USER_CANCELED', canResume: false, exists: true, filename: '' };
+  for (const listener of [...listeners]) listener({
+    id: 121, state: { current: 'interrupted' }, error: { current: 'USER_CANCELED' },
+  });
+  await assert.rejects(pending, error => {
+    assert.equal(error.name, 'DownloadInterruptedError');
+    assert.equal(error.downloadErrorCode, 'USER_CANCELED');
+    return true;
+  });
+  assert.equal(listeners.size, 0);
+});
+
+test('one cancelled format does not abort the other requested downloads', async () => {
+  const adapter = {
+    createObjectURL() { return 'blob:chrome-extension://test/cancelled-format'; },
+    revokeObjectURL() {},
+    async download({ filename }) { return filename.endsWith('.pdf') ? 130 : 131; },
+    resolveDownloadFilename: ATTEST_REQUESTED_FILENAME,
+    async waitForDownload(id) {
+      if (id === 130) {
+        throw Object.assign(new Error('USER_CANCELED'), {
+          name: 'DownloadInterruptedError', downloadErrorCode: 'USER_CANCELED',
+        });
+      }
+      return { id, state: 'complete' };
+    },
+    async cancelDownload() {}, async inspectDownload() { return []; }, async eraseDownload() { return []; },
+    async removeDownloadFile() {},
+  };
+  const result = await downloadArtifacts({ baseName: 'audit', pdf: '%PDF-1.7', html: '<!doctype html>' }, adapter, {
+    timeoutMs: 100, hashBytes: FAST_SHA256,
+  });
+  assert.deepEqual(result.formats.map(entry => [entry.format, entry.status, entry.failureCode]), [
+    ['html', 'complete', undefined],
+    ['pdf', 'interrupted', 'DOWNLOAD_CANCELLED'],
+  ]);
+  assert.deepEqual(result.limitations, ['O download do artefato PDF foi cancelado por você.']);
+});

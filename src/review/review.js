@@ -439,9 +439,29 @@ const EXPORT_CONFIRMATION_TIMEOUT_MS = 300_000;
 const EXPORT_OUTCOME_POLL_MS = 1_500;
 let exportConfirmationTimer = null;
 
-async function requestExport({ deleteAfterCompleteExport = false } = {}) {
+function requestedExportFormats(formats) {
+  if (Array.isArray(formats) && formats.length > 0) return formats;
+  if (typeof formats === 'string' && formats) return formats.split(',');
+  return null;
+}
+
+function setExportFormatResult(format, text) {
+  if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return;
+  const node = document.querySelector(`[data-report-export-result="${format}"]`);
+  if (node) node.textContent = text;
+}
+
+function showExportFormatResults(latest, formats) {
+  if (!formats) return;
+  const outcome = describeExportDelivery(latest, formats);
+  for (const result of outcome.results ?? []) setExportFormatResult(result.format, result.text);
+}
+
+async function requestExport({ deleteAfterCompleteExport = false, formats = undefined } = {}) {
   if (!auditModel?.auditId) return;
   const requestedAuditId = auditModel.auditId;
+  const requestedFormats = requestedExportFormats(formats);
+  if (requestedFormats) for (const format of requestedFormats) setExportFormatResult(format, 'Preparando o download…');
   // A resposta do worker confirma apenas o pedido, não os arquivos. Sem acompanhar o
   // recibo durável, a tela ficava em "na fila de geração" mesmo quando o download
   // falhava. A leitura é barata e limitada; em teste ou contexto sem store, é ignorada.
@@ -469,13 +489,17 @@ async function requestExport({ deleteAfterCompleteExport = false } = {}) {
     response = await sendAuthorizedRequest(sessionCapabilityId => ({
       type: 'REPORT_REQUEST_EXPORT', sessionCapabilityId, auditId: requestedAuditId,
       deleteAfterCompleteExport: deleteAfterCompleteExport === true,
+      ...(requestedFormats ? { formats: requestedFormats.join(',') } : {}),
     }));
   } catch { /* the bounded notice above still reports the unconfirmed outcome */ }
   clearTimeout(exportConfirmationTimer);
   exportConfirmationTimer = null;
   regenerate.disabled = false;
   status.textContent = response?.ok ? 'Relatório atualizado na fila de geração.' : describeExportFailure(response?.code);
-  if (response?.ok && canWatchOutcome) void watchExportOutcome(requestedAuditId, baselineAttempt);
+  if (!response?.ok && requestedFormats) {
+    for (const format of requestedFormats) setExportFormatResult(format, 'Não foi possível pedir este download.');
+  }
+  if (response?.ok && canWatchOutcome) void watchExportOutcome(requestedAuditId, baselineAttempt, requestedFormats);
 }
 
 // Em página grande a exportação leva dezenas de segundos; um segundo pedido nesse intervalo era
@@ -491,7 +515,7 @@ function describeExportFailure(code) {
 // Acompanha o recibo durável até o desfecho. O limite de tempo é o mesmo do aviso de
 // confirmação: se nada terminal aparecer, a tela diz que não houve confirmação e como
 // tentar de novo, em vez de continuar prometendo uma fila que não anda.
-async function watchExportOutcome(requestedAuditId, baselineAttempt) {
+async function watchExportOutcome(requestedAuditId, baselineAttempt, requestedFormats = null) {
   const deadline = Date.now() + EXPORT_CONFIRMATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, EXPORT_OUTCOME_POLL_MS));
@@ -512,12 +536,16 @@ async function watchExportOutcome(requestedAuditId, baselineAttempt) {
       return;
     }
     if (!['complete', 'partial', 'failed'].includes(latest.exportStatus)) continue;
-    status.textContent = exportDeliveryText(describeExportDelivery(latest));
+    showExportFormatResults(latest, requestedFormats);
+    status.textContent = exportDeliveryText(describeExportDelivery(latest, requestedFormats ?? undefined));
     regenerate.disabled = false;
     return;
   }
   if (auditModel?.auditId !== requestedAuditId) return;
   regenerate.disabled = false;
+  if (requestedFormats) for (const format of requestedFormats) {
+    setExportFormatResult(format, 'A geração não foi confirmada; tente novamente.');
+  }
   status.textContent = 'A geração dos arquivos não foi confirmada, então os arquivos não foram baixados. '
     + 'Tente novamente; se persistir, feche as abas de exportação abertas antes de repetir.';
 }

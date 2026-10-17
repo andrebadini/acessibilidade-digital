@@ -1483,6 +1483,28 @@ async function captureReport({ launch, panel, page, directory, attempt, shot }) 
   // As imagens de evidência são data-URLs; esperar a decodificação evita capturar um quadro vazio.
   await sleep(1_200);
 
+  // O grupo "Baixar relatório" precisa caber e continuar legível: quatro botões com descrição
+  // curta, sem depender de uma única ação que baixe tudo. A captura recortada mostra o grupo e,
+  // na mesma passada, coleta rótulos e motivos de indisponibilidade para o resumo.
+  const exportChoices = await attempt('botoes-de-formato', () => evaluate(target, `(() => {
+    const group = document.querySelector('[data-report-export-formats]');
+    if (!group) return null;
+    return { label: group.getAttribute('aria-label'),
+      buttons: [...group.querySelectorAll('button[data-report-export-format]')].map(button => ({
+        format: button.getAttribute('data-report-export-format'),
+        label: button.textContent,
+        disabled: button.disabled === true,
+        descriptions: (button.getAttribute('aria-describedby') ?? '').split(' ')
+          .map(id => document.getElementById(id)?.textContent ?? null).filter(Boolean),
+      })) };
+  })()`));
+  report.exportButtons = exportChoices.value ?? null;
+  if (exportChoices.value) {
+    const saved = await attempt('captura:botoes-de-formato', () => captureElementClip(target, directory,
+      '06b-botoes-formato.png', '[data-report-export-formats]', 0, { maxHeight: 900 }));
+    if (saved.ok && saved.value) report.screenshots.push(saved.value.name);
+  }
+
   await attempt('rolagem-instante', () => evaluate(target, DISABLE_SMOOTH_SCROLL));
   await attempt('topo-do-relatorio', () => scrollTo(target, 0));
   await sleep(400);
@@ -2643,6 +2665,12 @@ function printPageSummary(summary) {
       `(${summary.report.evidenceVisibleBefore ?? 0} visíveis antes de abrir as seções), ` +
       `${summary.report.evidenceCaptured} capturada(s)` +
       (summary.report.map?.present ? `, mapa: ${(summary.report.map.statuses ?? []).join('/')}` : ', mapa: ausente'));
+  }
+  if (summary.report?.exportButtons) {
+    const choices = summary.report.exportButtons;
+    lines.push(`  botões de formato: ${(choices.buttons ?? []).map(button =>
+      `${button.label}${button.disabled ? ' (indisponível)' : ''}`).join('; ') || 'nenhum'} — ` +
+      `grupo "${choices.label ?? 'sem nome'}"`);
   }
   if (summary.report?.reading) {
     const reading = summary.report.reading;

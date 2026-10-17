@@ -25,11 +25,16 @@ import {
   artifactFailureLimitation,
 } from '../browser/download-artifacts.js';
 
-import { createExportDeliveryIdentityV1, EXPORT_FORMATS_V1 } from './export-formats.js';
+import {
+  canonicalExportFormatsV1,
+  createExportDeliveryIdentityV1,
+  EXPORT_FORMATS_V1,
+} from './export-formats.js';
 const REQUIRED_FORMATS = new Set(['html', 'json']);
 const PRINT_CLEANUP_LIMITATION = createExportIssue('REPORT_PRINT_CLEANUP_LIMITED').message;
 const RESULT_KEYS = new Set([
-  'model', 'html', 'json', 'csv', 'pdf', 'formats', 'deliveryReceipt', 'exportDeliveryIdentity', 'limitations', 'pdfFallback',
+  'model', 'html', 'json', 'csv', 'pdf', 'formats', 'requestedFormats', 'deliveryReceipt',
+  'exportDeliveryIdentity', 'limitations', 'pdfFallback',
 ]);
 const SUCCESS_REQUESTS = new WeakMap();
 const FAILURE_REQUESTS = new WeakMap();
@@ -150,12 +155,17 @@ export async function persistExportSuccess(request, store) {
   const envelope = consumeOpaqueRequest(SUCCESS_REQUESTS, request, 'Solicitação de exportação');
   assertSuccessStore(store);
   const { auditId, expectedRevision } = envelope;
-  const outerResult = cloneOuterRecord(envelope.result, RESULT_KEYS, [...RESULT_KEYS], 'Resultado de exportação');
+  const outerResult = cloneOuterRecord(envelope.result, RESULT_KEYS,
+    [...RESULT_KEYS].filter(key => key !== 'requestedFormats'), 'Resultado de exportação');
+  const requestedFormats = Object.hasOwn(outerResult, 'requestedFormats')
+    ? canonicalExportFormatsV1(outerResult.requestedFormats)
+    : EXPORT_FORMATS_V1;
   let result;
   try {
     result = JSON.parse(canonicalStringify({
       model: outerResult.model,
       formats: outerResult.formats,
+      requestedFormats,
       json: outerResult.json,
       deliveryReceipt: outerResult.deliveryReceipt,
       exportDeliveryIdentity: outerResult.exportDeliveryIdentity,
@@ -185,8 +195,8 @@ export async function persistExportSuccess(request, store) {
   const immutableRevision = verifiedModel.report?.status === 'review-ready' &&
     verifiedModel.report?.artifact?.status === 'pending';
   const prepared = immutableRevision
-    ? immutableRevisionFormats(result.deliveryReceipt, envelope.artifactBaseName)
-    : preparedArtifactFormats(verifiedModel, envelope.artifactBaseName);
+    ? immutableRevisionFormats(result.deliveryReceipt, envelope.artifactBaseName, requestedFormats)
+    : preparedArtifactFormats(verifiedModel, envelope.artifactBaseName, requestedFormats);
   const receipt = normalizeDeliveryReceipt(result.deliveryReceipt, prepared);
   const exportDeliveryIdentity = normalizeExportDeliveryIdentity(
     result.exportDeliveryIdentity,
@@ -194,9 +204,15 @@ export async function persistExportSuccess(request, store) {
     expectedRevision,
     envelope.exportAttempt,
   );
-  if (immutableRevision) validateImmutableRevisionCorrelation({ model: verifiedModel, json: result.json, csv, pdf, formats: result.formats, receipt, exportDeliveryIdentity });
-  else validateArtifactCorrelation({ model: verifiedModel, html, json: result.json, csv, pdf, formats: result.formats,
-    limitations: result.limitations, pdfFallback, receipt, prepared });
+  if (immutableRevision) {
+    validateImmutableRevisionCorrelation({
+      model: verifiedModel, json: result.json, csv, pdf, formats: result.formats, receipt,
+      exportDeliveryIdentity, requestedFormats,
+    });
+  } else {
+    validateArtifactCorrelation({ model: verifiedModel, html, json: result.json, csv, pdf, formats: result.formats,
+      limitations: result.limitations, pdfFallback, receipt, prepared });
+  }
   await validateArtifactHashes({ html, json: result.json, csv, pdf }, receipt.formats);
   const verifiedCapability = await verifyGeneratedReportExportResult(envelope.result, {
     model: verifiedModel,
@@ -205,6 +221,7 @@ export async function persistExportSuccess(request, store) {
     csv,
     pdf,
     formats: result.formats,
+    requestedFormats,
     deliveryReceipt: result.deliveryReceipt,
     exportDeliveryIdentity: result.exportDeliveryIdentity,
     limitations: result.limitations,
@@ -335,7 +352,8 @@ function normalizeDeliveryReceipt(value, preparedFormats) {
     throw new TypeError('Recibo de entrega omite a limitação controlada de um artefato.');
   }
   const limitations = [...receipt.limitations];
-  const status = preparedFormats.missing.length === 0 && formats.every(entry => entry.status === 'complete') && limitations.length === 0
+  const status = formats.length === EXPORT_FORMATS_V1.length && preparedFormats.missing.length === 0 &&
+    formats.every(entry => entry.status === 'complete') && limitations.length === 0
     ? 'complete'
     : 'partial';
   if (receipt.status !== status) throw new TypeError('Status do recibo de entrega inválido.');
@@ -364,28 +382,52 @@ function isAttestedArtifactFilename(value, requestedBaseName, format) {
 // Requiring a complete receipt here rejected every honest partial delivery — the shape a
 // current-page audit actually produces — so the immutable path now validates the receipt's
 // own order and shape and lets the shared validator decide consistency.
-function immutableRevisionFormats(receipt, artifactBaseName) {
+function immutableRevisionFormats(receipt, artifactBaseName, requestedFormats = EXPORT_FORMATS_V1) {
   if (!receipt || !['complete', 'partial'].includes(receipt.status) || !Array.isArray(receipt.formats) ||
-    receipt.formats.length === 0 || receipt.formats.length > EXPORT_FORMATS_V1.length ||
-    receipt.formats.some((entry, index) => entry?.format !== EXPORT_FORMATS_V1[index])) {
+    !Array.isArray(receipt.limitations) || receipt.formats.length > EXPORT_FORMATS_V1.length ||
+    receipt.formats.some(entry => !EXPORT_FORMATS_V1.includes(entry?.format)) ||
+    receipt.formats.some((entry, index) => index > 0 &&
+      EXPORT_FORMATS_V1.indexOf(entry?.format) <= EXPORT_FORMATS_V1.indexOf(receipt.formats[index - 1]?.format))) {
     throw new TypeError('Recibo completo da revisão imutável inválido.');
   }
   const delivered = receipt.formats.map(entry => entry.format);
+  if (delivered.some(format => !requestedFormats.includes(format))) {
+    throw new TypeError('O recibo contém formato que não foi pedido.');
+  }
+  const missing = requestedFormats.filter(format => !delivered.includes(format));
+  const missingLimitations = [];
+  for (const format of missing) {
+    const codes = format === 'csv'
+      ? ['REPORT_CSV_UNAVAILABLE']
+      : format === 'pdf' ? PDF_GENERATION_FAILURE_CODES : [];
+    const limitation = codes.map(code => createExportIssue(code).message)
+      .find(message => receipt.limitations.includes(message));
+    if (!limitation) throw new TypeError('Recibo omite o motivo controlado de um formato pedido.');
+    missingLimitations.push(limitation);
+  }
   return {
     formats: delivered,
-    missing: EXPORT_FORMATS_V1.filter(format => !delivered.includes(format)),
-    missingLimitations: [],
+    missing,
+    missingLimitations,
     baseName: artifactBaseName,
   };
 }
 
-function validateImmutableRevisionCorrelation({ model, json, csv, pdf, formats, receipt, exportDeliveryIdentity }) {
-  if (canonicalStringify(formats) !== canonicalStringify(receipt.formats) || csv === null || pdf === null ||
+function validateImmutableRevisionCorrelation({
+  model, json, csv, pdf, formats, receipt, exportDeliveryIdentity, requestedFormats = EXPORT_FORMATS_V1,
+}) {
+  const delivered = receipt.formats.map(entry => entry.format);
+  if (canonicalStringify(formats) !== canonicalStringify(receipt.formats) ||
+    delivered.some(format => !requestedFormats.includes(format)) ||
+    (csv !== null) !== delivered.includes('csv') ||
+    (pdf !== null) !== delivered.includes('pdf') ||
     json !== renderTechnicalJson(model, { deliveryIdentity: exportDeliveryIdentity }) ||
-    !csv.startsWith('\uFEFF')) throw new TypeError('Artefatos da revisão imutável não correspondem ao recibo.');
+    (csv !== null && !csv.startsWith('\uFEFF'))) {
+    throw new TypeError('Artefatos da revisão imutável não correspondem ao recibo.');
+  }
 }
 
-function preparedArtifactFormats(model, artifactBaseName) {
+function preparedArtifactFormats(model, artifactBaseName, requestedFormats = EXPORT_FORMATS_V1) {
   const report = model?.report;
   const artifact = report?.artifact;
   const values = artifact?.formats;
@@ -394,7 +436,7 @@ function preparedArtifactFormats(model, artifactBaseName) {
     !Array.isArray(artifact.limitations) || !Array.isArray(values)) {
     throw new TypeError('Estado dos formatos preparados do relatório inválido.');
   }
-  const formats = values.map(entry => {
+  const modelFormats = values.map(entry => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
       canonicalStringify(Object.keys(entry).sort()) !== canonicalStringify(['format', 'status']) ||
       entry.status !== 'prepared' || !EXPORT_FORMATS_V1.includes(entry.format)) {
@@ -402,12 +444,13 @@ function preparedArtifactFormats(model, artifactBaseName) {
     }
     return entry.format;
   });
-  const expected = EXPORT_FORMATS_V1.filter(format => formats.includes(format));
-  if ([...REQUIRED_FORMATS].some(format => !formats.includes(format)) ||
-    canonicalStringify(formats) !== canonicalStringify(expected)) {
+  const expected = EXPORT_FORMATS_V1.filter(format => modelFormats.includes(format));
+  if ([...REQUIRED_FORMATS].some(format => !modelFormats.includes(format)) ||
+    canonicalStringify(modelFormats) !== canonicalStringify(expected)) {
     throw new TypeError('Formatos preparados do relatório duplicados, incompletos ou fora de ordem.');
   }
-  const missing = EXPORT_FORMATS_V1.filter(format => !formats.includes(format));
+  const formats = modelFormats.filter(format => requestedFormats.includes(format));
+  const missing = requestedFormats.filter(format => !modelFormats.includes(format));
   const missingLimitations = [];
   const generatedAt = model.timestamps?.generatedAt;
   if (typeof generatedAt !== 'string' || new Date(generatedAt).toISOString() !== generatedAt) {
@@ -468,7 +511,7 @@ function preparedArtifactFormats(model, artifactBaseName) {
   }
   const currentCsvUnavailable = currentGenerationIssues.some(diagnostic => diagnostic.code === 'REPORT_CSV_UNAVAILABLE');
   const currentPdfUnavailable = currentGenerationIssues.some(diagnostic => PDF_GENERATION_FAILURE_CODES.includes(diagnostic.code));
-  if (formats.includes('csv') && currentCsvUnavailable || formats.includes('pdf') && currentPdfUnavailable) {
+  if (modelFormats.includes('csv') && currentCsvUnavailable || modelFormats.includes('pdf') && currentPdfUnavailable) {
     throw new TypeError('Diagnóstico de geração não corresponde aos formatos preparados.');
   }
   return { formats, missing, missingLimitations, baseName: artifactBaseName };

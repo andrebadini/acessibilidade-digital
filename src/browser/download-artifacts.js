@@ -17,6 +17,7 @@ export const ARTIFACT_FAILURE_CONTRACT = Object.freeze({
   DOWNLOAD_START_FAILED: Object.freeze({ status: 'interrupted', hasHash: true, hasDownloadId: false }),
   DOWNLOAD_WAIT_TIMEOUT: Object.freeze({ status: 'timeout', hasHash: true, hasDownloadId: true }),
   DOWNLOAD_INTERRUPTED: Object.freeze({ status: 'interrupted', hasHash: true, hasDownloadId: true }),
+  DOWNLOAD_CANCELLED: Object.freeze({ status: 'interrupted', hasHash: true, hasDownloadId: true }),
 });
 
 const FAILURE_MESSAGES = Object.freeze({
@@ -27,6 +28,7 @@ const FAILURE_MESSAGES = Object.freeze({
   DOWNLOAD_START_FAILED: format => `O artefato ${format} não pôde iniciar o download.`,
   DOWNLOAD_WAIT_TIMEOUT: format => `O artefato ${format} não concluiu o download (tempo limite excedido).`,
   DOWNLOAD_INTERRUPTED: format => `O artefato ${format} não concluiu o download (interrompido).`,
+  DOWNLOAD_CANCELLED: format => `O download do artefato ${format} foi cancelado por você.`,
 });
 
 export function buildArtifactBaseName(auditId, timestamp) {
@@ -66,6 +68,11 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
   }
   const timeoutMs = options.timeoutMs ?? 30_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('Timeout de download inválido.');
+  // Quanto tempo a pessoa pode levar na janela "Perguntar onde salvar cada arquivo" antes de
+  // o download ser encerrado. Sem esse campo, a espera do diálogo não é renovada: chamadas
+  // diretas mantêm o prazo curto de sempre. A exportação passa alguns minutos.
+  const dialogTimeoutMs = options.dialogTimeoutMs ?? 0;
+  if (!Number.isFinite(dialogTimeoutMs) || dialogTimeoutMs < 0) throw new TypeError('Espera do diálogo de download inválida.');
   const hashBytes = options.hashBytes ?? sha256Hex;
   if (typeof hashBytes !== 'function') throw new TypeError('Calculador de integridade inválido.');
   const assertCanDownload = options.assertCanDownload;
@@ -287,6 +294,7 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
         throw error;
       }
       const cancelWait = once(() => cancelContained(adapter, downloadId));
+      const dialogKeepAlive = createDialogKeepAlive();
       const containRevokedDownload = async cause => {
         const cleanup = await cleanupPhysicalDownload(adapter, downloadId, cancelWait, timeoutMs);
         if (cleanup.removed) {
@@ -315,7 +323,10 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
       let monitor = null;
       try {
         const terminalWait = boundedDownloadWait(
-          adapter.waitForDownload(downloadId, { timeoutMs }), timeoutMs, cancelWait,
+          adapter.waitForDownload(downloadId, {
+            timeoutMs, keepWaiting: dialogKeepAlive.keepWaiting, dialogTimeoutMs,
+          }),
+          timeoutMs, cancelWait, dialogKeepAlive,
         );
         monitor = assertCanDownload
           ? createDeliveryMonitor(() => assertDelivery('in-flight'), timeoutMs)
@@ -350,6 +361,7 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
           throw error;
         }
         const timedOut = safeErrorName(error) === 'TimeoutError';
+        const cancelled = safeDownloadErrorCode(error) === 'USER_CANCELED';
         if (recordDeliveryState) {
           await containRevokedDownload(error);
         } else {
@@ -357,7 +369,7 @@ export async function downloadArtifacts(payload, adapter, options = {}) {
         }
         appendFailure(formats, limitations, {
           format, filename, sha256, downloadId,
-          failureCode: timedOut ? 'DOWNLOAD_WAIT_TIMEOUT' : 'DOWNLOAD_INTERRUPTED',
+          failureCode: cancelled ? 'DOWNLOAD_CANCELLED' : timedOut ? 'DOWNLOAD_WAIT_TIMEOUT' : 'DOWNLOAD_INTERRUPTED',
         });
       } finally {
         monitor?.stop();
@@ -423,16 +435,56 @@ export function createDownloadsAdapter(chromeApi, urlApi = globalThis.URL) {
             : [];
         }
       : undefined,
-    waitForDownload(downloadId, { timeoutMs }) {
+    waitForDownload(downloadId, { timeoutMs, keepWaiting, dialogTimeoutMs = Infinity } = {}) {
       return new Promise((resolve, reject) => {
         let settled = false;
+        let timer = null;
+        let poller = null;
+        let dialogStartedAt = null;
         const finish = (handler, value) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
+          if (timer !== null) clearTimeout(timer);
+          if (poller !== null) clearInterval(poller);
           chromeApi.downloads.onChanged.removeListener(listener);
           handler(value);
         };
+        const armTimeout = (delayMs = timeoutMs) => {
+          if (settled) return;
+          if (timer !== null) clearTimeout(timer);
+          timer = setTimeout(() => finish(reject, new DOMException('Download excedeu o tempo limite.', 'TimeoutError')), delayMs);
+        };
+        // Com "Perguntar onde salvar cada arquivo" ligado, o Chrome mantém o item em
+        // in_progress com filename vazio enquanto o diálogo está aberto. Esse estado espera a
+        // decisão da pessoa: o prazo é renovado e a espera continua até salvar ou cancelar.
+        // O mesmo estado aparece quando o Chrome não consegue gravar na pasta de destino e a
+        // API não os distingue; por isso a renovação tem um teto (`dialogTimeoutMs`).
+        const awaitingDestination = item => item?.state === 'in_progress' && item?.filename === '';
+        // O intervalo acompanha o prazo: precisa ser menor que ele para renovar a espera
+        // antes de o temporizador disparar, inclusive em testes com prazo curto.
+        const keepAlivePollMs = Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? Math.max(50, Math.min(1_000, Math.floor(timeoutMs / 3)))
+          : 1_000;
+        const keepDialogWaiting = item => {
+          if (settled || !awaitingDestination(item)) {
+            dialogStartedAt = null;
+            return false;
+          }
+          if (dialogTimeoutMs !== Infinity && (!Number.isFinite(dialogTimeoutMs) || dialogTimeoutMs <= 0)) return false;
+          if (dialogStartedAt === null) dialogStartedAt = Date.now();
+          const remainingMs = dialogTimeoutMs === Infinity ? Infinity : dialogTimeoutMs - (Date.now() - dialogStartedAt);
+          if (remainingMs <= 0) return false;
+          armTimeout(Math.min(timeoutMs, remainingMs));
+          if (typeof keepWaiting === 'function') {
+            try { keepWaiting(); } catch {}
+          }
+          if (poller === null) poller = setInterval(inspect, keepAlivePollMs);
+          return true;
+        };
+        const interruptedError = code => Object.assign(new Error(code || 'Download interrompido.'), {
+          name: 'DownloadInterruptedError',
+          downloadErrorCode: code || null,
+        });
         // Chrome can emit an interruption and still finish the very same download, and it
         // finishes under a different physical name when the profile renames artifacts. The
         // durable search result is the authority, so an interruption signal is confirmed
@@ -445,25 +497,31 @@ export function createDownloadsAdapter(chromeApi, urlApi = globalThis.URL) {
               finish(resolve, { id: downloadId, state: 'complete' });
               return;
             }
+            if (keepDialogWaiting(item)) return;
             const code = typeof item?.error === 'string' && item.error ? item.error : errorCode;
-            finish(reject, Object.assign(new Error(code ?? 'Download interrompido.'), { name: 'DownloadInterruptedError' }));
-          }, () => finish(reject, Object.assign(new Error(errorCode ?? 'Download interrompido.'), { name: 'DownloadInterruptedError' })));
+            finish(reject, interruptedError(code));
+          }, () => finish(reject, interruptedError(errorCode)));
+        };
+        const inspect = () => {
+          invokeChrome(chromeApi, callback => chromeApi.downloads.search({ id: downloadId }, callback)).then(items => {
+            const item = items?.[0];
+            if (item?.state === 'complete') finish(resolve, { id: downloadId, state: 'complete' });
+            else if (item?.state === 'interrupted') confirmInterrupted(item.error);
+            else keepDialogWaiting(item);
+          }, error => finish(reject, error));
         };
         const listener = delta => {
-          if (delta?.id !== downloadId || !delta.state?.current) return;
-          if (delta.state.current === 'complete') finish(resolve, { id: downloadId, state: 'complete' });
-          if (delta.state.current === 'interrupted') {
+          if (delta?.id !== downloadId) return;
+          if (delta.state?.current === 'complete') finish(resolve, { id: downloadId, state: 'complete' });
+          if (delta.state?.current === 'interrupted') {
             const code = typeof delta.error?.current === 'string' ? delta.error.current : null;
             confirmInterrupted(code);
           }
+          if (delta.filename?.current !== undefined || delta.state?.current === 'in_progress') inspect();
         };
-        const timer = setTimeout(() => finish(reject, new DOMException('Download excedeu o tempo limite.', 'TimeoutError')), timeoutMs);
+        armTimeout();
         chromeApi.downloads.onChanged.addListener(listener);
-        invokeChrome(chromeApi, callback => chromeApi.downloads.search({ id: downloadId }, callback)).then(items => {
-          const item = items?.[0];
-          if (item?.state === 'complete') finish(resolve, { id: downloadId, state: 'complete' });
-          else if (item?.state === 'interrupted') confirmInterrupted(item.error);
-        }, error => finish(reject, error));
+        inspect();
       });
     },
   };
@@ -765,16 +823,39 @@ function appendFailure(formats, limitations, { format, filename, failureCode, sh
   limitations.push(artifactFailureLimitation(format, failureCode));
 }
 
-function boundedDownloadWait(promise, timeoutMs, onTimeout) {
-  let timer;
+function createDialogKeepAlive() {
+  let arm = null;
+  return {
+    bind(callback) {
+      if (typeof callback === 'function') arm = callback;
+    },
+    keepWaiting() {
+      if (arm !== null) arm();
+    },
+  };
+}
+
+function boundedDownloadWait(promise, timeoutMs, onTimeout, keepAlive = undefined) {
+  let timer = null;
+  let rejectTimeout;
+  let finished = false;
   const source = Promise.resolve(promise);
-  const timeout = new Promise((_, reject) => {
+  const timeout = new Promise((_, reject) => { rejectTimeout = reject; });
+  const arm = () => {
+    if (finished) return;
+    if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
+      if (finished) return;
       onTimeout();
-      reject(new DOMException('O download excedeu o tempo limite.', 'TimeoutError'));
+      rejectTimeout(new DOMException('O download excedeu o tempo limite.', 'TimeoutError'));
     }, timeoutMs);
+  };
+  if (keepAlive && typeof keepAlive.bind === 'function') keepAlive.bind(arm);
+  arm();
+  return Promise.race([source, timeout]).finally(() => {
+    finished = true;
+    if (timer !== null) clearTimeout(timer);
   });
-  return Promise.race([source, timeout]).finally(() => clearTimeout(timer));
 }
 
 function boundedOperation(promise, timeoutMs, message) {
@@ -1053,6 +1134,21 @@ function settlePendingOwnership(source, timeoutMs) {
     );
     timer = setTimeout(() => finish('waiting'), timeoutMs);
   });
+}
+
+function safeDownloadErrorCode(value) {
+  try {
+    if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return '';
+    let current = value;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'downloadErrorCode');
+      if (descriptor) {
+        return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'string' ? descriptor.value : '';
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {}
+  return '';
 }
 
 function safeErrorCode(value) {

@@ -13,6 +13,7 @@ import { createAuditStore, isAuditExportLeaseConflict, isAuditRevisionConflict }
 import { deriveExportLeaseOwner } from '../background/export-launch.js';
 import { createExportBlobUrlClientV1 } from './blob-url-client.js';
 import { createExportTabAdapter } from './chrome-export-adapter.js';
+import { canonicalExportFormatsV1, EXPORT_FORMATS_V1 } from './export-formats.js';
 import {
   createExportFailureRequest,
   createExportSuccessRequest,
@@ -48,6 +49,7 @@ let latestState = null;
 let leaseClaimed = false;
 let completionPending = false;
 let blobLifecycle = null;
+let requestedFormats = EXPORT_FORMATS_V1;
 
 function sendWorkerRequest(message) {
   return new Promise(resolve => {
@@ -87,6 +89,7 @@ async function start() {
   if (!connected?.ok || connected.auditId !== auditId || !Number.isSafeInteger(connected.expectedRevision) ||
     !/^[1-9][0-9]*$/u.test(connected.attemptId ?? '')) throw new TypeError('Exportação não autorizada.');
   exportAttempt = Number(connected.attemptId);
+  if (connected.formats !== undefined) requestedFormats = canonicalExportFormatsV1(connected.formats);
   leaseOwnerId = deriveExportLeaseOwner(auditId, connected.attemptId);
   const blobClient = createExportBlobUrlClientV1({
     runtime: chrome.runtime, urlApi: globalThis.URL, auditId, sessionCapabilityId: connected.sessionCapabilityId,
@@ -126,11 +129,13 @@ async function generate(connected) {
     ownerId: leaseOwnerId, exportAttempt, now: new Date().toISOString(), ttlMs: 10 * 60 * 1000,
     latestState: { ...latestState, exportStatus: 'delivering', message: 'Transferindo os arquivos do relatório.' },
   });
-  status.textContent = 'Gerando os quatro arquivos (HTML, PDF, CSV e JSON). Isso pode levar alguns minutos.';
+  const formatNames = requestedFormats.map(format => format.toUpperCase()).join(', ');
+  status.textContent = `Gerando os arquivos pedidos (${formatNames}). Isso pode levar alguns minutos.`;
   const result = await runReportExport({
     auditSnapshotCapability: sourceSnapshotCapability, exportLeaseOwnerId: leaseOwnerId, exportAttempt,
     manifestVersion: chrome.runtime.getManifest().version, browserVersion: verified.environment?.chromeVersion || navigator.userAgent,
     timezone: verified.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    formats: requestedFormats,
   }, {
     reportView, urlApi: globalThis.URL, tabAdapter: createExportTabAdapter(chrome), downloadsAdapter, blobLifecycle,
     assertDelivery({ snapshotCapability, exportLeaseOwnerId }) {
@@ -152,20 +157,26 @@ async function generate(connected) {
   const persisted = await persistExportSuccess(createExportSuccessRequest({ auditId, result, latest: latestState }), store);
   leaseClaimed = false;
   completionPending = true;
-  const deliveredEverything = persisted?.latest?.exportStatus === 'complete';
+  const deliveredEverything = hasDeliveredFormats(persisted?.latest, requestedFormats);
   status.textContent = deliveredEverything
-    ? 'Os arquivos foram baixados; confirmando o recibo local.'
+    ? 'Os arquivos pedidos foram baixados; confirmando o recibo local.'
     : 'A exportação terminou; confirmando o recibo local.';
   await confirmExportCompletion(connected);
   completionPending = false;
   if (deliveredEverything) {
-    status.textContent = 'Os quatro arquivos foram baixados e o recibo local foi confirmado.';
+    status.textContent = `${describeExportDelivery(persisted?.latest, requestedFormats).headline} O recibo local foi confirmado.`;
     await closeOwnTab();
     return;
   }
   // Entrega parcial ou sem arquivos: a aba continua aberta com o motivo em português
   // simples e uma saída. Fechá-la em silêncio era o que deixava só uma aba "inválida".
-  showOutcome(describeExportDelivery(persisted?.latest));
+  showOutcome(describeExportDelivery(persisted?.latest, requestedFormats));
+}
+
+function hasDeliveredFormats(latest, formats) {
+  const entries = latest?.deliveryReceipt?.formats;
+  return Array.isArray(entries) && formats.every(format =>
+    entries.some(entry => entry?.format === format && entry?.status === 'complete'));
 }
 
 async function confirmExportCompletion(connected) {
@@ -181,7 +192,7 @@ async function confirmExportCompletion(connected) {
 
 async function fail(error) {
   if (completionPending) {
-    status.textContent = 'Os quatro arquivos foram baixados; a confirmação local continua pendente nesta aba.';
+    status.textContent = 'Os arquivos pedidos foram baixados; a confirmação local continua pendente nesta aba.';
     return;
   }
   if (isPendingReportReservationError(error)) {

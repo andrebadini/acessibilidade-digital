@@ -4,6 +4,7 @@ import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { createExportBlobUrlClientV1 } from '../../src/export/blob-url-client.js';
 import { deriveExportLeaseOwner } from '../../src/background/export-launch.js';
+import { canonicalExportFormatsV1, EXPORT_FORMATS_V1 } from '../../src/export/export-formats.js';
 import { shouldPreserveExportTabAndLease } from '../../src/export/export-page-failure-policy.js';
 import { normalizeReviewAuditId } from '../../src/review/review-state.js';
 
@@ -53,7 +54,7 @@ async function exportPageFixture(t, { closeFails = false, completionFails = fals
     ['#export-close-row', closeButton], ['#export-close', closeButton],
   ]);
   const clientArguments = []; const clients = []; const ports = [];
-  const nativeRevocations = []; const removedTabs = []; const workerRequests = []; const calls = [];
+  const nativeRevocations = []; const removedTabs = []; const workerRequests = []; const calls = []; const exportRequests = [];
   const documentListeners = new Map();
   let respond; let exportDependencies = null;
   class NativeURL extends URL {
@@ -96,8 +97,9 @@ async function exportPageFixture(t, { closeFails = false, completionFails = fals
     createInstalledCoreRuleInventory: async () => ({}), createAuditModel: value => value,
     verifyAuditIntegritySnapshot: async value => value, buildCompleteReportSummary: async () => ({}),
     buildReportView: () => ({}), deriveExportLeaseOwner, createExportTabAdapter: () => ({}),
+    canonicalExportFormatsV1, EXPORT_FORMATS_V1,
     reconcileStaleDownloads: async () => undefined,
-    runReportExport(_request, hooks) { exportDependencies = hooks; calls.push('export'); return exporting.promise; },
+    runReportExport(request, hooks) { exportRequests.push(request); exportDependencies = hooks; calls.push('export'); return exporting.promise; },
     describeExportDelivery: value => ({
       tone: 'info', headline: 'Os quatro arquivos foram baixados e o recibo local foi confirmado.',
       lines: [], guidance: null, value,
@@ -141,7 +143,7 @@ async function exportPageFixture(t, { closeFails = false, completionFails = fals
   t.after(() => { respond?.({ ok: false }); for (const client of clients) client.dispose(); });
   return {
     chrome, NativeURL, clientArguments, clients, ports, nativeRevocations, removedTabs, workerRequests, calls,
-    exporting, recovering, status,
+    exportRequests, exporting, recovering, status,
     get exportDependencies() { return exportDependencies; },
     respond(value = CONNECTED) { calls.push('connected'); respond(value); },
     pagehide() {
@@ -179,6 +181,24 @@ test('Blob wiring authenticates the real export entrypoint before creating and i
   assert.equal(env.ports.length, 0, 'the authenticated client still connects lazily');
   await env.exportDependencies.blobLifecycle.register(BLOB_URL);
   assert.deepEqual(env.ports[0].messages[0], { type: 'hello', auditId: AUDIT_ID, sessionCapabilityId: 'C'.repeat(22) });
+});
+
+test('the export tab generates only the formats authorized by the worker, keeping the four as legacy default', async t => {
+  const subset = await exportPageFixture(t);
+  subset.respond({ ...CONNECTED, formats: ['pdf'] });
+  for (let turn = 0; turn < 5 && subset.exportRequests.length === 0; turn += 1) await tick();
+  assert.equal(subset.exportRequests.length, 1);
+  assert.deepEqual(subset.exportRequests[0].formats, ['pdf']);
+  assert.match(subset.status.textContent, /Gerando os arquivos pedidos \(PDF\)/u);
+  subset.exporting.resolve({});
+  await tick();
+
+  const legacy = await exportPageFixture(t);
+  legacy.respond();
+  for (let turn = 0; turn < 5 && legacy.exportRequests.length === 0; turn += 1) await tick();
+  assert.deepEqual(legacy.exportRequests[0].formats, ['html', 'pdf', 'csv', 'json']);
+  legacy.exporting.resolve({});
+  await tick();
 });
 
 test('Blob wiring disposes on document pagehide but preserves a live owner during recovery and failed close', async t => {
@@ -264,8 +284,11 @@ test('internal export page authenticates first, rebuilds one stored revision and
   // em silêncio — que era o sintoma de "aba inválida". O botão é a única forma de fechar.
   assert.doesNotMatch(script.slice(script.indexOf('async function persistFailureOutcome'),
     script.indexOf('async function recoverPendingReportReservation')), /closeOwnTab/u);
-  assert.match(script, /showOutcome\(describeExportDelivery\(persisted\?\.latest\)\)/u);
+  assert.match(script, /showOutcome\(describeExportDelivery\(persisted\?\.latest, requestedFormats\)\)/u);
   assert.match(script, /describeExportDelivery\(\{ exportStatus: 'failed', message \}\)/u);
+  assert.match(script, /connected\.formats !== undefined[\s\S]*canonicalExportFormatsV1\(connected\.formats\)/u,
+    'a export tab must honour the formats the worker authorized, keeping the four as the legacy default');
+  assert.match(script, /formats: requestedFormats/u, 'the request must pass the authorized format subset to the generator');
   assert.match(completion, /type:\s*'EXPORT_COMPLETE'[\s\S]*sessionCapabilityId[\s\S]*attemptId/u);
   assert.match(script, /mimeType,\s*byteSize,\s*sha256/u);
   assert.doesNotMatch(script, /searchParams\.get\(['"](?:leaseOwnerId|exportAttempt|revision|capability)/u);

@@ -113,6 +113,66 @@ test('the report follows the durable receipt and names a partial delivery instea
   assert.doesNotMatch(cleanup.status.textContent, /na fila de geração/u);
 });
 
+test('a per-format button sends only its format, while the default request omits the field', async () => {
+  const sent = [];
+  const request = runInNewContext(`${requestSource}; requestExport`, {
+    auditModel: { auditId: 'audit-a' }, reportSessionCapabilityId: 'S'.repeat(22),
+    regenerate: {}, status: {}, exportConfirmationTimer: null,
+    document: { querySelector() { return null; } },
+    async sendAuthorizedRequest(build) { sent.push(build('S'.repeat(22))); return { ok: true }; },
+    setTimeout: () => 0, clearTimeout: () => {},
+  });
+  await request({ formats: ['pdf'] });
+  await request({ formats: ['html', 'json'] });
+  await request();
+  assert.deepEqual(sent.map(value => value.formats), ['pdf', 'html,json', undefined]);
+  assert.equal(Object.hasOwn(sent[2], 'formats'), false, 'the default must stay compatible with older workers');
+  assert.deepEqual(sent.map(value => value.deleteAfterCompleteExport), [false, false, false]);
+});
+
+test('the durable receipt fills each requested card result without erasing its neighbours', async () => {
+  const { describeExportDelivery, exportDeliveryText } = await import('../../src/export/export-outcome-message.js');
+  const nodes = new Map([
+    ['pdf', { textContent: '' }], ['csv', { textContent: '' }], ['html', { textContent: 'intocado' }],
+  ]);
+  const timers = [];
+  const status = { textContent: '' };
+  const regenerate = {};
+  const watch = runInNewContext(`${requestSource}; watchExportOutcome`, {
+    auditModel: { auditId: 'audit-a' }, status, regenerate,
+    EXPORT_CLEANUP_MESSAGE: 'limpeza pendente',
+    describeExportDelivery, exportDeliveryText,
+    document: { querySelector(selector) {
+      const format = selector.match(/data-report-export-result="([a-z]+)"/u)?.[1];
+      return nodes.get(format) ?? null;
+    } },
+    store: {
+      async getLatest() {
+        return { auditId: 'audit-a', exportAttempt: 2, exportStatus: 'partial', deliveryReceipt: {
+          status: 'partial',
+          limitations: ['O download do artefato CSV foi cancelado por você.'],
+          formats: [
+            { format: 'pdf', status: 'complete' },
+            { format: 'csv', status: 'interrupted', failureCode: 'DOWNLOAD_CANCELLED' },
+          ],
+        } };
+      },
+    },
+    setTimeout(callback) { timers.push(callback); return timers.length; },
+    clearTimeout() {},
+    Date,
+  });
+  const pending = watch('audit-a', 1, ['pdf', 'csv']);
+  await new Promise(resolve => setImmediate(resolve));
+  timers.shift()();
+  await pending;
+  assert.equal(nodes.get('pdf').textContent, 'PDF baixado.');
+  assert.equal(nodes.get('csv').textContent, 'CSV não foi baixado: você cancelou o salvamento.');
+  assert.equal(nodes.get('html').textContent, 'intocado', 'a result from another card must not be rewritten');
+  assert.match(status.textContent, /Baixados: PDF\./u);
+  assert.match(status.textContent, /você cancelou o salvamento/u);
+});
+
 test('regenerate uses the same current checkbox choice as the main export button', () => {
   const start = source.indexOf("regenerate.addEventListener('click'");
   const handler = source.slice(start, source.indexOf('\nreturnToPage.addEventListener', start));
