@@ -1,0 +1,44 @@
+name: Bug
+description: Algo não funciona como deveria no painel, na auditoria ou nos relatórios.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado pelo relato! Não inclua dados pessoais, URLs privadas ou capturas de sistemas internos.
+        Vulnerabilidades devem ser relatadas em particular, conforme a política de segurança.
+  - type: input
+    id: version
+    attributes:
+      label: Versão da extensão
+      description: Veja em chrome://extensions.
+      placeholder: "1.1.63"
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Navegador e sistema
+      placeholder: "Chrome 141, macOS 15"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Passos para reproduzir
+      placeholder: |
+        1. Abra a página …
+        2. Escolha o modo …
+        3. Clique em …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: O que você esperava e o que aconteceu
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Capturas, mensagens de erro ou página de teste mínima

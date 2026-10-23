@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Relatar uma vulnerabilidade
+    url: https://github.com/andrebadini/acessibilidade-digital/security/advisories/new
+    about: Vulnerabilidades devem ser relatadas em particular, nunca em issue pública.
+  - name: Guia de uso
+    url: https://github.com/andrebadini/acessibilidade-digital/blob/main/docs/COMO-USAR.md
+    about: Dúvidas sobre como usar a extensão e entender o resultado.

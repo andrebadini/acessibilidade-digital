@@ -1,0 +1,20 @@
+name: Sugestão
+description: Uma regra nova, um texto mais claro ou um recurso.
+labels: [sugestão]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Qual problema a sugestão resolve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Como você imagina a solução?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas consideradas

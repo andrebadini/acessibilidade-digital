@@ -1,6 +1,28 @@
 {
-  "name": "audita-mt",
+  "name": "audita-acessibilidade",
+  "version": "1.1.63",
+  "description": "Extensão do Chrome que audita a acessibilidade de páginas web conforme WCAG 2.2 e ABNT NBR 17225:2025, com processamento local.",
   "private": true,
+  "license": "MIT",
+  "author": "André Badini",
+  "homepage": "https://github.com/andrebadini/acessibilidade-digital#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrebadini/acessibilidade-digital.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andrebadini/acessibilidade-digital/issues"
+  },
+  "keywords": [
+    "acessibilidade",
+    "accessibility",
+    "a11y",
+    "wcag",
+    "abnt-nbr-17225",
+    "chrome-extension",
+    "manifest-v3",
+    "axe-core"
+  ],
   "type": "module",
   "scripts": {
     "build:release": "node scripts/build-release.mjs",

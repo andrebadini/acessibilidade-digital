@@ -1,9 +1,11 @@
 # CI da Audita Acessibilidade
 #
-# Os GitHub-hosted runners estão esgotados; este workflow roda SOMENTE no runner
-# self-hosted deste repositório (`mac-mini-andre-acessibilidade-digital`), labels
-# `self-hosted` + `local-mac`. Não usar `ubuntu-latest` nem qualquer hosted runner.
+# Repositório público: roda em runner hospedado do GitHub (gratuito para repositórios públicos).
+# Não usar runner self-hosted aqui — um PR de fork poderia executar código na máquina do mantenedor.
 name: ci
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -19,7 +21,7 @@ concurrency:
 jobs:
   test:
     name: verify-and-test
-    runs-on: [self-hosted, local-mac]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Checkout

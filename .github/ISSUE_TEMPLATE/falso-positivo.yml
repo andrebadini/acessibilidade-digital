@@ -1,0 +1,42 @@
+name: Falso positivo ou falso negativo
+description: A extensão apontou uma falha que não existe, ou deixou de apontar uma que existe.
+labels: [regras]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Versão da extensão
+      placeholder: "1.1.63"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Tipo
+      options:
+        - Falso positivo (apontou falha que não existe)
+        - Falso negativo (não apontou falha que existe)
+        - Classificação errada (falha que deveria ser revisão, ou o contrário)
+    validations:
+      required: true
+  - type: input
+    id: rule
+    attributes:
+      label: Item da ABNT NBR 17225 ou critério WCAG
+      placeholder: "5.2.1 / WCAG 1.1.1"
+    validations:
+      required: true
+  - type: textarea
+    id: html
+    attributes:
+      label: Trecho HTML mínimo que reproduz o caso
+      render: html
+    validations:
+      required: true
+  - type: textarea
+    id: reasoning
+    attributes:
+      label: O que você esperava e por quê
+      description: Se possível, cite o trecho da norma ou da técnica WCAG que fundamenta o resultado esperado.
+    validations:
+      required: true

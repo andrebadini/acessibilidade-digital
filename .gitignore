@@ -12,3 +12,16 @@ node_modules
 
 # Capturas do roteiro de QA visual (scripts/visual-qa.mjs) — material de revisão local.
 qa-out/
+
+# Ferramentas locais e editores
+.playwright-cli/
+.vscode/
+.idea/
+*.log
+
+# Segredos e chaves — nunca versionar
+.env
+.env.*
+*.pem
+*.key
+*.crx
